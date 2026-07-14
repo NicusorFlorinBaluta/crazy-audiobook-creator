@@ -1,0 +1,81 @@
+# ============================================================
+# Brain (Windows) — Configuration
+# ============================================================
+
+# --- Ollama LLM Settings ---
+ollama:
+  host: "http://localhost:11434"
+  model: "qwen3:32b"
+  temperature_pass1: 0.3           # Lower = more consistent character analysis
+  temperature_pass2: 0.4           # Slightly higher for creative emotion descriptions
+  top_p: 0.9
+  context_window: 10               # Paragraphs before/after for emotion context
+  timeout: 120                     # Seconds to wait for LLM response
+  max_retries: 3
+
+# --- Ubuntu Voice Server Connection ---
+ubuntu:
+  host: "http://192.168.1.100:8100"  # ← Replace with your Ubuntu machine's IP
+  timeout: 30
+  retries: 3
+  retry_delay: 5
+  reconnect_interval: 60
+
+# --- EPUB Text Extraction ---
+extraction:
+  skip_toc: true
+  skip_appendices: true
+  skip_front_matter: true
+  min_chapter_words: 100
+  max_chapter_words: 20000
+  chapter_detection: "auto"        # "auto" | "heading" | "pattern" | "none"
+  preserve_poetry: true
+
+# --- Script Generation ---
+script:
+  max_segment_sentences: 4
+  min_segment_words: 3
+  default_speed: 1.0
+
+  # Pause settings (milliseconds)
+  narrator_pause_ms: 500
+  dialogue_pause_ms: 300
+  scene_transition_pause_ms: 1500
+  chapter_start_pause_ms: 1000
+  chapter_end_pause_ms: 2000
+  paragraph_pause_ms: 600
+
+  # Character handling
+  max_unique_voices: 20
+  minor_character_threshold: 3
+  group_minor_characters: true
+
+  # Chunking for long chapters
+  chunk_size_words: 5000
+  chunk_overlap_words: 500
+
+# --- Web Dashboard ---
+dashboard:
+  port: 8000
+  host: "0.0.0.0"
+  cors_origins: ["*"]
+  static_dir: "dashboard/frontend"
+
+  # Project storage
+  projects_dir: "projects"
+  max_projects: 50
+  auto_cleanup_days: 0              # 0 = never
+
+# --- Pipeline Behavior ---
+pipeline:
+  auto_start_tts: true
+  auto_master: true
+  auto_export: true
+  cleanup_intermediates: true
+
+  # State persistence
+  state_db: "pipeline_state.db"
+  checkpoint_frequency: 10          # Save state every N lines
+
+  # Generation batching
+  batch_mode: "chapter"             # "chapter" | "line"

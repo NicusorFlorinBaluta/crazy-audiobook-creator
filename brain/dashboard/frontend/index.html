@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Crazy Audiobook Creator — AI-powered audiobook production pipeline">
+    <title>Crazy Audiobook Creator</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/styles.css">
+</head>
+<body>
+    <!-- ============================================ -->
+    <!-- Ambient background blobs                     -->
+    <!-- ============================================ -->
+    <div class="ambient-bg">
+        <div class="blob blob-1"></div>
+        <div class="blob blob-2"></div>
+        <div class="blob blob-3"></div>
+    </div>
+
+    <!-- ============================================ -->
+    <!-- Top navigation                               -->
+    <!-- ============================================ -->
+    <nav class="top-nav">
+        <div class="nav-brand" id="nav-home-btn">
+            <div class="brand-icon">📖</div>
+            <div class="brand-text">
+                <span class="brand-title">Crazy Audiobook Creator</span>
+                <span class="brand-subtitle">AI-Powered Pipeline</span>
+            </div>
+        </div>
+        <div class="nav-status" id="nav-status">
+            <div class="status-dot" id="voice-status-dot"></div>
+            <span id="voice-status-text">Voice Server: Checking...</span>
+        </div>
+    </nav>
+
+    <!-- ============================================ -->
+    <!-- Main content area                            -->
+    <!-- ============================================ -->
+    <main class="main-content">
+        <!-- ======================================== -->
+        <!-- Project List View                        -->
+        <!-- ======================================== -->
+        <section class="view" id="view-projects">
+            <div class="view-header">
+                <div>
+                    <h1>Projects</h1>
+                    <p class="subtitle">Upload an EPUB to start creating an audiobook</p>
+                </div>
+                <button class="btn btn-primary" id="btn-new-project">
+                    <span class="btn-icon">+</span>
+                    New Project
+                </button>
+            </div>
+
+            <!-- Empty state -->
+            <div class="empty-state" id="projects-empty">
+                <div class="empty-icon">📚</div>
+                <h2>No projects yet</h2>
+                <p>Upload your first EPUB file to get started</p>
+                <button class="btn btn-primary btn-lg" id="btn-empty-new">
+                    <span class="btn-icon">+</span>
+                    Create Your First Audiobook
+                </button>
+            </div>
+
+            <!-- Project cards grid -->
+            <div class="projects-grid" id="projects-grid"></div>
+        </section>
+
+        <!-- ======================================== -->
+        <!-- Project Detail View                      -->
+        <!-- ======================================== -->
+        <section class="view hidden" id="view-detail">
+            <div class="view-header">
+                <button class="btn btn-ghost" id="btn-back">
+                    ← Back to Projects
+                </button>
+                <div class="detail-actions">
+                    <button class="btn btn-success" id="btn-start-pipeline">
+                        ▶ Start Pipeline
+                    </button>
+                    <button class="btn btn-danger hidden" id="btn-stop-pipeline">
+                        ■ Stop
+                    </button>
+                    <button class="btn btn-ghost btn-danger-text" id="btn-delete-project">
+                        🗑 Delete
+                    </button>
+                </div>
+            </div>
+
+            <!-- Project info header -->
+            <div class="project-hero" id="project-hero">
+                <div class="project-cover" id="project-cover">📖</div>
+                <div class="project-meta">
+                    <h1 id="project-title">Book Title</h1>
+                    <p class="project-author" id="project-author">Author Name</p>
+                    <div class="project-stats" id="project-stats"></div>
+                    <div class="project-stage" id="project-stage"></div>
+                </div>
+            </div>
+
+            <!-- Pipeline progress -->
+            <div class="pipeline-section" id="pipeline-section">
+                <h2>Pipeline Progress</h2>
+                <div class="pipeline-tracker" id="pipeline-tracker"></div>
+                <div class="pipeline-live" id="pipeline-live"></div>
+            </div>
+
+            <!-- Tab navigation -->
+            <div class="tab-bar" id="detail-tabs">
+                <button class="tab active" data-tab="tab-characters">Characters</button>
+                <button class="tab" data-tab="tab-script">Script</button>
+                <button class="tab" data-tab="tab-quality">Quality</button>
+            </div>
+
+            <!-- Character Registry Tab -->
+            <div class="tab-content active" id="tab-characters">
+                <div class="character-grid" id="character-grid">
+                    <div class="empty-state small">
+                        <p>Characters will appear after the LLM analysis completes</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Script Viewer Tab -->
+            <div class="tab-content" id="tab-script">
+                <div class="script-controls">
+                    <select id="script-chapter-select" class="select">
+                        <option value="">Select Chapter</option>
+                    </select>
+                    <div class="script-legend" id="script-legend"></div>
+                </div>
+                <div class="script-viewer" id="script-viewer">
+                    <div class="empty-state small">
+                        <p>Script will appear after generation completes</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Quality Report Tab -->
+            <div class="tab-content" id="tab-quality">
+                <div class="quality-overview" id="quality-overview">
+                    <div class="empty-state small">
+                        <p>Quality data will appear after audio generation</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <!-- ============================================ -->
+    <!-- Upload Modal                                 -->
+    <!-- ============================================ -->
+    <div class="modal-overlay hidden" id="upload-modal">
+        <div class="modal">
+            <div class="modal-header">
+                <h2>New Audiobook Project</h2>
+                <button class="modal-close" id="modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="upload-zone" id="upload-zone">
+                    <div class="upload-icon">📤</div>
+                    <h3>Drop your EPUB file here</h3>
+                    <p>or click to browse</p>
+                    <input type="file" id="epub-file-input" accept=".epub" hidden>
+                </div>
+                <div class="upload-info hidden" id="upload-info">
+                    <div class="file-icon">📖</div>
+                    <div class="file-details">
+                        <span class="file-name" id="upload-file-name"></span>
+                        <span class="file-size" id="upload-file-size"></span>
+                    </div>
+                    <button class="btn btn-ghost" id="upload-remove">✕</button>
+                </div>
+                <div class="upload-progress hidden" id="upload-progress">
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="upload-progress-fill"></div>
+                    </div>
+                    <span class="progress-text" id="upload-progress-text">Uploading...</span>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-ghost" id="modal-cancel">Cancel</button>
+                <button class="btn btn-primary" id="modal-upload" disabled>
+                    Create Project
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============================================ -->
+    <!-- Toast notifications                          -->
+    <!-- ============================================ -->
+    <div class="toast-container" id="toast-container"></div>
+
+    <!-- Scripts -->
+    <script src="/static/js/app.js"></script>
+    <script src="/static/js/pipeline.js"></script>
+    <script src="/static/js/script-viewer.js"></script>
+</body>
+</html>
