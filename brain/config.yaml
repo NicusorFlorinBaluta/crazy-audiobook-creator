@@ -11,14 +11,14 @@ ollama:
   top_p: 0.9
   context_window: 10               # Paragraphs before/after for emotion context
   timeout: 600                     # Seconds to wait for LLM response
-  max_retries: 3
+  max_retries: 15
 
 # --- Ubuntu Voice Server Connection ---
 ubuntu:
   host: "http://192.168.50.180:8100"  # Corrected Ubuntu machine IP
   timeout: 30
-  retries: 3
-  retry_delay: 5
+  retries: 15
+  retry_delay: 20
   reconnect_interval: 60
 
 # --- EPUB Text Extraction ---
