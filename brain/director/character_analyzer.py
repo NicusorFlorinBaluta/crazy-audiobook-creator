@@ -35,19 +35,9 @@ def _load_prompt(name: str) -> str:
 
 
 # Inline fallback prompt if file doesn't exist yet
-_CHARACTER_PROMPT = """You are an expert audiobook director preparing a novel for multi-voice narration. Your task is to analyze this book and create a character registry with voice descriptions for text-to-speech generation.
+_SYSTEM_PROMPT = """You are an expert audiobook director and strict data extraction system. Analyze book text and extract all characters and their voice mappings.
 
-## Instructions
-
-1. Read the following text carefully
-2. Identify ALL speaking characters (anyone who has dialogue)
-3. For each character, determine:
-   - Their gender, approximate age, and key personality traits
-   - A detailed voice description suitable for voice synthesis
-4. Also create a narrator voice that fits the book's genre and tone
-5. Output ONLY valid JSON — no explanation, no markdown code fences
-
-## Voice Description Guidelines
+### Voice Description Guidelines
 
 Voice descriptions must be specific and actionable. Include:
 - **Gender and age**: "young female, early 20s" or "elderly male, 70s"
@@ -60,11 +50,14 @@ Voice descriptions must be specific and actionable. Include:
 Do NOT use real person names. Use archetypes instead.
 Keep descriptions under 50 words each.
 
-## Book Genre: {genre}
+### Book Genre: {genre}
 
-The narrator voice should suit {genre} storytelling — authoritative but warm, with gravitas for dramatic moments and warmth for intimate scenes.
+The narrator voice should suit {genre} storytelling - authoritative but warm, with gravitas for dramatic moments and warmth for intimate scenes.
 
+---
 ## Output Schema
+
+CRITICAL REMINDER: You MUST output ONLY valid JSON matching the Output Schema below. Do NOT output any conversational text, essays, explanations, or markdown fences. Just the raw JSON object starting with {{ and ending with }}.
 
 {{
   "book_title": "string",
@@ -90,10 +83,14 @@ The narrator voice should suit {genre} storytelling — authoritative but warm, 
     }}
   }}
 }}
+"""
 
-## Book Text
+_USER_PROMPT = """## Source Book Text
 
-{book_text}"""
+{book_text}
+
+Extract the characters from the text above as a valid JSON object matching the Output Schema. Do not output anything else.
+"""
 
 
 class CharacterAnalyzer:
@@ -112,92 +109,113 @@ class CharacterAnalyzer:
         self.max_unique_voices = max_unique_voices
 
     def analyze(self, book: ExtractedBook) -> CharacterRegistry:
-        """Analyze a book and produce a character registry.
-
-        For books that fit in the LLM context window, sends the full text.
-        For longer books, uses the chapter summary strategy:
-        first 3 chapters + last chapter + summaries.
-
-        Args:
-            book: Extracted book with chapters.
-
-        Returns:
-            CharacterRegistry with all identified characters.
-        """
+        """Analyze a book and produce a character registry."""
+        total_chars = sum(len(ch.text) for ch in book.chapters)
         logger.info(
-            "Starting character analysis for '%s' (%d chapters, %d words)",
+            "[CharacterAnalyzer] Starting Pass 1 for '%s' | chapters=%d | words=%d | total_chars=%d",
             book.metadata.title,
             book.metadata.total_chapters,
             book.metadata.total_words,
+            total_chars,
         )
 
         book_text = self._prepare_book_text(book)
-        prompt = self._build_prompt(book_text, book.metadata.title, book.metadata.author)
+        system_prompt = _SYSTEM_PROMPT.format(genre=self.genre)
+        prompt = _USER_PROMPT.format(book_text=book_text)
 
-        logger.info("Sending character analysis to LLM (%.1f KB prompt)...", len(prompt) / 1024)
+        logger.info(
+            "[CharacterAnalyzer] Prompt ready | system=%.1f KB | user=%.1f KB | total=%.1f KB",
+            len(system_prompt) / 1024,
+            len(prompt) / 1024,
+            (len(system_prompt) + len(prompt)) / 1024,
+        )
+        logger.info("[CharacterAnalyzer] Sending to LLM — this is the slow step...")
+
+        import time as _time
+        t0 = _time.time()
         raw_result = self.ollama.generate_json(
             prompt,
             temperature=self.temperature,
+            system=system_prompt,
+        )
+        elapsed = _time.time() - t0
+        logger.info(
+            "[CharacterAnalyzer] LLM responded in %.1fs | raw keys: %s",
+            elapsed,
+            list(raw_result.keys()),
         )
 
         registry = self._parse_registry(raw_result, book.metadata.title, book.metadata.author)
 
         logger.info(
-            "Character analysis complete: %d characters identified",
+            "[CharacterAnalyzer] Pass 1 complete in %.1fs | %d characters: %s",
+            elapsed,
             len(registry.characters),
+            list(registry.characters.keys()),
         )
 
         return registry
 
     def _prepare_book_text(self, book: ExtractedBook) -> str:
-        """Prepare book text for the LLM, handling long books.
-
-        Strategy for long books (>100K words):
-        - Send first 3 chapters in full (establish main characters)
-        - Send last chapter in full (character arc endpoints)
-        - For remaining chapters, send a paragraph-level summary
-        """
+        """Prepare book text for the LLM, handling long books."""
         total_text = "\n\n---\n\n".join(
             f"## {ch.title}\n\n{ch.text}" for ch in book.chapters
         )
+        total_len = len(total_text)
 
-        # If the text is reasonably sized (rough estimate: <80K chars ≈ fits context),
-        # send everything
-        if len(total_text) < 80_000:
+        if total_len < 25_000:
+            logger.info(
+                "[CharacterAnalyzer] Book fits in context (%.1f KB) — sending full text",
+                total_len / 1024,
+            )
             return total_text
 
-        # For long books, use the summary strategy
-        logger.info("Book is long (%d chars), using summary strategy", len(total_text))
+        logger.info(
+            "[CharacterAnalyzer] Book is large (%.1f KB > 25 KB limit) — using strict summary strategy",
+            total_len / 1024,
+        )
         parts: list[str] = []
+        current_len = 0
 
-        # First 3 chapters in full
-        for ch in book.chapters[:3]:
-            parts.append(f"## {ch.title} [FULL TEXT]\n\n{ch.text}")
+        for idx, ch in enumerate(book.chapters):
+            if idx == 0 and len(ch.text) < 15_000:
+                text_to_add = f"## {ch.title} [FULL TEXT]\n\n{ch.text}"
+                strategy = "FULL TEXT"
+            else:
+                summary = ch.text[:500].rsplit(".", 1)[0] + "."
+                text_to_add = f"## {ch.title} [SUMMARY]\n\n{summary}"
+                strategy = "SUMMARY"
 
-        # Middle chapters: first 500 chars as summary
-        for ch in book.chapters[3:-1]:
-            summary = ch.text[:500].rsplit(".", 1)[0] + "."
-            parts.append(f"## {ch.title} [SUMMARY]\n\n{summary}")
+            if current_len + len(text_to_add) > 25_000:
+                logger.warning(
+                    "[CharacterAnalyzer] Truncated at chapter %d/%d (%.1f KB used) — context limit reached",
+                    idx,
+                    len(book.chapters),
+                    current_len / 1024,
+                )
+                break
 
-        # Last chapter in full
-        if len(book.chapters) > 3:
-            last = book.chapters[-1]
-            parts.append(f"## {last.title} [FULL TEXT]\n\n{last.text}")
+            logger.info(
+                "[CharacterAnalyzer] Ch%d '%s': %s (+%.1f KB, total %.1f KB)",
+                idx + 1,
+                ch.title[:40],
+                strategy,
+                len(text_to_add) / 1024,
+                (current_len + len(text_to_add)) / 1024,
+            )
+            parts.append(text_to_add)
+            current_len += len(text_to_add)
 
+        logger.info(
+            "[CharacterAnalyzer] Prepared %d/%d chapters for LLM (%.1f KB)",
+            len(parts),
+            len(book.chapters),
+            current_len / 1024,
+        )
         return "\n\n---\n\n".join(parts)
 
     def _build_prompt(self, book_text: str, title: str, author: str) -> str:
-        """Build the character analysis prompt."""
-        # Try to load from file first
-        try:
-            template = _load_prompt("character_extraction.md")
-        except FileNotFoundError:
-            template = _CHARACTER_PROMPT
-
-        return template.format(
-            genre=self.genre,
-            book_text=book_text,
-        )
+        return ""
 
     def _parse_registry(
         self,
@@ -209,28 +227,45 @@ class CharacterAnalyzer:
         characters: dict[str, Character] = {}
 
         raw_chars = raw.get("characters", {})
+        logger.info(
+            "[CharacterAnalyzer] Parsing %d raw characters from LLM output",
+            len(raw_chars),
+        )
+
         for char_id, char_data in raw_chars.items():
             if not isinstance(char_data, dict):
+                logger.warning("[CharacterAnalyzer] Skipping invalid char_data for '%s': %r", char_id, char_data)
                 continue
 
             # Normalize character ID
-            char_id = char_id.lower().replace(" ", "_").replace("-", "_")
+            normalized_id = char_id.lower().replace(" ", "_").replace("-", "_")
 
             # Parse gender
             gender_str = str(char_data.get("gender", "other")).lower()
             try:
                 gender = Gender(gender_str)
             except ValueError:
+                logger.warning(
+                    "[CharacterAnalyzer] Unknown gender '%s' for '%s' — defaulting to OTHER",
+                    gender_str, normalized_id,
+                )
                 gender = Gender.OTHER
 
-            characters[char_id] = Character(
-                id=char_id,
-                name=char_data.get("name", char_id.replace("_", " ").title()),
+            characters[normalized_id] = Character(
+                id=normalized_id,
+                name=char_data.get("name", normalized_id.replace("_", " ").title()),
                 gender=gender,
                 age_range=str(char_data.get("age_range", "unknown")),
                 personality_traits=char_data.get("personality_traits", []),
                 voice_description=str(char_data.get("voice_description", "")),
                 speaking_style=str(char_data.get("speaking_style", "")),
+            )
+            logger.info(
+                "[CharacterAnalyzer]   + '%s' (%s) | %s | voice: %s",
+                characters[normalized_id].name,
+                normalized_id,
+                gender_str,
+                str(char_data.get("voice_description", ""))[:60],
             )
 
         # Ensure we have a narrator
@@ -248,16 +283,15 @@ class CharacterAnalyzer:
                 ),
                 speaking_style="Flowing descriptive prose, unhurried",
             )
-            logger.warning("LLM didn't produce a narrator — using default")
+            logger.warning("[CharacterAnalyzer] LLM didn't produce a narrator — using default")
 
         # Cap unique voices
         if len(characters) > self.max_unique_voices:
             logger.info(
-                "Capping characters from %d to %d unique voices",
+                "[CharacterAnalyzer] Capping %d → %d unique voices",
                 len(characters),
                 self.max_unique_voices,
             )
-            # Keep narrator + most important characters (first N in LLM output order)
             important = {"narrator"}
             for k in list(raw_chars.keys()):
                 normalized = k.lower().replace(" ", "_").replace("-", "_")

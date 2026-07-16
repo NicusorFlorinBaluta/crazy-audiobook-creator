@@ -47,12 +47,12 @@ window.PipelineManager = (() => {
     function updateTracker(currentStage, status) {
         if (!currentStage) return;
         
-        const currentIndex = STAGES.indexOf(currentStage);
+        const currentIndex = STAGES.indexOf(currentStage.toUpperCase());
         
         document.querySelectorAll('.pipeline-stage').forEach((el, idx) => {
             el.className = 'pipeline-stage'; // reset
             
-            if (idx < currentIndex || status === 'completed') {
+            if (idx < currentIndex || status === 'complete') {
                 el.classList.add('done');
             } else if (idx === currentIndex) {
                 if (status === 'error') {
@@ -93,7 +93,7 @@ window.PipelineManager = (() => {
             els.btnStart.classList.remove('hidden');
             els.btnStop.classList.add('hidden');
             
-            if (status === 'completed') {
+            if (status === 'complete') {
                 els.btnStart.textContent = '▶ Run Again';
             } else if (status === 'error' || status === 'paused') {
                 els.btnStart.textContent = '▶ Resume Pipeline';

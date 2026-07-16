@@ -51,6 +51,7 @@ class OllamaClient:
             temperature: Sampling temperature (lower = more deterministic).
             top_p: Nucleus sampling parameter.
             system: Optional system prompt.
+            format: Optional response format (e.g., 'json').
 
         Returns:
             The generated text response.
@@ -58,77 +59,128 @@ class OllamaClient:
         Raises:
             OllamaError: If the request fails after all retries.
         """
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+
         payload: dict[str, Any] = {
             "model": self.model,
-            "prompt": prompt,
-            "stream": False,
+            "messages": messages,
+            "stream": True,
             "options": {
                 "temperature": temperature,
                 "top_p": top_p,
+                "num_predict": -1,
+                "num_ctx": 8192,
+                "num_gpu": 99,
             },
         }
-        if system:
-            payload["system"] = system
 
         last_error: Exception | None = None
 
         for attempt in range(1, self.max_retries + 1):
             try:
-                logger.debug(
-                    "Ollama request (attempt %d/%d, model=%s, temp=%.1f)",
+                prompt_kb = sum(len(m["content"]) for m in messages) / 1024
+                logger.info(
+                    "[Ollama] → Sending request (attempt %d/%d) | model=%s | prompt=%.1f KB | temp=%.2f",
                     attempt,
                     self.max_retries,
                     self.model,
+                    prompt_kb,
                     temperature,
                 )
 
+                t0 = time.time()
                 response = self._client.post(
-                    f"{self.host}/api/generate",
+                    f"{self.host}/api/chat",
                     json=payload,
+                    timeout=httpx.Timeout(self.timeout),
                 )
                 response.raise_for_status()
+                logger.info("[Ollama] ← HTTP 200 received, streaming tokens...")
 
-                data = response.json()
-                text = data.get("response", "")
+                full_text = []
+                token_count = 0
+                last_log_tokens = 0
+                for line in response.iter_lines():
+                    if line:
+                        chunk = json.loads(line)
+                        if "message" in chunk and "content" in chunk["message"]:
+                            full_text.append(chunk["message"]["content"])
+                            token_count += 1
+                            # Log every 200 tokens so we know it's alive
+                            if token_count - last_log_tokens >= 200:
+                                elapsed = time.time() - t0
+                                logger.info(
+                                    "[Ollama] ↻ Streaming... %d tokens | %.1f tok/s | %.0fs elapsed",
+                                    token_count,
+                                    token_count / elapsed if elapsed > 0 else 0,
+                                    elapsed,
+                                )
+                                last_log_tokens = token_count
+
+                text = "".join(full_text)
+                elapsed = time.time() - t0
 
                 if not text.strip():
+                    with open("empty_response_debug.txt", "w", encoding="utf-8") as f:
+                        f.write(text)
+                    logger.error(
+                        "[Ollama] ✗ Empty response after streaming! %d token chunks received in %.1fs",
+                        token_count,
+                        elapsed,
+                    )
                     raise OllamaError("Empty response from Ollama")
 
-                logger.debug(
-                    "Ollama response: %d chars, eval_duration=%.1fs",
+                logger.info(
+                    "[Ollama] ✓ Complete: %d tokens | %d chars | %.1fs | ~%.0f tok/s | preview: %r",
+                    token_count,
                     len(text),
-                    data.get("eval_duration", 0) / 1e9,
+                    elapsed,
+                    token_count / elapsed if elapsed > 0 else 0,
+                    text[:120].replace("\n", " "),
                 )
                 return text
 
             except httpx.TimeoutException as e:
                 last_error = e
                 logger.warning(
-                    "Ollama request timed out (attempt %d/%d): %s",
+                    "[Ollama] ✗ Request TIMED OUT (attempt %d/%d, timeout=%ds): %s",
                     attempt,
                     self.max_retries,
+                    self.timeout,
                     e,
                 )
             except httpx.HTTPStatusError as e:
                 last_error = e
+                err_text = ""
+                try:
+                    err_text = e.response.text
+                except Exception:
+                    pass
                 logger.warning(
-                    "Ollama HTTP error (attempt %d/%d): %s",
+                    "[Ollama] ✗ HTTP error (attempt %d/%d): %s — Body: %s",
                     attempt,
                     self.max_retries,
                     e,
+                    err_text,
                 )
+            except OllamaError:
+                raise
             except Exception as e:
                 last_error = e
                 logger.warning(
-                    "Ollama request failed (attempt %d/%d): %s",
+                    "[Ollama] ✗ Unexpected error (attempt %d/%d): %s: %s",
                     attempt,
                     self.max_retries,
+                    type(e).__name__,
                     e,
                 )
 
             if attempt < self.max_retries:
                 wait = 2 ** attempt
-                logger.info("Retrying in %d seconds...", wait)
+                logger.info("[Ollama] Retrying in %d seconds...", wait)
                 time.sleep(wait)
 
         raise OllamaError(
@@ -176,54 +228,51 @@ class OllamaClient:
         1. Pure JSON
         2. JSON wrapped in markdown code fences (```json ... ```)
         3. JSON with leading/trailing text
-        4. Qwen3 thinking tags (<think>...</think>) before JSON
+        4. DeepSeek/Qwen3 thinking tags (<think>...</think>) before JSON
         """
-        # Strip Qwen3 thinking tags if present
+        # Strip thinking tags (DeepSeek-R1 and Qwen3 both use these)
+        think_match = re.search(r"<think>.*?</think>", text, flags=re.DOTALL)
+        if think_match:
+            think_len = think_match.end() - think_match.start()
+            logger.info(
+                "[JSON] Stripped <think> block (%d chars of reasoning)",
+                think_len,
+            )
         text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
         text = text.strip()
 
         # Try 1: Parse directly
         try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            pass
+            result = json.loads(text)
+            logger.info("[JSON] Parsed directly (try 1). Keys: %s", list(result.keys())[:8])
+            return result
+        except json.JSONDecodeError as e:
+            logger.debug("[JSON] Direct parse failed: %s", e)
 
-        # Try 2: Extract from markdown code fences
-        fence_match = re.search(
-            r"```(?:json)?\s*\n?(.*?)\n?\s*```",
-            text,
-            re.DOTALL,
+        import json_repair
+        
+        # Try robust parsing using json_repair
+        try:
+            logger.info("[JSON] Attempting robust json_repair parsing...")
+            # We want to feed json_repair just the text after the think block, or the whole text
+            # Usually extracting from the first { to the end helps it.
+            brace_match = re.search(r"\{.*\}", text, re.DOTALL)
+            json_text = brace_match.group(0) if brace_match else text
+            
+            result = json_repair.loads(json_text)
+            if isinstance(result, dict):
+                logger.info("[JSON] Parsed via json_repair successfully. Keys: %s", list(result.keys())[:8])
+                return result
+            else:
+                logger.warning("[JSON] json_repair returned non-dict type: %s", type(result))
+        except Exception as e:
+            logger.error("[JSON] json_repair failed: %s", e)
+
+        logger.error(
+            "[JSON] ✗ All parse attempts failed. Response head: %r | Response tail: %r",
+            text[:300],
+            text[-200:],
         )
-        if fence_match:
-            try:
-                return json.loads(fence_match.group(1))
-            except json.JSONDecodeError:
-                pass
-
-        # Try 3: Find the first { ... } block
-        brace_match = re.search(r"\{.*\}", text, re.DOTALL)
-        if brace_match:
-            try:
-                return json.loads(brace_match.group(0))
-            except json.JSONDecodeError:
-                pass
-
-        # Try 4: Find outermost braces more carefully
-        depth = 0
-        start = -1
-        for i, ch in enumerate(text):
-            if ch == "{":
-                if depth == 0:
-                    start = i
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0 and start >= 0:
-                    try:
-                        return json.loads(text[start : i + 1])
-                    except json.JSONDecodeError:
-                        start = -1
-
         raise OllamaError(
             f"Could not extract valid JSON from LLM response. "
             f"Response starts with: {text[:200]!r}"

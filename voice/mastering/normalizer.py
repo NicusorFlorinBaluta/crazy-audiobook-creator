@@ -95,8 +95,8 @@ class LoudnessNormalizer:
 
         # Final measurements
         final_lufs = self._measure_lufs(audio, sample_rate)
-        peak = np.max(np.abs(audio))
-        peak_dbfs = 20 * np.log10(peak) if peak > 0 else -100
+        peak = float(np.max(np.abs(audio)))
+        peak_dbfs = float(20 * np.log10(peak)) if peak > 0 else -100.0
 
         # Convert to output format
         audio = audio.astype(np.float32)
@@ -132,19 +132,25 @@ class LoudnessNormalizer:
 
     def _measure_lufs(self, audio: np.ndarray, sample_rate: int) -> float:
         """Measure integrated loudness in LUFS."""
+        import math
         try:
             import pyloudnorm
             meter = pyloudnorm.Meter(sample_rate)
             # pyloudnorm expects at least 0.4 seconds
             if len(audio) / sample_rate < 0.4:
                 return -70.0
-            lufs = meter.integrated_loudness(audio)
-            return float(lufs)
+            lufs = float(meter.integrated_loudness(audio))
+            if math.isinf(lufs) or math.isnan(lufs):
+                return -70.0
+            return lufs
         except ImportError:
             logger.warning("pyloudnorm not available — using RMS approximation")
-            rms = np.sqrt(np.mean(audio ** 2))
+            rms = float(np.sqrt(np.mean(audio ** 2)))
             if rms > 0:
-                return 20 * np.log10(rms) - 0.691  # Rough LUFS approximation
+                lufs = float(20 * np.log10(rms) - 0.691)  # Rough LUFS approximation
+                if math.isinf(lufs) or math.isnan(lufs):
+                    return -70.0
+                return lufs
             return -70.0
         except Exception as e:
             logger.warning("LUFS measurement failed: %s", e)

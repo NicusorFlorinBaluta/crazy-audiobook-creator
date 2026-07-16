@@ -9,9 +9,13 @@ echo " Crazy Audiobook Creator — Ubuntu Voice Server Setup"
 echo "============================================================"
 
 # 1. System Dependencies
-echo "[1/4] Installing system dependencies..."
-sudo apt-update
-sudo apt-get install -y python3-pip python3-venv ffmpeg
+echo "[1/4] Checking system dependencies..."
+if ! command -v ffmpeg &> /dev/null; then
+    echo "WARNING: ffmpeg not found. You may need to install it manually."
+fi
+if ! command -v python3 -m venv &> /dev/null; then
+    echo "WARNING: python3-venv not found. You may need to install it manually."
+fi
 
 # 2. Python Virtual Environment
 echo "[2/4] Setting up Python virtual environment..."

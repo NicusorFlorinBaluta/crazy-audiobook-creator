@@ -122,8 +122,11 @@ class M4BExporter:
         with open(concat_file, "w", encoding="utf-8") as f:
             for chapter in chapters:
                 chapter_path = project_dir / chapter.file
+                # FFmpeg concat demuxer resolves relative paths relative to the concat file's directory.
+                # Use absolute paths to avoid workspace/sample_book/workspace/sample_book/ duplication.
+                abs_path = chapter_path.absolute()
                 # FFmpeg requires forward slashes and escaped single quotes
-                safe_path = str(chapter_path).replace("\\", "/").replace("'", "'\\''")
+                safe_path = str(abs_path).replace("\\", "/").replace("'", "'\\''")
                 f.write(f"file '{safe_path}'\n")
 
     def _get_chapter_durations(

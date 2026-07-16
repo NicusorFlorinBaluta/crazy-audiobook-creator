@@ -5,17 +5,17 @@
 # --- Ollama LLM Settings ---
 ollama:
   host: "http://localhost:11434"
-  model: "qwen3:32b"
+  model: "deepseek-r1:32b"
   temperature_pass1: 0.3           # Lower = more consistent character analysis
   temperature_pass2: 0.4           # Slightly higher for creative emotion descriptions
   top_p: 0.9
   context_window: 10               # Paragraphs before/after for emotion context
-  timeout: 120                     # Seconds to wait for LLM response
+  timeout: 600                     # Seconds to wait for LLM response
   max_retries: 3
 
 # --- Ubuntu Voice Server Connection ---
 ubuntu:
-  host: "http://192.168.1.100:8100"  # ← Replace with your Ubuntu machine's IP
+  host: "http://192.168.50.180:8100"  # Corrected Ubuntu machine IP
   timeout: 30
   retries: 3
   retry_delay: 5

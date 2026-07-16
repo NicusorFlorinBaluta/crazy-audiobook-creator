@@ -115,6 +115,7 @@
                 <button class="tab active" data-tab="tab-characters">Characters</button>
                 <button class="tab" data-tab="tab-script">Script</button>
                 <button class="tab" data-tab="tab-quality">Quality</button>
+                <button class="tab tab-logs" data-tab="tab-logs">🖥 Logs</button>
             </div>
 
             <!-- Character Registry Tab -->
@@ -147,6 +148,24 @@
                     <div class="empty-state small">
                         <p>Quality data will appear after audio generation</p>
                     </div>
+                </div>
+            </div>
+
+            <!-- Log Console Tab -->
+            <div class="tab-content" id="tab-logs">
+                <div class="log-console-toolbar">
+                    <span class="log-status log-status-disconnected" id="log-status">● Disconnected</span>
+                    <div class="log-toolbar-actions">
+                        <label class="log-toggle">
+                            <input type="checkbox" id="log-autoscroll" checked>
+                            Auto-scroll
+                        </label>
+                        <button class="btn btn-ghost btn-sm" id="log-clear">Clear</button>
+                        <button class="btn btn-ghost btn-sm" id="log-copy">Copy All</button>
+                    </div>
+                </div>
+                <div class="log-console" id="log-console" role="log" aria-live="polite">
+                    <div class="log-empty">No logs yet — start the pipeline or open this tab during a run</div>
                 </div>
             </div>
         </section>
@@ -201,5 +220,6 @@
     <script src="/static/js/app.js"></script>
     <script src="/static/js/pipeline.js"></script>
     <script src="/static/js/script-viewer.js"></script>
+    <script src="/static/js/log-console.js"></script>
 </body>
 </html>

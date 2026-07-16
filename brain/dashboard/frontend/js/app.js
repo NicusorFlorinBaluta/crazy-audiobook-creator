@@ -4,7 +4,7 @@
  */
 
 // Global State
-const state = {
+const state = window.state = {
     projects: [],
     currentProjectId: null,
     ws: null,
@@ -116,6 +116,11 @@ async function showDetailView(projectId) {
     document.querySelector('.tab[data-tab="tab-characters"]').click();
     
     await fetchProjectDetails(projectId);
+
+    // Connect log console in background (non-blocking)
+    if (window.LogConsole) {
+        window.LogConsole.openForProject(projectId);
+    }
 }
 
 // ============================================================================
@@ -150,8 +155,11 @@ async function fetchProjectDetails(projectId) {
         
         // Let pipeline.js and script-viewer.js update their parts
         if (window.PipelineManager) {
-            window.PipelineManager.updateTracker(data.current_stage, data.status);
-            window.PipelineManager.toggleControls(data.status, data.running);
+            // Backend 'status' is actually the stage. Compute coarse status (running/error/paused/completed).
+            const stage = data.status;
+            const coarseStatus = ['error', 'paused', 'complete'].includes(stage) ? stage : 'running';
+            window.PipelineManager.updateTracker(stage, coarseStatus);
+            window.PipelineManager.toggleControls(stage, coarseStatus === 'running');
         }
         
         if (window.ScriptViewer) {
@@ -366,9 +374,9 @@ function renderProjectsList() {
                     <span class="card-stat-value">${formatDate(project.created_at)}</span>
                 </div>
             </div>
-            <div class="card-stage" style="background: var(--stage-${project.current_stage.toLowerCase()}-bg, var(--bg-elevated)); color: var(--stage-${project.current_stage.toLowerCase()}, var(--text-primary))">
-                ${project.status === 'error' ? '⚠️ ' : (project.status === 'completed' ? '✅ ' : '⏳ ')}
-                ${project.current_stage.replace('_', ' ')}
+            <div class="card-stage" style="background: var(--stage-${project.status.toLowerCase()}-bg, var(--bg-elevated)); color: var(--stage-${project.status.toLowerCase()}, var(--text-primary))">
+                ${['error', 'paused', 'complete'].includes(project.status) ? (project.status === 'complete' ? '✅ ' : '⚠️ ') : '⏳ '}
+                ${project.status.replace('_', ' ')}
             </div>
         `;
         
@@ -387,10 +395,11 @@ function renderProjectDetails(project) {
         <span>Started: ${formatDate(project.created_at)}</span>
     `;
     
-    const stageColor = `var(--stage-${project.current_stage.toLowerCase()}, var(--text-primary))`;
+    const stageColor = `var(--stage-${project.status.toLowerCase()}, var(--text-primary))`;
+    const coarseStatus = ['error', 'paused', 'complete'].includes(project.status) ? project.status : 'running';
     document.getElementById('project-stage').innerHTML = `
         <span class="card-stage" style="border: 1px solid ${stageColor}; color: ${stageColor}">
-            Status: ${project.status.toUpperCase()} | Stage: ${project.current_stage.replace('_', ' ')}
+            Status: ${coarseStatus.toUpperCase()} | Stage: ${project.status.replace('_', ' ').toUpperCase()}
         </span>
     `;
 }
@@ -485,6 +494,11 @@ function handleWsMessage(data) {
             // Show live progress line
             if (data.type === 'progress' && window.PipelineManager) {
                 window.PipelineManager.updateLiveProgress(data);
+            }
+
+            // Auto-connect log console if the Logs tab is active
+            if (window.LogConsole) {
+                window.LogConsole.openForProject(data.project_id);
             }
         } else if (data.type === 'error') {
             showToast(data.message || 'Pipeline error occurred', 'error');

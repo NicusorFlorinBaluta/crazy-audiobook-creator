@@ -1188,6 +1188,140 @@ body {
 /* Responsive                                                    */
 /* ------------------------------------------------------------ */
 
+/* ------------------------------------------------------------ */
+/* Log Console                                                   */
+/* ------------------------------------------------------------ */
+
+/* Logs tab badge */
+.tab.tab-logs { position: relative; }
+
+/* Make the log panel fill edge-to-edge within the tab-content card */
+#tab-logs {
+    padding: 0;
+}
+
+/* Toolbar above the console */
+.log-console-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-sm) var(--space-md);
+    background: hsl(225, 25%, 8%);
+    border: 1px solid var(--glass-border);
+    border-bottom: none;
+    border-radius: var(--radius-md) var(--radius-md) 0 0;
+    gap: var(--space-md);
+    flex-wrap: wrap;
+}
+
+.log-toolbar-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+}
+
+.log-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    cursor: pointer;
+    user-select: none;
+}
+
+.log-toggle input[type="checkbox"] {
+    accent-color: var(--accent);
+    width: 14px;
+    height: 14px;
+}
+
+.btn-sm {
+    padding: 4px 10px;
+    font-size: 0.78rem;
+}
+
+/* Status indicator */
+.log-status {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.78rem;
+    font-weight: 500;
+    transition: color 0.3s;
+}
+
+.log-status-live        { color: var(--success);   animation: log-blink 2s ease-in-out infinite; }
+.log-status-connecting  { color: var(--warning);   }
+.log-status-loading     { color: var(--info);      }
+.log-status-done        { color: var(--text-muted);}
+.log-status-error       { color: var(--danger);    }
+.log-status-disconnected{ color: var(--text-muted);}
+
+@keyframes log-blink {
+    0%, 100% { opacity: 1; }
+    50%       { opacity: 0.5; }
+}
+
+/* The scrollable terminal panel */
+.log-console {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.75rem;
+    line-height: 1.6;
+    background: hsl(225, 28%, 5%);
+    border: 1px solid var(--glass-border);
+    border-radius: 0 0 var(--radius-md) var(--radius-md);
+    height: 520px;
+    overflow-y: auto;
+    padding: var(--space-sm) var(--space-md);
+    scroll-behavior: smooth;
+    color: hsl(225, 10%, 72%);
+    /* Custom scrollbar */
+    scrollbar-width: thin;
+    scrollbar-color: hsl(225, 15%, 20%) transparent;
+}
+
+.log-console::-webkit-scrollbar       { width: 6px; }
+.log-console::-webkit-scrollbar-track { background: transparent; }
+.log-console::-webkit-scrollbar-thumb { background: hsl(225, 15%, 22%); border-radius: 3px; }
+
+.log-empty {
+    color: var(--text-muted);
+    font-style: italic;
+    padding: var(--space-lg) 0;
+    text-align: center;
+}
+
+/* Log lines */
+.log-line {
+    display: block;
+    white-space: pre-wrap;
+    word-break: break-all;
+    padding: 1px 0;
+    animation: log-fadein 0.15s ease;
+    border-bottom: 1px solid hsla(225, 20%, 100%, 0.02);
+}
+
+@keyframes log-fadein {
+    from { opacity: 0; transform: translateY(2px); }
+    to   { opacity: 1; transform: none; }
+}
+
+/* Per-level colours */
+.log-error    { color: hsl(0,  70%, 68%); }
+.log-warn     { color: hsl(38, 85%, 60%); }
+.log-info     { color: hsl(225, 10%, 80%); }
+.log-debug    { color: hsl(225, 10%, 45%); }
+.log-sentinel { color: var(--text-muted); font-style: italic; text-align: center; }
+.log-other    { color: hsl(225, 10%, 55%); }
+
+/* Highlighted prefix badges */
+.log-badge {
+    color: var(--accent-light);
+    font-weight: 600;
+}
+
+.log-error   .log-badge { color: hsl(0,  70%, 80%); }
+.log-warn    .log-badge { color: hsl(38, 85%, 75%); }
+
 @media (max-width: 768px) {
     .main-content { padding: var(--space-lg) var(--space-md); }
 

@@ -291,22 +291,34 @@ class Pipeline:
         from shared.models import ExtractedBook
         book = ExtractedBook.model_validate_json(book_path.read_text(encoding="utf-8"))
 
+        logger.info(
+            "═══ [SCRIPTING] Stage started for '%s' | %d chapters | %d words ═══",
+            project_id,
+            book.metadata.total_chapters,
+            book.metadata.total_words,
+        )
+
+        t0 = time.time()
+
         # Pass 1: Character analysis
-        logger.info("Pass 1: Analyzing characters...")
+        logger.info("[SCRIPTING] ── Pass 1: Character Analysis ──")
         registry = self.character_analyzer.analyze(book)
+        pass1_elapsed = time.time() - t0
+        logger.info("[SCRIPTING] Pass 1 done in %.1fs", pass1_elapsed)
 
         # Save character registry
         chars_path = project_dir / "characters.json"
         with open(chars_path, "w", encoding="utf-8") as f:
             f.write(registry.model_dump_json(indent=2))
+        logger.info("[SCRIPTING] characters.json saved (%d characters)", len(registry.characters))
 
         # Pass 2: Script generation for each chapter
-        logger.info("Pass 2: Generating scripts...")
+        logger.info("[SCRIPTING] ── Pass 2: Script Generation (%d chapters) ──", len(book.chapters))
         scripts_dir = project_dir / "script"
         scripts_dir.mkdir(exist_ok=True)
 
         chapter_scripts = self.script_generator.generate_all_chapters(
-            book.chapters, registry
+            book.chapters, registry, scripts_dir=scripts_dir
         )
 
         total_lines = 0
@@ -315,6 +327,11 @@ class Pipeline:
             with open(script_path, "w", encoding="utf-8") as f:
                 f.write(script.model_dump_json(indent=2))
             total_lines += script.total_lines
+            logger.info(
+                "[SCRIPTING] Saved chapter_%03d.json (%d lines)",
+                script.chapter_number,
+                script.total_lines,
+            )
 
         # Build complete BookScript for reference
         book_script = BookScript(
@@ -325,8 +342,14 @@ class Pipeline:
         with open(project_dir / "book_script.json", "w", encoding="utf-8") as f:
             f.write(book_script.model_dump_json(indent=2))
 
+        total_elapsed = time.time() - t0
         self.job_queue.update_job(project_id, {"total_lines": total_lines, "script_completed": True})
-        logger.info("Script generation complete: %d total lines", total_lines)
+        logger.info(
+            "═══ [SCRIPTING] Complete: %d lines in %.1fs (pass1=%.1fs) ═══",
+            total_lines,
+            total_elapsed,
+            pass1_elapsed,
+        )
 
     def _run_voice_bootstrap(self, project_id: str, project_dir: Path) -> None:
         """Run Stage ③: Generate voice reference clips on Ubuntu."""
@@ -363,6 +386,29 @@ class Pipeline:
         script_files = sorted(scripts_dir.glob("chapter_*.json"))
 
         from shared.models import ScriptChapter
+        import json
+        import re
+        
+        # Load pronunciation dictionaries (global and project-specific)
+        pronunciation_dict = {}
+        global_dict_path = Path("brain/pronunciation_dict.json")
+        if global_dict_path.exists():
+            try:
+                pronunciation_dict.update(json.loads(global_dict_path.read_text(encoding="utf-8")))
+            except Exception as e:
+                logger.warning("Failed to load global pronunciation_dict.json: %s", e)
+                
+        proj_dict_path = project_dir / "pronunciation_dict.json"
+        if proj_dict_path.exists():
+            try:
+                pronunciation_dict.update(json.loads(proj_dict_path.read_text(encoding="utf-8")))
+            except Exception as e:
+                logger.warning("Failed to load project pronunciation_dict.json: %s", e)
+                
+        compiled_pronunciations = [
+            (re.compile(rf"\b{re.escape(w)}\b", re.IGNORECASE), r)
+            for w, r in pronunciation_dict.items()
+        ]
         
         state = self.job_queue.get_job(project_id)
         completed_gen_chapters = state.get("completed_gen_chapters", [])
@@ -376,6 +422,12 @@ class Pipeline:
             if chapter_script.chapter_number in completed_gen_chapters:
                 logger.info("Skipping chapter %d (already generated)", chapter_script.chapter_number)
                 continue
+
+            # Apply pronunciation replacements
+            if compiled_pronunciations:
+                for line in chapter_script.lines:
+                    for pattern, replacement in compiled_pronunciations:
+                        line.text = pattern.sub(replacement, line.text)
 
             try:
                 request = GenerateChapterRequest(

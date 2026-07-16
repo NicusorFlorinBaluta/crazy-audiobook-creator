@@ -121,8 +121,8 @@ MAX_UNIQUE_VOICES = 20
 MINOR_CHARACTER_LINE_THRESHOLD = 3   # ≤ this many lines → generic voice
 
 # Chunking for long chapters
-CHUNK_SIZE_WORDS = 5000
-CHUNK_OVERLAP_WORDS = 500
+CHUNK_SIZE_WORDS = 600
+CHUNK_OVERLAP_WORDS = 150
 
 # ---------------------------------------------------------------------------
 # Export defaults

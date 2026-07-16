@@ -24,7 +24,7 @@ class AudioAssembler:
 
     def __init__(
         self,
-        crossfade_ms: int = 30,
+        crossfade_ms: int = 50,
         sample_rate: int = 24000,
         chapter_start_silence_ms: int = 1000,
         chapter_end_silence_ms: int = 2000,

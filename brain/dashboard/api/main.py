@@ -13,15 +13,18 @@ Endpoints:
 from __future__ import annotations
 
 import asyncio
+import collections
 import logging
+import queue
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 import yaml
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from brain.orchestrator.pipeline import Pipeline
@@ -35,6 +38,81 @@ pipeline: Pipeline | None = None
 job_queue: JobQueue | None = None
 ws_connections: list[WebSocket] = []
 running_tasks: dict[str, asyncio.Task] = {}
+
+# ---------------------------------------------------------------------------
+# Per-project log capture
+# ---------------------------------------------------------------------------
+
+# project_id -> deque of log line strings (ring buffer, max 500)
+_project_logs: dict[str, collections.deque] = {}
+# project_id -> list of asyncio.Queue for SSE subscribers
+_log_subscribers: dict[str, list[asyncio.Queue]] = {}
+
+
+class ProjectLogHandler(logging.Handler):
+    """Logging handler that captures records to a per-project ring buffer
+    and fans out to any live SSE subscribers."""
+
+    # Suppress these noisy loggers from the project log stream
+    _SUPPRESS = {
+        "brain.dashboard.api.main",
+        "uvicorn.access",
+        "uvicorn.error",
+    }
+
+    def __init__(self, project_id: str):
+        super().__init__()
+        self.project_id = project_id
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self.setFormatter(logging.Formatter(
+            "%(asctime)s.%(msecs)03d | %(levelname)-7s | %(name)s | %(message)s",
+            datefmt="%H:%M:%S",
+        ))
+
+    def emit(self, record: logging.LogRecord) -> None:
+        # Skip dashboard / uvicorn noise
+        if record.name in self._SUPPRESS:
+            return
+        try:
+            line = self.format(record)
+            pid = self.project_id
+
+            # Store in ring buffer (safe from any thread)
+            if pid not in _project_logs:
+                _project_logs[pid] = collections.deque(maxlen=500)
+            _project_logs[pid].append(line)
+
+            # Fan out to SSE subscribers — MUST be thread-safe because
+            # the pipeline runs in a thread-pool executor, not the event loop.
+            loop = self._loop
+            if loop and loop.is_running():
+                for q in list(_log_subscribers.get(pid, [])):
+                    loop.call_soon_threadsafe(q.put_nowait, line)
+        except Exception:
+            self.handleError(record)
+
+
+def _attach_project_logger(project_id: str) -> ProjectLogHandler:
+    """Attach a ProjectLogHandler to the root logger for this pipeline run."""
+    if project_id not in _project_logs:
+        _project_logs[project_id] = collections.deque(maxlen=500)
+    if project_id not in _log_subscribers:
+        _log_subscribers[project_id] = []
+
+    handler = ProjectLogHandler(project_id)
+    handler.setLevel(logging.INFO)
+    # Capture the running event loop now (we're on the async thread)
+    try:
+        handler._loop = asyncio.get_running_loop()
+    except RuntimeError:
+        handler._loop = None
+    logging.getLogger().addHandler(handler)
+    return handler
+
+
+def _detach_project_logger(handler: ProjectLogHandler) -> None:
+    """Remove the handler from the root logger."""
+    logging.getLogger().removeHandler(handler)
 
 
 def load_config(config_path: str = "brain/config.yaml") -> dict[str, Any]:
@@ -190,14 +268,16 @@ async def start_pipeline(project_id: str):
     if project_id in running_tasks and not running_tasks[project_id].done():
         raise HTTPException(status_code=409, detail="Pipeline already running")
 
+    # Clear old logs for this project on a fresh start
+    _project_logs[project_id] = collections.deque(maxlen=500)
+
     async def run_in_background():
+        handler = _attach_project_logger(project_id)
         try:
-            # Run pipeline in thread pool to not block the event loop
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(None, pipeline.run, project_id)
         except Exception as e:
             logger.error("Pipeline failed for %s: %s", project_id, e)
-            # Send error to WebSocket clients
             for ws in ws_connections:
                 try:
                     await ws.send_json({
@@ -205,6 +285,14 @@ async def start_pipeline(project_id: str):
                         "project_id": project_id,
                         "message": str(e),
                     })
+                except Exception:
+                    pass
+        finally:
+            _detach_project_logger(handler)
+            # Send sentinel to all SSE subscribers so they know the run ended
+            for q in list(_log_subscribers.get(project_id, [])):
+                try:
+                    q.put_nowait(None)  # None = stream done
                 except Exception:
                     pass
 
@@ -244,6 +332,64 @@ async def get_pipeline_status(project_id: str):
         return state
     except KeyError:
         raise HTTPException(status_code=404, detail="Project not found")
+
+
+# ---------------------------------------------------------------------------
+# Log streaming (SSE)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/projects/{project_id}/logs")
+async def get_log_history(project_id: str):
+    """Return all buffered log lines for a project (up to last 500)."""
+    lines = list(_project_logs.get(project_id, []))
+    return {"project_id": project_id, "lines": lines}
+
+
+@app.get("/api/projects/{project_id}/logs/stream")
+async def stream_logs(project_id: str, request: Request):
+    """SSE endpoint — streams live log lines for a running pipeline."""
+    if project_id not in _log_subscribers:
+        _log_subscribers[project_id] = []
+
+    q: asyncio.Queue = asyncio.Queue(maxsize=1000)
+    _log_subscribers[project_id].append(q)
+
+    # First, replay any buffered lines so the client catches up
+    buffered = list(_project_logs.get(project_id, []))
+
+    async def event_generator():
+        try:
+            # Replay history
+            for line in buffered:
+                yield f"data: {line}\n\n"
+
+            # Stream live
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    line = await asyncio.wait_for(q.get(), timeout=15.0)
+                    if line is None:  # sentinel: pipeline finished
+                        yield "data: [PIPELINE ENDED]\n\n"
+                        break
+                    yield f"data: {line}\n\n"
+                except asyncio.TimeoutError:
+                    yield "data: \n\n"  # heartbeat keep-alive
+        finally:
+            try:
+                _log_subscribers[project_id].remove(q)
+            except ValueError:
+                pass
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # ---------------------------------------------------------------------------

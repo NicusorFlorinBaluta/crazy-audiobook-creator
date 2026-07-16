@@ -60,7 +60,7 @@ class Qwen3TTSEngine:
 
         try:
             import torch
-            from transformers import AutoModelForCausalLM, AutoProcessor
+            from qwen_tts import Qwen3TTSModel
 
             # Determine torch dtype
             torch_dtype = {
@@ -69,22 +69,18 @@ class Qwen3TTSEngine:
                 "float32": torch.float32,
             }.get(self.dtype, torch.float16)
 
-            # Load processor and model
-            self._processor = AutoProcessor.from_pretrained(
-                self.model_name,
-                trust_remote_code=True,
-            )
-            self._model = AutoModelForCausalLM.from_pretrained(
-                self.model_name,
-                torch_dtype=torch_dtype,
-                device_map=self.device if self.device != "cpu" else None,
-                trust_remote_code=True,
+            # Use snapshot_download to get local path
+            from huggingface_hub import snapshot_download
+            model_path = snapshot_download(repo_id=self.model_name, local_files_only=False)
+
+            # Load model directly using qwen_tts with local path
+            self._model = Qwen3TTSModel.from_pretrained(
+                model_path,
+                device_map=self.device if self.device != "cpu" else "cpu",
+                dtype=torch_dtype,
+                attn_implementation="eager" # Fallback to eager if flash-attn is not installed
             )
 
-            if self.device != "cpu" and not hasattr(self._model, "hf_device_map"):
-                self._model = self._model.to(self.device)
-
-            self._model.eval()
             self._is_loaded = True
             self._load_time = time.time() - start
 
@@ -112,9 +108,7 @@ class Qwen3TTSEngine:
         logger.info("Unloading model from %s...", self.device)
 
         del self._model
-        del self._processor
         self._model = None
-        self._processor = None
         self._is_loaded = False
 
         # Free CUDA cache
@@ -277,68 +271,26 @@ class Qwen3TTSEngine:
         instruction: str = "",
         voice_reference: str | None = None,
     ) -> np.ndarray:
-        """Internal generation method.
-
-        Note: The exact API for Qwen3-TTS may differ from generic
-        transformers usage. This implementation follows the expected
-        interface based on the Qwen3-TTS documentation. Adjust the
-        _generate method when the official API is finalized.
-        """
+        """Internal generation method using qwen_tts."""
         import torch
 
-        # Build the input for Qwen3-TTS
-        # The model expects a structured input with text, instruction,
-        # and optionally a voice reference
-        inputs: dict[str, Any] = {
-            "text": text,
-        }
-
-        if instruction:
-            inputs["instruction"] = instruction
-
         if voice_reference:
-            # Load reference audio
-            ref_audio, ref_sr = sf.read(voice_reference)
-            if ref_sr != self.sample_rate:
-                # Resample if needed
-                import librosa
-                ref_audio = librosa.resample(
-                    ref_audio, orig_sr=ref_sr, target_sr=self.sample_rate
-                )
-            inputs["voice_reference"] = ref_audio
-
-        # Process inputs through the model
-        # NOTE: This is a placeholder for the actual Qwen3-TTS inference API.
-        # The real API will use the model's specific generate() method.
-        try:
-            processed = self._processor(
+            wavs, sr = self._model.generate_voice_clone(
                 text=text,
-                return_tensors="pt",
+                language="auto",
+                ref_audio=voice_reference,
+                ref_text="",
+                x_vector_only_mode=True,
+            )
+        else:
+            wavs, sr = self._model.generate_custom_voice(
+                text=text,
+                language="auto",
+                speaker="vivian", # fallback default speaker for CustomVoice
+                instruct=instruction,
             )
 
-            # Move to device
-            for key in processed:
-                if hasattr(processed[key], "to"):
-                    processed[key] = processed[key].to(self.device)
-
-            with torch.no_grad():
-                output = self._model.generate(
-                    **processed,
-                    max_new_tokens=4096,
-                    do_sample=True,
-                    temperature=0.7,
-                    top_p=0.9,
-                    repetition_penalty=1.1,
-                )
-
-            # Decode audio from output tokens
-            audio = self._decode_audio(output)
-
-        except Exception as e:
-            logger.error("TTS generation failed: %s", e)
-            # Return silence as fallback
-            audio = np.zeros(int(self.sample_rate * 0.5), dtype=np.float32)
-
+        audio = np.asarray(wavs[0], dtype=np.float32)
         return audio
 
     def _generate_batch(
@@ -440,7 +392,7 @@ class Qwen3TTSEngine:
             import torch
             if torch.cuda.is_available():
                 return {
-                    "vram_total_gb": torch.cuda.get_device_properties(0).total_mem / 1e9,
+                    "vram_total_gb": torch.cuda.get_device_properties(0).total_memory / 1e9,
                     "vram_used_gb": torch.cuda.memory_allocated() / 1e9,
                 }
         except ImportError:

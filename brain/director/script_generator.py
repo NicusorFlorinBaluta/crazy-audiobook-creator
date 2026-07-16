@@ -27,8 +27,7 @@ logger = logging.getLogger(__name__)
 
 _PROMPT_DIR = Path(__file__).parent / "prompts"
 
-# Inline prompt template
-_SCRIPT_PROMPT = """You are an expert audiobook script annotator. Convert the following chapter text into a structured audiobook script with speaker attribution, emotion tags, and pacing instructions.
+_SYSTEM_PROMPT = """You are an expert audiobook script annotator. Convert chapter text into a structured audiobook script.
 
 ## Context
 
@@ -38,63 +37,50 @@ _SCRIPT_PROMPT = """You are an expert audiobook script annotator. Convert the fo
 ### Previous Chapter Summary (for emotional continuity)
 {previous_summary}
 
-## Instructions
+## Script Generation Task
 
-1. Process the chapter text into individual speech segments
-2. For each segment, determine:
-   - **speaker**: Character ID from the registry, or "narrator" for non-dialogue
-   - **text**: The exact text to speak (strip dialogue attribution like "he said")
-   - **emotion**: Natural language description of the emotional state, considering context
-   - **speed**: Delivery speed (0.8 = slow/dramatic, 1.0 = normal, 1.2 = fast/excited)
-   - **pause_before_ms**: Silence before this segment (0-2000)
-   - **pause_after_ms**: Silence after this segment (0-2000)
+Convert the chapter text into a line-by-line script for text-to-speech.
 
-## Rules
+### Audio Direction Guidelines
 
-### Speaker Attribution
-- Anything inside quotation marks is dialogue — identify the speaker from context
-- Everything outside quotation marks is narrator
-- Internal monologue (often in italics or without quotes but clearly a character's thoughts) → assign to the thinking character with emotion "internal, thoughtful"
-- If you can't determine the speaker, use "narrator"
+#### Speaker Attribution
+- Anything inside quotation marks is dialogue — identify the speaker from context.
+- Everything outside quotation marks is narrator.
+- Internal monologue (italics or clear thoughts) -> assign to the thinking character with emotion "internal, thoughtful".
+- If you can't determine the speaker, use "narrator".
 
-### Emotion Tagging
-- Consider the SURROUNDING CONTEXT, not just the words themselves
-- "Fine" can be dismissive, relieved, or lying — the context tells you which
-- Use 2-3 descriptive words: "angry, barely controlled" not just "angry"
-- For narrator segments, the emotion reflects the SCENE MOOD, not a character's feelings
+#### Emotion Mapping
+For each line, provide an emotion directive matching TTS capabilities:
+- Consider the SURROUNDING CONTEXT, not just the words themselves.
+- Neutral narration: 1.0 (default)
+- Happy/excited: 1.1-1.2
+- Sad/somber: 0.8-0.9
+- Angry/intense: 1.2-1.3
 
-### Pacing
-- Scene transitions: 1500-2000ms pause
-- Paragraph breaks in narration: 500-800ms pause
-- Between dialogue lines in conversation: 200-400ms pause
-- Dramatic pauses within dialogue: 300-600ms pause_before
-- After a dramatic revelation: 1000-1500ms pause_after
-- Chapter opening: 1000ms pause_before on first segment
-- Chapter ending: 2000ms pause_after on last segment
-
-### Speed
-- Normal narration: 1.0
-- Action sequences: 1.05-1.1
-- Dramatic/emotional moments: 0.85-0.9
-- Whispered/secretive: 0.85
+#### Pacing (Speed)
+- Default narration: 1.0
+- Fast action: 1.1-1.2
+- Slow/thoughtful: 0.8-0.9
 - Excited/panicked: 1.1-1.15
 - Contemplative/sad: 0.85-0.9
 
-### Text Cleaning
-- Remove dialogue attribution ("he said", "she whispered", "Kvothe replied")
-- Keep the actual spoken words only
-- For narration, keep the full text
-- Preserve special punctuation (ellipses, em-dashes) as they affect TTS pacing
+#### Text Cleaning
+- Remove dialogue attribution ("he said", "she whispered", "Kvothe replied").
+- Keep the actual spoken words only.
+- For narration, keep the full text.
+- Preserve special punctuation (ellipses, em-dashes) as they affect TTS pacing.
 
-### Segment Length
-- Keep segments between 1-4 sentences
-- Never split mid-sentence
-- Split long narration paragraphs at natural breathing points
-- Each dialogue utterance is one segment (even if it's one word)
+#### Segment Length
+- Keep segments between 1-4 sentences.
+- Never split mid-sentence.
+- Split long narration paragraphs at natural breathing points.
+- Each dialogue utterance is one segment (even if it's one word).
 
+---
 ## Output Schema
 
-Output ONLY valid JSON:
+CRITICAL REMINDER: You MUST output ONLY valid JSON matching the Output Schema below. Do NOT output any conversational text, essays, explanations, or markdown fences. Just the raw JSON object starting with {{ and ending with }}.
+
 {{
   "chapter_number": {chapter_number},
   "chapter_title": "{chapter_title}",
@@ -111,10 +97,14 @@ Output ONLY valid JSON:
     }}
   ]
 }}
+"""
 
-## Chapter Text
+_USER_PROMPT = """## Source Chapter Text
 
-{chapter_text}"""
+{chapter_text}
+
+Convert the chapter text above into a line-by-line script matching the Output Schema JSON exactly. Do not output anything else.
+"""
 
 
 class ScriptGenerator:
@@ -175,38 +165,81 @@ class ScriptGenerator:
         self,
         chapters: list[ExtractedChapter],
         registry: CharacterRegistry,
+        scripts_dir: Path | None = None,
     ) -> list[ScriptChapter]:
-        """Generate scripts for all chapters sequentially.
-
-        Each chapter receives the previous chapter's summary for
-        emotional continuity.
-
-        Args:
-            chapters: List of chapters to process.
-            registry: Character registry from Pass 1.
-
-        Returns:
-            List of ScriptChapters.
-        """
+        """Generate scripts for all chapters sequentially with incremental saving."""
         scripts: list[ScriptChapter] = []
         previous_summary = ""
+        total_words = sum(ch.word_count for ch in chapters)
+
+        logger.info(
+            "[ScriptGenerator] Starting Pass 2: %d chapters | %d total words",
+            len(chapters),
+            total_words,
+        )
+
+        import time as _time
+        pipeline_t0 = _time.time()
 
         for i, chapter in enumerate(chapters):
             logger.info(
-                "Processing chapter %d/%d: '%s'",
+                "[ScriptGenerator] ---- Chapter %d/%d: '%s' (%d words) ----",
                 i + 1,
                 len(chapters),
                 chapter.title,
+                chapter.word_count,
             )
 
+            # Check if chapter is already generated
+            script_path = None
+            if scripts_dir:
+                script_path = scripts_dir / f"chapter_{chapter.number:03d}.json"
+                if script_path.exists():
+                    logger.info("[ScriptGenerator] Skipping Chapter %d (already exists)", chapter.number)
+                    try:
+                        script = ScriptChapter.model_validate_json(script_path.read_text(encoding="utf-8"))
+                        scripts.append(script)
+                        previous_summary = script.chapter_summary
+                        continue
+                    except Exception as e:
+                        logger.warning("Failed to load existing script %s, regenerating. Error: %s", script_path, e)
+
+            ch_t0 = _time.time()
             script = self.generate_chapter_script(
                 chapter, registry, previous_summary
             )
+            ch_elapsed = _time.time() - ch_t0
+
             scripts.append(script)
             previous_summary = script.chapter_summary
 
+            # Save incrementally
+            if script_path:
+                with open(script_path, "w", encoding="utf-8") as f:
+                    f.write(script.model_dump_json(indent=2))
+                logger.info("[ScriptGenerator] Incrementally saved %s", script_path.name)
+
+            logger.info(
+                "[ScriptGenerator] Chapter %d/%d done in %.1fs | %d lines | summary: %r",
+                i + 1,
+                len(chapters),
+                ch_elapsed,
+                len(script.lines),
+                (script.chapter_summary or "")[:80],
+            )
+
             # Check for new characters discovered during script generation
             self._detect_new_characters(script, registry)
+
+        total_elapsed = _time.time() - pipeline_t0
+        total_lines = sum(len(s.lines) for s in scripts)
+        logger.info(
+            "[ScriptGenerator] Pass 2 complete: %d chapters | %d total lines | %.1fs total (avg %.1fs/ch)",
+            len(scripts),
+            total_lines,
+            total_elapsed,
+            total_elapsed / len(chapters) if chapters else 0,
+        )
 
         return scripts
 
@@ -219,26 +252,50 @@ class ScriptGenerator:
         previous_summary: str,
     ) -> ScriptChapter:
         """Process a single chunk of text through the LLM."""
-        # Build the character registry summary for the prompt
         char_summary = self._format_registry(registry)
 
-        prompt = _SCRIPT_PROMPT.format(
+        system_prompt = _SYSTEM_PROMPT.format(
             character_registry=char_summary,
-            previous_summary=previous_summary or "This is the first chapter.",
+            previous_summary=previous_summary or "None",
             chapter_number=chapter_number,
             chapter_title=chapter_title,
             chapter_number_padded=f"{chapter_number:02d}",
-            chapter_text=text,
+        )
+        prompt = _USER_PROMPT.format(chapter_text=text)
+
+        prompt_kb = (len(system_prompt) + len(prompt)) / 1024
+        if prompt_kb > 80:
+            logger.warning(
+                "[ScriptGenerator] Chapter %d prompt is very large (%.1f KB) — LLM may struggle",
+                chapter_number,
+                prompt_kb,
+            )
+
+        logger.info(
+            "[ScriptGenerator] Ch%d '%s' → LLM | %.1f KB prompt | %d chars in registry",
+            chapter_number,
+            chapter_title[:40],
+            prompt_kb,
+            len(char_summary),
         )
 
-        logger.debug("Script prompt: %.1f KB", len(prompt) / 1024)
-
+        import time as _time
+        t0 = _time.time()
         raw = self.ollama.generate_json(
             prompt,
             temperature=self.temperature,
+            system=system_prompt,
         )
+        elapsed = _time.time() - t0
 
-        return self._parse_script_chapter(raw, chapter_number, chapter_title)
+        result = self._parse_script_chapter(raw, chapter_number, chapter_title)
+        logger.info(
+            "[ScriptGenerator] Ch%d LLM done in %.1fs | %d lines parsed",
+            chapter_number,
+            elapsed,
+            len(result.lines),
+        )
+        return result
 
     def _process_chunked(
         self,
@@ -331,15 +388,12 @@ class ScriptGenerator:
     ) -> None:
         """Check for speakers not in the registry (discovered in Pass 2)."""
         known_ids = set(registry.characters.keys())
+        new_found = []
 
         for line in script.lines:
             speaker = line.speaker.lower().replace(" ", "_")
             if speaker not in known_ids:
-                logger.info(
-                    "New character discovered in chapter %d: '%s'",
-                    script.chapter_number,
-                    speaker,
-                )
+                new_found.append(speaker)
                 # Add a placeholder character
                 registry.characters[speaker] = Character(
                     id=speaker,
@@ -354,6 +408,19 @@ class ScriptGenerator:
                     discovered_in_pass2=True,
                 )
                 known_ids.add(speaker)
+
+        if new_found:
+            logger.info(
+                "[ScriptGenerator] Ch%d: %d new character(s) discovered in Pass 2: %s",
+                script.chapter_number,
+                len(new_found),
+                new_found,
+            )
+        else:
+            logger.info(
+                "[ScriptGenerator] Ch%d: no new characters (all speakers known)",
+                script.chapter_number,
+            )
 
     @staticmethod
     def _format_registry(registry: CharacterRegistry) -> str:
