@@ -248,7 +248,7 @@ class M4BExporter:
 
             if result.returncode != 0:
                 logger.error("FFmpeg failed:\n%s", result.stderr)
-                raise RuntimeError(f"FFmpeg export failed: {result.stderr[:500]}")
+                raise RuntimeError(f"FFmpeg export failed: {result.stderr[-1000:]}")
 
             logger.info("FFmpeg completed successfully")
 

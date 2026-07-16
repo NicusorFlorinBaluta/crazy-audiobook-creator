@@ -6,7 +6,7 @@ def fix():
     try:
         client.connect("192.168.50.180", username="crazywiz", password="xardas", timeout=10)
         # Update config
-        cmd1 = "sed -i 's/-Base/-Instruct/g' /home/crazywiz/crazy-audiobook-creator/voice/config.yaml"
+        cmd1 = "sed -i 's/-Instruct/-CustomVoice/g' /home/crazywiz/crazy-audiobook-creator/voice/config.yaml"
         client.exec_command(cmd1)
         
         # Kill the voice server so the Watchdog on Windows or the run.sh script restarts it

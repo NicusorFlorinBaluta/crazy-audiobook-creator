@@ -4,7 +4,7 @@
 
 # --- TTS Engine ---
 tts:
-  model: "Qwen/Qwen3-TTS-12Hz-1.7B-Instruct"
+  model: "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
   device: "cuda"                     # "cuda" | "cpu"
   dtype: "float16"                   # "float16" | "bfloat16" | "float32"
   sample_rate: 24000                 # Native output sample rate (Hz)
