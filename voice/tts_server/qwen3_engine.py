@@ -14,10 +14,12 @@ import logging
 import time
 from pathlib import Path
 from typing import Any
+from typing import Any
 
 import numpy as np
 import soundfile as sf
 import yaml
+from voice.tts_server.audio_effects import AudioPostProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +38,7 @@ class Qwen3TTSEngine:
         self.device = device
         self.dtype = dtype
         self.sample_rate = sample_rate
+        self.fx = AudioPostProcessor()
 
         self._model = None
         self._processor = None
@@ -169,18 +172,20 @@ class Qwen3TTSEngine:
         voice_reference_path: str | Path,
         emotion_instruction: str = "",
         speed: float = 1.0,
+        voice_fx: Any | None = None,
         output_path: str | Path | None = None,
     ) -> np.ndarray:
         """Generate speech using a voice reference clip.
 
         Uses the saved reference clip to clone the voice character,
-        applying per-line emotion instructions.
+        applying per-line emotion instructions and optional audio FX.
 
         Args:
             text: Text to speak.
             voice_reference_path: Path to the character's voice reference .wav.
             emotion_instruction: Natural language emotion/delivery instruction.
             speed: Speed multiplier (0.8=slow, 1.0=normal, 1.2=fast).
+            voice_fx: Optional VoiceFXSettings for pitch/tone processing.
             output_path: If provided, save the audio to this file.
 
         Returns:
@@ -190,12 +195,24 @@ class Qwen3TTSEngine:
 
         # Build instruction from emotion and speed
         instruction = self._build_instruction(emotion_instruction, speed)
+        
+        # Prepare the reference audio with pitch FX if requested
+        fx_reference_path = None
+        if self.fx and voice_fx and not voice_fx.is_identity():
+            fx_reference_path = self.fx.prepare_prompt_audio(str(voice_reference_path), voice_fx)
 
         audio = self._generate(
             text=text,
             instruction=instruction,
-            voice_reference=str(voice_reference_path),
+            voice_reference=str(fx_reference_path) if fx_reference_path else str(voice_reference_path),
         )
+
+        if fx_reference_path and hasattr(fx_reference_path, "unlink"):
+            fx_reference_path.unlink(missing_ok=True)
+
+        # Apply post-processing (speed, tone, normalization)
+        if self.fx and voice_fx and not voice_fx.is_identity():
+            audio = self.fx.apply_post_pipeline(audio, self.sample_rate, voice_fx)
 
         if output_path:
             output_path = Path(output_path)
@@ -236,6 +253,12 @@ class Qwen3TTSEngine:
             ))
             
             v_ref = req.get("voice_reference_path")
+            voice_fx = req.get("voice_fx")
+            
+            if v_ref and self.fx and voice_fx and not voice_fx.is_identity():
+                v_ref = self.fx.prepare_prompt_audio(str(v_ref), voice_fx)
+                req["_temp_v_ref"] = v_ref
+            
             if v_ref:
                 # Load and resample audio
                 import librosa
@@ -255,15 +278,25 @@ class Qwen3TTSEngine:
             voice_references=voice_refs,
         )
         
-        # Save to disk if requested
+        # Save to disk if requested and apply FX
+        processed_audios = []
         for req, audio in zip(batch_requests, audios):
+            temp_v_ref = req.get("_temp_v_ref")
+            if temp_v_ref and hasattr(temp_v_ref, "unlink"):
+                temp_v_ref.unlink(missing_ok=True)
+                
+            voice_fx = req.get("voice_fx")
+            if self.fx and voice_fx and not voice_fx.is_identity():
+                audio = self.fx.apply_post_pipeline(audio, self.sample_rate, voice_fx)
+            processed_audios.append(audio)
+            
             out_path = req.get("output_path")
             if out_path:
                 out_path = Path(out_path)
                 out_path.parent.mkdir(parents=True, exist_ok=True)
                 sf.write(str(out_path), audio, self.sample_rate)
                 
-        return audios
+        return processed_audios
 
     def _generate(
         self,

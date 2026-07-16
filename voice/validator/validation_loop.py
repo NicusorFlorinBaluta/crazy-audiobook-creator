@@ -120,6 +120,7 @@ class ValidationLoop:
                     "voice_reference_path": voice_ref,
                     "emotion_instruction": line.emotion,
                     "speed": line.speed,
+                    "voice_fx": line.voice_fx,
                     "output_path": output_path,
                 })
                 
@@ -196,6 +197,7 @@ class ValidationLoop:
                                 voice_reference_path=voice_ref,
                                 emotion_instruction=line.emotion,
                                 speed=line.speed,
+                                voice_fx=line.voice_fx,
                                 output_path=output_path,
                             )
                             retried += 1

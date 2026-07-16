@@ -248,6 +248,7 @@ async def generate_line(request: GenerateLineRequest) -> GenerateLineResponse:
         voice_reference_path=voice_ref,
         emotion_instruction=request.line.emotion,
         speed=request.line.speed,
+        voice_fx=request.line.voice_fx,
         output_path=output_path,
     )
 

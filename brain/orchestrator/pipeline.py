@@ -423,11 +423,26 @@ class Pipeline:
                 logger.info("Skipping chapter %d (already generated)", chapter_script.chapter_number)
                 continue
 
-            # Apply pronunciation replacements
+            # Apply pronunciation replacements and voice FX
             if compiled_pronunciations:
                 for line in chapter_script.lines:
                     for pattern, replacement in compiled_pronunciations:
                         line.text = pattern.sub(replacement, line.text)
+                        
+            # Inject voice FX from CharacterRegistry
+            book_json_path = project_dir / "book.json"
+            if book_json_path.exists():
+                try:
+                    book_data = json.loads(book_json_path.read_text(encoding="utf-8"))
+                    registry = book_data.get("character_registry", {}).get("characters", {})
+                    for line in chapter_script.lines:
+                        char_info = registry.get(line.speaker)
+                        if char_info and "voice_fx" in char_info and char_info["voice_fx"]:
+                            from shared.models import VoiceFXSettings
+                            line.voice_fx = VoiceFXSettings(**char_info["voice_fx"])
+                except Exception as e:
+                    logger.warning("Failed to inject voice_fx from book.json: %s", e)
+
 
             try:
                 request = GenerateChapterRequest(

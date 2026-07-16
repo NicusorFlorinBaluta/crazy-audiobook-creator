@@ -56,6 +56,21 @@ class ExtractedBook(BaseModel):
 # ===================================================================
 
 
+class VoiceFXSettings(BaseModel):
+    """Post-processing controls for TTS generation."""
+    pitch_semitones: float = Field(default=0.0, ge=-12.0, le=12.0)
+    speed: float = Field(default=1.0, ge=0.5, le=2.0)
+    tone: str = Field(default="neutral", description="neutral | warm | bright")
+
+    def is_identity(self) -> bool:
+        """Return True when the settings would not alter the audio."""
+        return (
+            abs(self.pitch_semitones) < 1e-3
+            and abs(self.speed - 1.0) < 1e-3
+            and self.tone == "neutral"
+        )
+
+
 class Character(BaseModel):
     """A character identified by the LLM with voice description."""
 
@@ -74,6 +89,10 @@ class Character(BaseModel):
     discovered_in_pass2: bool = Field(
         default=False,
         description="True if this character was discovered during script generation, not initial analysis",
+    )
+    voice_fx: VoiceFXSettings | None = Field(
+        default=None,
+        description="Voice FX settings (pitch, speed, tone) for this character",
     )
 
 
@@ -107,6 +126,10 @@ class ScriptLine(BaseModel):
         ge=0.5,
         le=2.0,
         description="Delivery speed multiplier (0.8=slow, 1.0=normal, 1.2=fast)",
+    )
+    voice_fx: VoiceFXSettings | None = Field(
+        default=None,
+        description="Optional Voice FX settings to apply during generation",
     )
     pause_before_ms: int = Field(
         default=0,
@@ -182,6 +205,7 @@ class GenerateLineRequest(BaseModel):
 
     project_id: str
     line: ScriptLine
+    voice_fx: VoiceFXSettings | None = None
 
 
 class GenerateLineResponse(BaseModel):
