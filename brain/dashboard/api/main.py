@@ -29,6 +29,7 @@ from fastapi.staticfiles import StaticFiles
 
 from brain.orchestrator.pipeline import Pipeline
 from brain.orchestrator.job_queue import JobQueue
+from brain.orchestrator.watchdog import ServiceWatchdog
 from shared.constants import PipelineStage
 
 logger = logging.getLogger(__name__)
@@ -36,6 +37,7 @@ logger = logging.getLogger(__name__)
 # Global state
 pipeline: Pipeline | None = None
 job_queue: JobQueue | None = None
+watchdog: ServiceWatchdog | None = None
 ws_connections: list[WebSocket] = []
 running_tasks: dict[str, asyncio.Task] = {}
 
@@ -127,17 +129,22 @@ def load_config(config_path: str = "brain/config.yaml") -> dict[str, Any]:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler."""
-    global pipeline, job_queue
+    global pipeline, job_queue, watchdog
 
     config = load_config()
     pipeline = Pipeline(config_path="brain/config.yaml")
     job_queue = pipeline.job_queue
+    
+    watchdog = ServiceWatchdog(check_interval_seconds=60)
+    watchdog.start()
 
     logger.info("Brain Dashboard starting...")
 
     yield
 
     # Cleanup
+    if watchdog:
+        await watchdog.stop()
     if pipeline:
         pipeline.ollama.close()
         pipeline.ubuntu.close()
@@ -316,6 +323,40 @@ async def stop_pipeline(project_id: str):
         running_tasks[project_id].cancel()
         
     return {"status": "stopped", "project_id": project_id}
+
+@app.post("/api/projects/{project_id}/reset")
+async def reset_pipeline_stage(project_id: str, request: Request):
+    """Reset the pipeline to a specific stage."""
+    if not job_queue:
+        raise HTTPException(status_code=503, detail="Server not initialized")
+        
+    if project_id in running_tasks and not running_tasks[project_id].done():
+        raise HTTPException(status_code=409, detail="Cannot reset while pipeline is running. Please stop it first.")
+        
+    data = await request.json()
+    stage = data.get("stage")
+    if not stage:
+        raise HTTPException(status_code=400, detail="Missing 'stage' in request body")
+        
+    try:
+        job_queue.update_job(project_id, {"status": stage})
+        return {"status": "success", "project_id": project_id, "stage": stage}
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+
+@app.get("/api/projects/{project_id}/download")
+async def download_audiobook(project_id: str):
+    """Download the final mastered audiobook."""
+    m4b_path = Path(f"brain/projects/{project_id}/{project_id}.m4b")
+    if not m4b_path.exists():
+        raise HTTPException(status_code=404, detail="Audiobook file not found")
+        
+    return FileResponse(
+        path=m4b_path,
+        filename=f"{project_id}.m4b",
+        media_type="audio/mp4"
+    )
 
 
 @app.get("/api/projects/{project_id}/status")

@@ -1,0 +1,1 @@
+import sqlite3; conn=sqlite3.connect('brain/projects/pipeline_state.db'); conn.execute("UPDATE jobs SET status='scripting', completed_gen_chapters='[]', completed_master_chapters='[]' WHERE project_id='sample_book'"); conn.commit(); print('done')

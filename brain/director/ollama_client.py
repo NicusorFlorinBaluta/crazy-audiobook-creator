@@ -28,7 +28,7 @@ class OllamaClient:
         host: str = "http://localhost:11434",
         model: str = "qwen3:32b",
         timeout: int = 120,
-        max_retries: int = 3,
+        max_retries: int = 15,
     ):
         self.host = host.rstrip("/")
         self.model = model
@@ -179,7 +179,7 @@ class OllamaClient:
                 )
 
             if attempt < self.max_retries:
-                wait = 2 ** attempt
+                wait = min(30, 2 ** attempt)
                 logger.info("[Ollama] Retrying in %d seconds...", wait)
                 time.sleep(wait)
 

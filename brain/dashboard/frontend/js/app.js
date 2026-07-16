@@ -20,6 +20,9 @@ const els = {
     btnNewProject: document.getElementById('btn-new-project'),
     btnEmptyNew: document.getElementById('btn-empty-new'),
     btnBack: document.getElementById('btn-back'),
+    btnResetStage: document.getElementById('btn-reset-stage'),
+    selectResetStage: document.getElementById('select-reset-stage'),
+    btnDownloadAudiobook: document.getElementById('btn-download-audiobook'),
     uploadModal: document.getElementById('upload-modal'),
     modalClose: document.getElementById('modal-close'),
     modalCancel: document.getElementById('modal-cancel'),
@@ -61,6 +64,41 @@ function setupEventListeners() {
     els.btnEmptyNew.addEventListener('click', openUploadModal);
     els.btnBack.addEventListener('click', showProjectsView);
     document.getElementById('nav-home-btn').addEventListener('click', showProjectsView);
+    
+    // Reset and Download features
+    els.selectResetStage.addEventListener('change', () => {
+        if (els.selectResetStage.value) {
+            els.btnResetStage.classList.remove('hidden');
+        }
+    });
+    
+    els.btnResetStage.addEventListener('click', async () => {
+        const stage = els.selectResetStage.value;
+        if (!stage || !state.currentProjectId) return;
+        
+        try {
+            const resp = await fetch(`/api/projects/${state.currentProjectId}/reset`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ stage })
+            });
+            if (!resp.ok) {
+                const data = await resp.json();
+                throw new Error(data.detail || 'Failed to reset pipeline');
+            }
+            showToast(`Project reset to ${stage}`, 'success');
+            els.selectResetStage.value = '';
+            els.btnResetStage.classList.add('hidden');
+            fetchProjectDetails(state.currentProjectId);
+        } catch (e) {
+            showToast(e.message, 'error');
+        }
+    });
+    
+    els.btnDownloadAudiobook.addEventListener('click', () => {
+        if (!state.currentProjectId) return;
+        window.location.href = `/api/projects/${state.currentProjectId}/download`;
+    });
 
     // Modal
     els.modalClose.addEventListener('click', closeUploadModal);

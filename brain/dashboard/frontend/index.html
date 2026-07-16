@@ -86,6 +86,20 @@
                     <button class="btn btn-danger hidden" id="btn-stop-pipeline">
                         ■ Stop
                     </button>
+                    <select id="select-reset-stage" class="btn btn-ghost">
+                        <option value="" disabled selected>Reset to Stage...</option>
+                        <option value="created">Created</option>
+                        <option value="extracting">Extracting</option>
+                        <option value="scripting">Scripting</option>
+                        <option value="bootstrapping">Bootstrapping</option>
+                        <option value="generating">Generating</option>
+                        <option value="validating">Validating</option>
+                        <option value="mastering">Mastering</option>
+                    </select>
+                    <button class="btn btn-warning hidden" id="btn-reset-stage">Reset</button>
+                    <button class="btn btn-success hidden" id="btn-download-audiobook">
+                        ⬇ Download
+                    </button>
                     <button class="btn btn-ghost btn-danger-text" id="btn-delete-project">
                         🗑 Delete
                     </button>

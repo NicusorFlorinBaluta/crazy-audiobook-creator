@@ -479,10 +479,14 @@ If the pipeline crashes or is interrupted:
 - Already-generated audio is not regenerated
 - Voice library is preserved across restarts
 
-### Network Failure
-- REST API calls have 30-second timeout with 3 retries
-- If Ubuntu machine is unreachable, pipeline pauses and retries every 60 seconds
-- WebSocket reconnects automatically
+### Network Failure & Autonomous Watchdog Recovery
+- REST API calls have been extended to **15 retries** with up to **30-second backoff delays** (allowing up to 5 minutes of patient waiting).
+- A background **Watchdog Service** (`brain/orchestrator/watchdog.py`) constantly polls both the local Ollama LLM and the remote Voice Server.
+- If Ollama goes down, the Watchdog silently executes a local PowerShell script to restart the `ollama serve` process.
+- If the Ubuntu Voice Server crashes or locks up (e.g. PyTorch zombie process), the Watchdog connects via SSH (`paramiko`), safely kills the specific Python module, and automatically respawns the backend.
+- During these Watchdog recoveries, the pipeline seamlessly "pauses" (by waiting out the HTTP retries) and automatically resumes once the service is healthy again. 
+- The Watchdog limits its automatic interventions to a maximum of 5 consecutive restarts, logging all actions to `watchdog.log`.
+- WebSocket reconnects automatically.
 
 ### GPU OOM
 - If Qwen3-TTS hits OOM on a long segment, the segment is split at the nearest sentence boundary and retried

@@ -394,6 +394,8 @@ GET /api/projects/{id}/script   → Get generated script
 GET /api/projects/{id}/quality  → Get quality report
 POST /api/projects/{id}/start   → Start pipeline execution
 POST /api/projects/{id}/stop    → Stop pipeline execution
+POST /api/projects/{id}/reset   → Reset pipeline to a specific stage
+GET /api/projects/{id}/download → Download the final generated audiobook (M4B)
 GET /api/projects/{id}/status   → Get pipeline status
 POST /api/projects/{id}/retry/{line_id}  → Retry a specific line
 ```
@@ -449,6 +451,32 @@ GET /api/projects/{id}/status
   "started_at": "2026-07-13T20:00:00Z"
 }
 ```
+
+### Reset Pipeline
+
+Reset a project to a specific pipeline stage, destroying progress in subsequent stages.
+
+```
+POST /api/projects/{id}/reset
+Content-Type: application/json
+```
+
+**Request Body**:
+```json
+{
+  "stage": "bootstrapping"
+}
+```
+
+### Download Audiobook
+
+Download the final M4B audiobook file. Only valid if the pipeline has reached the `complete` stage.
+
+```
+GET /api/projects/{id}/download
+```
+
+Returns the `.m4b` file as a binary stream.
 
 ### WebSocket — Real-Time Updates
 

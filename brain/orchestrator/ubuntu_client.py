@@ -43,8 +43,8 @@ class UbuntuClient:
         self,
         host: str = "http://192.168.1.100:8100",
         timeout: int = 30,
-        retries: int = 3,
-        retry_delay: int = 5,
+        retries: int = 15,
+        retry_delay: int = 20,
         reconnect_interval: int = 60,
     ):
         self.host = host.rstrip("/")
@@ -112,11 +112,11 @@ class UbuntuClient:
             len(request.characters),
             request.project_id,
         )
-        # Voice bootstrapping can take a while — use a longer timeout
+        # Voice bootstrapping can take a while (especially on first boot) — use a longer timeout (1200s)
         data = self._post(
             "/voices/bootstrap",
             request.model_dump(),
-            timeout=300,
+            timeout=1200,
         )
         return BootstrapVoicesResponse(**data)
 
@@ -145,7 +145,7 @@ class UbuntuClient:
         data = self._post(
             "/generate/chapter",
             request.model_dump(),
-            timeout=3600,  # 1 hour max for a chapter
+            timeout=7200,  # 2 hours max for a chapter
         )
         return GenerateChapterResponse(**data)
 

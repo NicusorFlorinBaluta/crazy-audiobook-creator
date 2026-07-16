@@ -86,19 +86,30 @@ window.PipelineManager = (() => {
     }
 
     function toggleControls(status, isRunning) {
+        // Find DOM elements directly since this is in a separate module scope
+        const btnResetStage = document.getElementById('btn-reset-stage');
+        const selectResetStage = document.getElementById('select-reset-stage');
+        const btnDownloadAudiobook = document.getElementById('btn-download-audiobook');
+
         if (isRunning) {
             els.btnStart.classList.add('hidden');
             els.btnStop.classList.remove('hidden');
+            if (selectResetStage) selectResetStage.classList.add('hidden');
+            if (btnResetStage) btnResetStage.classList.add('hidden');
         } else {
             els.btnStart.classList.remove('hidden');
             els.btnStop.classList.add('hidden');
+            if (selectResetStage) selectResetStage.classList.remove('hidden');
             
-            if (status === 'complete') {
+            if (status === 'complete' || status === 'completed') {
                 els.btnStart.textContent = '▶ Run Again';
+                if (btnDownloadAudiobook) btnDownloadAudiobook.classList.remove('hidden');
             } else if (status === 'error' || status === 'paused') {
                 els.btnStart.textContent = '▶ Resume Pipeline';
+                if (btnDownloadAudiobook) btnDownloadAudiobook.classList.add('hidden');
             } else {
                 els.btnStart.textContent = '▶ Start Pipeline';
+                if (btnDownloadAudiobook) btnDownloadAudiobook.classList.add('hidden');
             }
         }
     }
