@@ -355,8 +355,12 @@ def export_m4b(request: ExportM4BRequest) -> ExportM4BResponse:
 @app.get("/download/{project_id}/{path:path}")
 def download_file(project_id: str, path: str):
     """Download a file from the workspace."""
-    workspace = Path(config.get("storage", {}).get("workspace_dir", "workspace"))
-    file_path = workspace / project_id / path
+    workspace = Path(config.get("storage", {}).get("workspace_dir", "workspace")).resolve()
+    project_dir = (workspace / project_id).resolve()
+    
+    file_path = (project_dir / path).resolve()
+    if not file_path.is_relative_to(project_dir):
+        raise HTTPException(status_code=403, detail="Access denied")
 
     if not file_path.exists():
         raise HTTPException(status_code=404, detail=f"File not found: {path}")

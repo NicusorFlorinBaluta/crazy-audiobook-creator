@@ -213,7 +213,8 @@ async def create_project(
     # Save uploaded file temporarily
     temp_dir = Path("brain/projects/_uploads")
     temp_dir.mkdir(parents=True, exist_ok=True)
-    temp_path = temp_dir / file.filename
+    safe_filename = Path(file.filename).name
+    temp_path = temp_dir / safe_filename
 
     try:
         content = await file.read()
@@ -319,8 +320,7 @@ async def stop_pipeline(project_id: str):
     pipeline.stop(project_id)
     
     if project_id in running_tasks and not running_tasks[project_id].done():
-        # Optionally wait for it to cancel or just cancel it
-        running_tasks[project_id].cancel()
+        pipeline.stop(project_id)
         
     return {"status": "stopped", "project_id": project_id}
 
@@ -334,13 +334,18 @@ async def reset_pipeline_stage(project_id: str, request: Request):
         raise HTTPException(status_code=409, detail="Cannot reset while pipeline is running. Please stop it first.")
         
     data = await request.json()
-    stage = data.get("stage")
-    if not stage:
+    stage_value = data.get("stage")
+    if not stage_value:
         raise HTTPException(status_code=400, detail="Missing 'stage' in request body")
         
     try:
-        job_queue.update_job(project_id, {"status": stage})
-        return {"status": "success", "project_id": project_id, "stage": stage}
+        stage = PipelineStage(stage_value)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid stage: {stage_value}")
+        
+    try:
+        job_queue.update_job(project_id, {"status": stage.value})
+        return {"status": "success", "project_id": project_id, "stage": stage.value}
     except KeyError:
         raise HTTPException(status_code=404, detail="Project not found")
 

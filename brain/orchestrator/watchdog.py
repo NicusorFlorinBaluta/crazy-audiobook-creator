@@ -139,9 +139,8 @@ class ServiceWatchdog:
     async def _restart_voice_server_task(self):
         try:
             await asyncio.to_thread(self._execute_remote_restart)
-            import time
             logger.info("Watchdog: Ubuntu Voice Server successfully restarted. Waiting 40s grace period for model load...")
-            time.sleep(40)
+            await asyncio.sleep(40)
         except Exception as e:
             logger.error("Watchdog: Failed to restart Voice Server via SSH: %s", e)
         finally:

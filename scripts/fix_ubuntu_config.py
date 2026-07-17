@@ -1,10 +1,13 @@
+import os
+from dotenv import load_dotenv
 import paramiko
 
 def fix():
+    load_dotenv()
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     try:
-        client.connect("192.168.50.180", username="crazywiz", password="xardas", timeout=10)
+        client.connect("192.168.50.180", username="crazywiz", password=os.getenv("HA_SERVER_SSH_PASSWORD"), timeout=10)
         # Update m4b_exporter.py
         cmd1 = "sed -i 's/result.stderr\\[:500\\]/result.stderr\\[-1000:\\]/g' /home/crazywiz/crazy-audiobook-creator/voice/mastering/m4b_exporter.py"
         client.exec_command(cmd1)
