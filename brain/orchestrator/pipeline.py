@@ -145,6 +145,18 @@ class Pipeline:
 
         # Create project ID from title
         project_id = self._make_project_id(book.metadata.title)
+        
+        # Ensure project ID is unique
+        base_id = project_id
+        counter = 1
+        while True:
+            try:
+                self.job_queue.get_job(project_id)
+                project_id = f"{base_id}-{counter}"
+                counter += 1
+            except KeyError:
+                break
+
         project_dir = self.projects_dir / project_id
         project_dir.mkdir(parents=True, exist_ok=True)
 
@@ -299,6 +311,7 @@ class Pipeline:
         )
 
         t0 = time.time()
+        pass1_elapsed = 0.0
 
         # Pass 1: Character analysis
         chars_path = project_dir / "characters.json"

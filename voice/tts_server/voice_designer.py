@@ -88,25 +88,24 @@ class VoiceDesigner:
             raise RuntimeError("Parler-TTS Microservice failed to start")
 
         try:
+            for char_id, character in request.characters.items():
+                # Check if voice already exists and skip if not forcing regeneration
+                if not request.force_regenerate and self.library.voice_exists(
+                    project_id, char_id
+                ):
+                    existing = self.library.get_voice_info(project_id, char_id)
+                    if existing:
+                        logger.info("Voice for '%s' already exists, skipping", char_id)
+                        voices_generated[char_id] = BootstrapVoiceResult(
+                            file=existing.get("file", ""),
+                            duration_seconds=existing.get("duration_seconds", 0.0),
+                            sample_rate=existing.get("sample_rate", 24000),
+                        )
+                        continue
 
-        for char_id, character in request.characters.items():
-            # Check if voice already exists and skip if not forcing regeneration
-            if not request.force_regenerate and self.library.voice_exists(
-                project_id, char_id
-            ):
-                existing = self.library.get_voice_info(project_id, char_id)
-                if existing:
-                    logger.info("Voice for '%s' already exists, skipping", char_id)
-                    voices_generated[char_id] = BootstrapVoiceResult(
-                        file=existing.get("file", ""),
-                        duration_seconds=existing.get("duration_seconds", 0.0),
-                        sample_rate=existing.get("sample_rate", 24000),
-                    )
-                    continue
-
-            # Generate voice reference clip
-            result = self._generate_voice(project_id, char_id, character)
-            voices_generated[char_id] = result
+                # Generate voice reference clip
+                result = self._generate_voice(project_id, char_id, character)
+                voices_generated[char_id] = result
         
         finally:
             # Shut down Parler Microservice to free up VRAM for Qwen
