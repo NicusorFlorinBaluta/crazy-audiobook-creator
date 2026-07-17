@@ -5,8 +5,8 @@ def fix():
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     try:
         client.connect("192.168.50.180", username="crazywiz", password="xardas", timeout=10)
-        # Update config
-        cmd1 = "sed -i 's/-Instruct/-CustomVoice/g' /home/crazywiz/crazy-audiobook-creator/voice/config.yaml"
+        # Update m4b_exporter.py
+        cmd1 = "sed -i 's/result.stderr\\[:500\\]/result.stderr\\[-1000:\\]/g' /home/crazywiz/crazy-audiobook-creator/voice/mastering/m4b_exporter.py"
         client.exec_command(cmd1)
         
         # Kill the voice server so the Watchdog on Windows or the run.sh script restarts it

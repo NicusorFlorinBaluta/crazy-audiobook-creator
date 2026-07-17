@@ -96,14 +96,17 @@ class JobQueue:
         """Get the current state of a job."""
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT state FROM jobs WHERE project_id = ?",
+                "SELECT state, created_at, updated_at FROM jobs WHERE project_id = ?",
                 (project_id,),
             ).fetchone()
 
         if row is None:
             raise KeyError(f"Job not found: {project_id}")
 
-        return json.loads(row[0])
+        state = json.loads(row[0])
+        state["created_at"] = row[1]
+        state["updated_at"] = row[2]
+        return state
 
     def update_job(self, project_id: str, updates: dict[str, Any]) -> None:
         """Update job state with partial updates (merge)."""

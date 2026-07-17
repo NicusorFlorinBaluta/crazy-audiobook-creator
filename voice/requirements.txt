@@ -4,7 +4,7 @@ uvicorn>=0.30.0
 websockets>=13.0
 
 # TTS Engine (PyTorch installed separately with CUDA)
-transformers>=4.46.0
+transformers==4.57.3
 accelerate>=1.0.0
 soundfile>=0.12.0
 librosa>=0.10.0

@@ -10,8 +10,11 @@ to produce a line-by-line audiobook script with:
 
 from __future__ import annotations
 
+import json
 import logging
+import time
 from pathlib import Path
+from typing import Any, Callable
 
 from brain.director.ollama_client import OllamaClient
 from shared.constants import CHUNK_OVERLAP_WORDS, CHUNK_SIZE_WORDS
@@ -64,10 +67,10 @@ For each line, provide an emotion directive matching TTS capabilities:
 - Excited/panicked: 1.1-1.15
 - Contemplative/sad: 0.85-0.9
 
-#### Text Cleaning
-- Remove dialogue attribution ("he said", "she whispered", "Kvothe replied").
-- Keep the actual spoken words only.
-- For narration, keep the full text.
+#### Text Preservation (CRITICAL)
+- DO NOT skip, summarize, or alter any sentences from the source text. You must transcribe the chapter EXACTLY word-for-word.
+- Keep dialogue attributions ("he said", "she whispered"). Do not remove them, as they often contain important action beats.
+- Ensure 100% of the original text is preserved across the generated segments.
 - Preserve special punctuation (ellipses, em-dashes) as they affect TTS pacing.
 
 #### Segment Length
@@ -166,6 +169,7 @@ class ScriptGenerator:
         chapters: list[ExtractedChapter],
         registry: CharacterRegistry,
         scripts_dir: Path | None = None,
+        progress_callback: Callable[[ScriptChapter], None] = None,
     ) -> list[ScriptChapter]:
         """Generate scripts for all chapters sequentially with incremental saving."""
         scripts: list[ScriptChapter] = []
@@ -200,6 +204,8 @@ class ScriptGenerator:
                         script = ScriptChapter.model_validate_json(script_path.read_text(encoding="utf-8"))
                         scripts.append(script)
                         previous_summary = script.chapter_summary
+                        if progress_callback:
+                            progress_callback(script)
                         continue
                     except Exception as e:
                         logger.warning("Failed to load existing script %s, regenerating. Error: %s", script_path, e)
@@ -230,6 +236,12 @@ class ScriptGenerator:
 
             # Check for new characters discovered during script generation
             self._detect_new_characters(script, registry)
+
+            if progress_callback:
+                try:
+                    progress_callback(script)
+                except Exception as e:
+                    logger.warning("Progress callback failed: %s", e)
 
         total_elapsed = _time.time() - pipeline_t0
         total_lines = sum(len(s.lines) for s in scripts)

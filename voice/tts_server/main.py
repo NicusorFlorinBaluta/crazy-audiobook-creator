@@ -94,7 +94,7 @@ async def lifespan(app: FastAPI):
     # Initialize components
     tts_cfg = config.get("tts", {})
     engine = Qwen3TTSEngine(
-        model_name=tts_cfg.get("model", "Qwen/Qwen3-TTS-1.7B"),
+        model_name=tts_cfg.get("model", "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign"),
         device=tts_cfg.get("device", "cuda"),
         dtype=tts_cfg.get("dtype", "float16"),
         sample_rate=tts_cfg.get("sample_rate", 24000),
@@ -190,7 +190,7 @@ async def health_check() -> VoiceHealthResponse:
 
 
 @app.post("/voices/bootstrap")
-async def bootstrap_voices(request: BootstrapVoicesRequest) -> BootstrapVoicesResponse:
+def bootstrap_voices(request: BootstrapVoicesRequest) -> BootstrapVoicesResponse:
     """Generate voice reference clips for all characters."""
     if not designer:
         raise HTTPException(status_code=503, detail="Server not initialized")
@@ -198,7 +198,7 @@ async def bootstrap_voices(request: BootstrapVoicesRequest) -> BootstrapVoicesRe
 
 
 @app.post("/voices/regenerate")
-async def regenerate_voice(
+def regenerate_voice(
     project_id: str,
     character_id: str,
     voice_description: str = "",
@@ -220,7 +220,7 @@ async def regenerate_voice(
 
 
 @app.get("/voices/{project_id}")
-async def list_voices(project_id: str):
+def list_voices(project_id: str):
     """List all voices for a project."""
     if not library:
         raise HTTPException(status_code=503, detail="Server not initialized")
@@ -228,7 +228,7 @@ async def list_voices(project_id: str):
 
 
 @app.post("/generate/line")
-async def generate_line(request: GenerateLineRequest) -> GenerateLineResponse:
+def generate_line(request: GenerateLineRequest) -> GenerateLineResponse:
     """Generate audio for a single script line."""
     if not engine or not library:
         raise HTTPException(status_code=503, detail="Server not initialized")
@@ -264,7 +264,7 @@ async def generate_line(request: GenerateLineRequest) -> GenerateLineResponse:
 
 
 @app.post("/generate/chapter")
-async def generate_chapter(request: GenerateChapterRequest) -> GenerateChapterResponse:
+def generate_chapter(request: GenerateChapterRequest) -> GenerateChapterResponse:
     """Generate audio for an entire chapter with validation."""
     if not validator:
         raise HTTPException(status_code=503, detail="Server not initialized")
@@ -285,7 +285,7 @@ async def generate_chapter(request: GenerateChapterRequest) -> GenerateChapterRe
 
 
 @app.post("/validate")
-async def validate_segment(request: ValidateRequest) -> dict:
+def validate_segment(request: ValidateRequest) -> dict:
     """Validate a single audio segment."""
     if not validator:
         raise HTTPException(status_code=503, detail="Server not initialized")
@@ -298,7 +298,7 @@ async def validate_segment(request: ValidateRequest) -> dict:
 
 
 @app.post("/master/chapter")
-async def master_chapter(request: MasterChapterRequest) -> MasterChapterResponse:
+def master_chapter(request: MasterChapterRequest) -> MasterChapterResponse:
     """Master (assemble + normalize) a chapter's audio."""
     if not assembler or not normalizer:
         raise HTTPException(status_code=503, detail="Server not initialized")
@@ -334,7 +334,7 @@ async def master_chapter(request: MasterChapterRequest) -> MasterChapterResponse
 
 
 @app.post("/export/m4b")
-async def export_m4b(request: ExportM4BRequest) -> ExportM4BResponse:
+def export_m4b(request: ExportM4BRequest) -> ExportM4BResponse:
     """Export all chapters as a single M4B audiobook."""
     if not exporter:
         raise HTTPException(status_code=503, detail="Server not initialized")
@@ -353,7 +353,7 @@ async def export_m4b(request: ExportM4BRequest) -> ExportM4BResponse:
 
 
 @app.get("/download/{project_id}/{path:path}")
-async def download_file(project_id: str, path: str):
+def download_file(project_id: str, path: str):
     """Download a file from the workspace."""
     workspace = Path(config.get("storage", {}).get("workspace_dir", "workspace"))
     file_path = workspace / project_id / path

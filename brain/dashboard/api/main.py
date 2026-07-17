@@ -461,7 +461,47 @@ async def get_quality_report(project_id: str):
     """Get quality report for a project."""
     if not job_queue:
         raise HTTPException(status_code=503, detail="Server not initialized")
-    return job_queue.get_quality_report(project_id)
+    logs = job_queue.get_quality_report(project_id)
+    
+    summary = {
+        "total_segments": 0,
+        "passed_segments": 0,
+        "retries_triggered": 0,
+        "average_wer": 0.0,
+        "failed_silence": 0,
+        "failed_clipping": 0
+    }
+    
+    if not logs:
+        return summary
+
+    # Group by line_id to get the final attempt
+    lines = {}
+    for log in logs:
+        line_id = log["line_id"]
+        if line_id not in lines or log["attempt"] > lines[line_id]["attempt"]:
+            lines[line_id] = log
+        if log["attempt"] > 1:
+            summary["retries_triggered"] += 1
+            
+    summary["total_segments"] = len(lines)
+    total_wer = 0.0
+    
+    for line in lines.values():
+        if line["status"] == "pass":
+            summary["passed_segments"] += 1
+        total_wer += line["wer"] or 0.0
+        
+        details = line.get("details", {})
+        if details.get("silence_issues", False):
+            summary["failed_silence"] += 1
+        if details.get("clipping_issues", False):
+            summary["failed_clipping"] += 1
+            
+    if summary["total_segments"] > 0:
+        summary["average_wer"] = total_wer / summary["total_segments"]
+        
+    return summary
 
 
 # ---------------------------------------------------------------------------

@@ -56,11 +56,38 @@ class VoiceDesigner:
         project_id = request.project_id
         voices_generated: dict[str, BootstrapVoiceResult] = {}
 
+        import subprocess
+        import time
+        import requests
+        
         logger.info(
             "Bootstrapping %d voices for project '%s'",
             len(request.characters),
             project_id,
         )
+
+        # Boot up Parler Microservice
+        logger.info("Booting Parler-TTS Microservice on port 8101...")
+        parler_proc = subprocess.Popen(
+            ["/home/crazywiz/crazy-audiobook-creator/venv_parler/bin/python", "/home/crazywiz/crazy-audiobook-creator/parler_server.py"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+        
+        # Wait for microservice to be healthy
+        for _ in range(30):
+            try:
+                resp = requests.get("http://127.0.0.1:8101/health")
+                if resp.status_code == 200:
+                    logger.info("Parler-TTS Microservice is ready!")
+                    break
+            except Exception:
+                time.sleep(2)
+        else:
+            parler_proc.kill()
+            raise RuntimeError("Parler-TTS Microservice failed to start")
+
+        try:
 
         for char_id, character in request.characters.items():
             # Check if voice already exists and skip if not forcing regeneration
@@ -80,6 +107,12 @@ class VoiceDesigner:
             # Generate voice reference clip
             result = self._generate_voice(project_id, char_id, character)
             voices_generated[char_id] = result
+        
+        finally:
+            # Shut down Parler Microservice to free up VRAM for Qwen
+            logger.info("Shutting down Parler-TTS Microservice...")
+            parler_proc.terminate()
+            parler_proc.wait(timeout=10)
 
         return BootstrapVoicesResponse(
             status="success",
@@ -121,11 +154,20 @@ class VoiceDesigner:
             character.voice_description[:60],
         )
 
-        result = self.engine.generate_voice_design(
-            voice_description=character.voice_description,
-            text=test_sentence,
-            output_path=output_path,
-        )
+        import requests
+        resp = requests.post("http://127.0.0.1:8101/voices/design", json={
+            "prompt": character.voice_description,
+            "text": test_sentence,
+            "output_path": str(output_path)
+        })
+        
+        if resp.status_code != 200:
+            raise RuntimeError(f"Parler microservice failed: {resp.text}")
+
+        # Try to read the file to get duration and sample rate
+        import soundfile as sf
+        audio, sr = sf.read(str(output_path))
+        duration_seconds = len(audio) / sr
 
         # Save to voice library registry
         self.library.register_voice(
@@ -135,12 +177,12 @@ class VoiceDesigner:
             description=character.voice_description,
             gender=gender_key,
             file_path=str(output_path),
-            duration_seconds=result["duration_seconds"],
-            sample_rate=result["sample_rate"],
+            duration_seconds=duration_seconds,
+            sample_rate=sr,
         )
 
         return BootstrapVoiceResult(
             file=str(output_path),
-            duration_seconds=result["duration_seconds"],
-            sample_rate=result["sample_rate"],
+            duration_seconds=duration_seconds,
+            sample_rate=sr,
         )

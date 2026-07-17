@@ -91,7 +91,9 @@ window.ScriptViewer = (() => {
         els.charGrid.innerHTML = '';
         
         // Convert to array and sort (Narrator usually first if we identify it, or by mention count)
-        const chars = Object.entries(currentData.characters).map(([id, data]) => ({ id, ...data }));
+        // The API might return { book_title: "...", characters: { ... } } or just the characters dict.
+        const charDict = currentData.characters.characters || currentData.characters;
+        const chars = Object.entries(charDict).map(([id, data]) => ({ id, ...data }));
         
         chars.forEach((char, idx) => {
             // Assign a color based on index
@@ -115,7 +117,7 @@ window.ScriptViewer = (() => {
                     <div class="char-avatar" style="background: ${colorVar}">${initials}</div>
                     <div>
                         <div class="char-name">${escapeHtml(char.name)}</div>
-                        <div class="char-meta">${char.gender} • ${char.age}</div>
+                        <div class="char-meta">${escapeHtml(char.gender || 'Unknown')} • ${escapeHtml(char.age || 'Unknown Age')}</div>
                     </div>
                 </div>
                 ${traitsHtml}
@@ -153,7 +155,8 @@ window.ScriptViewer = (() => {
         
         // Build legend based on characters found
         if (currentData.characters) {
-            const chars = Object.entries(currentData.characters);
+            const charDict = currentData.characters.characters || currentData.characters;
+            const chars = Object.entries(charDict);
             chars.forEach(([id, data], idx) => {
                 const colorVar = id.toLowerCase() === 'narrator' ? 'var(--speaker-narrator)' : `var(--speaker-${(idx % 10) + 1})`;
                 els.scriptLegend.innerHTML += `

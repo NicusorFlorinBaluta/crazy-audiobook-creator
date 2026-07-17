@@ -56,6 +56,18 @@ document.addEventListener('DOMContentLoaded', () => {
 
 async function initApp() {
     await fetchProjects();
+    handleHash();
+    window.addEventListener('hashchange', handleHash);
+}
+
+function handleHash() {
+    const hash = window.location.hash.substring(1);
+    if (hash && hash.startsWith('project/')) {
+        const projectId = hash.replace('project/', '');
+        showDetailView(projectId, true);
+    } else {
+        showProjectsView(true);
+    }
 }
 
 function setupEventListeners() {
@@ -138,14 +150,20 @@ function setupEventListeners() {
 // Navigation
 // ============================================================================
 
-function showProjectsView() {
+function showProjectsView(isHashLoad = false) {
+    if (!isHashLoad) {
+        window.history.pushState(null, '', '#');
+    }
     state.currentProjectId = null;
     els.viewDetail.classList.add('hidden');
     els.viewProjects.classList.remove('hidden');
     fetchProjects();
 }
 
-async function showDetailView(projectId) {
+async function showDetailView(projectId, isHashLoad = false) {
+    if (!isHashLoad) {
+        window.history.pushState(null, '', `#project/${projectId}`);
+    }
     state.currentProjectId = projectId;
     els.viewProjects.classList.add('hidden');
     els.viewDetail.classList.remove('hidden');
@@ -196,7 +214,7 @@ async function fetchProjectDetails(projectId) {
             // Backend 'status' is actually the stage. Compute coarse status (running/error/paused/completed).
             const stage = data.status;
             const coarseStatus = ['error', 'paused', 'complete'].includes(stage) ? stage : 'running';
-            window.PipelineManager.updateTracker(stage, coarseStatus);
+            window.PipelineManager.updateTracker(stage, coarseStatus, data);
             window.PipelineManager.toggleControls(stage, coarseStatus === 'running');
         }
         
@@ -400,8 +418,8 @@ function renderProjectsList() {
             <div class="card-header">
                 <div class="card-emoji">📖</div>
                 <div>
-                    <h3 class="card-title">${escapeHtml(project.title || 'Untitled')}</h3>
-                    <div class="card-author">${escapeHtml(project.author || 'Unknown Author')}</div>
+                    <h3 class="card-title">${escapeHtml(project.title && project.title !== 'Unknown' ? project.title : 'Untitled')}</h3>
+                    <div class="card-author">${escapeHtml(project.author && project.author !== 'Unknown' ? project.author : 'Unknown Author')}</div>
                 </div>
             </div>
             <div class="card-stats">
@@ -424,8 +442,8 @@ function renderProjectsList() {
 }
 
 function renderProjectDetails(project) {
-    document.getElementById('project-title').textContent = project.title || 'Untitled';
-    document.getElementById('project-author').textContent = project.author || 'Unknown Author';
+    document.getElementById('project-title').textContent = (project.title && project.title !== 'Unknown') ? project.title : 'Untitled';
+    document.getElementById('project-author').textContent = (project.author && project.author !== 'Unknown') ? project.author : 'Unknown Author';
     
     document.getElementById('project-stats').innerHTML = `
         <span>${project.total_chapters || 0} Chapters</span>

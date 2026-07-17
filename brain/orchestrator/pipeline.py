@@ -301,24 +301,39 @@ class Pipeline:
         t0 = time.time()
 
         # Pass 1: Character analysis
-        logger.info("[SCRIPTING] ── Pass 1: Character Analysis ──")
-        registry = self.character_analyzer.analyze(book)
-        pass1_elapsed = time.time() - t0
-        logger.info("[SCRIPTING] Pass 1 done in %.1fs", pass1_elapsed)
-
-        # Save character registry
         chars_path = project_dir / "characters.json"
-        with open(chars_path, "w", encoding="utf-8") as f:
-            f.write(registry.model_dump_json(indent=2))
-        logger.info("[SCRIPTING] characters.json saved (%d characters)", len(registry.characters))
+        if chars_path.exists():
+            logger.info("[SCRIPTING] ── Pass 1: Character Analysis (Skipping, already exists) ──")
+            from shared.models import CharacterRegistry
+            registry = CharacterRegistry.model_validate_json(chars_path.read_text(encoding="utf-8"))
+        else:
+            logger.info("[SCRIPTING] ── Pass 1: Character Analysis ──")
+            registry = self.character_analyzer.analyze(book)
+            pass1_elapsed = time.time() - t0
+            logger.info("[SCRIPTING] Pass 1 done in %.1fs", pass1_elapsed)
+
+            # Save character registry
+            with open(chars_path, "w", encoding="utf-8") as f:
+                f.write(registry.model_dump_json(indent=2))
+            logger.info("[SCRIPTING] characters.json saved (%d characters)", len(registry.characters))
 
         # Pass 2: Script generation for each chapter
         logger.info("[SCRIPTING] ── Pass 2: Script Generation (%d chapters) ──", len(book.chapters))
         scripts_dir = project_dir / "script"
         scripts_dir.mkdir(exist_ok=True)
 
+        def on_chapter_scripted(chapter_script):
+            # Check for stop flag between chapters
+            self._check_stop(project_id)
+            # Update scripting progress dynamically
+            state = self.job_queue.get_job(project_id)
+            completed = state.get("completed_script_chapters", [])
+            if chapter_script.chapter_number not in completed:
+                completed.append(chapter_script.chapter_number)
+                self.job_queue.update_job(project_id, {"completed_script_chapters": completed})
+
         chapter_scripts = self.script_generator.generate_all_chapters(
-            book.chapters, registry, scripts_dir=scripts_dir
+            book.chapters, registry, scripts_dir=scripts_dir, progress_callback=on_chapter_scripted
         )
 
         total_lines = 0
@@ -501,7 +516,7 @@ class Pipeline:
             segments = [
                 MasterSegmentInfo(
                     line_id=line.line_id,
-                    file=f"workspace/{project_id}/segments/{line.line_id}.wav",
+                    file=f"{project_id}/segments/{line.line_id}.wav",
                     pause_before_ms=line.pause_before_ms,
                     pause_after_ms=line.pause_after_ms,
                 )

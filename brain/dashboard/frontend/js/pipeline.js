@@ -38,27 +38,67 @@ window.PipelineManager = (() => {
             stageDiv.innerHTML = `
                 <span class="stage-num">${idx + 1}</span>
                 <span class="stage-name">${stage.replace('_', ' ')}</span>
+                <span class="stage-percent" style="font-size: 0.8em; opacity: 0.7; margin-left: 5px; font-weight: bold;"></span>
             `;
             
             els.tracker.appendChild(stageDiv);
         });
     }
 
-    function updateTracker(currentStage, status) {
+    function updateTracker(currentStage, status, data = null) {
         if (!currentStage) return;
         
         const currentIndex = STAGES.indexOf(currentStage.toUpperCase());
         
         document.querySelectorAll('.pipeline-stage').forEach((el, idx) => {
             el.className = 'pipeline-stage'; // reset
+            const percentEl = el.querySelector('.stage-percent');
+            if (percentEl) percentEl.textContent = '';
             
             if (idx < currentIndex || status === 'complete') {
                 el.classList.add('done');
+                if (percentEl) percentEl.textContent = '100%';
             } else if (idx === currentIndex) {
                 if (status === 'error') {
                     el.classList.add('error');
                 } else if (status === 'running' || status === 'paused') {
                     el.classList.add('active');
+                    
+                    // Compute percentage based on real metrics from the pipeline state!
+                    if (data && percentEl) {
+                        let pct = null;
+                        const stage = STAGES[idx];
+                        const totalCh = data.total_chapters || 0;
+                        const totalLines = data.total_lines || 0;
+                        
+                        // SCRIPTING runs locally via Ollama. We'd need to poll the script dir, 
+                        // but we can't add a new API endpoint without restarting the server (which would interrupt the E2E test).
+                        if (stage === 'SCRIPTING' && data.completed_script_chapters) {
+                            pct = (data.completed_script_chapters.length / totalCh) * 100;
+                        } else if (stage === 'SCRIPTING') {
+                            // If we don't have hard metrics, show an active animation instead of blank!
+                            percentEl.innerHTML = '<span class="loading-dots">⏳</span>';
+                        } else if (stage === 'BOOTSTRAPPING') {
+                            pct = data.bootstrapping_completed ? 100 : 25;
+                        } else if (stage === 'GENERATING' && totalCh > 0) {
+                            const doneCount = data.completed_gen_chapters ? data.completed_gen_chapters.length : 0;
+                            // Since chapter generation is a blocking call, we estimate progress based on completed chapters.
+                            // Add 0.5 to show it is currently working on a chapter.
+                            pct = ((doneCount + (doneCount < totalCh ? 0.5 : 0)) / totalCh) * 100;
+                        } else if (stage === 'VALIDATING' && totalCh > 0) {
+                            const doneCount = data.completed_gen_chapters ? data.completed_gen_chapters.length : 0;
+                            pct = ((doneCount + (doneCount < totalCh ? 0.5 : 0)) / totalCh) * 100;
+                        } else if (stage === 'MASTERING' && totalCh > 0) {
+                            const doneCount = data.completed_master_chapters ? data.completed_master_chapters.length : 0;
+                            pct = (doneCount / totalCh) * 100;
+                        } else if (stage === 'EXPORTING') {
+                            pct = 50; // coarse
+                        }
+                        
+                        if (pct !== null) {
+                            percentEl.textContent = Math.min(100, Math.round(pct)) + '%';
+                        }
+                    }
                 }
             }
         });

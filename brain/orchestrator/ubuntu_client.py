@@ -264,19 +264,25 @@ class UbuntuClient:
                 )
             except httpx.HTTPStatusError as e:
                 last_error = e
+                # Read response body for details if possible
+                try:
+                    error_details = e.response.text
+                except Exception:
+                    error_details = ""
                 logger.warning(
-                    "%s %s failed with status %d (attempt %d/%d): %s",
+                    "%s %s failed with status %d (attempt %d/%d): %s\nDetails: %s",
                     method,
                     path,
                     e.response.status_code,
                     attempt,
                     self.retries,
                     e,
+                    error_details,
                 )
-                # Don't retry 4xx errors
-                if 400 <= e.response.status_code < 500:
+                if e.response.status_code in (401, 403, 404, 422):
+                    # Don't retry client errors, except 429 or 408 maybe
                     raise UbuntuClientError(
-                        f"{method} {path} failed: {e.response.status_code} {e.response.text}"
+                        f"{method} {path} failed: {e.response.status_code} {e.response.reason_phrase}\nDetails: {error_details}"
                     ) from e
             except httpx.ConnectError as e:
                 last_error = e
