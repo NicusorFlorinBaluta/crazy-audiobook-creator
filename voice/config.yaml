@@ -1,0 +1,93 @@
+# ============================================================
+# Voice (Ubuntu) — Configuration
+# ============================================================
+
+# --- TTS Engine ---
+tts:
+  model: "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
+  device: "cuda"                     # "cuda" | "cpu"
+  dtype: "float16"                   # "float16" | "bfloat16" | "float32"
+  sample_rate: 24000                 # Native output sample rate (Hz)
+  max_text_length: 500               # Max characters per generation call
+
+  # Voice Design settings
+  voice_design_duration: 10          # Duration of reference clips (seconds)
+  voice_design_test_sentences:
+    male: "The ancient tower stood against the darkening sky, its stones weathered by centuries of wind and rain."
+    female: "She walked through the moonlit garden, her footsteps barely disturbing the fallen leaves."
+    neutral: "The library was vast and silent, filled with the scent of old paper and forgotten memories."
+
+  # Generation parameters
+  generation:
+    max_new_tokens: 4096
+    do_sample: true
+    temperature: 0.7
+    top_p: 0.9
+    repetition_penalty: 1.1
+
+# --- Quality Validation ---
+validation:
+  enabled: true
+  whisper_model: "medium"            # "tiny" | "base" | "small" | "medium" | "large-v3"
+  whisper_device: "auto"             # "auto" | "cuda" | "cpu"
+
+  # Thresholds
+  wer_threshold: 0.05               # 5%
+  max_retries: 3
+
+  # Audio checks
+  artifact_noise_threshold: -50      # dB
+  clipping_threshold: -0.5           # dBFS
+  min_duration_seconds: 0.3
+  max_silence_seconds: 3.0
+  duration_tolerance: 0.3            # ±30%
+
+  # Text normalization for WER
+  normalize_text: true
+  expand_numbers: true
+  expand_abbreviations: true
+
+# --- Audio Mastering ---
+mastering:
+  target_lufs: -19                   # ACX standard range: -18 to -23
+  peak_limit_dbfs: -1.0
+  crossfade_ms: 30
+  fade_curve: "cosine"               # "linear" | "cosine" | "exponential"
+
+  # Noise gate
+  noise_gate_enabled: true
+  noise_gate_threshold: -50
+  noise_gate_attack_ms: 5
+  noise_gate_release_ms: 50
+
+  # Output format
+  output_sample_rate: 44100
+  output_bit_depth: 16
+  output_channels: 1                 # Mono (audiobook standard)
+
+# --- M4B Export ---
+export:
+  codec: "aac"
+  bitrate: "128k"
+  channels: 1
+  default_narrator: "AI Generated"
+  default_genre: "Fantasy"
+  chapter_silence_ms: 2000
+  embed_cover_art: true
+  filename_template: "{title}"
+
+# --- FastAPI Server ---
+server:
+  port: 8100
+  host: "0.0.0.0"
+  workers: 1                         # Keep at 1 for GPU
+  cors_origins: ["*"]
+  max_upload_size_mb: 100
+
+# --- Storage ---
+storage:
+  workspace_dir: "workspace"
+  voice_library_dir: "voice_library"
+  auto_cleanup_intermediates: true
+  keep_voice_library: true
+  max_workspace_gb: 50
