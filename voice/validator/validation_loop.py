@@ -103,15 +103,14 @@ class ValidationLoop:
         # Phase 1: Generate all segments in batches (grouped by speaker to minimize prompt re-encoding)
         BATCH_SIZE = 5  # Configurable batch size to fit in VRAM
         
-        # Sort lines by speaker to group same-speaker lines together while preserving index for progress
-        indexed_lines = list(enumerate(lines))
-        grouped_indexed_lines = sorted(indexed_lines, key=lambda item: item[1].speaker)
+        # Sort lines by speaker to group same-speaker lines together
+        grouped_lines = sorted(lines, key=lambda line: line.speaker)
         
         for i in range(0, total_lines, BATCH_SIZE):
-            batch_tuples = grouped_indexed_lines[i:i + BATCH_SIZE]
+            batch_lines = grouped_lines[i:i + BATCH_SIZE]
             batch_requests = []
             
-            for orig_idx, line in batch_tuples:
+            for line in batch_lines:
                 output_path = segments_dir / f"{line.line_id}.wav"
                 voice_ref = self.library.get_voice_path(project_id, line.speaker)
                 ref_text = self.library.get_voice_ref_text(project_id, line.speaker)

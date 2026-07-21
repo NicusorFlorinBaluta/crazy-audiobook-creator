@@ -168,7 +168,8 @@ function setupEventListeners() {
         btnReqDeploy.addEventListener('click', async () => {
             if (!state.currentProjectId) return;
             try {
-                await fetch(`/api/projects/${state.currentProjectId}/request-deploy`, { method: 'POST' });
+                const res = await fetch(`/api/projects/${state.currentProjectId}/request-deploy`, { method: 'POST' });
+                if (!res.ok) throw new Error('Failed to request deployment pause');
                 showToast('Deployment pause requested — will park at next chapter', 'warning');
                 fetchProjectDetails(state.currentProjectId);
             } catch (e) {
@@ -182,7 +183,8 @@ function setupEventListeners() {
         btnResDeploy.addEventListener('click', async () => {
             if (!state.currentProjectId) return;
             try {
-                await fetch(`/api/projects/${state.currentProjectId}/resume-deploy`, { method: 'POST' });
+                const res = await fetch(`/api/projects/${state.currentProjectId}/resume-deploy`, { method: 'POST' });
+                if (!res.ok) throw new Error('Failed to resume deployment');
                 showToast('Resuming pipeline from deploy pause...', 'success');
                 fetchProjectDetails(state.currentProjectId);
             } catch (e) {
@@ -614,8 +616,12 @@ function renderChapterGrid(project) {
     }
 }
 
-async function updateChapterSelectionState() {
+let _selectionDebounceTimer = null;
+
+function updateChapterSelectionState() {
     if (!state.currentProjectId) return;
+    if (_selectionDebounceTimer) clearTimeout(_selectionDebounceTimer);
+
     const cbs = document.querySelectorAll('.chapter-select-cb');
     const selected = [];
     let total = cbs.length;
@@ -627,16 +633,23 @@ async function updateChapterSelectionState() {
     });
 
     const selectionValue = selected.length === total ? null : selected;
+    const targetProjectId = state.currentProjectId;
 
-    try {
-        await fetch(`/api/projects/${state.currentProjectId}/set-selection`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ chapters: selectionValue })
-        });
-    } catch (e) {
-        console.error('Failed to update selection', e);
-    }
+    _selectionDebounceTimer = setTimeout(async () => {
+        try {
+            const res = await fetch(`/api/projects/${targetProjectId}/set-selection`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ chapters: selectionValue })
+            });
+            if (!res.ok) {
+                console.error('Failed to update chapter selection (status ' + res.status + ')');
+                showToast('Failed to save chapter selection', 'error');
+            }
+        } catch (e) {
+            console.error('Failed to update selection', e);
+        }
+    }, 300);
 }
 
 // ============================================================================
