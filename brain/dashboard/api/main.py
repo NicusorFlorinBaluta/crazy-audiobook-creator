@@ -356,9 +356,9 @@ async def download_audiobook(project_id: str):
     """Download the final mastered audiobook."""
     m4b_path = Path(f"brain/projects/{project_id}/{project_id}.m4b")
     if not m4b_path.exists():
-        # Check for partial M4B export if full M4B does not exist yet
+        # Check for partial M4B export if full M4B does not exist yet (sorted by modification time)
         project_dir = Path(f"brain/projects/{project_id}")
-        partials = sorted(project_dir.glob("*.m4b"))
+        partials = sorted(project_dir.glob("*.m4b"), key=lambda p: p.stat().st_mtime)
         if partials:
             m4b_path = partials[-1]
         else:
@@ -423,7 +423,7 @@ async def fetch_project_metadata(project_id: str):
     from brain.extractor.metadata_fetcher import MetadataFetcher
     book_data = json.loads(book_json.read_text(encoding="utf-8"))
     meta = book_data.get("metadata", {})
-    fetched = MetadataFetcher.fetch(meta.get("title", ""), meta.get("author", ""))
+    fetched = await asyncio.to_thread(MetadataFetcher.fetch, meta.get("title", ""), meta.get("author", ""))
 
     cover_path = None
     if fetched.cover_image_bytes:
@@ -481,7 +481,7 @@ async def export_partial_m4b(project_id: str):
     if not pipeline:
         raise HTTPException(status_code=503, detail="Server not initialized")
     project_dir = Path("brain/projects") / project_id
-    pipeline._run_export(project_id, project_dir, partial=True)
+    await asyncio.to_thread(pipeline._run_export, project_id, project_dir, partial=True)
     return {"status": "success", "project_id": project_id}
 
 
