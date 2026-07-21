@@ -43,6 +43,7 @@ class OllamaClient:
         temperature: float = 0.4,
         top_p: float = 0.9,
         system: str | None = None,
+        format: str | None = None,
     ) -> str:
         """Generate a text completion from the LLM.
 
@@ -76,6 +77,8 @@ class OllamaClient:
                 "num_gpu": 99,
             },
         }
+        if format:
+            payload["format"] = format
 
         last_error: Exception | None = None
 
@@ -92,33 +95,35 @@ class OllamaClient:
                 )
 
                 t0 = time.time()
-                response = self._client.post(
-                    f"{self.host}/api/chat",
-                    json=payload,
-                    timeout=httpx.Timeout(self.timeout),
-                )
-                response.raise_for_status()
-                logger.info("[Ollama] ← HTTP 200 received, streaming tokens...")
-
                 full_text = []
                 token_count = 0
                 last_log_tokens = 0
-                for line in response.iter_lines():
-                    if line:
-                        chunk = json.loads(line)
-                        if "message" in chunk and "content" in chunk["message"]:
-                            full_text.append(chunk["message"]["content"])
-                            token_count += 1
-                            # Log every 200 tokens so we know it's alive
-                            if token_count - last_log_tokens >= 200:
-                                elapsed = time.time() - t0
-                                logger.info(
-                                    "[Ollama] ↻ Streaming... %d tokens | %.1f tok/s | %.0fs elapsed",
-                                    token_count,
-                                    token_count / elapsed if elapsed > 0 else 0,
-                                    elapsed,
-                                )
-                                last_log_tokens = token_count
+
+                with self._client.stream(
+                    "POST",
+                    f"{self.host}/api/chat",
+                    json=payload,
+                    timeout=httpx.Timeout(self.timeout),
+                ) as response:
+                    response.raise_for_status()
+                    logger.info("[Ollama] ← HTTP 200 received, streaming tokens...")
+
+                    for line in response.iter_lines():
+                        if line:
+                            chunk = json.loads(line)
+                            if "message" in chunk and "content" in chunk["message"]:
+                                full_text.append(chunk["message"]["content"])
+                                token_count += 1
+                                # Log every 200 tokens so we know it's alive
+                                if token_count - last_log_tokens >= 200:
+                                    elapsed = time.time() - t0
+                                    logger.info(
+                                        "[Ollama] ↻ Streaming... %d tokens | %.1f tok/s | %.0fs elapsed",
+                                        token_count,
+                                        token_count / elapsed if elapsed > 0 else 0,
+                                        elapsed,
+                                    )
+                                    last_log_tokens = token_count
 
                 text = "".join(full_text)
                 elapsed = time.time() - t0

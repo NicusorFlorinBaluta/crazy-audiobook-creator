@@ -44,6 +44,8 @@ config.local.yaml
 # Logs
 *.log
 logs/
+logs.txt
+*_debug.txt
 
 # Models (downloaded, not committed)
 models/

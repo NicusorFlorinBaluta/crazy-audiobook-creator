@@ -59,6 +59,11 @@ def deploy():
         transfer_dirs = ["voice", "shared", "scripts"]
         
         print("Transferring files...")
+        
+        # Upload parler_server.py
+        sftp.put(str(local_dir / "parler_server.py"), f"/home/{USER}/{REMOTE_DIR}/parler_server.py")
+        print("  Copied parler_server.py")
+        
         for t_dir in transfer_dirs:
             for root, dirs, files in os.walk(local_dir / t_dir):
                 if "__pycache__" in root:

@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="description" content="Crazy Audiobook Creator — AI-powered audiobook production pipeline">
     <title>Crazy Audiobook Creator</title>
+    <link rel="icon" type="image/png" href="/static/img/favicon.png">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -25,7 +26,7 @@
     <!-- ============================================ -->
     <nav class="top-nav">
         <div class="nav-brand" id="nav-home-btn">
-            <div class="brand-icon">📖</div>
+            <img class="brand-logo" src="/static/img/logo.png" alt="Logo">
             <div class="brand-text">
                 <span class="brand-title">Crazy Audiobook Creator</span>
                 <span class="brand-subtitle">AI-Powered Pipeline</span>
@@ -83,8 +84,8 @@
                     <button class="btn btn-success" id="btn-start-pipeline">
                         ▶ Start Pipeline
                     </button>
-                    <button class="btn btn-danger hidden" id="btn-stop-pipeline">
-                        ■ Stop
+                    <button class="btn btn-warning hidden" id="btn-pause-pipeline">
+                        ⏸ Pause
                     </button>
                     <select id="select-reset-stage" class="select">
                         <option value="" disabled selected>Reset to Stage...</option>

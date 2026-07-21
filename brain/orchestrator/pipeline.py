@@ -218,6 +218,9 @@ class Pipeline:
         state = self.job_queue.get_job(project_id)
         current_stage = state.get("status", PipelineStage.CREATED)
 
+        if current_stage in (PipelineStage.PAUSED, PipelineStage.ERROR):
+            current_stage = PipelineStage.CREATED
+
         start_time = time.time()
         self._stop_flags[project_id] = False
         logger.info("Starting pipeline for '%s' from stage: %s", project_id, current_stage)
@@ -225,15 +228,12 @@ class Pipeline:
         try:
             # Stage ②: LLM Script Director
             self._check_stop(project_id)
-            if current_stage in (PipelineStage.CREATED, PipelineStage.EXTRACTING):
+            if current_stage in (PipelineStage.CREATED, PipelineStage.EXTRACTING, PipelineStage.SCRIPTING):
                 self._run_script_director(project_id, project_dir)
 
             # Stage ③: Voice Bootstrapping
             self._check_stop(project_id)
             state = self.job_queue.get_job(project_id)
-            if state.get("status") == PipelineStage.SCRIPTING:
-                self._update_stage(project_id, PipelineStage.SCRIPTING)
-
             if state.get("status") in (PipelineStage.SCRIPTING, PipelineStage.BOOTSTRAPPING):
                 self._run_voice_bootstrap(project_id, project_dir)
 

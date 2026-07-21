@@ -142,7 +142,7 @@ function setupEventListeners() {
 
     // Detail Actions
     document.getElementById('btn-start-pipeline').addEventListener('click', startPipeline);
-    document.getElementById('btn-stop-pipeline').addEventListener('click', stopPipeline);
+    document.getElementById('btn-pause-pipeline').addEventListener('click', pausePipeline);
     document.getElementById('btn-delete-project').addEventListener('click', deleteProject);
 }
 
@@ -361,17 +361,19 @@ async function startPipeline() {
     }
 }
 
-async function stopPipeline() {
+async function pausePipeline() {
     if (!state.currentProjectId) return;
     
     try {
         const response = await fetch(`/api/projects/${state.currentProjectId}/stop`, { method: 'POST' });
         if (!response.ok) {
             const err = await response.json();
-            throw new Error(err.detail || 'Failed to stop pipeline');
+            throw new Error(err.detail || 'Failed to pause pipeline');
         }
-        showToast('Pipeline stopped', 'info');
-        fetchProjectDetails(state.currentProjectId); // Refresh status
+        showToast('Pipeline pausing...', 'info');
+        // The pipeline thread might take a moment to gracefully stop.
+        // Wait briefly before refreshing to ensure the UI reflects the PAUSED state.
+        setTimeout(() => fetchProjectDetails(state.currentProjectId), 1000);
     } catch (error) {
         showToast(error.message, 'error');
     }

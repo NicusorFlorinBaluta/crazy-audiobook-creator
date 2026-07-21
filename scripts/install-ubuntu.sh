@@ -32,8 +32,16 @@ pip install -r voice/requirements.txt
 echo "Installing PyTorch with CUDA 12.1..."
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 
-# 4. Check hardware
-echo "[4/4] Checking NVIDIA hardware..."
+# 4. Setup Parler-TTS Venv
+echo "[4/5] Setting up Parler-TTS virtual environment..."
+python3 -m venv venv_parler
+source venv_parler/bin/activate
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+pip install git+https://github.com/huggingface/parler-tts.git
+pip install fastapi uvicorn requests
+
+# 5. Check hardware
+echo "[5/5] Checking NVIDIA hardware..."
 if command -v nvidia-smi &> /dev/null; then
     nvidia-smi
 else

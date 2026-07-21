@@ -58,7 +58,7 @@ class VoiceDesigner:
 
         import subprocess
         import time
-        import requests
+        import httpx
         
         logger.info(
             "Bootstrapping %d voices for project '%s'",
@@ -68,16 +68,17 @@ class VoiceDesigner:
 
         # Boot up Parler Microservice
         logger.info("Booting Parler-TTS Microservice on port 8101...")
+        log_file = open("/home/crazywiz/crazy-audiobook-creator/parler.log", "w")
         parler_proc = subprocess.Popen(
             ["/home/crazywiz/crazy-audiobook-creator/venv_parler/bin/python", "/home/crazywiz/crazy-audiobook-creator/parler_server.py"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
+            stdout=log_file,
+            stderr=subprocess.STDOUT
         )
         
-        # Wait for microservice to be healthy
-        for _ in range(30):
+        # Wait for microservice to be healthy (Allow up to 10 minutes for first-time model download)
+        for _ in range(300):
             try:
-                resp = requests.get("http://127.0.0.1:8101/health")
+                resp = httpx.get("http://127.0.0.1:8101/health", timeout=2.0)
                 if resp.status_code == 200:
                     logger.info("Parler-TTS Microservice is ready!")
                     break

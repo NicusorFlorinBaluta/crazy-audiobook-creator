@@ -26,7 +26,7 @@ while True:
     
     print(f"Status: {state.upper()} | Stage: {stage} | Lines: {status_data.get('total_lines', 0)}")
     
-    if state in ("completed", "error", "failed"):
+    if state in ("complete", "error", "failed"):
         print(f"\nPipeline finished with state: {state}")
         break
         
