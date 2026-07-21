@@ -13,13 +13,16 @@ ollama:
   timeout: 600                     # Seconds to wait for LLM response
   max_retries: 15
 
-# --- Ubuntu Voice Server Connection ---
-ubuntu:
-  host: "http://192.168.50.180:8100"  # Corrected Ubuntu machine IP
+# --- Voice Server Connection & Management ---
+voice_server:
+  host: "http://127.0.0.1:8100"
+  venv: "E:\\PyTorch env\\my_venv"
+  auto_start: true
+  startup_timeout_seconds: 120
   timeout: 30
-  retries: 15
-  retry_delay: 20
-  reconnect_interval: 60
+  retries: 5
+  retry_delay: 2
+
 
 # --- EPUB Text Extraction ---
 extraction:

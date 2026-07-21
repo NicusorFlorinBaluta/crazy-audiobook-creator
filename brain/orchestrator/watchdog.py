@@ -5,13 +5,11 @@ import subprocess
 from typing import Optional
 
 import httpx
-import paramiko
-from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
 
 class ServiceWatchdog:
-    """Background watchdog service that monitors local Ollama and remote Voice Server.
+    """Background watchdog service that monitors local Ollama and local Voice Server.
     Restarts them safely if they become unresponsive.
     """
     def __init__(self, check_interval_seconds: int = 60):
@@ -19,13 +17,7 @@ class ServiceWatchdog:
         self.running = False
         self._task: Optional[asyncio.Task] = None
         
-        load_dotenv()
-        self.ubuntu_host = os.getenv("HA_SERVER_SSH_HOST", "192.168.50.180")
-        self.ubuntu_user = os.getenv("HA_SERVER_SSH_USER", "crazywiz")
-        self.ubuntu_password = os.getenv("HA_SERVER_SSH_PASSWORD", "")
-        self.ubuntu_dir = "crazy-audiobook-creator"
-
-        self.voice_server_url = f"http://{self.ubuntu_host}:8100/health"
+        self.voice_server_url = "http://127.0.0.1:8100/health"
         self.ollama_url = "http://localhost:11434"
         
         self.client = httpx.AsyncClient(timeout=10.0)

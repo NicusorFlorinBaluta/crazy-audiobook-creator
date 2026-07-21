@@ -100,17 +100,17 @@ async def lifespan(app: FastAPI):
         sample_rate=tts_cfg.get("sample_rate", 24000),
     )
 
+    val_cfg = config.get("validation", {})
+    whisper_val = WhisperValidator(
+        model_name=val_cfg.get("whisper_model", "large-v3"),
+        device=val_cfg.get("whisper_device", "auto"),
+    )
+
     storage_cfg = config.get("storage", {})
     library = VoiceLibraryManager(
         library_dir=storage_cfg.get("voice_library_dir", "voice_library"),
     )
-    designer = VoiceDesigner(engine=engine, library=library)
-
-    val_cfg = config.get("validation", {})
-    whisper_val = WhisperValidator(
-        model_name=val_cfg.get("whisper_model", "medium"),
-        device=val_cfg.get("whisper_device", "auto"),
-    )
+    designer = VoiceDesigner(engine=engine, library=library, validator=whisper_val)
     audio_analyzer = AudioAnalyzer(
         noise_threshold=val_cfg.get("artifact_noise_threshold", -50),
         clipping_threshold=val_cfg.get("clipping_threshold", -0.5),

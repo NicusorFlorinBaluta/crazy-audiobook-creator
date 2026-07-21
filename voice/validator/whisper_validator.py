@@ -40,29 +40,42 @@ class WhisperValidator:
         logger.info("Loading Whisper model '%s' (device=%s)...", self.model_name, self.device)
 
         try:
-            from faster_whisper import WhisperModel
+            try:
+                from faster_whisper import WhisperModel
 
-            # Determine device
-            compute_type = "float16"
-            device = self.device
+                compute_type = "float16"
+                device = self.device
 
-            if device == "auto":
-                try:
-                    import torch
+                if device == "auto":
+                    try:
+                        import torch
+                        device = "cuda" if torch.cuda.is_available() else "cpu"
+                    except ImportError:
+                        device = "cpu"
+
+                if device == "cpu":
+                    compute_type = "int8"
+
+                self._model = WhisperModel(
+                    self.model_name,
+                    device=device,
+                    compute_type=compute_type,
+                )
+                self._backend = "faster_whisper"
+            except ImportError:
+                import whisper
+                import torch
+
+                device = self.device
+                if device == "auto":
                     device = "cuda" if torch.cuda.is_available() else "cpu"
-                except ImportError:
-                    device = "cpu"
 
-            if device == "cpu":
-                compute_type = "int8"
+                logger.info("faster_whisper not found, falling back to openai-whisper...")
+                self._model = whisper.load_model(self.model_name, device=device)
+                self._backend = "openai_whisper"
 
-            self._model = WhisperModel(
-                self.model_name,
-                device=device,
-                compute_type=compute_type,
-            )
             self._is_loaded = True
-            logger.info("Whisper model loaded (device=%s)", device)
+            logger.info("Whisper model loaded using %s (device=%s)", getattr(self, "_backend", "faster_whisper"), device)
 
         except Exception as e:
             logger.error("Failed to load Whisper: %s", e)
@@ -96,15 +109,18 @@ class WhisperValidator:
         if not self._is_loaded:
             self.load()
 
-        segments, info = self._model.transcribe(
-            audio_file,
-            language="en",
-            beam_size=5,
-            vad_filter=True,
-        )
-
-        text = " ".join(segment.text for segment in segments)
-        return text.strip()
+        if getattr(self, "_backend", "faster_whisper") == "openai_whisper":
+            result = self._model.transcribe(audio_file, language="en")
+            return result.get("text", "").strip()
+        else:
+            segments, info = self._model.transcribe(
+                audio_file,
+                language="en",
+                beam_size=5,
+                vad_filter=True,
+            )
+            text = " ".join(segment.text for segment in segments)
+            return text.strip()
 
     def calculate_wer(
         self,

@@ -463,6 +463,17 @@ class ProjectStatus(BaseModel):
     completed_at: datetime | None = None
     error_message: str | None = None
 
+    # Detailed per-chapter tracking
+    scripted_chapters: list[int] = Field(default_factory=list)
+    generated_chapters: list[int] = Field(default_factory=list)
+    mastered_chapters: list[int] = Field(default_factory=list)
+    current_script_chapter: int | None = None
+    current_gen_chapter: int | None = None
+
+    # Safe deployment and selective generation controls
+    deployment_requested: bool = False
+    generation_chapter_selection: list[int] | None = None
+
 
 class ProjectSummary(BaseModel):
     """Brief summary of a project for listing."""

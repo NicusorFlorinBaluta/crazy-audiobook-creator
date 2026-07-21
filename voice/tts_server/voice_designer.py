@@ -31,9 +31,11 @@ class VoiceDesigner:
         self,
         engine: Qwen3TTSEngine,
         library: VoiceLibraryManager,
+        validator: Any = None,
     ):
         self.engine = engine
         self.library = library
+        self.validator = validator
 
     def bootstrap_voices(
         self,
@@ -44,8 +46,9 @@ class VoiceDesigner:
         For each character:
         1. Check if a voice already exists (skip if idempotent)
         2. Select a test sentence based on gender
-        3. Use Qwen3-TTS Voice Design to generate a reference clip
-        4. Save to the voice library
+        3. Use Parler-TTS Voice Design to generate a reference clip
+        4. Transcribe reference clip with Whisper for Full ICL mode
+        5. Save to the voice library
 
         Args:
             request: Bootstrap request with project ID and characters.
@@ -57,6 +60,7 @@ class VoiceDesigner:
         voices_generated: dict[str, BootstrapVoiceResult] = {}
 
         import subprocess
+        import sys
         import time
         import httpx
         
@@ -68,9 +72,14 @@ class VoiceDesigner:
 
         # Boot up Parler Microservice
         logger.info("Booting Parler-TTS Microservice on port 8101...")
-        log_file = open("/home/crazywiz/crazy-audiobook-creator/parler.log", "w")
+        python_exe = Path(r"E:\PyTorch env\my_venv\Scripts\python.exe")
+        if not python_exe.exists():
+            python_exe = Path(sys.executable)
+
+        parler_script = Path("parler_server.py").resolve()
+        log_file = open("parler.log", "w", encoding="utf-8")
         parler_proc = subprocess.Popen(
-            ["/home/crazywiz/crazy-audiobook-creator/venv_parler/bin/python", "/home/crazywiz/crazy-audiobook-creator/parler_server.py"],
+            [str(python_exe), str(parler_script)],
             stdout=log_file,
             stderr=subprocess.STDOUT
         )
@@ -169,6 +178,19 @@ class VoiceDesigner:
         audio, sr = sf.read(str(output_path))
         duration_seconds = len(audio) / sr
 
+        # Auto-transcribe for Full ICL mode
+        ref_text = ""
+        if self.validator:
+            try:
+                ref_text = self.validator.transcribe(str(output_path))
+                logger.info("Auto-transcribed reference clip for '%s': %r", char_id, ref_text[:60])
+            except Exception as e:
+                logger.warning("Failed to auto-transcribe reference clip for '%s': %s", char_id, e)
+
+        # Fallback to test_sentence if transcription is empty or failed
+        if not ref_text:
+            ref_text = test_sentence
+
         # Save to voice library registry
         self.library.register_voice(
             project_id=project_id,
@@ -179,6 +201,7 @@ class VoiceDesigner:
             file_path=str(output_path),
             duration_seconds=duration_seconds,
             sample_rate=sr,
+            ref_text=ref_text,
         )
 
         return BootstrapVoiceResult(

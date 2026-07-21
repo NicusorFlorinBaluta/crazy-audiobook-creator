@@ -45,6 +45,7 @@ class VoiceLibraryManager:
         file_path: str,
         duration_seconds: float,
         sample_rate: int,
+        ref_text: str = "",
     ) -> None:
         """Register a voice in the project's voice registry (voices.json)."""
         registry = self._load_registry(project_id)
@@ -60,6 +61,7 @@ class VoiceLibraryManager:
             "gender": gender,
             "duration_seconds": duration_seconds,
             "sample_rate": sample_rate,
+            "ref_text": ref_text,
             "generated_at": datetime.now(timezone.utc).isoformat(),
         }
 
@@ -69,6 +71,13 @@ class VoiceLibraryManager:
         """Get info about a specific voice."""
         registry = self._load_registry(project_id)
         return registry.get("voices", {}).get(character_id)
+
+    def get_voice_ref_text(self, project_id: str, character_id: str) -> str:
+        """Get the reference transcript for a character's voice clip."""
+        info = self.get_voice_info(project_id, character_id)
+        if info:
+            return info.get("ref_text", "")
+        return ""
 
     def list_voices(self, project_id: str) -> dict[str, Any]:
         """List all voices for a project."""

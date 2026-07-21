@@ -23,7 +23,12 @@ from brain.director.ollama_client import OllamaClient
 from brain.director.script_generator import ScriptGenerator
 from brain.extractor.epub_parser import EpubParser
 from brain.orchestrator.job_queue import JobQueue, JobState
-from brain.orchestrator.ubuntu_client import UbuntuClient
+from brain.director.character_analyzer import CharacterAnalyzer
+from brain.director.ollama_client import OllamaClient
+from brain.director.script_generator import ScriptGenerator
+from brain.extractor.epub_parser import EpubParser
+from brain.orchestrator.job_queue import JobQueue, JobState
+from brain.orchestrator.voice_client import VoiceClient
 from shared.constants import PipelineStage
 from shared.models import (
     AudiobookMetadata,
@@ -66,13 +71,12 @@ class Pipeline:
             max_retries=ollama_cfg.get("max_retries", 3),
         )
 
-        ubuntu_cfg = self.config.get("ubuntu", {})
-        self.ubuntu = UbuntuClient(
-            host=ubuntu_cfg.get("host", "http://192.168.1.100:8100"),
-            timeout=ubuntu_cfg.get("timeout", 30),
-            retries=ubuntu_cfg.get("retries", 3),
-            retry_delay=ubuntu_cfg.get("retry_delay", 5),
-            reconnect_interval=ubuntu_cfg.get("reconnect_interval", 60),
+        voice_cfg = self.config.get("voice_server", {})
+        self.voice_client = VoiceClient(
+            host=voice_cfg.get("host", "http://127.0.0.1:8100"),
+            timeout=voice_cfg.get("timeout", 30),
+            retries=voice_cfg.get("retries", 5),
+            retry_delay=voice_cfg.get("retry_delay", 2),
         )
 
         # Extraction config
@@ -103,6 +107,7 @@ class Pipeline:
         )
 
         self._stop_flags: dict[str, bool] = {}
+        self._voice_server_proc = None
 
     def stop(self, project_id: str) -> None:
         """Signal the pipeline for a project to stop gracefully."""
@@ -122,31 +127,156 @@ class Pipeline:
         return {}
 
     # ------------------------------------------------------------------
+    # Voice Server Process Management
+    # ------------------------------------------------------------------
+
+    def _start_voice_server(self) -> None:
+        """Start local Voice Server subprocess if auto_start is enabled."""
+        voice_cfg = self.config.get("voice_server", {})
+        if not voice_cfg.get("auto_start", True):
+            logger.info("Voice server auto_start is disabled in config.")
+            return
+
+        try:
+            health = self.voice_client.health_check()
+            if health.status == "ok":
+                logger.info("Voice server is already running and healthy.")
+                return
+        except Exception:
+            pass
+
+        venv_py = voice_cfg.get("venv", r"E:\PyTorch env\my_venv")
+        python_exe = Path(venv_py) / "Scripts" / "python.exe"
+        if not python_exe.exists():
+            import sys
+            python_exe = Path(sys.executable)
+
+        main_script = Path("voice/tts_server/main.py").resolve()
+        logger.info("Starting local Voice Server subprocess via %s...", python_exe)
+        import subprocess
+        self._voice_server_proc = subprocess.Popen(
+            [str(python_exe), str(main_script)],
+            cwd=str(Path.cwd()),
+        )
+
+        timeout = voice_cfg.get("startup_timeout_seconds", 120)
+        if not self.voice_client.wait_for_server(max_wait_seconds=timeout):
+            self._stop_voice_server()
+            raise RuntimeError(f"Voice server subprocess failed to start within {timeout}s")
+
+    def _stop_voice_server(self) -> None:
+        """Stop Voice Server subprocess if managed by this pipeline."""
+        if getattr(self, "_voice_server_proc", None) is not None:
+            logger.info("Stopping Voice Server subprocess...")
+            try:
+                self._voice_server_proc.terminate()
+                self._voice_server_proc.wait(timeout=10)
+            except Exception as e:
+                logger.warning("Force killing Voice Server subprocess: %s", e)
+                try:
+                    self._voice_server_proc.kill()
+                except Exception:
+                    pass
+            finally:
+                self._voice_server_proc = None
+
+    # ------------------------------------------------------------------
+    # Schedule & Deployment Controls
+    # ------------------------------------------------------------------
+
+    def _check_schedule(self, project_id: str) -> None:
+        """Pause pipeline if outside configured working hours."""
+        schedule_cfg = self.config.get("schedule", {})
+        if not schedule_cfg.get("enabled", False):
+            return
+
+        windows = schedule_cfg.get("windows", [])
+        if not windows:
+            return
+
+        import datetime
+        now = datetime.datetime.now()
+        current_day = now.strftime("%A")
+
+        in_window = False
+        for win in windows:
+            days = win.get("days", [])
+            if days and current_day not in days:
+                continue
+            start_str = win.get("start", "00:00")
+            end_str = win.get("end", "23:59")
+            start_time = datetime.datetime.strptime(start_str, "%H:%M").time()
+            end_time = datetime.datetime.strptime(end_str, "%H:%M").time()
+            now_time = now.time()
+
+            if start_time <= end_time:
+                if start_time <= now_time <= end_time:
+                    in_window = True
+                    break
+            else:
+                if now_time >= start_time or now_time <= end_time:
+                    in_window = True
+                    break
+
+        if not in_window:
+            logger.info("Outside working hours window — pausing pipeline (PAUSED_SCHEDULED)")
+            self._update_stage(project_id, PipelineStage.PAUSED_SCHEDULED)
+            while True:
+                self._check_stop(project_id)
+                time.sleep(30)
+                self.config = self._load_config()
+                schedule_cfg = self.config.get("schedule", {})
+                if not schedule_cfg.get("enabled", False):
+                    break
+                now = datetime.datetime.now()
+                current_day = now.strftime("%A")
+                still_out = True
+                for win in schedule_cfg.get("windows", []):
+                    if win.get("days") and current_day not in win.get("days"):
+                        continue
+                    s_t = datetime.datetime.strptime(win.get("start", "00:00"), "%H:%M").time()
+                    e_t = datetime.datetime.strptime(win.get("end", "23:59"), "%H:%M").time()
+                    n_t = now.time()
+                    if (s_t <= e_t and s_t <= n_t <= e_t) or (s_t > e_t and (n_t >= s_t or n_t <= e_t)):
+                        still_out = False
+                        break
+                if not still_out:
+                    break
+            logger.info("Schedule window opened — resuming pipeline execution")
+
+    def _check_deployment_pause(self, project_id: str) -> None:
+        """Pause pipeline if user requested a safe deployment parking point."""
+        state = self.job_queue.get_job(project_id)
+        if state.get("deployment_requested", False):
+            logger.info("Safe deployment pause requested — parking pipeline at chapter boundary")
+            self._update_stage(project_id, PipelineStage.DEPLOY_PAUSED)
+            try:
+                from plyer import notification
+                notification.notify(
+                    title="Audiobook Creator — Safe Deployment",
+                    message=f"Pipeline parked for project '{project_id}'. Safe to deploy updates.",
+                    app_name="Audiobook Creator",
+                )
+            except Exception:
+                pass
+
+            while True:
+                self._check_stop(project_id)
+                time.sleep(5)
+                st = self.job_queue.get_job(project_id)
+                if not st.get("deployment_requested", False):
+                    logger.info("Deployment pause cleared — resuming pipeline execution")
+                    break
+
+    # ------------------------------------------------------------------
     # Project creation
     # ------------------------------------------------------------------
 
     def create_project(self, epub_path: str | Path) -> ProjectStatus:
-        """Create a new audiobook project from an EPUB file.
-
-        Steps:
-        1. Parse EPUB to extract text and metadata
-        2. Create project directory structure
-        3. Save extracted text to project
-        4. Initialize pipeline state in job queue
-
-        Args:
-            epub_path: Path to the EPUB file.
-
-        Returns:
-            Initial ProjectStatus.
-        """
-        # Stage ① — Text Extraction
+        """Create a new audiobook project from an EPUB file."""
         book = self.parser.parse(epub_path)
-
-        # Create project ID from title
         project_id = self._make_project_id(book.metadata.title)
         
-        # Ensure project ID is unique
         base_id = project_id
         counter = 1
         while True:
@@ -160,12 +290,10 @@ class Pipeline:
         project_dir = self.projects_dir / project_id
         project_dir.mkdir(parents=True, exist_ok=True)
 
-        # Save extracted book
         book_path = project_dir / "book.json"
         with open(book_path, "w", encoding="utf-8") as f:
             f.write(book.model_dump_json(indent=2))
 
-        # Copy EPUB cover if extracted
         if book.metadata.cover_image_path:
             cover_src = Path(book.metadata.cover_image_path)
             if cover_src.exists():
@@ -173,7 +301,6 @@ class Pipeline:
                 cover_dest.write_bytes(cover_src.read_bytes())
                 book.metadata.cover_image_path = str(cover_dest)
 
-        # Initialize job state
         status = ProjectStatus(
             project_id=project_id,
             title=book.metadata.title,
@@ -200,25 +327,15 @@ class Pipeline:
     # ------------------------------------------------------------------
 
     def run(self, project_id: str) -> ProjectStatus:
-        """Run the full pipeline for a project.
-
-        Resumes from the last completed stage if the pipeline was interrupted.
-
-        Args:
-            project_id: The project to process.
-
-        Returns:
-            Final ProjectStatus.
-        """
+        """Run the full pipeline for a project."""
         project_dir = self.projects_dir / project_id
         if not project_dir.exists():
             raise ValueError(f"Project not found: {project_id}")
 
-        # Load current state
         state = self.job_queue.get_job(project_id)
         current_stage = state.get("status", PipelineStage.CREATED)
 
-        if current_stage in (PipelineStage.PAUSED, PipelineStage.ERROR):
+        if current_stage in (PipelineStage.PAUSED, PipelineStage.ERROR, PipelineStage.PAUSED_SCHEDULED, PipelineStage.DEPLOY_PAUSED):
             current_stage = PipelineStage.CREATED
 
         start_time = time.time()
@@ -226,6 +343,8 @@ class Pipeline:
         logger.info("Starting pipeline for '%s' from stage: %s", project_id, current_stage)
 
         try:
+            self._start_voice_server()
+
             # Stage ②: LLM Script Director
             self._check_stop(project_id)
             if current_stage in (PipelineStage.CREATED, PipelineStage.EXTRACTING, PipelineStage.SCRIPTING):
@@ -252,20 +371,28 @@ class Pipeline:
             # Stage ⑦: M4B Export
             self._check_stop(project_id)
             state = self.job_queue.get_job(project_id)
-            if state.get("status") in (PipelineStage.MASTERING, PipelineStage.EXPORTING):
-                self._run_export(project_id, project_dir)
+            selection = state.get("generation_chapter_selection")
 
-            elapsed = time.time() - start_time
-            self._update_stage(
-                project_id,
-                PipelineStage.COMPLETE,
-                elapsed_seconds=elapsed,
-            )
-            logger.info(
-                "Pipeline complete for '%s' in %.1f minutes",
-                project_id,
-                elapsed / 60,
-            )
+            if selection is not None:
+                # Selective run complete — do partial export
+                self._run_export(project_id, project_dir, partial=True)
+                self._update_stage(project_id, PipelineStage.SELECTION_COMPLETE)
+                logger.info("Selection batch complete for '%s'", project_id)
+            else:
+                if state.get("status") in (PipelineStage.MASTERING, PipelineStage.EXPORTING):
+                    self._run_export(project_id, project_dir, partial=False)
+
+                elapsed = time.time() - start_time
+                self._update_stage(
+                    project_id,
+                    PipelineStage.COMPLETE,
+                    elapsed_seconds=elapsed,
+                )
+                logger.info(
+                    "Pipeline complete for '%s' in %.1f minutes",
+                    project_id,
+                    elapsed / 60,
+                )
 
         except Exception as e:
             elapsed = time.time() - start_time
@@ -287,6 +414,8 @@ class Pipeline:
                 elapsed_seconds=elapsed,
             )
             return ProjectStatus(**self.job_queue.get_job(project_id))
+        finally:
+            self._stop_voice_server()
 
         return ProjectStatus(**self.job_queue.get_job(project_id))
 
@@ -298,52 +427,37 @@ class Pipeline:
         """Run Stage ②: LLM character analysis + script generation."""
         self._update_stage(project_id, PipelineStage.SCRIPTING)
 
-        # Load extracted book
         book_path = project_dir / "book.json"
         from shared.models import ExtractedBook
         book = ExtractedBook.model_validate_json(book_path.read_text(encoding="utf-8"))
 
-        logger.info(
-            "═══ [SCRIPTING] Stage started for '%s' | %d chapters | %d words ═══",
-            project_id,
-            book.metadata.total_chapters,
-            book.metadata.total_words,
-        )
-
         t0 = time.time()
         pass1_elapsed = 0.0
 
-        # Pass 1: Character analysis
         chars_path = project_dir / "characters.json"
         if chars_path.exists():
-            logger.info("[SCRIPTING] ── Pass 1: Character Analysis (Skipping, already exists) ──")
             from shared.models import CharacterRegistry
             registry = CharacterRegistry.model_validate_json(chars_path.read_text(encoding="utf-8"))
         else:
-            logger.info("[SCRIPTING] ── Pass 1: Character Analysis ──")
             registry = self.character_analyzer.analyze(book)
             pass1_elapsed = time.time() - t0
-            logger.info("[SCRIPTING] Pass 1 done in %.1fs", pass1_elapsed)
 
-            # Save character registry
             with open(chars_path, "w", encoding="utf-8") as f:
                 f.write(registry.model_dump_json(indent=2))
-            logger.info("[SCRIPTING] characters.json saved (%d characters)", len(registry.characters))
 
-        # Pass 2: Script generation for each chapter
-        logger.info("[SCRIPTING] ── Pass 2: Script Generation (%d chapters) ──", len(book.chapters))
         scripts_dir = project_dir / "script"
         scripts_dir.mkdir(exist_ok=True)
 
         def on_chapter_scripted(chapter_script):
-            # Check for stop flag between chapters
             self._check_stop(project_id)
-            # Update scripting progress dynamically
             state = self.job_queue.get_job(project_id)
-            completed = state.get("completed_script_chapters", [])
-            if chapter_script.chapter_number not in completed:
-                completed.append(chapter_script.chapter_number)
-                self.job_queue.update_job(project_id, {"completed_script_chapters": completed})
+            scripted = state.get("scripted_chapters", [])
+            if chapter_script.chapter_number not in scripted:
+                scripted.append(chapter_script.chapter_number)
+                self.job_queue.update_job(project_id, {
+                    "scripted_chapters": scripted,
+                    "current_script_chapter": chapter_script.chapter_number,
+                })
 
         chapter_scripts = self.script_generator.generate_all_chapters(
             book.chapters, registry, scripts_dir=scripts_dir, progress_callback=on_chapter_scripted
@@ -355,13 +469,7 @@ class Pipeline:
             with open(script_path, "w", encoding="utf-8") as f:
                 f.write(script.model_dump_json(indent=2))
             total_lines += script.total_lines
-            logger.info(
-                "[SCRIPTING] Saved chapter_%03d.json (%d lines)",
-                script.chapter_number,
-                script.total_lines,
-            )
 
-        # Build complete BookScript for reference
         book_script = BookScript(
             metadata=book.metadata,
             character_registry=registry,
@@ -371,37 +479,30 @@ class Pipeline:
             f.write(book_script.model_dump_json(indent=2))
 
         total_elapsed = time.time() - t0
-        self.job_queue.update_job(project_id, {"total_lines": total_lines, "script_completed": True})
-        logger.info(
-            "═══ [SCRIPTING] Complete: %d lines in %.1fs (pass1=%.1fs) ═══",
-            total_lines,
-            total_elapsed,
-            pass1_elapsed,
-        )
+        self.job_queue.update_job(project_id, {
+            "total_lines": total_lines,
+            "script_completed": True,
+            "current_script_chapter": None,
+        })
 
     def _run_voice_bootstrap(self, project_id: str, project_dir: Path) -> None:
-        """Run Stage ③: Generate voice reference clips on Ubuntu."""
+        """Run Stage ③: Generate voice reference clips."""
         self._update_stage(project_id, PipelineStage.BOOTSTRAPPING)
 
-        # Load character registry
         chars_path = project_dir / "characters.json"
         from shared.models import CharacterRegistry
         registry = CharacterRegistry.model_validate_json(
             chars_path.read_text(encoding="utf-8")
         )
 
-        # Send to Ubuntu for voice bootstrapping
         request = BootstrapVoicesRequest(
             project_id=project_id,
             characters=registry.characters,
         )
         try:
-            response = self.ubuntu.bootstrap_voices(request)
+            response = self.voice_client.bootstrap_voices(request)
             self.job_queue.update_job(project_id, {"bootstrapping_completed": True})
-            logger.info(
-                "Voice bootstrapping complete: %d voices generated",
-                len(response.voices_generated),
-            )
+            logger.info("Voice bootstrapping complete: %d voices generated", len(response.voices_generated))
         except Exception as e:
             logger.error("Failed to bootstrap voices: %s", e)
             raise
@@ -416,8 +517,7 @@ class Pipeline:
         from shared.models import ScriptChapter
         import json
         import re
-        
-        # Load pronunciation dictionaries (global and project-specific)
+
         pronunciation_dict = {}
         global_dict_path = Path("brain/pronunciation_dict.json")
         if global_dict_path.exists():
@@ -425,39 +525,48 @@ class Pipeline:
                 pronunciation_dict.update(json.loads(global_dict_path.read_text(encoding="utf-8")))
             except Exception as e:
                 logger.warning("Failed to load global pronunciation_dict.json: %s", e)
-                
+
         proj_dict_path = project_dir / "pronunciation_dict.json"
         if proj_dict_path.exists():
             try:
                 pronunciation_dict.update(json.loads(proj_dict_path.read_text(encoding="utf-8")))
             except Exception as e:
                 logger.warning("Failed to load project pronunciation_dict.json: %s", e)
-                
+
         compiled_pronunciations = [
             (re.compile(rf"\b{re.escape(w)}\b", re.IGNORECASE), r)
             for w, r in pronunciation_dict.items()
         ]
-        
+
         state = self.job_queue.get_job(project_id)
-        completed_gen_chapters = state.get("completed_gen_chapters", [])
+        generated_chapters = state.get("generated_chapters", [])
+        selection = state.get("generation_chapter_selection")
 
         for script_file in script_files:
             self._check_stop(project_id)
+            self._check_schedule(project_id)
+            self._check_deployment_pause(project_id)
+
             chapter_script = ScriptChapter.model_validate_json(
                 script_file.read_text(encoding="utf-8")
             )
 
-            if chapter_script.chapter_number in completed_gen_chapters:
+            # Selection filter
+            if selection is not None and chapter_script.chapter_number not in selection:
+                logger.info("Skipping chapter %d (not in current generation selection)", chapter_script.chapter_number)
+                continue
+
+            if chapter_script.chapter_number in generated_chapters:
                 logger.info("Skipping chapter %d (already generated)", chapter_script.chapter_number)
                 continue
 
-            # Apply pronunciation replacements and voice FX
+            self.job_queue.update_job(project_id, {"current_gen_chapter": chapter_script.chapter_number})
+
             if compiled_pronunciations:
                 for line in chapter_script.lines:
                     for pattern, replacement in compiled_pronunciations:
                         line.text = pattern.sub(replacement, line.text)
-                        
-            # Inject voice FX from CharacterRegistry
+
             book_json_path = project_dir / "book.json"
             if book_json_path.exists():
                 try:
@@ -469,8 +578,7 @@ class Pipeline:
                             from shared.models import VoiceFXSettings
                             line.voice_fx = VoiceFXSettings(**char_info["voice_fx"])
                 except Exception as e:
-                    logger.warning("Failed to inject voice_fx from book.json: %s", e)
-
+                    logger.warning("Failed to inject voice_fx: %s", e)
 
             try:
                 request = GenerateChapterRequest(
@@ -482,26 +590,22 @@ class Pipeline:
                     max_retries=self.config.get("validation", {}).get("max_retries", 3),
                 )
 
-                response = self.ubuntu.generate_chapter(request)
+                response = self.voice_client.generate_chapter(request)
 
-                completed_gen_chapters.append(chapter_script.chapter_number)
+                generated_chapters.append(chapter_script.chapter_number)
                 self.job_queue.update_job(project_id, {
-                    "completed_gen_chapters": completed_gen_chapters,
+                    "generated_chapters": generated_chapters,
                     "current_chapter": chapter_script.chapter_number,
                     "lines_generated": response.generated,
                     "lines_failed": response.failed_validation,
                 })
 
-                logger.info(
-                    "Chapter %d generated: %d/%d lines, %d retried",
-                    chapter_script.chapter_number,
-                    response.generated,
-                    response.total_lines,
-                    response.retried,
-                )
+                logger.info("Chapter %d generated: %d/%d lines", chapter_script.chapter_number, response.generated, response.total_lines)
             except Exception as e:
                 logger.error("Failed to generate chapter %d: %s", chapter_script.chapter_number, e)
                 raise
+
+        self.job_queue.update_job(project_id, {"current_gen_chapter": None})
 
     def _run_mastering(self, project_id: str, project_dir: Path) -> None:
         """Run Stage ⑥: Audio mastering."""
@@ -511,18 +615,23 @@ class Pipeline:
         script_files = sorted(scripts_dir.glob("chapter_*.json"))
 
         from shared.models import ScriptChapter
-        mastering_cfg = self.config.get("mastering", {})
-        
         state = self.job_queue.get_job(project_id)
-        completed_master_chapters = state.get("completed_master_chapters", [])
+        mastered_chapters = state.get("mastered_chapters", [])
+        selection = state.get("generation_chapter_selection")
 
         for script_file in script_files:
             self._check_stop(project_id)
+            self._check_schedule(project_id)
+            self._check_deployment_pause(project_id)
+
             chapter_script = ScriptChapter.model_validate_json(
                 script_file.read_text(encoding="utf-8")
             )
-            
-            if chapter_script.chapter_number in completed_master_chapters:
+
+            if selection is not None and chapter_script.chapter_number not in selection:
+                continue
+
+            if chapter_script.chapter_number in mastered_chapters:
                 logger.info("Skipping chapter %d (already mastered)", chapter_script.chapter_number)
                 continue
 
@@ -543,47 +652,53 @@ class Pipeline:
                     segments=segments,
                 )
 
-                response = self.ubuntu.master_chapter(request)
-                
-                completed_master_chapters.append(chapter_script.chapter_number)
+                response = self.voice_client.master_chapter(request)
+
+                mastered_chapters.append(chapter_script.chapter_number)
                 self.job_queue.update_job(project_id, {
-                    "completed_master_chapters": completed_master_chapters,
+                    "mastered_chapters": mastered_chapters,
                 })
-                
-                logger.info(
-                    "Chapter %d mastered: %.1f seconds, %.1f LUFS",
-                    chapter_script.chapter_number,
-                    response.duration_seconds,
-                    response.lufs,
-                )
+
+                logger.info("Chapter %d mastered: %.1f seconds, %.1f LUFS", chapter_script.chapter_number, response.duration_seconds, response.lufs)
             except Exception as e:
                 logger.error("Failed to master chapter %d: %s", chapter_script.chapter_number, e)
                 raise
 
-    def _run_export(self, project_id: str, project_dir: Path) -> None:
+    def _run_export(self, project_id: str, project_dir: Path, partial: bool = False) -> None:
         """Run Stage ⑦: M4B export."""
         self._update_stage(project_id, PipelineStage.EXPORTING)
 
-        # Load metadata
         book_path = project_dir / "book.json"
-        from shared.models import ExtractedBook
+        from shared.models import ExtractedBook, ScriptChapter
         book = ExtractedBook.model_validate_json(book_path.read_text(encoding="utf-8"))
 
-        # Build chapter list
         scripts_dir = project_dir / "script"
         script_files = sorted(scripts_dir.glob("chapter_*.json"))
 
-        from shared.models import ScriptChapter
+        state = self.job_queue.get_job(project_id)
+        mastered_chapters = set(state.get("mastered_chapters", []))
+
         chapters: list[ExportChapterInfo] = []
         for script_file in script_files:
             ch = ScriptChapter.model_validate_json(
                 script_file.read_text(encoding="utf-8")
             )
+            # Only include mastered chapters
+            if partial and ch.chapter_number not in mastered_chapters:
+                continue
+
             chapters.append(ExportChapterInfo(
                 number=ch.chapter_number,
                 title=ch.chapter_title,
                 file=f"chapters/chapter_{ch.chapter_number:03d}.wav",
             ))
+
+        if not chapters:
+            logger.warning("No mastered chapters available for export.")
+            return
+
+        cover_art = project_dir / "cover.jpg"
+        cover_path_str = str(cover_art) if cover_art.exists() else None
 
         request = ExportM4BRequest(
             project_id=project_id,
@@ -592,22 +707,29 @@ class Pipeline:
                 author=book.metadata.author,
             ),
             chapters=chapters,
+            cover_art=cover_path_str,
         )
 
-        response = self.ubuntu.export_m4b(request)
+        response = self.voice_client.export_m4b(request)
 
-        # Download the M4B file to the local project directory
-        if response.download_url:
-            local_m4b = project_dir / f"{project_id}.m4b"
-            self.ubuntu.download_file(
+        import shutil
+        suffix = f"_chapters_1-{max(ch.number for ch in chapters)}" if partial else ""
+        local_m4b = project_dir / f"{project_id}{suffix}.m4b"
+
+        if response.output_file and Path(response.output_file).exists():
+            shutil.copy2(response.output_file, local_m4b)
+            logger.info("M4B copied to: %s", local_m4b)
+        elif response.download_url:
+            self.voice_client.download_file(
                 project_id,
                 f"output/{project_id}.m4b",
                 str(local_m4b),
             )
-            logger.info("M4B saved to: %s", local_m4b)
+            logger.info("M4B downloaded to: %s", local_m4b)
 
         logger.info(
-            "Export complete: %s, %s, %.1f MB",
+            "Export complete (%s): %s, %s, %.1f MB",
+            "partial" if partial else "full",
             response.total_duration,
             f"{response.total_chapters} chapters",
             response.file_size_mb,
@@ -632,8 +754,7 @@ class Pipeline:
     def _make_project_id(title: str) -> str:
         """Generate a URL-safe project ID from a book title."""
         import re
-        # Convert to lowercase, replace spaces/special chars with hyphens
         project_id = title.lower().strip()
         project_id = re.sub(r"[^\w\s-]", "", project_id)
         project_id = re.sub(r"[-\s]+", "-", project_id)
-        return project_id[:64]  # Cap length
+        return project_id[:64]

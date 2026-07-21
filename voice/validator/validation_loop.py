@@ -100,24 +100,31 @@ class ValidationLoop:
             project_id,
         )
 
-        # Phase 1: Generate all segments in batches
+        # Phase 1: Generate all segments in batches (grouped by speaker to minimize prompt re-encoding)
         BATCH_SIZE = 5  # Configurable batch size to fit in VRAM
         
+        # Sort lines by speaker to group same-speaker lines together while preserving index for progress
+        indexed_lines = list(enumerate(lines))
+        grouped_indexed_lines = sorted(indexed_lines, key=lambda item: item[1].speaker)
+        
         for i in range(0, total_lines, BATCH_SIZE):
-            batch_lines = lines[i:i + BATCH_SIZE]
+            batch_tuples = grouped_indexed_lines[i:i + BATCH_SIZE]
             batch_requests = []
             
-            for line in batch_lines:
+            for orig_idx, line in batch_tuples:
                 output_path = segments_dir / f"{line.line_id}.wav"
                 voice_ref = self.library.get_voice_path(project_id, line.speaker)
+                ref_text = self.library.get_voice_ref_text(project_id, line.speaker)
                 
                 if not voice_ref.exists():
                     logger.warning("No voice reference for '%s', using narrator", line.speaker)
                     voice_ref = self.library.get_voice_path(project_id, "narrator")
+                    ref_text = self.library.get_voice_ref_text(project_id, "narrator")
                     
                 batch_requests.append({
                     "text": line.text,
                     "voice_reference_path": voice_ref,
+                    "ref_text": ref_text,
                     "emotion_instruction": line.emotion,
                     "speed": line.speed,
                     "voice_fx": line.voice_fx,
@@ -129,7 +136,7 @@ class ValidationLoop:
                 audios = self.engine.generate_speech_batch(batch_requests)
                 
                 for idx, audio in enumerate(audios):
-                    line = batch_lines[idx]
+                    orig_idx, line = batch_tuples[idx]
                     duration = len(audio) / self.engine.sample_rate
                     total_duration += duration
                     generated += 1
@@ -137,7 +144,7 @@ class ValidationLoop:
                     if ws_connections:
                         self._send_progress(
                             ws_connections, project_id, chapter_number,
-                            line.line_id, i + idx + 1, total_lines,
+                            line.line_id, generated, total_lines,
                             line.speaker, line.emotion,
                         )
                         

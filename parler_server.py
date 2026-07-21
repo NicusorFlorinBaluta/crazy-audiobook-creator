@@ -32,8 +32,9 @@ def load_model():
     device = get_device()
     logger.info(f"Loading Parler-TTS on {device}...")
     try:
-        model_name = "parler-tts/parler-tts-mini-v1"
-        model = ParlerTTSForConditionalGeneration.from_pretrained(model_name).to(device)
+        model_name = "parler-tts/parler-tts-large-v1"
+        dtype = torch.float16 if "cuda" in device else torch.float32
+        model = ParlerTTSForConditionalGeneration.from_pretrained(model_name, torch_dtype=dtype).to(device)
         tokenizer = AutoTokenizer.from_pretrained(model_name)
         logger.info("Parler-TTS loaded successfully!")
     except Exception as e:
@@ -52,7 +53,7 @@ def design_voice(request: VoiceDesignRequest):
         prompt_input_ids = tokenizer(request.prompt, return_tensors="pt").input_ids.to(device)
         
         generation = model.generate(input_ids=input_ids, prompt_input_ids=prompt_input_ids)
-        audio_arr = generation.cpu().numpy().squeeze()
+        audio_arr = generation.cpu().numpy().squeeze().astype(np.float32)
         
         # Save audio
         out_path = Path(request.output_path)
