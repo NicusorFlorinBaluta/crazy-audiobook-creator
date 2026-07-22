@@ -109,7 +109,7 @@ class CharacterAnalyzer:
         self.max_unique_voices = max_unique_voices
 
     def analyze(self, book: ExtractedBook) -> CharacterRegistry:
-        """Analyze a book and produce a character registry."""
+        """Analyze a book and produce a character registry, using multi-pass for long books."""
         total_chars = sum(len(ch.text) for ch in book.chapters)
         logger.info(
             "[CharacterAnalyzer] Starting Pass 1 for '%s' | chapters=%d | words=%d | total_chars=%d",
@@ -119,34 +119,79 @@ class CharacterAnalyzer:
             total_chars,
         )
 
-        book_text = self._prepare_book_text(book)
-        system_prompt = _SYSTEM_PROMPT.format(genre=self.genre)
-        prompt = _USER_PROMPT.format(book_text=book_text)
-
-        logger.info(
-            "[CharacterAnalyzer] Prompt ready | system=%.1f KB | user=%.1f KB | total=%.1f KB",
-            len(system_prompt) / 1024,
-            len(prompt) / 1024,
-            (len(system_prompt) + len(prompt)) / 1024,
-        )
-        logger.info("[CharacterAnalyzer] Sending to LLM — this is the slow step...")
-
         import time as _time
         t0 = _time.time()
-        raw_result = self.ollama.generate_json(
-            prompt,
-            temperature=self.temperature,
-            system=system_prompt,
-        )
+
+        if total_chars <= 25_000 or len(book.chapters) <= 1:
+            # Single pass for short books
+            book_text = self._prepare_book_text(book)
+            system_prompt = _SYSTEM_PROMPT.format(genre=self.genre)
+            prompt = _USER_PROMPT.format(book_text=book_text)
+
+            raw_result = self.ollama.generate_json(
+                prompt,
+                temperature=self.temperature,
+                system=system_prompt,
+            )
+            registry = self._parse_registry(raw_result, book.metadata.title, book.metadata.author)
+        else:
+            # Iterative multi-pass chapter-by-chapter analysis for long books
+            logger.info("[CharacterAnalyzer] Long book detected (total_chars=%d) — running iterative multi-pass analysis", total_chars)
+            accumulated_chars: dict[str, dict] = {}
+            book_title = book.metadata.title
+            book_author = book.metadata.author
+            tone_desc = ""
+
+            for idx, ch in enumerate(book.chapters):
+                # Format current accumulated characters for context
+                existing_summary = ""
+                if accumulated_chars:
+                    existing_summary = "\nExisting Characters:\n" + "\n".join(
+                        f"- {cid}: {info.get('name', cid)} ({info.get('gender', 'other')}, {info.get('voice_description', '')[:50]})"
+                        for cid, info in accumulated_chars.items()
+                    )
+
+                ch_prompt = f"Chapter {ch.number}: {ch.title}\n{existing_summary}\n\nChapter Text:\n{ch.text[:12000]}"
+                system_prompt = _SYSTEM_PROMPT.format(genre=self.genre)
+
+                try:
+                    logger.info("[CharacterAnalyzer] Analyzing chapter %d/%d: '%s' (%d words)...", idx + 1, len(book.chapters), ch.title, ch.word_count)
+                    raw_ch = self.ollama.generate_json(
+                        ch_prompt,
+                        temperature=self.temperature,
+                        system=system_prompt,
+                    )
+
+                    if not tone_desc and raw_ch.get("tone"):
+                        tone_desc = raw_ch.get("tone", "")
+
+                    new_chars = raw_ch.get("characters", {})
+                    for cid, cinfo in new_chars.items():
+                        if not isinstance(cinfo, dict):
+                            continue
+                        norm_id = cid.lower().replace(" ", "_").replace("-", "_")
+                        if norm_id not in accumulated_chars:
+                            accumulated_chars[norm_id] = cinfo
+                        else:
+                            # Update if existing info is sparse
+                            old_desc = accumulated_chars[norm_id].get("voice_description", "")
+                            new_desc = cinfo.get("voice_description", "")
+                            if len(new_desc) > len(old_desc):
+                                accumulated_chars[norm_id] = cinfo
+                except Exception as e:
+                    logger.warning("[CharacterAnalyzer] Failed to analyze chapter %d: %s", idx + 1, e)
+
+            # Build final raw dict for parser
+            final_raw = {
+                "book_title": book_title,
+                "book_author": book_author,
+                "genre": self.genre,
+                "tone": tone_desc,
+                "characters": accumulated_chars,
+            }
+            registry = self._parse_registry(final_raw, book_title, book_author)
+
         elapsed = _time.time() - t0
-        logger.info(
-            "[CharacterAnalyzer] LLM responded in %.1fs | raw keys: %s",
-            elapsed,
-            list(raw_result.keys()),
-        )
-
-        registry = self._parse_registry(raw_result, book.metadata.title, book.metadata.author)
-
         logger.info(
             "[CharacterAnalyzer] Pass 1 complete in %.1fs | %d characters: %s",
             elapsed,

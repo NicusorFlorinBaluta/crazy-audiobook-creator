@@ -169,13 +169,14 @@ class Qwen3TTSEngine:
     def generate_speech(
         self,
         text: str,
-        voice_reference_path: str | Path,
+        voice_reference_path: str | Path | None = None,
+        ref_text: str = "",
         emotion_instruction: str = "",
         speed: float = 1.0,
         voice_fx: Any | None = None,
         output_path: str | Path | None = None,
     ) -> np.ndarray:
-        """Generate speech using a voice reference clip.
+        """Generate speech audio for a script line.
 
         Uses the saved reference clip to clone the voice character,
         applying per-line emotion instructions and optional audio FX.
@@ -183,6 +184,7 @@ class Qwen3TTSEngine:
         Args:
             text: Text to speak.
             voice_reference_path: Path to the character's voice reference .wav.
+            ref_text: Reference text transcript for Full ICL mode.
             emotion_instruction: Natural language emotion/delivery instruction.
             speed: Speed multiplier (0.8=slow, 1.0=normal, 1.2=fast).
             voice_fx: Optional VoiceFXSettings for pitch/tone processing.
@@ -205,6 +207,7 @@ class Qwen3TTSEngine:
             text=text,
             instruction=instruction,
             voice_reference=str(fx_reference_path) if fx_reference_path else str(voice_reference_path),
+            ref_text=ref_text,
         )
 
         if fx_reference_path and hasattr(fx_reference_path, "unlink"):
@@ -238,6 +241,7 @@ class Qwen3TTSEngine:
                 audio = self.generate_speech(
                     text=req["text"],
                     voice_reference_path=req.get("voice_reference_path"),
+                    ref_text=req.get("ref_text", ""),
                     emotion_instruction=req.get("emotion_instruction", ""),
                     speed=req.get("speed", 1.0),
                     voice_fx=req.get("voice_fx"),
@@ -256,17 +260,33 @@ class Qwen3TTSEngine:
         text: str,
         instruction: str = "",
         voice_reference: str | None = None,
+        ref_text: str = "",
     ) -> np.ndarray:
         """Internal generation method using qwen_tts."""
         import torch
 
         if voice_reference:
+            use_icl = bool(ref_text and ref_text.strip())
+            x_vec_mode = not use_icl
+
+            if x_vec_mode:
+                logger.warning(
+                    "No ref_text available for %s — using x_vector_only_mode=True (quality/similarity may be reduced)",
+                    voice_reference,
+                )
+            else:
+                logger.info(
+                    "Using Full ICL mode with ref_text (%d chars) for %s",
+                    len(ref_text),
+                    voice_reference,
+                )
+
             wavs, sr = self._model.generate_voice_clone(
                 text=text,
                 language="auto",
                 ref_audio=voice_reference,
-                ref_text="",
-                x_vector_only_mode=True,
+                ref_text=ref_text if use_icl else "",
+                x_vector_only_mode=x_vec_mode,
             )
         else:
             wavs, sr = self._model.generate_custom_voice(

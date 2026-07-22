@@ -21,7 +21,7 @@ window.PipelineManager = (() => {
         tracker: document.getElementById('pipeline-tracker'),
         live: document.getElementById('pipeline-live'),
         btnStart: document.getElementById('btn-start-pipeline'),
-        btnStop: document.getElementById('btn-stop-pipeline'),
+        btnPause: document.getElementById('btn-pause-pipeline'),
     };
 
     function init() {
@@ -133,12 +133,12 @@ window.PipelineManager = (() => {
 
         if (isRunning) {
             els.btnStart.classList.add('hidden');
-            els.btnStop.classList.remove('hidden');
+            els.btnPause.classList.remove('hidden');
             if (selectResetStage) selectResetStage.classList.add('hidden');
             if (btnResetStage) btnResetStage.classList.add('hidden');
         } else {
             els.btnStart.classList.remove('hidden');
-            els.btnStop.classList.add('hidden');
+            els.btnPause.classList.add('hidden');
             if (selectResetStage) selectResetStage.classList.remove('hidden');
             
             if (status === 'complete' || status === 'completed') {

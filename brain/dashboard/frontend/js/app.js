@@ -142,8 +142,92 @@ function setupEventListeners() {
 
     // Detail Actions
     document.getElementById('btn-start-pipeline').addEventListener('click', startPipeline);
-    document.getElementById('btn-stop-pipeline').addEventListener('click', stopPipeline);
+    document.getElementById('btn-pause-pipeline').addEventListener('click', pausePipeline);
     document.getElementById('btn-delete-project').addEventListener('click', deleteProject);
+
+    // Feature Expansion Handlers
+    const btnFetchMeta = document.getElementById('btn-fetch-metadata');
+    if (btnFetchMeta) {
+        btnFetchMeta.addEventListener('click', async () => {
+            if (!state.currentProjectId) return;
+            showToast('Fetching artwork and info...', 'info');
+            try {
+                const res = await fetch(`/api/projects/${state.currentProjectId}/fetch-metadata`, { method: 'POST' });
+                if (!res.ok) throw new Error('Metadata fetch failed');
+                const data = await res.json();
+                showToast('Artwork & metadata updated!', 'success');
+                fetchProjectDetails(state.currentProjectId);
+            } catch (e) {
+                showToast(e.message, 'error');
+            }
+        });
+    }
+
+    const btnReqDeploy = document.getElementById('btn-request-deploy');
+    if (btnReqDeploy) {
+        btnReqDeploy.addEventListener('click', async () => {
+            if (!state.currentProjectId) return;
+            try {
+                const res = await fetch(`/api/projects/${state.currentProjectId}/request-deploy`, { method: 'POST' });
+                if (!res.ok) throw new Error('Failed to request deployment pause');
+                showToast('Deployment pause requested — will park at next chapter', 'warning');
+                fetchProjectDetails(state.currentProjectId);
+            } catch (e) {
+                showToast(e.message, 'error');
+            }
+        });
+    }
+
+    const btnResDeploy = document.getElementById('btn-resume-deploy');
+    if (btnResDeploy) {
+        btnResDeploy.addEventListener('click', async () => {
+            if (!state.currentProjectId) return;
+            try {
+                const res = await fetch(`/api/projects/${state.currentProjectId}/resume-deploy`, { method: 'POST' });
+                if (!res.ok) throw new Error('Failed to resume deployment');
+                showToast('Resuming pipeline from deploy pause...', 'success');
+                fetchProjectDetails(state.currentProjectId);
+            } catch (e) {
+                showToast(e.message, 'error');
+            }
+        });
+    }
+
+    // Chapter Selection Toolbar
+    const btnSelAll = document.getElementById('btn-select-all-chapters');
+    if (btnSelAll) {
+        btnSelAll.addEventListener('click', () => {
+            document.querySelectorAll('.chapter-select-cb').forEach(cb => cb.checked = true);
+            updateChapterSelectionState();
+        });
+    }
+
+    const btnSelNone = document.getElementById('btn-select-none-chapters');
+    if (btnSelNone) {
+        btnSelNone.addEventListener('click', () => {
+            document.querySelectorAll('.chapter-select-cb').forEach(cb => cb.checked = false);
+            updateChapterSelectionState();
+        });
+    }
+
+    const btnApplyRange = document.getElementById('btn-apply-range');
+    if (btnApplyRange) {
+        btnApplyRange.addEventListener('click', () => {
+            const input = document.getElementById('chapter-range-input').value.trim();
+            const match = input.match(/^(\d+)-(\d+)$/);
+            if (!match) {
+                showToast('Use format 1-5', 'warning');
+                return;
+            }
+            const start = parseInt(match[1], 10);
+            const end = parseInt(match[2], 10);
+            document.querySelectorAll('.chapter-select-cb').forEach(cb => {
+                const ch = parseInt(cb.dataset.ch, 10);
+                cb.checked = (ch >= start && ch <= end);
+            });
+            updateChapterSelectionState();
+        });
+    }
 }
 
 // ============================================================================
@@ -361,17 +445,19 @@ async function startPipeline() {
     }
 }
 
-async function stopPipeline() {
+async function pausePipeline() {
     if (!state.currentProjectId) return;
     
     try {
         const response = await fetch(`/api/projects/${state.currentProjectId}/stop`, { method: 'POST' });
         if (!response.ok) {
             const err = await response.json();
-            throw new Error(err.detail || 'Failed to stop pipeline');
+            throw new Error(err.detail || 'Failed to pause pipeline');
         }
-        showToast('Pipeline stopped', 'info');
-        fetchProjectDetails(state.currentProjectId); // Refresh status
+        showToast('Pipeline pausing...', 'info');
+        // The pipeline thread might take a moment to gracefully stop.
+        // Wait briefly before refreshing to ensure the UI reflects the PAUSED state.
+        setTimeout(() => fetchProjectDetails(state.currentProjectId), 1000);
     } catch (error) {
         showToast(error.message, 'error');
     }
@@ -458,6 +544,112 @@ function renderProjectDetails(project) {
             Status: ${coarseStatus.toUpperCase()} | Stage: ${project.status.replace('_', ' ').toUpperCase()}
         </span>
     `;
+
+    renderChapterGrid(project);
+}
+
+function renderChapterGrid(project) {
+    const grid = document.getElementById('chapter-grid');
+    if (!grid) return;
+    grid.innerHTML = '';
+
+    const total = project.total_chapters || 0;
+    const scripted = new Set(project.scripted_chapters || []);
+    const generated = new Set(project.generated_chapters || []);
+    const mastered = new Set(project.mastered_chapters || []);
+    const currentScript = project.current_script_chapter;
+    const currentGen = project.current_gen_chapter;
+    const selection = project.generation_chapter_selection ? new Set(project.generation_chapter_selection) : null;
+
+    for (let i = 1; i <= total; i++) {
+        const cell = document.createElement('div');
+        cell.className = 'chapter-cell';
+        cell.style.cssText = 'padding: 6px 10px; border-radius: 6px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); display: flex; align-items: center; justify-content: space-between; font-size: 0.85em;';
+
+        let statusText = '⬜ Pending';
+        let statusColor = '#aaa';
+
+        if (mastered.has(i)) {
+            statusText = '✅ Done';
+            statusColor = '#4caf50';
+        } else if (generated.has(i)) {
+            statusText = '🟣 Master';
+            statusColor = '#9c27b0';
+        } else if (currentGen === i) {
+            statusText = '🔵 Gen...';
+            statusColor = '#2196f3';
+        } else if (scripted.has(i)) {
+            statusText = '🟢 Scripted';
+            statusColor = '#8bc34a';
+        } else if (currentScript === i) {
+            statusText = '🟡 Script...';
+            statusColor = '#ffeb3b';
+        }
+
+        const isChecked = selection === null || selection.has(i);
+
+        cell.innerHTML = `
+            <div style="display: flex; align-items: center; gap: 6px;">
+                <input type="checkbox" class="chapter-select-cb" data-ch="${i}" ${isChecked ? 'checked' : ''}>
+                <span>Ch ${i}</span>
+            </div>
+            <span style="color: ${statusColor}; font-weight: bold; font-size: 0.8em;">${statusText}</span>
+        `;
+
+        const cb = cell.querySelector('.chapter-select-cb');
+        cb.addEventListener('change', updateChapterSelectionState);
+
+        grid.appendChild(cell);
+    }
+
+    const btnReqDeploy = document.getElementById('btn-request-deploy');
+    const btnResDeploy = document.getElementById('btn-resume-deploy');
+    if (project.status === 'deploy_paused') {
+        if (btnReqDeploy) btnReqDeploy.classList.add('hidden');
+        if (btnResDeploy) btnResDeploy.classList.remove('hidden');
+    } else if (project.running) {
+        if (btnReqDeploy) btnReqDeploy.classList.remove('hidden');
+        if (btnResDeploy) btnResDeploy.classList.add('hidden');
+    } else {
+        if (btnReqDeploy) btnReqDeploy.classList.add('hidden');
+        if (btnResDeploy) btnResDeploy.classList.add('hidden');
+    }
+}
+
+let _selectionDebounceTimer = null;
+
+function updateChapterSelectionState() {
+    if (!state.currentProjectId) return;
+    if (_selectionDebounceTimer) clearTimeout(_selectionDebounceTimer);
+
+    const cbs = document.querySelectorAll('.chapter-select-cb');
+    const selected = [];
+    let total = cbs.length;
+
+    cbs.forEach(cb => {
+        if (cb.checked) {
+            selected.push(parseInt(cb.dataset.ch, 10));
+        }
+    });
+
+    const selectionValue = selected.length === total ? null : selected;
+    const targetProjectId = state.currentProjectId;
+
+    _selectionDebounceTimer = setTimeout(async () => {
+        try {
+            const res = await fetch(`/api/projects/${targetProjectId}/set-selection`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ chapters: selectionValue })
+            });
+            if (!res.ok) {
+                console.error('Failed to update chapter selection (status ' + res.status + ')');
+                showToast('Failed to save chapter selection', 'error');
+            }
+        } catch (e) {
+            console.error('Failed to update selection', e);
+        }
+    }, 300);
 }
 
 // ============================================================================

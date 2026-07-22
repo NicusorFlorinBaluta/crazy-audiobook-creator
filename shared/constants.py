@@ -21,6 +21,9 @@ class PipelineStage(StrEnum):
     COMPLETE = "complete"
     ERROR = "error"
     PAUSED = "paused"
+    PAUSED_SCHEDULED = "paused_scheduled"
+    DEPLOY_PAUSED = "deploy_paused"
+    SELECTION_COMPLETE = "selection_complete"
 
 
 class ValidationStatus(StrEnum):

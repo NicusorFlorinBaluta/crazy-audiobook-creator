@@ -1,12 +1,11 @@
-"""Ubuntu Voice Server client — REST API client for the TTS server.
+"""Voice Server client — REST API client for the local TTS server.
 
-Communicates with the Ubuntu machine over the local network to:
+Communicates with the local Voice TTS server to:
   - Bootstrap character voices
   - Generate audio segments
   - Validate audio quality
   - Master chapter audio
   - Export M4B audiobooks
-  - Stream progress updates via WebSocket
 """
 
 from __future__ import annotations
@@ -36,22 +35,20 @@ from shared.models import (
 logger = logging.getLogger(__name__)
 
 
-class UbuntuClient:
-    """REST client for the Ubuntu Voice (TTS) server."""
+class VoiceClient:
+    """REST client for the local Voice (TTS) server."""
 
     def __init__(
         self,
-        host: str = "http://192.168.1.100:8100",
+        host: str = "http://127.0.0.1:8100",
         timeout: int = 30,
-        retries: int = 15,
-        retry_delay: int = 20,
-        reconnect_interval: int = 60,
+        retries: int = 5,
+        retry_delay: int = 2,
     ):
         self.host = host.rstrip("/")
         self.timeout = timeout
         self.retries = retries
         self.retry_delay = retry_delay
-        self.reconnect_interval = reconnect_interval
         self._client = httpx.Client(
             timeout=httpx.Timeout(timeout, connect=10.0),
             follow_redirects=True,
@@ -66,7 +63,7 @@ class UbuntuClient:
         data = self._get("/health")
         return VoiceHealthResponse(**data)
 
-    def wait_for_server(self, max_wait_seconds: int = 300) -> bool:
+    def wait_for_server(self, max_wait_seconds: int = 120) -> bool:
         """Wait for the Voice server to become available.
 
         Args:
@@ -92,7 +89,7 @@ class UbuntuClient:
                 elapsed,
                 max_wait_seconds,
             )
-            time.sleep(self.reconnect_interval)
+            time.sleep(self.retry_delay)
 
         logger.error("Voice server did not become available within %ds", max_wait_seconds)
         return False
@@ -102,17 +99,12 @@ class UbuntuClient:
     # ------------------------------------------------------------------
 
     def bootstrap_voices(self, request: BootstrapVoicesRequest) -> BootstrapVoicesResponse:
-        """Generate voice reference clips for all characters.
-
-        This calls the Voice Design mode of Qwen3-TTS to create a unique
-        voice for each character based on their text description.
-        """
+        """Generate voice reference clips for all characters."""
         logger.info(
             "Bootstrapping %d voices for project '%s'",
             len(request.characters),
             request.project_id,
         )
-        # Voice bootstrapping can take a while (especially on first boot) — use a longer timeout (1200s)
         data = self._post(
             "/voices/bootstrap",
             request.model_dump(),
@@ -130,18 +122,13 @@ class UbuntuClient:
         return GenerateLineResponse(**data)
 
     def generate_chapter(self, request: GenerateChapterRequest) -> GenerateChapterResponse:
-        """Generate audio for an entire chapter.
-
-        This is the primary generation endpoint. It generates all lines,
-        validates them, and handles retries automatically.
-        """
+        """Generate audio for an entire chapter."""
         logger.info(
             "Generating chapter %d (%d lines) for project '%s'",
             request.chapter_number,
             len(request.lines),
             request.project_id,
         )
-        # Chapter generation can take a very long time
         data = self._post(
             "/generate/chapter",
             request.model_dump(),
@@ -189,28 +176,6 @@ class UbuntuClient:
             timeout=600,
         )
         return ExportM4BResponse(**data)
-
-    def download_file(self, project_id: str, path: str, save_to: str) -> str:
-        """Download a file from the Voice server.
-
-        Args:
-            project_id: Project identifier.
-            path: Relative path within the project workspace.
-            save_to: Local file path to save the downloaded file.
-
-        Returns:
-            The local file path.
-        """
-        url = f"{self.host}/download/{project_id}/{path}"
-        logger.info("Downloading %s to %s", url, save_to)
-
-        with self._client.stream("GET", url) as response:
-            response.raise_for_status()
-            with open(save_to, "wb") as f:
-                for chunk in response.iter_bytes(chunk_size=8192):
-                    f.write(chunk)
-
-        return save_to
 
     # ------------------------------------------------------------------
     # Internal HTTP helpers
@@ -264,7 +229,6 @@ class UbuntuClient:
                 )
             except httpx.HTTPStatusError as e:
                 last_error = e
-                # Read response body for details if possible
                 try:
                     error_details = e.response.text
                 except Exception:
@@ -280,8 +244,7 @@ class UbuntuClient:
                     error_details,
                 )
                 if e.response.status_code in (401, 403, 404, 422):
-                    # Don't retry client errors, except 429 or 408 maybe
-                    raise UbuntuClientError(
+                    raise VoiceClientError(
                         f"{method} {path} failed: {e.response.status_code} {e.response.reason_phrase}\nDetails: {error_details}"
                     ) from e
             except httpx.ConnectError as e:
@@ -307,7 +270,7 @@ class UbuntuClient:
             if attempt < self.retries:
                 time.sleep(self.retry_delay)
 
-        raise UbuntuClientError(
+        raise VoiceClientError(
             f"{method} {path} failed after {self.retries} attempts: {last_error}"
         ) from last_error
 
@@ -315,12 +278,12 @@ class UbuntuClient:
         """Close the HTTP client."""
         self._client.close()
 
-    def __enter__(self) -> UbuntuClient:
+    def __enter__(self) -> VoiceClient:
         return self
 
     def __exit__(self, *args: Any) -> None:
         self.close()
 
 
-class UbuntuClientError(Exception):
-    """Raised when communication with the Ubuntu Voice server fails."""
+class VoiceClientError(Exception):
+    """Raised when communication with the Voice server fails."""

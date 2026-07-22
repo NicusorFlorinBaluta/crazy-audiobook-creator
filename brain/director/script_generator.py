@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 _PROMPT_DIR = Path(__file__).parent / "prompts"
 
-_SYSTEM_PROMPT = """You are an expert audiobook script annotator. Convert chapter text into a structured audiobook script.
+_SYSTEM_PROMPT = """You are a STRICT AUDIOBOOK SCRIPT METADATA ANNOTATOR. Your ONLY job is to assign the correct speaker, emotion, and reading speed to an array of pre-extracted text fragments.
 
 ## Context
 
@@ -40,20 +40,18 @@ _SYSTEM_PROMPT = """You are an expert audiobook script annotator. Convert chapte
 ### Previous Chapter Summary (for emotional continuity)
 {previous_summary}
 
-## Script Generation Task
-
-Convert the chapter text into a line-by-line script for text-to-speech.
+## Script Tagging Task
 
 ### Audio Direction Guidelines
 
 #### Speaker Attribution
-- Anything inside quotation marks is dialogue — identify the speaker from context.
-- Everything outside quotation marks is narrator.
+- Fragments inside quotation marks are dialogue — identify the speaker from context.
+- Fragments outside quotation marks are narrator.
 - Internal monologue (italics or clear thoughts) -> assign to the thinking character with emotion "internal, thoughtful".
 - If you can't determine the speaker, use "narrator".
 
 #### Emotion Mapping
-For each line, provide an emotion directive matching TTS capabilities:
+For each fragment, provide an emotion directive matching TTS capabilities:
 - Consider the SURROUNDING CONTEXT, not just the words themselves.
 - Neutral narration: 1.0 (default)
 - Happy/excited: 1.1-1.2
@@ -67,18 +65,6 @@ For each line, provide an emotion directive matching TTS capabilities:
 - Excited/panicked: 1.1-1.15
 - Contemplative/sad: 0.85-0.9
 
-#### Text Preservation (CRITICAL)
-- DO NOT skip, summarize, or alter any sentences from the source text. You must transcribe the chapter EXACTLY word-for-word.
-- Keep dialogue attributions ("he said", "she whispered"). Do not remove them, as they often contain important action beats.
-- Ensure 100% of the original text is preserved across the generated segments.
-- Preserve special punctuation (ellipses, em-dashes) as they affect TTS pacing.
-
-#### Segment Length
-- Keep segments between 1-4 sentences.
-- Never split mid-sentence.
-- Split long narration paragraphs at natural breathing points.
-- Each dialogue utterance is one segment (even if it's one word).
-
 ---
 ## Output Schema
 
@@ -90,9 +76,8 @@ CRITICAL REMINDER: You MUST output ONLY valid JSON matching the Output Schema be
   "chapter_summary": "1-2 sentence summary for continuity with next chapter",
   "lines": [
     {{
-      "line_id": "ch{chapter_number_padded}_001",
+      "id": 0,
       "speaker": "character_id",
-      "text": "The spoken text",
       "emotion": "descriptive emotion state",
       "speed": 1.0,
       "pause_before_ms": 0,
@@ -102,11 +87,13 @@ CRITICAL REMINDER: You MUST output ONLY valid JSON matching the Output Schema be
 }}
 """
 
-_USER_PROMPT = """## Source Chapter Text
+_USER_PROMPT = """## Source Text Fragments
 
-{chapter_text}
+{chapter_text_json}
 
-Convert the chapter text above into a line-by-line script matching the Output Schema JSON exactly. Do not output anything else.
+Provide the metadata (speaker, emotion, speed) for EACH fragment ID in the JSON array above. Ensure every single ID is accounted for in your output `lines` array.
+
+CRITICAL: YOU MUST ONLY OUTPUT A SINGLE VALID JSON OBJECT ENCLOSED IN {{}}. DO NOT ADD ANY CONVERSATIONAL TEXT BEFORE OR AFTER THE JSON.
 """
 
 
@@ -273,7 +260,12 @@ class ScriptGenerator:
             chapter_title=chapter_title,
             chapter_number_padded=f"{chapter_number:02d}",
         )
-        prompt = _USER_PROMPT.format(chapter_text=text)
+        # Pre-process text into static fragments
+        fragments = self._split_into_fragments(text)
+        fragment_dicts = [{"id": i, "text": f} for i, f in enumerate(fragments)]
+        chapter_text_json = json.dumps(fragment_dicts, indent=2)
+        
+        prompt = _USER_PROMPT.format(chapter_text_json=chapter_text_json)
 
         prompt_kb = (len(system_prompt) + len(prompt)) / 1024
         if prompt_kb > 80:
@@ -284,11 +276,11 @@ class ScriptGenerator:
             )
 
         logger.info(
-            "[ScriptGenerator] Ch%d '%s' → LLM | %.1f KB prompt | %d chars in registry",
+            "[ScriptGenerator] Ch%d '%s' → LLM | %.1f KB prompt | %d fragments",
             chapter_number,
             chapter_title[:40],
             prompt_kb,
-            len(char_summary),
+            len(fragments),
         )
 
         import time as _time
@@ -300,9 +292,9 @@ class ScriptGenerator:
         )
         elapsed = _time.time() - t0
 
-        result = self._parse_script_chapter(raw, chapter_number, chapter_title)
+        result = self._parse_script_chapter(raw, chapter_number, chapter_title, fragments)
         logger.info(
-            "[ScriptGenerator] Ch%d LLM done in %.1fs | %d lines parsed",
+            "[ScriptGenerator] Ch%d LLM done in %.1fs | %d lines generated",
             chapter_number,
             elapsed,
             len(result.lines),
@@ -446,36 +438,71 @@ class ScriptGenerator:
         return "\n".join(lines)
 
     @staticmethod
+    def _split_into_fragments(text: str) -> list[str]:
+        """Split text into an array of sentence and dialogue fragments."""
+        import re
+        paragraphs = [p.strip() for p in text.split('\n') if p.strip()]
+        fragments = []
+        for p in paragraphs:
+            # Split by quotes first to isolate dialogue blocks
+            quote_pattern = re.compile(r'([\"“”].*?[\"“”])')
+            parts = quote_pattern.split(p)
+            for part in parts:
+                if not part.strip():
+                    continue
+                is_quote = bool(re.match(r'^[\"“”].*[\"“”]$', part.strip()))
+                if is_quote:
+                    fragments.append(part.strip())
+                else:
+                    # Split narrative text into sentences
+                    pattern = re.compile(r'.*?(?:[.!?]+(?=\s|$)|$)', re.DOTALL)
+                    sentences = [match.group(0).strip() for match in pattern.finditer(part) if match.group(0).strip()]
+                    fragments.extend(sentences)
+        return fragments
+
+    @staticmethod
     def _parse_script_chapter(
         raw: dict,
         fallback_number: int,
         fallback_title: str,
+        fragments: list[str] = None,
     ) -> ScriptChapter:
-        """Parse LLM JSON output into a ScriptChapter."""
+        """Parse LLM JSON metadata output into a ScriptChapter using static fragments."""
         raw_lines = raw.get("lines", [])
         lines: list[ScriptLine] = []
-
-        for i, raw_line in enumerate(raw_lines, 1):
+        
+        fragments = fragments or []
+        metadata_map = {}
+        
+        for raw_line in raw_lines:
             if not isinstance(raw_line, dict):
                 continue
+            line_id_val = raw_line.get("id")
+            if line_id_val is not None:
+                try:
+                    metadata_map[int(line_id_val)] = raw_line
+                except (ValueError, TypeError):
+                    pass
 
-            line_id = raw_line.get(
-                "line_id",
-                f"ch{fallback_number:02d}_{i:03d}",
-            )
-            text = str(raw_line.get("text", "")).strip()
-            if not text:
-                continue
-
+        # Reconstruct exactly from static fragments to guarantee 100% text fidelity
+        for i, text in enumerate(fragments):
+            meta = metadata_map.get(i, {})
+            
+            # Safely parse speed which might come back as a string like "normal"
+            try:
+                speed = float(meta.get("speed", 1.0))
+            except (ValueError, TypeError):
+                speed = 1.0
+                
             lines.append(
                 ScriptLine(
-                    line_id=line_id,
-                    speaker=str(raw_line.get("speaker", "narrator")).lower(),
+                    line_id=f"ch{fallback_number:02d}_{i:03d}",
+                    speaker=str(meta.get("speaker", "narrator")).lower(),
                     text=text,
-                    emotion=str(raw_line.get("emotion", "neutral")),
-                    speed=float(raw_line.get("speed", 1.0)),
-                    pause_before_ms=int(raw_line.get("pause_before_ms", 0)),
-                    pause_after_ms=int(raw_line.get("pause_after_ms", 500)),
+                    emotion=str(meta.get("emotion", "neutral")),
+                    speed=speed,
+                    pause_before_ms=int(meta.get("pause_before_ms", 0) or 0),
+                    pause_after_ms=int(meta.get("pause_after_ms", 500) or 500),
                 )
             )
 

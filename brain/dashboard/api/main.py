@@ -313,16 +313,17 @@ async def start_pipeline(project_id: str):
 @app.post("/api/projects/{project_id}/stop")
 async def stop_pipeline(project_id: str):
     """Stop a running pipeline."""
-    if not pipeline:
+    if not pipeline or not job_queue:
         raise HTTPException(status_code=503, detail="Server not initialized")
         
-    # Signal the thread to stop gracefully
+    try:
+        job_queue.update_job(project_id, {"status": PipelineStage.PAUSED.value})
+    except Exception:
+        pass
+
     pipeline.stop(project_id)
-    
-    if project_id in running_tasks and not running_tasks[project_id].done():
-        pipeline.stop(project_id)
-        
     return {"status": "stopped", "project_id": project_id}
+
 
 @app.post("/api/projects/{project_id}/reset")
 async def reset_pipeline_stage(project_id: str, request: Request):
@@ -355,11 +356,17 @@ async def download_audiobook(project_id: str):
     """Download the final mastered audiobook."""
     m4b_path = Path(f"brain/projects/{project_id}/{project_id}.m4b")
     if not m4b_path.exists():
-        raise HTTPException(status_code=404, detail="Audiobook file not found")
+        # Check for partial M4B export if full M4B does not exist yet (sorted by modification time)
+        project_dir = Path(f"brain/projects/{project_id}")
+        partials = sorted(project_dir.glob("*.m4b"), key=lambda p: p.stat().st_mtime)
+        if partials:
+            m4b_path = partials[-1]
+        else:
+            raise HTTPException(status_code=404, detail="Audiobook file not found")
         
     return FileResponse(
         path=m4b_path,
-        filename=f"{project_id}.m4b",
+        filename=m4b_path.name,
         media_type="audio/mp4"
     )
 
@@ -378,6 +385,104 @@ async def get_pipeline_status(project_id: str):
         return state
     except KeyError:
         raise HTTPException(status_code=404, detail="Project not found")
+
+
+# ---------------------------------------------------------------------------
+# Feature Expansion Endpoints (Schedule, Metadata, Deploy, Selective)
+# ---------------------------------------------------------------------------
+
+
+@app.post("/api/schedule")
+async def update_schedule(request: Request):
+    """Update schedule config in brain/config.yaml."""
+    data = await request.json()
+    config_path = Path("brain/config.yaml")
+    cfg = {}
+    if config_path.exists():
+        with open(config_path, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+    cfg["schedule"] = data
+    with open(config_path, "w", encoding="utf-8") as f:
+        yaml.dump(cfg, f)
+    if pipeline:
+        pipeline.config = pipeline._load_config()
+    return {"status": "success", "schedule": data}
+
+
+@app.post("/api/projects/{project_id}/fetch-metadata")
+async def fetch_project_metadata(project_id: str):
+    """Fetch cover image and metadata from Google Books API."""
+    if not job_queue:
+        raise HTTPException(status_code=503, detail="Server not initialized")
+    project_dir = Path("brain/projects") / project_id
+    book_json = project_dir / "book.json"
+    if not book_json.exists():
+        raise HTTPException(status_code=404, detail="Project book.json not found")
+
+    import json
+    from brain.extractor.metadata_fetcher import MetadataFetcher
+    book_data = json.loads(book_json.read_text(encoding="utf-8"))
+    meta = book_data.get("metadata", {})
+    fetched = await asyncio.to_thread(MetadataFetcher.fetch, meta.get("title", ""), meta.get("author", ""))
+
+    cover_path = None
+    if fetched.cover_image_bytes:
+        cover_file = project_dir / "cover.jpg"
+        cover_file.write_bytes(fetched.cover_image_bytes)
+        cover_path = str(cover_file)
+        book_data["metadata"]["cover_image_path"] = cover_path
+
+    if fetched.description:
+        book_data["metadata"]["description"] = fetched.description
+
+    book_json.write_text(json.dumps(book_data, indent=2), encoding="utf-8")
+
+    return {
+        "status": "success",
+        "title": fetched.title,
+        "author": fetched.author,
+        "description": fetched.description,
+        "cover_path": cover_path,
+    }
+
+
+@app.post("/api/projects/{project_id}/request-deploy")
+async def request_deploy_pause(project_id: str):
+    """Request pipeline to park at next chapter boundary for safe deployment."""
+    if not job_queue:
+        raise HTTPException(status_code=503, detail="Server not initialized")
+    job_queue.update_job(project_id, {"deployment_requested": True})
+    return {"status": "success", "project_id": project_id, "deployment_requested": True}
+
+
+@app.post("/api/projects/{project_id}/resume-deploy")
+async def resume_from_deploy_pause(project_id: str):
+    """Resume pipeline from safe deployment parking point."""
+    if not job_queue:
+        raise HTTPException(status_code=503, detail="Server not initialized")
+    job_queue.update_job(project_id, {"deployment_requested": False})
+    return {"status": "success", "project_id": project_id, "deployment_requested": False}
+
+
+@app.post("/api/projects/{project_id}/set-selection")
+async def set_chapter_selection(project_id: str, request: Request):
+    """Set which chapters to generate in the next run."""
+    if not job_queue:
+        raise HTTPException(status_code=503, detail="Server not initialized")
+    data = await request.json()
+    selection = data.get("chapters")
+    job_queue.update_job(project_id, {"generation_chapter_selection": selection})
+    return {"status": "success", "project_id": project_id, "selection": selection}
+
+
+@app.post("/api/projects/{project_id}/export-partial")
+async def export_partial_m4b(project_id: str):
+    """Trigger a partial M4B export with all currently mastered chapters."""
+    if not pipeline:
+        raise HTTPException(status_code=503, detail="Server not initialized")
+    project_dir = Path("brain/projects") / project_id
+    await asyncio.to_thread(pipeline._run_export, project_id, project_dir, partial=True)
+    return {"status": "success", "project_id": project_id}
 
 
 # ---------------------------------------------------------------------------
