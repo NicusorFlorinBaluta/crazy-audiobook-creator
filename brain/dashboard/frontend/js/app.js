@@ -234,9 +234,15 @@ function setupEventListeners() {
 // Navigation
 // ============================================================================
 
+let detailPollTimer = null;
+
 function showProjectsView(isHashLoad = false) {
     if (!isHashLoad) {
         window.history.pushState(null, '', '#');
+    }
+    if (detailPollTimer) {
+        clearInterval(detailPollTimer);
+        detailPollTimer = null;
     }
     state.currentProjectId = null;
     els.viewDetail.classList.add('hidden');
@@ -256,6 +262,13 @@ async function showDetailView(projectId, isHashLoad = false) {
     document.querySelector('.tab[data-tab="tab-characters"]').click();
     
     await fetchProjectDetails(projectId);
+
+    if (detailPollTimer) clearInterval(detailPollTimer);
+    detailPollTimer = setInterval(() => {
+        if (state.currentProjectId) {
+            fetchProjectDetails(state.currentProjectId, true);
+        }
+    }, 2000);
 
     // Connect log console in background (non-blocking)
     if (window.LogConsole) {
@@ -285,7 +298,7 @@ async function fetchProjects() {
     }
 }
 
-async function fetchProjectDetails(projectId) {
+async function fetchProjectDetails(projectId, isPoll = false) {
     try {
         const response = await fetch(`/api/projects/${projectId}/status`);
         if (!response.ok) throw new Error('Failed to fetch project details');
@@ -295,20 +308,25 @@ async function fetchProjectDetails(projectId) {
         
         // Let pipeline.js and script-viewer.js update their parts
         if (window.PipelineManager) {
-            // Backend 'status' is actually the stage. Compute coarse status (running/error/paused/completed).
-            const stage = data.status;
-            const coarseStatus = ['error', 'paused', 'complete'].includes(stage) ? stage : 'running';
-            window.PipelineManager.updateTracker(stage, coarseStatus, data);
-            window.PipelineManager.toggleControls(stage, coarseStatus === 'running');
+            const stage = (data.status || '').toLowerCase();
+            const activeStages = ['extracting', 'scripting', 'bootstrapping', 'generating', 'validating', 'mastering', 'exporting'];
+            const isDoneStage = ['complete', 'completed', 'selection_complete', 'paused', 'error', 'deploy_paused'].includes(stage);
+            const isRunning = (data.running === true || activeStages.includes(stage)) && !isDoneStage;
+            const coarseStatus = isRunning ? 'running' : stage;
+            
+            window.PipelineManager.updateTracker(data.status, isRunning ? 'running' : coarseStatus, data);
+            window.PipelineManager.toggleControls(data.status, isRunning, data);
         }
         
-        if (window.ScriptViewer) {
+        if (window.ScriptViewer && !isPoll) {
             window.ScriptViewer.loadData(projectId);
         }
         
     } catch (error) {
-        showToast(`Error loading project details: ${error.message}`, 'error');
-        showProjectsView();
+        if (!isPoll) {
+            showToast(`Error loading project details: ${error.message}`, 'error');
+            showProjectsView();
+        }
     }
 }
 
@@ -433,15 +451,19 @@ async function startPipeline() {
     if (!state.currentProjectId) return;
     
     try {
+        if (window.PipelineManager) {
+            window.PipelineManager.toggleControls('generating', true);
+        }
         const response = await fetch(`/api/projects/${state.currentProjectId}/start`, { method: 'POST' });
         if (!response.ok) {
             const err = await response.json();
             throw new Error(err.detail || 'Failed to start pipeline');
         }
         showToast('Pipeline started', 'info');
-        fetchProjectDetails(state.currentProjectId); // Refresh status immediately
+        setTimeout(() => fetchProjectDetails(state.currentProjectId), 500);
     } catch (error) {
         showToast(error.message, 'error');
+        if (state.currentProjectId) fetchProjectDetails(state.currentProjectId);
     }
 }
 
@@ -568,10 +590,12 @@ function renderChapterGrid(project) {
 
         let statusText = '⬜ Pending';
         let statusColor = '#aaa';
+        let downloadBtn = '';
 
         if (mastered.has(i)) {
             statusText = '✅ Done';
             statusColor = '#4caf50';
+            downloadBtn = `<a href="/api/projects/${project.project_id}/download/chapter/${i}" target="_blank" title="Download Mastered Chapter WAV" style="color: #4caf50; text-decoration: none; font-size: 1.1em; margin-left: 6px;">⬇</a>`;
         } else if (generated.has(i)) {
             statusText = '🟣 Master';
             statusColor = '#9c27b0';
@@ -593,7 +617,10 @@ function renderChapterGrid(project) {
                 <input type="checkbox" class="chapter-select-cb" data-ch="${i}" ${isChecked ? 'checked' : ''}>
                 <span>Ch ${i}</span>
             </div>
-            <span style="color: ${statusColor}; font-weight: bold; font-size: 0.8em;">${statusText}</span>
+            <div style="display: flex; align-items: center;">
+                <span style="color: ${statusColor}; font-weight: bold; font-size: 0.8em;">${statusText}</span>
+                ${downloadBtn}
+            </div>
         `;
 
         const cb = cell.querySelector('.chapter-select-cb');

@@ -209,6 +209,14 @@ body {
     line-height: 1;
 }
 
+.brand-logo {
+    width: 42px;
+    height: 42px;
+    border-radius: 8px;
+    object-fit: cover;
+    box-shadow: 0 0 10px rgba(250, 180, 50, 0.3);
+}
+
 .brand-title {
     font-size: 1.1rem;
     font-weight: 700;
@@ -740,8 +748,8 @@ body {
     color: white;
 }
 
-.tab-content { display: none; animation: fadeIn var(--duration-normal) var(--ease-out); }
-.tab-content.active { display: block; }
+.tab-content { display: none !important; animation: fadeIn var(--duration-normal) var(--ease-out); }
+.tab-content.active { display: block !important; }
 
 /* ------------------------------------------------------------ */
 /* Character Grid                                                */

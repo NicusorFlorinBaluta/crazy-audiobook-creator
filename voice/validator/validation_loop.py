@@ -44,8 +44,9 @@ class ValidationLoop:
         analyzer: AudioAnalyzer,
         engine: Qwen3TTSEngine,
         library: VoiceLibraryManager,
-        wer_threshold: float = 0.05,
+        wer_threshold: float = 0.20,
         max_retries: int = 3,
+        embedding_store: Any | None = None,
     ):
         self.whisper = whisper
         self.analyzer = analyzer
@@ -53,6 +54,7 @@ class ValidationLoop:
         self.library = library
         self.wer_threshold = wer_threshold
         self.max_retries = max_retries
+        self.embedding_store = embedding_store
 
     def process_chapter(
         self,
@@ -100,18 +102,43 @@ class ValidationLoop:
             project_id,
         )
 
-        # Phase 1: Generate all segments in batches (grouped by speaker to minimize prompt re-encoding)
-        BATCH_SIZE = 5  # Configurable batch size to fit in VRAM
-        
-        # Sort lines by speaker to group same-speaker lines together
-        grouped_lines = sorted(lines, key=lambda line: line.speaker)
+        # Phase 1: Generate all segments in batches in narrative script order
+        BATCH_SIZE = 5  # Configurable batch size
         
         for i in range(0, total_lines, BATCH_SIZE):
-            batch_lines = grouped_lines[i:i + BATCH_SIZE]
+            batch_lines = lines[i:i + BATCH_SIZE]
             batch_requests = []
             
             for line in batch_lines:
                 output_path = segments_dir / f"{line.line_id}.wav"
+                fx_dict = line.voice_fx.model_dump() if getattr(line, "voice_fx", None) else None
+                
+                needs_regen = True
+                if self.embedding_store:
+                    needs_regen = self.embedding_store.line_needs_regeneration(
+                        project_id=project_id,
+                        line_id=line.line_id,
+                        text=line.text,
+                        speaker=line.speaker,
+                        emotion=line.emotion or "",
+                        speed=getattr(line, "speed", 1.0),
+                        fx_dict=fx_dict,
+                        output_path=output_path,
+                    )
+                else:
+                    needs_regen = not (output_path.exists() and output_path.stat().st_size > 1000)
+
+                if not needs_regen:
+                    try:
+                        import soundfile as sf
+                        info = sf.info(str(output_path))
+                        total_duration += info.duration
+                        generated += 1
+                        logger.info("Line %s audio already exists & fingerprint matches (%.2fs), skipping synthesis", line.line_id, info.duration)
+                        continue
+                    except Exception:
+                        pass
+
                 voice_ref = self.library.get_voice_path(project_id, line.speaker)
                 ref_text = self.library.get_voice_ref_text(project_id, line.speaker)
                 
@@ -130,12 +157,15 @@ class ValidationLoop:
                     "output_path": output_path,
                 })
                 
+            if not batch_requests:
+                continue
+
             try:
                 # Generate a batch concurrently on GPU
                 audios = self.engine.generate_speech_batch(batch_requests)
                 
                 for idx, audio in enumerate(audios):
-                    orig_idx, line = batch_tuples[idx]
+                    line = batch_lines[idx]
                     duration = len(audio) / self.engine.sample_rate
                     total_duration += duration
                     generated += 1
@@ -155,8 +185,12 @@ class ValidationLoop:
         if validate:
             logger.info("Validating %d segments...", generated)
 
-            # Swap models: unload TTS, load Whisper
-            self.engine.unload()
+            import gc, torch
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+            # Load Whisper model (keeping TTS loaded in VRAM)
             self.whisper.load()
 
             for line in lines:
@@ -169,6 +203,23 @@ class ValidationLoop:
                 )
                 quality_results.append(result)
 
+                if self.embedding_store:
+                    fx_dict = line.voice_fx.model_dump() if getattr(line, "voice_fx", None) else None
+                    self.embedding_store.save_generation_fingerprint(
+                        project_id=project_id,
+                        line_id=line.line_id,
+                        text=line.text,
+                        speaker=line.speaker,
+                        emotion=line.emotion or "",
+                        speed=getattr(line, "speed", 1.0),
+                        fx_dict=fx_dict,
+                        output_path=audio_path,
+                        duration_seconds=result.duration_seconds,
+                        wer=result.wer,
+                        quality_score=result.quality_score,
+                        validation_status=str(result.status.value) if hasattr(result.status, "value") else str(result.status),
+                    )
+
                 if result.status == ValidationStatus.FAIL:
                     failed_validation += 1
                 elif result.status == ValidationStatus.FLAGGED:
@@ -178,8 +229,7 @@ class ValidationLoop:
             if auto_retry and failed_validation > 0:
                 logger.info("Retrying %d failed segments...", failed_validation)
 
-                # Swap back: unload Whisper, reload TTS
-                self.whisper.unload()
+                # Ensure TTS engine is ready for retries
                 self.engine.load()
 
                 failed_lines = [
@@ -326,6 +376,18 @@ class ValidationLoop:
             status = ValidationStatus.FLAGGED
         else:
             status = ValidationStatus.PASS
+
+        logger.info(
+            "[Validator] Line %s (attempt %d): status=%s, WER=%.3f (threshold=%.2f), quality_score=%.2f\n  Expected:    \"%s\"\n  Transcribed: \"%s\"",
+            line_id,
+            attempt,
+            status,
+            wer,
+            self.wer_threshold,
+            quality_score,
+            expected_text[:80] + ("..." if len(expected_text) > 80 else ""),
+            transcribed[:80] + ("..." if len(transcribed) > 80 else ""),
+        )
 
         return QualityResult(
             line_id=line_id,

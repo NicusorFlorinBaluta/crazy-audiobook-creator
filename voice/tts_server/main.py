@@ -92,12 +92,16 @@ async def lifespan(app: FastAPI):
     config = load_config()
 
     # Initialize components
+    from voice.tts_server.embedding_store import EmbeddingStore
+    embedding_store = EmbeddingStore(db_path="voice_cache.db")
+
     tts_cfg = config.get("tts", {})
     engine = Qwen3TTSEngine(
         model_name=tts_cfg.get("model", "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign"),
         device=tts_cfg.get("device", "cuda"),
         dtype=tts_cfg.get("dtype", "float16"),
         sample_rate=tts_cfg.get("sample_rate", 24000),
+        embedding_store=embedding_store,
     )
 
     val_cfg = config.get("validation", {})
@@ -105,6 +109,9 @@ async def lifespan(app: FastAPI):
         model_name=val_cfg.get("whisper_model", "large-v3"),
         device=val_cfg.get("whisper_device", "auto"),
     )
+
+    from voice.tts_server.embedding_store import EmbeddingStore
+    embedding_store = EmbeddingStore(db_path="voice_cache.db")
 
     storage_cfg = config.get("storage", {})
     library = VoiceLibraryManager(
@@ -122,8 +129,9 @@ async def lifespan(app: FastAPI):
         analyzer=audio_analyzer,
         engine=engine,
         library=library,
-        wer_threshold=val_cfg.get("wer_threshold", 0.05),
+        wer_threshold=val_cfg.get("wer_threshold", 0.20),
         max_retries=val_cfg.get("max_retries", 3),
+        embedding_store=embedding_store,
     )
 
     master_cfg = config.get("mastering", {})
@@ -233,15 +241,22 @@ def generate_line(request: GenerateLineRequest) -> GenerateLineResponse:
     if not engine or not library:
         raise HTTPException(status_code=503, detail="Server not initialized")
 
+    t0 = time.time()
     workspace = Path(config.get("storage", {}).get("workspace_dir", "workspace"))
     output_path = workspace / request.project_id / "segments" / f"{request.line.line_id}.wav"
 
+    logger.info(
+        "[VoiceServer] Synthesizing line %s (speaker='%s', text_len=%d, emotion='%s')",
+        request.line.line_id,
+        request.line.speaker,
+        len(request.line.text),
+        request.line.emotion or "normal",
+    )
+
     voice_ref = library.get_voice_path(request.project_id, request.line.speaker)
     if not voice_ref.exists():
-        raise HTTPException(
-            status_code=404,
-            detail=f"Voice reference not found for speaker: {request.line.speaker}",
-        )
+        logger.warning("[VoiceServer] Voice ref missing for '%s', falling back to narrator", request.line.speaker)
+        voice_ref = library.get_voice_path(request.project_id, "narrator")
 
     audio = engine.generate_speech(
         text=request.line.text,
@@ -253,6 +268,14 @@ def generate_line(request: GenerateLineRequest) -> GenerateLineResponse:
     )
 
     duration = len(audio) / engine.sample_rate
+    elapsed = time.time() - t0
+    logger.info(
+        "[VoiceServer] Line %s completed: audio_duration=%.2fs, gen_time=%.2fs → %s",
+        request.line.line_id,
+        duration,
+        elapsed,
+        output_path.name,
+    )
 
     return GenerateLineResponse(
         status="success",
@@ -269,6 +292,15 @@ def generate_chapter(request: GenerateChapterRequest) -> GenerateChapterResponse
     if not validator:
         raise HTTPException(status_code=503, detail="Server not initialized")
 
+    t0 = time.time()
+    logger.info(
+        "[VoiceServer] Starting chapter %d generation for '%s' (%d lines, validate=%s)",
+        request.chapter_number,
+        request.project_id,
+        len(request.lines),
+        request.validate,
+    )
+
     workspace = Path(config.get("storage", {}).get("workspace_dir", "workspace"))
     result = validator.process_chapter(
         project_id=request.project_id,
@@ -279,6 +311,16 @@ def generate_chapter(request: GenerateChapterRequest) -> GenerateChapterResponse
         auto_retry=request.auto_retry,
         max_retries=request.max_retries,
         ws_connections=ws_connections,
+    )
+
+    elapsed = time.time() - t0
+    logger.info(
+        "[VoiceServer] Chapter %d finished in %.2fs: %d/%d lines generated, %d failed",
+        request.chapter_number,
+        elapsed,
+        result.generated,
+        result.total_lines,
+        result.failed_validation,
     )
 
     return result

@@ -34,6 +34,16 @@ from shared.constants import PipelineStage
 
 logger = logging.getLogger(__name__)
 
+class AsyncioConnectionResetFilter(logging.Filter):
+    """Filter out benign Windows asyncio socket connection reset errors."""
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        if "_call_connection_lost" in msg or "10054" in msg:
+            return False
+        return True
+
+logging.getLogger("asyncio").addFilter(AsyncioConnectionResetFilter())
+
 # Global state
 pipeline: Pipeline | None = None
 job_queue: JobQueue | None = None
@@ -83,6 +93,15 @@ class ProjectLogHandler(logging.Handler):
             if pid not in _project_logs:
                 _project_logs[pid] = collections.deque(maxlen=500)
             _project_logs[pid].append(line)
+
+            # Append to disk log file so logs survive server restarts
+            try:
+                log_file = Path("brain/projects") / pid / "pipeline.log"
+                log_file.parent.mkdir(parents=True, exist_ok=True)
+                with open(log_file, "a", encoding="utf-8") as f:
+                    f.write(line + "\n")
+            except Exception:
+                pass
 
             # Fan out to SSE subscribers — MUST be thread-safe because
             # the pipeline runs in a thread-pool executor, not the event loop.
@@ -138,6 +157,7 @@ async def lifespan(app: FastAPI):
     watchdog = ServiceWatchdog(check_interval_seconds=60)
     watchdog.start()
 
+    logging.getLogger().setLevel(logging.INFO)
     logger.info("Brain Dashboard starting...")
 
     yield
@@ -219,8 +239,13 @@ async def create_project(
     try:
         content = await file.read()
         temp_path.write_bytes(content)
+        logger.info("[DashboardAPI] Uploaded EPUB '%s' (%d bytes) for project creation", file.filename, len(content))
 
         status = pipeline.create_project(str(temp_path))
+        logger.info("[DashboardAPI] Created project '%s' (%d chapters detected)", status.project_id, status.total_chapters)
+
+        # Automatically fetch metadata and artwork in background
+        asyncio.create_task(asyncio.to_thread(_auto_fetch_metadata_sync, status.project_id))
 
         return {
             "project_id": status.project_id,
@@ -231,7 +256,7 @@ async def create_project(
         }
 
     except Exception as e:
-        logger.error("Failed to create project: %s", e)
+        logger.error("[DashboardAPI] Failed to create project from '%s': %s", file.filename, e)
         raise HTTPException(status_code=400, detail=str(e))
 
     finally:
@@ -270,11 +295,14 @@ async def delete_project(project_id: str):
 @app.post("/api/projects/{project_id}/start")
 async def start_pipeline(project_id: str):
     """Start the pipeline for a project."""
-    if not pipeline:
+    if not pipeline or not job_queue:
         raise HTTPException(status_code=503, detail="Server not initialized")
 
     if project_id in running_tasks and not running_tasks[project_id].done():
         raise HTTPException(status_code=409, detail="Pipeline already running")
+
+    # Clear old deployment request flag and set running=True immediately
+    job_queue.update_job(project_id, {"deployment_requested": False, "running": True})
 
     # Clear old logs for this project on a fresh start
     _project_logs[project_id] = collections.deque(maxlen=500)
@@ -356,9 +384,13 @@ async def download_audiobook(project_id: str):
     """Download the final mastered audiobook."""
     m4b_path = Path(f"brain/projects/{project_id}/{project_id}.m4b")
     if not m4b_path.exists():
-        # Check for partial M4B export if full M4B does not exist yet (sorted by modification time)
+        m4b_path = Path(f"workspace/{project_id}/output/{project_id}.m4b")
+    if not m4b_path.exists():
         project_dir = Path(f"brain/projects/{project_id}")
         partials = sorted(project_dir.glob("*.m4b"), key=lambda p: p.stat().st_mtime)
+        if not partials:
+            project_dir_ws = Path(f"workspace/{project_id}")
+            partials = sorted(project_dir_ws.glob("**/*.m4b"), key=lambda p: p.stat().st_mtime)
         if partials:
             m4b_path = partials[-1]
         else:
@@ -368,6 +400,21 @@ async def download_audiobook(project_id: str):
         path=m4b_path,
         filename=m4b_path.name,
         media_type="audio/mp4"
+    )
+
+
+@app.get("/api/projects/{project_id}/download/chapter/{chapter_num}")
+async def download_chapter_audio(project_id: str, chapter_num: int):
+    """Download the mastered WAV file for a specific chapter."""
+    ch_file = Path(f"workspace/{project_id}/chapters/chapter_{chapter_num:03d}.wav")
+    if not ch_file.exists():
+        ch_file = Path(f"brain/projects/{project_id}/chapters/chapter_{chapter_num:03d}.wav")
+    if not ch_file.exists():
+        raise HTTPException(status_code=404, detail=f"Chapter {chapter_num} mastered audio not found")
+    return FileResponse(
+        path=ch_file,
+        filename=f"{project_id}_chapter_{chapter_num:03d}.wav",
+        media_type="audio/wav"
     )
 
 
@@ -407,6 +454,33 @@ async def update_schedule(request: Request):
     if pipeline:
         pipeline.config = pipeline._load_config()
     return {"status": "success", "schedule": data}
+
+
+def _auto_fetch_metadata_sync(project_id: str) -> None:
+    """Helper to automatically fetch artwork and description in background."""
+    try:
+        project_dir = Path("brain/projects") / project_id
+        book_json = project_dir / "book.json"
+        if not book_json.exists():
+            return
+        import json
+        from brain.extractor.metadata_fetcher import MetadataFetcher
+        book_data = json.loads(book_json.read_text(encoding="utf-8"))
+        meta = book_data.get("metadata", {})
+        fetched = MetadataFetcher.fetch(meta.get("title", ""), meta.get("author", ""))
+
+        if fetched.cover_image_bytes:
+            cover_file = project_dir / "cover.jpg"
+            cover_file.write_bytes(fetched.cover_image_bytes)
+            book_data["metadata"]["cover_image_path"] = str(cover_file)
+
+        if fetched.description:
+            book_data["metadata"]["description"] = fetched.description
+
+        book_json.write_text(json.dumps(book_data, indent=2), encoding="utf-8")
+        logger.info("Auto-fetched artwork/metadata for project %s", project_id)
+    except Exception as e:
+        logger.warning("Auto metadata fetch failed for %s: %s", project_id, e)
 
 
 @app.post("/api/projects/{project_id}/fetch-metadata")
@@ -494,6 +568,17 @@ async def export_partial_m4b(project_id: str):
 async def get_log_history(project_id: str):
     """Return all buffered log lines for a project (up to last 500)."""
     lines = list(_project_logs.get(project_id, []))
+    if not lines:
+        log_file = Path("brain/projects") / project_id / "pipeline.log"
+        if log_file.exists():
+            try:
+                with open(log_file, "r", encoding="utf-8") as f:
+                    all_lines = [line.rstrip() for line in f if line.strip()]
+                    lines = all_lines[-500:]
+                    # Hydrate RAM buffer
+                    _project_logs[project_id] = collections.deque(lines, maxlen=500)
+            except Exception:
+                pass
     return {"project_id": project_id, "lines": lines}
 
 

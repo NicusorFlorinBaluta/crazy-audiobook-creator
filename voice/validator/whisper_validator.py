@@ -70,7 +70,7 @@ class WhisperValidator:
                 if device == "auto":
                     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-                logger.info("faster_whisper not found, falling back to openai-whisper...")
+                logger.info("faster_whisper not found, using openai-whisper on %s...", device)
                 self._model = whisper.load_model(self.model_name, device=device)
                 self._backend = "openai_whisper"
 
@@ -109,18 +109,22 @@ class WhisperValidator:
         if not self._is_loaded:
             self.load()
 
-        if getattr(self, "_backend", "faster_whisper") == "openai_whisper":
-            result = self._model.transcribe(audio_file, language="en")
-            return result.get("text", "").strip()
-        else:
-            segments, info = self._model.transcribe(
-                audio_file,
-                language="en",
-                beam_size=5,
-                vad_filter=True,
-            )
-            text = " ".join(segment.text for segment in segments)
-            return text.strip()
+        try:
+            if getattr(self, "_backend", "faster_whisper") == "openai_whisper":
+                result = self._model.transcribe(audio_file, language="en")
+                return result.get("text", "").strip()
+            else:
+                segments, info = self._model.transcribe(
+                    audio_file,
+                    language="en",
+                    beam_size=5,
+                    vad_filter=True,
+                )
+                text = " ".join(segment.text for segment in segments)
+                return text.strip()
+        except Exception as e:
+            logger.warning("[WhisperValidator] STT transcription failed for '%s': %s", audio_file, e)
+            return ""
 
     def calculate_wer(
         self,
@@ -146,25 +150,72 @@ class WhisperValidator:
             import jiwer
             wer = jiwer.wer(reference, hypothesis)
             return min(wer, 1.0)  # Cap at 1.0
+        except ImportError:
+            ref_words = reference.split()
+            hyp_words = hypothesis.split()
+            if not ref_words:
+                return 0.0 if not hyp_words else 1.0
+            d = [[0] * (len(hyp_words) + 1) for _ in range(len(ref_words) + 1)]
+            for i in range(len(ref_words) + 1):
+                d[i][0] = i
+            for j in range(len(hyp_words) + 1):
+                d[0][j] = j
+            for i in range(1, len(ref_words) + 1):
+                for j in range(1, len(hyp_words) + 1):
+                    cost = 0 if ref_words[i - 1] == hyp_words[j - 1] else 1
+                    d[i][j] = min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + cost)
+            return min(d[len(ref_words)][len(hyp_words)] / len(ref_words), 1.0)
         except Exception as e:
             logger.error("WER calculation failed: %s", e)
             return 1.0  # Assume worst case
 
     @staticmethod
     def _normalize_text(text: str) -> str:
-        """Normalize text for WER comparison.
+        """Fully generic text normalizer for WER calculation across any book.
 
-        - Lowercase
-        - Remove punctuation
-        - Expand common numbers
-        - Collapse whitespace
+        Handles:
+          - OpenAI EnglishTextNormalizer (spelling variants, contractions, symbols, abbreviations)
+          - Dynamic cardinal & ordinal number expansion via num2words (e.g. 1st->first, 12->twelve, 1999->one thousand...)
+          - Punctuation stripping & whitespace collapsing
         """
-        text = text.lower()
+        if not text:
+            return ""
 
-        # Remove punctuation (keep apostrophes for contractions)
-        text = re.sub(r"[^\w\s']", " ", text)
+        # Step 1: Use OpenAI Whisper's official English normalizer if available
+        try:
+            from whisper.normalizers import EnglishTextNormalizer
+            if not hasattr(WhisperValidator, "_english_normalizer"):
+                WhisperValidator._english_normalizer = EnglishTextNormalizer()
+            text = WhisperValidator._english_normalizer(text)
+        except Exception:
+            text = text.lower()
 
-        # Collapse whitespace
+        # Step 2: Dynamically convert any remaining numbers/ordinals to words
+        try:
+            import num2words
+
+            def replace_ordinal(match):
+                num_str, suffix = match.group(1), match.group(2)
+                try:
+                    return " " + num2words.num2words(int(num_str), to="ordinal") + " "
+                except Exception:
+                    return match.group(0)
+
+            def replace_cardinal(match):
+                try:
+                    return " " + num2words.num2words(int(match.group(0))) + " "
+                except Exception:
+                    return match.group(0)
+
+            # Match ordinals first (e.g., 21st, 100th)
+            text = re.sub(r"\b(\d+)(st|nd|rd|th)\b", replace_ordinal, text, flags=re.IGNORECASE)
+            # Match cardinal numbers (e.g., 42, 1000)
+            text = re.sub(r"\b\d+\b", replace_cardinal, text)
+        except ImportError:
+            pass
+
+        # Step 3: Remove punctuation and collapse whitespace
+        text = re.sub(r"[^\w\s]", " ", text)
         text = re.sub(r"\s+", " ", text).strip()
 
         return text

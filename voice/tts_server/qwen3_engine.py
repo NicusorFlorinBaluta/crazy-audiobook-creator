@@ -33,12 +33,14 @@ class Qwen3TTSEngine:
         device: str = "cuda",
         dtype: str = "float16",
         sample_rate: int = 24000,
+        embedding_store: Any | None = None,
     ):
         self.model_name = model_name
         self.device = device
         self.dtype = dtype
         self.sample_rate = sample_rate
         self.fx = AudioPostProcessor()
+        self.embedding_store = embedding_store
 
         self._model = None
         self._processor = None
@@ -198,10 +200,28 @@ class Qwen3TTSEngine:
         # Build instruction from emotion and speed
         instruction = self._build_instruction(emotion_instruction, speed)
         
-        # Prepare the reference audio with pitch FX if requested
+        # Prepare the reference audio with pitch FX if requested (with persistent DB caching)
         fx_reference_path = None
         if self.fx and voice_fx and not voice_fx.is_identity():
-            fx_reference_path = self.fx.prepare_prompt_audio(str(voice_reference_path), voice_fx)
+            fx_dict = voice_fx.model_dump()
+            cached_fx_path = None
+            if self.embedding_store:
+                cached_fx_path = self.embedding_store.get_fx_prompt(voice_reference_path, fx_dict)
+
+            if cached_fx_path and cached_fx_path.exists():
+                fx_reference_path = cached_fx_path
+            else:
+                if not hasattr(self, "_fx_prompt_cache"):
+                    self._fx_prompt_cache = {}
+                cache_key = (str(voice_reference_path), str(fx_dict))
+                if cache_key in self._fx_prompt_cache and Path(self._fx_prompt_cache[cache_key]).exists():
+                    fx_reference_path = Path(self._fx_prompt_cache[cache_key])
+                else:
+                    fx_reference_path = self.fx.prepare_prompt_audio(str(voice_reference_path), voice_fx)
+                    if fx_reference_path:
+                        self._fx_prompt_cache[cache_key] = str(fx_reference_path)
+                        if self.embedding_store:
+                            self.embedding_store.save_fx_prompt(voice_reference_path, fx_dict, fx_reference_path)
 
         audio = self._generate(
             text=text,
@@ -209,9 +229,6 @@ class Qwen3TTSEngine:
             voice_reference=str(fx_reference_path) if fx_reference_path else str(voice_reference_path),
             ref_text=ref_text,
         )
-
-        if fx_reference_path and hasattr(fx_reference_path, "unlink"):
-            fx_reference_path.unlink(missing_ok=True)
 
         # Apply post-processing (speed, tone, normalization)
         if self.fx and voice_fx and not voice_fx.is_identity():

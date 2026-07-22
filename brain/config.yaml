@@ -5,7 +5,7 @@
 # --- Ollama LLM Settings ---
 ollama:
   host: "http://localhost:11434"
-  model: "deepseek-r1:32b"
+  model: "qwen2.5:7b"
   temperature_pass1: 0.3           # Lower = more consistent character analysis
   temperature_pass2: 0.4           # Slightly higher for creative emotion descriptions
   top_p: 0.9
@@ -54,8 +54,8 @@ script:
   group_minor_characters: true
 
   # Chunking for long chapters
-  chunk_size_words: 5000
-  chunk_overlap_words: 500
+  chunk_size_words: 600
+  chunk_overlap_words: 150
 
 # --- Web Dashboard ---
 dashboard:
@@ -78,7 +78,7 @@ pipeline:
 
   # State persistence
   state_db: "pipeline_state.db"
-  checkpoint_frequency: 10          # Save state every N lines
+  checkpoint_frequency: 5           # Save state every N lines
 
   # Generation batching
   batch_mode: "chapter"             # "chapter" | "line"

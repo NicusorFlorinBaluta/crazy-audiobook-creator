@@ -1,45 +1,38 @@
-"""Silent desktop launcher for Crazy Audiobook Creator."""
-import os
-import sys
 import subprocess
 import time
 import webbrowser
-from pathlib import Path
+import sys
+import os
 
 def main():
-    project_root = Path(__file__).parent.resolve()
-    os.chdir(project_root)
-
-    # Use current python executable or venv
-    venv_py = project_root / "venv" / "Scripts" / "python.exe"
-    python_exe = str(venv_py) if venv_py.exists() else sys.executable
-
-    cmd = [python_exe, "-m", "uvicorn", "brain.dashboard.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    # Base directory of script
+    base_dir = os.path.dirname(os.path.abspath(__file__))
     
-    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    proc = subprocess.Popen(cmd, cwd=str(project_root), creationflags=creationflags)
+    # 8.3 Short path Python executable to avoid ROCm spaces path bug
+    python_exe = r"E:\PYTORC~1\my_venv\Scripts\python.exe"
+    if not os.path.exists(python_exe):
+        python_exe = sys.executable
 
-    # Poll for server readiness before opening browser
-    import urllib.request
-    max_wait_seconds = 15
-    start = time.time()
-    server_ready = False
+    cmd = [
+        python_exe,
+        "-m", "uvicorn",
+        "brain.dashboard.api.main:app",
+        "--host", "127.0.0.1",
+        "--port", "8000"
+    ]
+    
+    # Launch uvicorn silently without creating a console window on Windows
+    kwargs = {}
+    if os.name == 'nt':
+        kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
 
-    while time.time() - start < max_wait_seconds:
-        if proc.poll() is not None:
-            # Process exited early
-            break
-        try:
-            with urllib.request.urlopen("http://localhost:8000/api/projects", timeout=1) as resp:
-                if resp.status == 200:
-                    server_ready = True
-                    break
-        except Exception:
-            pass
-        time.sleep(0.5)
+    subprocess.Popen(cmd, cwd=base_dir, **kwargs)
+    
+    # Wait 2 seconds for FastAPI server startup
+    time.sleep(2)
+    
+    # Open default browser to localhost
+    webbrowser.open("http://127.0.0.1:8000")
 
-    if server_ready or proc.poll() is None:
-        webbrowser.open("http://localhost:8000")
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

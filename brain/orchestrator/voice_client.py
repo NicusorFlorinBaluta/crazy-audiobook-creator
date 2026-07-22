@@ -41,8 +41,8 @@ class VoiceClient:
     def __init__(
         self,
         host: str = "http://127.0.0.1:8100",
-        timeout: int = 30,
-        retries: int = 5,
+        timeout: int = 3600,
+        retries: int = 3,
         retry_delay: int = 2,
     ):
         self.host = host.rstrip("/")
@@ -50,7 +50,7 @@ class VoiceClient:
         self.retries = retries
         self.retry_delay = retry_delay
         self._client = httpx.Client(
-            timeout=httpx.Timeout(timeout, connect=10.0),
+            timeout=httpx.Timeout(float(timeout), connect=10.0),
             follow_redirects=True,
         )
 
@@ -205,8 +205,12 @@ class VoiceClient:
         url = f"{self.host}{path}"
         effective_timeout = timeout or self.timeout
         last_error: Exception | None = None
+        req_size = len(str(json_data)) if json_data else 0
+
+        logger.info("[VoiceClient] Requesting %s %s (timeout=%ss, payload=%d bytes)", method, path, effective_timeout, req_size)
 
         for attempt in range(1, self.retries + 1):
+            t0 = time.time()
             try:
                 response = self._client.request(
                     method,
@@ -215,6 +219,8 @@ class VoiceClient:
                     timeout=effective_timeout,
                 )
                 response.raise_for_status()
+                elapsed = time.time() - t0
+                logger.info("[VoiceClient] %s %s -> 200 OK (%.2fs)", method, path, elapsed)
                 return response.json()
 
             except httpx.TimeoutException as e:
