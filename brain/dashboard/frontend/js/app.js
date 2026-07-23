@@ -623,6 +623,10 @@ function renderChapterGrid(project) {
         let statusColor = '#94a3b8';
         let downloadBtn = '';
 
+        const stageLower = (project.stage || project.status || '').toLowerCase();
+        const isGeneratingStage = stageLower.includes('gen');
+        const isScriptingStage = stageLower.includes('script');
+
         if (mastered.has(i)) {
             statusText = '✅ Done';
             statusBg = 'rgba(16, 185, 129, 0.15)';
@@ -634,7 +638,7 @@ function renderChapterGrid(project) {
             statusBg = 'rgba(168, 85, 247, 0.15)';
             statusColor = '#c084fc';
             pct = 100;
-        } else if (currentGen === i) {
+        } else if (isGeneratingStage && currentGen === i) {
             statusText = `🔵 Gen (${genLines}/${totalLines})`;
             statusBg = 'rgba(59, 130, 246, 0.15)';
             statusColor = '#60a5fa';
@@ -642,7 +646,7 @@ function renderChapterGrid(project) {
             statusText = `🟢 Scripted (${totalLines}l)`;
             statusBg = 'rgba(132, 204, 22, 0.15)';
             statusColor = '#a3e635';
-        } else if (currentScript === i) {
+        } else if (isScriptingStage && (currentScript === i || (!currentScript && i === (scripted.size + 1)))) {
             statusText = '🟡 Scripting...';
             statusBg = 'rgba(234, 179, 8, 0.15)';
             statusColor = '#facc15';
