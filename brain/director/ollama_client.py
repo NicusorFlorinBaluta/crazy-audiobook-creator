@@ -105,6 +105,15 @@ class OllamaClient:
                     json=payload,
                     timeout=httpx.Timeout(self.timeout),
                 ) as response:
+                    if response.status_code == 404:
+                        # Model not found on Ollama server — auto-fallback to available model
+                        resolved = self._auto_resolve_model()
+                        if resolved and resolved != self.model:
+                            logger.warning("[Ollama] Model '%s' return 404. Auto-switching to installed model '%s'", payload["model"], resolved)
+                            self.model = resolved
+                            payload["model"] = resolved
+                            # Retry immediately with resolved model
+                            continue
                     response.raise_for_status()
                     logger.info("[Ollama] ← HTTP 200 received, streaming tokens...")
 
@@ -306,6 +315,20 @@ class OllamaClient:
         except Exception as e:
             logger.error("Ollama health check failed: %s", e)
             return False
+
+    def _auto_resolve_model(self) -> str | None:
+        """Find an installed model on the local Ollama instance if requested model 404s."""
+        try:
+            response = self._client.get(f"{self.host}/api/tags", timeout=5.0)
+            if response.status_code == 200:
+                data = response.json()
+                models = [m.get("name", "") for m in data.get("models", []) if m.get("name")]
+                if models:
+                    logger.info("[Ollama] Discovered installed models: %s", models)
+                    return models[0]  # Use first installed model (e.g. deepseek-r1:32b)
+        except Exception as e:
+            logger.warning("[Ollama] Failed to auto-resolve installed models: %s", e)
+        return None
 
     def close(self) -> None:
         """Close the HTTP client."""
