@@ -141,10 +141,13 @@ class ValidationLoop:
 
                 voice_ref = self.library.get_voice_path(project_id, line.speaker)
                 ref_text = self.library.get_voice_ref_text(project_id, line.speaker)
-                
+
                 if not voice_ref.exists():
-                    logger.warning("No voice reference for '%s', using narrator", line.speaker)
+                    logger.warning("No voice reference for '%s', using narrator reference with Full ICL", line.speaker)
                     voice_ref = self.library.get_voice_path(project_id, "narrator")
+                    ref_text = self.library.get_voice_ref_text(project_id, "narrator")
+
+                if not ref_text:
                     ref_text = self.library.get_voice_ref_text(project_id, "narrator")
                     
                 batch_requests.append({

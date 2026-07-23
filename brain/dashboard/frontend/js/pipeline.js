@@ -86,14 +86,17 @@ window.PipelineManager = (() => {
                         } else if (stage === 'BOOTSTRAPPING') {
                             pct = data.bootstrapping_completed ? 100 : 25;
                         } else if (stage === 'GENERATING' && totalCh > 0) {
-                            const doneCount = data.completed_gen_chapters ? data.completed_gen_chapters.length : 0;
-                            pct = ((doneCount + (doneCount < totalCh ? 0.5 : 0)) / totalCh) * 100;
+                            const genSet = new Set(data.generated_chapters || []);
+                            const curCh = data.current_gen_chapter || 1;
+                            const curDetail = data.chapter_details ? data.chapter_details.find(d => d.number === curCh) : null;
+                            const curPct = curDetail ? (curDetail.progress_percent / 100) : 0;
+                            pct = ((genSet.size + curPct) / totalCh) * 100;
                         } else if (stage === 'VALIDATING' && totalCh > 0) {
-                            const doneCount = data.completed_gen_chapters ? data.completed_gen_chapters.length : 0;
-                            pct = ((doneCount + (doneCount < totalCh ? 0.5 : 0)) / totalCh) * 100;
+                            const genSet = new Set(data.generated_chapters || []);
+                            pct = (genSet.size / totalCh) * 100;
                         } else if (stage === 'MASTERING' && totalCh > 0) {
-                            const doneCount = data.completed_master_chapters ? data.completed_master_chapters.length : 0;
-                            pct = (doneCount / totalCh) * 100;
+                            const masterSet = new Set(data.mastered_chapters || []);
+                            pct = (masterSet.size / totalCh) * 100;
                         } else if (stage === 'EXPORTING') {
                             pct = 50; // coarse
                         }

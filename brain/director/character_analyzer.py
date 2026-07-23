@@ -37,6 +37,11 @@ def _load_prompt(name: str) -> str:
 # Inline fallback prompt if file doesn't exist yet
 _SYSTEM_PROMPT = """You are an expert audiobook director and strict data extraction system. Analyze book text and extract all characters and their voice mappings.
 
+### Character Extraction Guidelines
+- CRITICAL: ONLY extract characters who ACTUALLY SPEAK SPOKEN DIALOGUE in quotation marks ("...").
+- Do NOT extract personified locations, islands, ships, animals, or non-speaking entities (e.g. islands like Vathi/Patji, ships, inanimate objects, or creatures that never speak dialogue).
+- If an entity is mentioned in narration but NEVER speaks spoken dialogue, do NOT include them in the character registry.
+
 ### Voice Description Guidelines
 
 Voice descriptions must be specific and actionable. Include:

@@ -574,6 +574,9 @@ function renderChapterGrid(project) {
     const grid = document.getElementById('chapter-grid');
     if (!grid) return;
     grid.innerHTML = '';
+    grid.style.maxHeight = '420px';
+    grid.style.overflowY = 'auto';
+    grid.style.paddingRight = '6px';
 
     const total = project.total_chapters || 0;
     const scripted = new Set(project.scripted_chapters || []);
@@ -582,44 +585,88 @@ function renderChapterGrid(project) {
     const currentScript = project.current_script_chapter;
     const currentGen = project.current_gen_chapter;
     const selection = project.generation_chapter_selection ? new Set(project.generation_chapter_selection) : null;
+    const detailsMap = {};
+    if (project.chapter_details) {
+        project.chapter_details.forEach(d => { detailsMap[d.number] = d; });
+    }
+
+    const summaryBadge = document.getElementById('chapter-summary-badge');
+    if (summaryBadge) {
+        const completedCount = mastered.size || generated.size || 0;
+        summaryBadge.textContent = `${completedCount} / ${total} Completed`;
+    }
 
     for (let i = 1; i <= total; i++) {
         const cell = document.createElement('div');
         cell.className = 'chapter-cell';
-        cell.style.cssText = 'padding: 6px 10px; border-radius: 6px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); display: flex; align-items: center; justify-content: space-between; font-size: 0.85em;';
+        cell.style.cssText = 'padding: 10px 14px; border-radius: 10px; background: rgba(24, 24, 37, 0.9); border: 1px solid rgba(255,255,255,0.08); display: flex; flex-direction: column; gap: 6px; font-size: 0.85em; transition: all 0.2s ease; box-shadow: 0 2px 8px rgba(0,0,0,0.2);';
+
+        cell.onmouseenter = () => {
+            cell.style.borderColor = 'rgba(99, 102, 241, 0.4)';
+            cell.style.transform = 'translateY(-2px)';
+            cell.style.boxShadow = '0 4px 12px rgba(99, 102, 241, 0.15)';
+        };
+        cell.onmouseleave = () => {
+            cell.style.borderColor = 'rgba(255,255,255,0.08)';
+            cell.style.transform = 'none';
+            cell.style.boxShadow = '0 2px 8px rgba(0,0,0,0.2)';
+        };
+
+        const detail = detailsMap[i] || {};
+        const title = detail.title || `Chapter ${i}`;
+        const totalLines = detail.total_lines || 0;
+        const genLines = detail.lines_generated || 0;
+        let pct = detail.progress_percent || 0;
 
         let statusText = '⬜ Pending';
-        let statusColor = '#aaa';
+        let statusBg = 'rgba(148, 163, 184, 0.12)';
+        let statusColor = '#94a3b8';
         let downloadBtn = '';
 
         if (mastered.has(i)) {
             statusText = '✅ Done';
-            statusColor = '#4caf50';
-            downloadBtn = `<a href="/api/projects/${project.project_id}/download/chapter/${i}" target="_blank" title="Download Mastered Chapter WAV" style="color: #4caf50; text-decoration: none; font-size: 1.1em; margin-left: 6px;">⬇</a>`;
+            statusBg = 'rgba(16, 185, 129, 0.15)';
+            statusColor = '#34d399';
+            pct = 100;
+            downloadBtn = `<a href="/api/projects/${project.project_id}/download/chapter/${i}" target="_blank" title="Download Mastered Chapter WAV" style="color: #34d399; text-decoration: none; font-size: 1.1em; margin-left: 6px; transition: transform 0.2s ease;">⬇</a>`;
         } else if (generated.has(i)) {
-            statusText = '🟣 Master';
-            statusColor = '#9c27b0';
+            statusText = '🟣 Mastered';
+            statusBg = 'rgba(168, 85, 247, 0.15)';
+            statusColor = '#c084fc';
+            pct = 100;
         } else if (currentGen === i) {
-            statusText = '🔵 Gen...';
-            statusColor = '#2196f3';
+            statusText = `🔵 Gen (${genLines}/${totalLines})`;
+            statusBg = 'rgba(59, 130, 246, 0.15)';
+            statusColor = '#60a5fa';
         } else if (scripted.has(i)) {
-            statusText = '🟢 Scripted';
-            statusColor = '#8bc34a';
+            statusText = `🟢 Scripted (${totalLines}l)`;
+            statusBg = 'rgba(132, 204, 22, 0.15)';
+            statusColor = '#a3e635';
         } else if (currentScript === i) {
-            statusText = '🟡 Script...';
-            statusColor = '#ffeb3b';
+            statusText = '🟡 Scripting...';
+            statusBg = 'rgba(234, 179, 8, 0.15)';
+            statusColor = '#facc15';
         }
 
         const isChecked = selection === null || selection.has(i);
 
         cell.innerHTML = `
-            <div style="display: flex; align-items: center; gap: 6px;">
-                <input type="checkbox" class="chapter-select-cb" data-ch="${i}" ${isChecked ? 'checked' : ''}>
-                <span>Ch ${i}</span>
+            <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+                <div style="display: flex; align-items: center; gap: 6px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; flex: 1;">
+                    <input type="checkbox" class="chapter-select-cb" data-ch="${i}" ${isChecked ? 'checked' : ''} style="cursor: pointer; accent-color: #6366f1; flex-shrink: 0;">
+                    <span style="background: rgba(99, 102, 241, 0.2); color: #a5b4fc; padding: 1px 5px; border-radius: 4px; font-weight: 700; font-size: 0.78em; flex-shrink: 0;">Ch ${i}</span>
+                    <span style="font-weight: 600; color: #f3f4f6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.84em;" title="${title}">${title}</span>
+                </div>
+                <div style="display: flex; align-items: center; flex-shrink: 0;">
+                    <span style="background: ${statusBg}; color: ${statusColor}; border: 1px solid ${statusColor}33; padding: 2px 8px; border-radius: 12px; font-weight: 600; font-size: 0.76em; letter-spacing: 0.02em;">${statusText}</span>
+                    ${downloadBtn}
+                </div>
             </div>
-            <div style="display: flex; align-items: center;">
-                <span style="color: ${statusColor}; font-weight: bold; font-size: 0.8em;">${statusText}</span>
-                ${downloadBtn}
+            <div style="display: flex; align-items: center; gap: 8px; margin-top: 2px;">
+                <div style="flex: 1; height: 5px; background: rgba(255,255,255,0.06); border-radius: 3px; overflow: hidden;">
+                    <div style="height: 100%; width: ${pct}%; background: ${statusColor}; transition: width 0.4s ease; border-radius: 3px;"></div>
+                </div>
+                <span style="font-size: 0.75em; color: #9ca3af; font-weight: 500; width: 32px; text-align: right;">${pct}%</span>
             </div>
         `;
 
@@ -763,7 +810,10 @@ function connectWebSocket() {
 function handleWsMessage(data) {
     // Refresh project details if we are viewing the updated project
     if (data.project_id && state.currentProjectId === data.project_id) {
-        if (data.type === 'progress' || data.type === 'stage_change') {
+        if (data.type === 'status_update' && data.status) {
+            renderProjectHeader(data.status);
+            renderChapterGrid(data.status);
+        } else if (data.type === 'progress' || data.type === 'stage_change') {
             fetchProjectDetails(state.currentProjectId);
             
             // Show live progress line

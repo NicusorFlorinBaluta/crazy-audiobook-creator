@@ -21,7 +21,7 @@ function getPythonExecutable() {
   return 'python';
 }
 
-// Kill all spawned Python process trees cleanly
+// Kill all spawned Python process trees cleanly and free ports 8000/8100
 function stopPythonProcesses() {
   console.log('[Electron] Cleaning up Python subprocesses...');
   for (const proc of pythonProcesses) {
@@ -39,10 +39,20 @@ function stopPythonProcesses() {
     }
   }
   pythonProcesses = [];
+
+  // Guarantee no orphaned processes remain listening on ports 8000 or 8100
+  if (process.platform === 'win32') {
+    try {
+      execSync('powershell -Command "Stop-Process -Id (Get-NetTCPConnection -LocalPort 8000,8100 -ErrorAction SilentlyContinue).OwningProcess -Force -ErrorAction SilentlyContinue"', { stdio: 'ignore' });
+    } catch (e) {}
+  }
 }
 
 // Start Dashboard API (8000) and Voice Server (8100)
 function startBackendServers() {
+  // First ensure any old/orphaned server processes are completely killed
+  stopPythonProcesses();
+
   const pythonExe = getPythonExecutable();
   const env = { ...process.env, PYTHONPATH: rootDir };
 

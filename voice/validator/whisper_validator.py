@@ -143,16 +143,27 @@ class WhisperValidator:
             WER as a float between 0.0 and 1.0.
         """
         if normalize:
-            reference = self._normalize_text(reference)
-            hypothesis = self._normalize_text(hypothesis)
+            norm_ref = self._normalize_text(reference)
+            norm_hyp = self._normalize_text(hypothesis)
+        else:
+            norm_ref, norm_hyp = reference, hypothesis
+
+        ref_words = norm_ref.split()
+        hyp_words = norm_hyp.split()
+
+        # Check for hallucinated prompt prefixes (e.g., hypothesis starts with "you" or "u" when reference does not)
+        if hyp_words and ref_words:
+            first_hyp = hyp_words[0].lower()
+            first_ref = ref_words[0].lower()
+            if first_hyp in {"you", "u", "user"} and first_ref not in {"you", "u", "user"}:
+                logger.warning("[WhisperValidator] Detected leading prompt token hallucination: %r vs ref %r", hyp_words[:3], ref_words[:3])
+                return 0.50  # Instantly fail threshold for leading prompt hallucinations
 
         try:
             import jiwer
-            wer = jiwer.wer(reference, hypothesis)
+            wer = jiwer.wer(norm_ref, norm_hyp)
             return min(wer, 1.0)  # Cap at 1.0
         except ImportError:
-            ref_words = reference.split()
-            hyp_words = hypothesis.split()
             if not ref_words:
                 return 0.0 if not hyp_words else 1.0
             d = [[0] * (len(hyp_words) + 1) for _ in range(len(ref_words) + 1)]

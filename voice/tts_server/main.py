@@ -455,6 +455,24 @@ async def websocket_progress(websocket: WebSocket):
         logger.info("WebSocket client disconnected")
 
 
+@app.post("/unload")
+async def unload_models():
+    """Unload all TTS and Whisper models from GPU VRAM instantly."""
+    global engine, validator
+    unloaded = []
+    if engine:
+        engine.unload()
+        unloaded.append("qwen3_tts")
+    if validator and hasattr(validator, "validator") and hasattr(validator.validator, "unload"):
+        try:
+            validator.validator.unload()
+            unloaded.append("whisper")
+        except Exception:
+            pass
+    logger.info("[VoiceServer] Unloaded models on request: %s", unloaded)
+    return {"status": "unloaded", "models": unloaded}
+
+
 # ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------

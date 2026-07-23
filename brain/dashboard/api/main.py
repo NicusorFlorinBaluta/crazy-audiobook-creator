@@ -167,8 +167,34 @@ async def lifespan(app: FastAPI):
     logging.getLogger().setLevel(logging.INFO)
     logger.info("Brain Dashboard starting...")
 
+    # Periodic background task to push live project updates via WebSocket
+    async def ws_broadcast_loop():
+        while True:
+            await asyncio.sleep(2)
+            if ws_connections and job_queue:
+                try:
+                    jobs = job_queue.list_jobs()
+                    for job in jobs:
+                        pid = job.get("project_id")
+                        if pid and job.get("running"):
+                            st = await get_pipeline_status(pid)
+                            for ws in list(ws_connections):
+                                try:
+                                    await ws.send_json({
+                                        "type": "status_update",
+                                        "project_id": pid,
+                                        "status": st
+                                    })
+                                except Exception:
+                                    pass
+                except Exception:
+                    pass
+
+    broadcast_task = asyncio.create_task(ws_broadcast_loop())
+
     yield
 
+    broadcast_task.cancel()
     if watchdog:
         await watchdog.stop()
     if pipeline:
@@ -349,7 +375,7 @@ async def start_pipeline(project_id: str):
 
 @app.post("/api/projects/{project_id}/stop")
 async def stop_pipeline(project_id: str):
-    """Stop a running pipeline."""
+    """Stop a running pipeline and immediately unload GPU models."""
     if not pipeline or not job_queue:
         raise HTTPException(status_code=503, detail="Server not initialized")
         
@@ -359,6 +385,15 @@ async def stop_pipeline(project_id: str):
         pass
 
     pipeline.stop(project_id)
+
+    # Immediately trigger GPU model unload on Voice Server so VRAM is 100% released
+    import httpx
+    try:
+        async with httpx.AsyncClient() as client:
+            await client.post("http://127.0.0.1:8100/unload", timeout=5.0)
+    except Exception:
+        pass
+
     return {"status": "stopped", "project_id": project_id}
 
 
@@ -429,7 +464,7 @@ async def download_chapter_audio(project_id: str, chapter_num: int):
 
 @app.get("/api/projects/{project_id}/status")
 async def get_pipeline_status(project_id: str):
-    """Get the current pipeline status."""
+    """Get the current pipeline status with detailed per-chapter metrics."""
     if not job_queue:
         raise HTTPException(status_code=503, detail="Server not initialized")
     try:
@@ -438,6 +473,75 @@ async def get_pipeline_status(project_id: str):
             project_id in running_tasks
             and not running_tasks[project_id].done()
         )
+
+        # Enrich state with per-chapter progress details
+        project_dir = Path("brain/projects") / project_id
+        workspace_dir = Path("workspace") / project_id
+        script_dir = project_dir / "script"
+        segments_dir = workspace_dir / "segments"
+
+        chapter_details = []
+        total_chapters = state.get("total_chapters") or 0
+
+        book_json_path = project_dir / "book.json"
+        if total_chapters == 0 and book_json_path.exists():
+            try:
+                import json
+                bdata = json.loads(book_json_path.read_text(encoding="utf-8"))
+                total_chapters = len(bdata.get("chapters", [])) or bdata.get("metadata", {}).get("total_chapters", 0)
+            except Exception:
+                pass
+
+        for ch_num in range(1, total_chapters + 1):
+            ch_script_file = script_dir / f"chapter_{ch_num:03d}.json"
+            title = f"Chapter {ch_num}"
+            total_lines = 0
+
+            if ch_script_file.exists():
+                try:
+                    import json
+                    script_data = json.loads(ch_script_file.read_text(encoding="utf-8"))
+                    title = script_data.get("chapter_title", title)
+                    raw_lines = script_data.get("lines", [])
+
+                    # Count merged line batches matching TTS generation merging
+                    merged_count = 0
+                    prev_speaker = None
+                    prev_emotion = None
+                    prev_words = 0
+
+                    for l in raw_lines:
+                        spk = l.get("speaker")
+                        emo = (l.get("emotion") or "").strip().lower()
+                        words = len((l.get("text") or "").split())
+                        if prev_speaker == spk and prev_emotion == emo and (prev_words + words < 250):
+                            prev_words += words
+                        else:
+                            merged_count += 1
+                            prev_speaker = spk
+                            prev_emotion = emo
+                            prev_words = words
+
+                    total_lines = merged_count or len(raw_lines)
+                except Exception:
+                    pass
+
+            # Count generated segment files for this chapter
+            gen_count = 0
+            if segments_dir.exists() and total_lines > 0:
+                ch_prefix = f"ch{ch_num:02d}_"
+                gen_count = len(list(segments_dir.glob(f"{ch_prefix}*.wav")))
+
+            pct = int((gen_count / total_lines) * 100) if total_lines > 0 else 0
+            chapter_details.append({
+                "number": ch_num,
+                "title": title,
+                "total_lines": total_lines,
+                "lines_generated": gen_count,
+                "progress_percent": min(pct, 100)
+            })
+
+        state["chapter_details"] = chapter_details
         return state
     except KeyError:
         raise HTTPException(status_code=404, detail="Project not found")

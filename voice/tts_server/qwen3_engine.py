@@ -314,6 +314,24 @@ class Qwen3TTSEngine:
             )
 
         audio = np.asarray(wavs[0], dtype=np.float32)
+
+        # Dynamic Range-Aware Volume Equalization:
+        # Preserves natural loudness differences between whispers (-26dB) and shouts (-15dB),
+        # while preventing jarring out-of-bounds volume jumps across clips.
+        rms = np.sqrt(np.mean(audio**2)) if len(audio) > 0 else 0
+        if rms > 1e-5:
+            rms_db = 20 * np.log10(rms)
+            target_db = -20.0
+            # Apply soft 50% gain compression toward target to preserve emotional dynamic range
+            adjusted_db = rms_db + 0.5 * (target_db - rms_db)
+            gain = 10 ** ((adjusted_db - rms_db) / 20.0)
+            gain = max(0.4, min(gain, 2.5))  # Smooth gain adjustment bounds
+            audio = audio * gain
+            # Peak limiter to prevent clipping
+            max_peak = np.max(np.abs(audio))
+            if max_peak > 0.95:
+                audio = audio * (0.95 / max_peak)
+
         return audio
 
     def _generate_batch(
