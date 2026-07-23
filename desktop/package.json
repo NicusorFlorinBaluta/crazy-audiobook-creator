@@ -1,0 +1,19 @@
+{
+  "name": "crazy-audiobook-creator-desktop",
+  "version": "1.0.0",
+  "description": "Desktop wrapper for Crazy Audiobook Creator",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "keywords": [
+    "audiobook",
+    "tts",
+    "electron"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^35.0.0"
+  }
+}

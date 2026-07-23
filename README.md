@@ -4,6 +4,7 @@ A fully local, two-machine audiobook production pipeline that converts fantasy/f
 
 ## ✨ Features
 
+- **Electron Desktop Shell** — Native desktop application (`desktop/`) with automated subprocess management and 100% guaranteed process/VRAM cleanup on quit
 - **Fully Automated Pipeline** — Drop an EPUB, get a chaptered M4B audiobook
 - **Multi-Speaker & Narrator Chapter Announcements** — LLM identifies all characters and assigns distinct voices; Narrator voice automatically speaks chapter title announcements
 - **Standardized Audiobook Formatting** — Professional silence spacing (1.0s intro, 1.5s post-announcement pause, 0.5s inter-segment gap, 2.0s chapter outro)
