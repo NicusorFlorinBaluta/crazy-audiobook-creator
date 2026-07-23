@@ -91,6 +91,13 @@ async def lifespan(app: FastAPI):
     start_time = time.time()
     config = load_config()
 
+    from shared.single_instance import SingleInstanceLock
+    lock = SingleInstanceLock("voice_server.lock")
+    if not lock.acquire():
+        logger.error("Another Voice Server instance is already running! Exiting.")
+        import sys
+        sys.exit(1)
+
     # Initialize components
     from voice.tts_server.embedding_store import EmbeddingStore
     embedding_store = EmbeddingStore(db_path="voice_cache.db")
@@ -109,9 +116,6 @@ async def lifespan(app: FastAPI):
         model_name=val_cfg.get("whisper_model", "large-v3"),
         device=val_cfg.get("whisper_device", "auto"),
     )
-
-    from voice.tts_server.embedding_store import EmbeddingStore
-    embedding_store = EmbeddingStore(db_path="voice_cache.db")
 
     storage_cfg = config.get("storage", {})
     library = VoiceLibraryManager(
@@ -150,12 +154,28 @@ async def lifespan(app: FastAPI):
     logger.info("Loading TTS model...")
     engine.load()
 
+    import asyncio
+    async def vram_cleanup_loop():
+        """Periodic background task to empty PyTorch CUDA cache when idle (every 5 minutes)."""
+        while True:
+            await asyncio.sleep(300)
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+
+    cleanup_task = asyncio.create_task(vram_cleanup_loop())
+
     yield
 
     # Shutdown
+    cleanup_task.cancel()
     logger.info("Shutting down — unloading model...")
     if engine:
         engine.unload()
+    lock.release()
 
 
 # ---------------------------------------------------------------------------

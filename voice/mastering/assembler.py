@@ -38,28 +38,39 @@ class AudioAssembler:
         self,
         segments: list,
         workspace: Path,
+        announcement_audio: np.ndarray | None = None,
     ) -> dict[str, Any]:
         """Assemble multiple segments into a single chapter audio.
 
         Args:
             segments: List of MasterSegmentInfo objects with file paths and pause info.
             workspace: Base workspace directory.
+            announcement_audio: Optional Narrator chapter announcement audio numpy array.
 
         Returns:
             Dict with 'audio' (numpy array) and 'sample_rate'.
         """
-        if not segments:
+        if not segments and announcement_audio is None:
             return {
                 "audio": np.array([], dtype=np.float32),
                 "sample_rate": self.sample_rate,
             }
 
-        logger.info("Assembling %d segments...", len(segments))
+        logger.info("Assembling %d segments (announcement=%s)...", len(segments), announcement_audio is not None)
 
         parts: list[np.ndarray] = []
 
-        # Chapter start silence
+        # Chapter start silence (1.0s standard audiobook start)
         parts.append(self._silence(self.chapter_start_silence_ms))
+
+        # Add Narrator Chapter Announcement if provided
+        if announcement_audio is not None and len(announcement_audio) > 0:
+            ann_audio = announcement_audio.astype(np.float32)
+            if announcement_audio.ndim > 1:
+                ann_audio = ann_audio.mean(axis=1)
+            parts.append(ann_audio)
+            # 1.5s pause after chapter announcement before body text
+            parts.append(self._silence(1500))
 
         for i, segment in enumerate(segments):
             # Insert pre-segment silence
@@ -96,12 +107,12 @@ class AudioAssembler:
 
             parts.append(audio)
 
-            # Insert post-segment silence
+            # Insert post-segment silence (default 500ms inter-segment gap)
             pause_after = getattr(segment, "pause_after_ms", 500)
             if pause_after > 0:
                 parts.append(self._silence(pause_after))
 
-        # Chapter end silence
+        # Chapter end silence (2.0s standard audiobook outro)
         parts.append(self._silence(self.chapter_end_silence_ms))
 
         # Concatenate all parts

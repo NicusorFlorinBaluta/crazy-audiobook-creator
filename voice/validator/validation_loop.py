@@ -246,11 +246,16 @@ class ValidationLoop:
                     for line in failed_lines:
                         output_path = segments_dir / f"{line.line_id}.wav"
                         voice_ref = self.library.get_voice_path(project_id, line.speaker)
+                        ref_text = self.library.get_voice_ref_text(project_id, line.speaker)
+                        if not voice_ref.exists():
+                            voice_ref = self.library.get_voice_path(project_id, "narrator")
+                            ref_text = self.library.get_voice_ref_text(project_id, "narrator")
 
                         try:
                             audio = self.engine.generate_speech(
                                 text=line.text,
                                 voice_reference_path=voice_ref,
+                                ref_text=ref_text,
                                 emotion_instruction=line.emotion,
                                 speed=line.speed,
                                 voice_fx=line.voice_fx,

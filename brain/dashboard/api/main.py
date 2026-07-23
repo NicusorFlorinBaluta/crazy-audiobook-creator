@@ -150,6 +150,13 @@ async def lifespan(app: FastAPI):
     """Application lifespan handler."""
     global pipeline, job_queue, watchdog
 
+    from shared.single_instance import SingleInstanceLock
+    lock = SingleInstanceLock("dashboard.lock")
+    if not lock.acquire():
+        logger.error("Another Dashboard API instance is already running! Exiting.")
+        import sys
+        sys.exit(1)
+
     config = load_config()
     pipeline = Pipeline(config_path="brain/config.yaml")
     job_queue = pipeline.job_queue
@@ -162,12 +169,14 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # Cleanup
     if watchdog:
         await watchdog.stop()
     if pipeline:
-        pipeline.ollama.close()
-        pipeline.ubuntu.close()
+        try:
+            pipeline.ollama.close()
+        except Exception:
+            pass
+    lock.release()
 
 
 app = FastAPI(
