@@ -32,7 +32,9 @@ build/
 # OS
 .DS_Store
 Thumbs.db
-desktop.ini
+# Node / Dependencies
+node_modules/
+desktop/node_modules/
 
 # Config with secrets
 config.local.yaml

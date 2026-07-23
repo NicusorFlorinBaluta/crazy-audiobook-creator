@@ -74,8 +74,8 @@ class Pipeline:
         voice_cfg = self.config.get("voice_server", {})
         self.voice_client = VoiceClient(
             host=voice_cfg.get("host", "http://127.0.0.1:8100"),
-            timeout=voice_cfg.get("timeout", 30),
-            retries=voice_cfg.get("retries", 5),
+            timeout=voice_cfg.get("timeout", 3600),
+            retries=voice_cfg.get("retries", 3),
             retry_delay=voice_cfg.get("retry_delay", 2),
         )
 
@@ -151,12 +151,16 @@ class Pipeline:
             import sys
             python_exe = Path(sys.executable)
 
-        main_script = Path("voice/tts_server/main.py").resolve()
         logger.info("Starting local Voice Server subprocess via %s...", python_exe)
+        import os
         import subprocess
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(Path.cwd())
+
         self._voice_server_proc = subprocess.Popen(
-            [str(python_exe), str(main_script)],
+            [str(python_exe), "-m", "voice.tts_server.main"],
             cwd=str(Path.cwd()),
+            env=env,
         )
 
         timeout = voice_cfg.get("startup_timeout_seconds", 120)
@@ -335,8 +339,16 @@ class Pipeline:
         state = self.job_queue.get_job(project_id)
         current_stage = state.get("status", PipelineStage.CREATED)
 
-        if current_stage in (PipelineStage.PAUSED, PipelineStage.ERROR, PipelineStage.PAUSED_SCHEDULED, PipelineStage.DEPLOY_PAUSED):
-            current_stage = PipelineStage.CREATED
+        # When starting or re-running a pipeline:
+        # Determine the appropriate stage to resume from based on completed phases.
+        if current_stage in (PipelineStage.COMPLETE, PipelineStage.SELECTION_COMPLETE, PipelineStage.PAUSED, PipelineStage.ERROR, PipelineStage.PAUSED_SCHEDULED, PipelineStage.DEPLOY_PAUSED):
+            if state.get("bootstrapping_completed", False):
+                current_stage = PipelineStage.GENERATING
+            elif state.get("script_completed", False):
+                current_stage = PipelineStage.BOOTSTRAPPING
+            else:
+                current_stage = PipelineStage.CREATED
+            self.job_queue.update_job(project_id, {"status": current_stage.value})
 
         start_time = time.time()
         self._stop_flags[project_id] = False
@@ -539,8 +551,19 @@ class Pipeline:
         ]
 
         state = self.job_queue.get_job(project_id)
-        generated_chapters = state.get("generated_chapters", [])
+        generated_chapters = list(state.get("generated_chapters", []))
         selection = state.get("generation_chapter_selection")
+
+        # Sync generated_chapters with existing mastered chapter files on disk
+        for disk_dir in (project_dir / "chapters", Path("workspace") / project_id / "chapters"):
+            if disk_dir.exists():
+                for wav in disk_dir.glob("chapter_*.wav"):
+                    m = re.search(r"chapter_(\d+)\.wav", wav.name)
+                    if m:
+                        ch_num = int(m.group(1))
+                        if ch_num not in generated_chapters:
+                            generated_chapters.append(ch_num)
+        self.job_queue.update_job(project_id, {"generated_chapters": generated_chapters, "mastered_chapters": generated_chapters})
 
         for script_file in script_files:
             self._check_stop(project_id)
@@ -580,11 +603,29 @@ class Pipeline:
                 except Exception as e:
                     logger.warning("Failed to inject voice_fx: %s", e)
 
+            # Merge consecutive lines spoken by the same character to reduce total inference calls
+            merged_lines = []
+            for line in chapter_script.lines:
+                if not merged_lines:
+                    merged_lines.append(line.model_copy(deep=True))
+                else:
+                    prev = merged_lines[-1]
+                    same_speaker = line.speaker == prev.speaker
+                    same_emotion = (line.emotion or "").strip().lower() == (prev.emotion or "").strip().lower()
+                    same_speed = getattr(line, "speed", 1.0) == getattr(prev, "speed", 1.0)
+                    same_fx = getattr(line, "voice_fx", None) == getattr(prev, "voice_fx", None)
+                    under_limit = len(prev.text.split()) + len(line.text.split()) < 250
+
+                    if same_speaker and same_emotion and same_speed and same_fx and under_limit:
+                        prev.text = prev.text.rstrip() + " " + line.text.lstrip()
+                    else:
+                        merged_lines.append(line.model_copy(deep=True))
+
             try:
                 request = GenerateChapterRequest(
                     project_id=project_id,
                     chapter_number=chapter_script.chapter_number,
-                    lines=chapter_script.lines,
+                    lines=merged_lines,
                     validate=True,
                     auto_retry=True,
                     max_retries=self.config.get("validation", {}).get("max_retries", 3),
@@ -746,9 +787,18 @@ class Pipeline:
         **extra: Any,
     ) -> None:
         """Update the pipeline stage in the job queue."""
-        update = {"status": stage, **extra}
+        is_done_stage = stage in (
+            PipelineStage.COMPLETE,
+            PipelineStage.SELECTION_COMPLETE,
+            PipelineStage.ERROR,
+            PipelineStage.PAUSED,
+            PipelineStage.PAUSED_SCHEDULED,
+            PipelineStage.DEPLOY_PAUSED,
+        )
+        is_running = not is_done_stage
+        update = {"status": stage, "running": is_running, **extra}
         self.job_queue.update_job(project_id, update)
-        logger.info("Pipeline stage: %s → %s", project_id, stage)
+        logger.info("Pipeline stage: %s → %s (running=%s)", project_id, stage, is_running)
 
     @staticmethod
     def _make_project_id(title: str) -> str:

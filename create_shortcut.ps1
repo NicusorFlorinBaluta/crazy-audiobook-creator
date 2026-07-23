@@ -1,26 +1,26 @@
-# Creates a Desktop Shortcut for Crazy Audiobook Creator
-$ProjectRoot = $PSScriptRoot
-$ShortcutPath = Join-Path ([Environment]::GetFolderPath("Desktop")) "Crazy Audiobook Creator.lnk"
+# Crazy Audiobook Creator - Desktop Shortcut Generator
 
-$PythonW = Join-Path $ProjectRoot "venv\Scripts\pythonw.exe"
+$ProjectRoot = $PSScriptRoot
+$DesktopPath = [System.Environment]::GetFolderPath('Desktop')
+$ShortcutPath = Join-Path $DesktopPath "Crazy Audiobook Creator.lnk"
+$TargetScript = Join-Path $ProjectRoot "start_app.pyw"
+$PythonW = "E:\PYTORC~1\my_venv\Scripts\pythonw.exe"
+
 if (-not (Test-Path $PythonW)) {
-    $PythonW = (Get-Command pythonw.exe -ErrorAction SilentlyContinue).Source
+    $PythonW = "pythonw.exe"
 }
 
-$TargetPath = $PythonW
-$Arguments = "`"$ProjectRoot\start_app.pyw`""
-
-$WScriptShell = New-Object -ComObject WScript.Shell
-$Shortcut = $WScriptShell.CreateShortcut($ShortcutPath)
-$Shortcut.TargetPath = $TargetPath
-$Shortcut.Arguments = $Arguments
+$WshShell = New-Object -ComObject WScript.Shell
+$Shortcut = $WshShell.CreateShortcut($ShortcutPath)
+$Shortcut.TargetPath = $PythonW
+$Shortcut.Arguments = "`"$TargetScript`""
 $Shortcut.WorkingDirectory = $ProjectRoot
-$Shortcut.Description = "Crazy Audiobook Creator Desktop Application"
+$Shortcut.Description = "Crazy Audiobook Creator - AI-Powered Pipeline"
 
-$IconPath = Join-Path $ProjectRoot "brain\dashboard\frontend\img\favicon.png"
-if (Test-Path $IconPath) {
-    $Shortcut.IconLocation = "$IconPath,0"
+$FaviconPath = Join-Path $ProjectRoot "brain\dashboard\frontend\img\favicon.png"
+if (Test-Path $FaviconPath) {
+    $Shortcut.IconLocation = "$FaviconPath,0"
 }
 
 $Shortcut.Save()
-Write-Host "Desktop shortcut successfully created at: $ShortcutPath"
+Write-Host "Created Desktop Shortcut at: $ShortcutPath"

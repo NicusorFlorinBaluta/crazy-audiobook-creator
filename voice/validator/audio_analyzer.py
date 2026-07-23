@@ -75,6 +75,22 @@ class AudioAnalyzer:
             duration_deviation = abs(duration - expected_duration) / expected_duration
             duration_ok = duration_deviation <= self.duration_tolerance
 
+        # RMS loudness measurement & CPS pacing check
+        rms = np.sqrt(np.mean(audio**2)) if len(audio) > 0 else 0
+        rms_dbfs = 20 * np.log10(rms) if rms > 0 else -100.0
+
+        # Characters per second (CPS) check (detects trailing repetition or swallowed text)
+        char_count = len(expected_text.strip())
+        cps = char_count / duration if duration > 0 and char_count > 0 else 0.0
+        pacing_anomaly = False
+        if char_count > 10 and duration > 0:
+            if cps < 4.0:   # Hallucinated long silence/repetition
+                pacing_anomaly = True
+                logger.warning("[AudioAnalyzer] Slow pacing anomaly detected (%.1f CPS) for file: %s", cps, audio_file)
+            elif cps > 32.0: # Swallowed/rushed text
+                pacing_anomaly = True
+                logger.warning("[AudioAnalyzer] Fast pacing anomaly detected (%.1f CPS) for file: %s", cps, audio_file)
+
         # Artifact score (1.0 = perfect, reduced for each issue)
         artifact_score = 1.0
         if clipping_detected:
@@ -83,6 +99,8 @@ class AudioAnalyzer:
             artifact_score -= 0.2
         if has_long_silence:
             artifact_score -= 0.2
+        if pacing_anomaly:
+            artifact_score -= 0.3
         artifact_score = max(0.0, artifact_score)
 
         # Duration score
@@ -92,11 +110,14 @@ class AudioAnalyzer:
             "duration_seconds": duration,
             "expected_duration_seconds": expected_duration,
             "duration_deviation": duration_deviation,
-            "duration_ok": duration_ok,
+            "duration_ok": duration_ok and not pacing_anomaly,
             "peak_dbfs": peak_dbfs,
+            "rms_dbfs": rms_dbfs,
             "clipping_detected": clipping_detected,
             "noise_floor_db": noise_floor_db,
             "has_long_silence": has_long_silence,
+            "pacing_anomaly": pacing_anomaly,
+            "cps": cps,
             "artifact_score": artifact_score,
             "duration_score": duration_score,
             "sample_rate": sample_rate,

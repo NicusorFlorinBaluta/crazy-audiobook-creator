@@ -44,26 +44,26 @@ _SYSTEM_PROMPT = """You are a STRICT AUDIOBOOK SCRIPT METADATA ANNOTATOR. Your O
 
 ### Audio Direction Guidelines
 
-#### Speaker Attribution
-- Fragments inside quotation marks are dialogue — identify the speaker from context.
-- Fragments outside quotation marks are narrator.
-- Internal monologue (italics or clear thoughts) -> assign to the thinking character with emotion "internal, thoughtful".
-- If you can't determine the speaker, use "narrator".
+#### Speaker Attribution Guidelines
+- CRITICAL: EVERY fragment that is NOT inside quotation marks ("...") is NARRATION -> speaker MUST be "narrator".
+- Dialogue tags (e.g., "he said", "she whispered", "Vathi replied", "Dusk looked at her") are NARRATOR lines -> speaker MUST be "narrator".
+- ONLY spoken words inside quotation marks ("...") get a character speaker ID!
+- Identify the dialogue speaker from the surrounding context and dialogue tags (e.g. if tag says "she whispered", speaker MUST be a female character like vathi or frond, NEVER male dusk).
+- If you cannot determine the speaker with high confidence, use "narrator".
 
-#### Emotion Mapping
-For each fragment, provide an emotion directive matching TTS capabilities:
-- Consider the SURROUNDING CONTEXT, not just the words themselves.
-- Neutral narration: 1.0 (default)
-- Happy/excited: 1.1-1.2
-- Sad/somber: 0.8-0.9
-- Angry/intense: 1.2-1.3
+#### Emotion Mapping & Inflection Taxonomy
+Provide a rich, specific emotion directive matching TTS performance capabilities:
+- **Whispers/Secrets:** "hushed whisper", "conspiratorial whisper", "soft comfort"
+- **Action/Intensity:** "panicked shout", "angry demand", "breathless urgency", "terrified cry"
+- **Reflective/Somber:** "somber reflection", "weary sigh", "thoughtful contemplation", "sad nostalgia"
+- **Humor/Warmth:** "warm chuckle", "playful banter", "sarcastic retort", "gentle reassurance"
+- **Narration:** "neutral", "authoritative", "suspenseful", "reflective narration"
 
-#### Pacing (Speed)
-- Default narration: 1.0
-- Fast action: 1.1-1.2
-- Slow/thoughtful: 0.8-0.9
-- Excited/panicked: 1.1-1.15
-- Contemplative/sad: 0.85-0.9
+#### Pacing (Speed) & Pauses
+- Default narration: 1.0 (pause_after_ms: 500)
+- Action / panicked / urgent: 1.15-1.25 (pause_after_ms: 250)
+- Whispered / secret / breathless: 0.85-0.90 (pause_after_ms: 600)
+- Weary / somber / reflective: 0.80-0.90 (pause_after_ms: 700)
 
 ---
 ## Output Schema
@@ -485,6 +485,9 @@ class ScriptGenerator:
                     pass
 
         # Reconstruct exactly from static fragments to guarantee 100% text fidelity
+        import re
+        quote_pattern = re.compile(r'^[\"“”\'‘].*[\"“”\'’]$', re.DOTALL)
+
         for i, text in enumerate(fragments):
             meta = metadata_map.get(i, {})
             
@@ -493,11 +496,19 @@ class ScriptGenerator:
                 speed = float(meta.get("speed", 1.0))
             except (ValueError, TypeError):
                 speed = 1.0
+
+            text_trimmed = text.strip()
+            is_quote = bool(quote_pattern.match(text_trimmed))
+            
+            # CRITICAL RULE: Non-dialogue text outside quotation marks MUST be narrator!
+            speaker = str(meta.get("speaker", "narrator")).lower().replace(" ", "_")
+            if not is_quote:
+                speaker = "narrator"
                 
             lines.append(
                 ScriptLine(
                     line_id=f"ch{fallback_number:02d}_{i:03d}",
-                    speaker=str(meta.get("speaker", "narrator")).lower(),
+                    speaker=speaker,
                     text=text,
                     emotion=str(meta.get("emotion", "neutral")),
                     speed=speed,

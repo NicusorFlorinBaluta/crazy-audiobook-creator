@@ -19,7 +19,7 @@ Write-Host "[OK] Found AMD PyTorch venv: $VenvPath" -ForegroundColor Green
 Write-Host ""
 Write-Host "[1/3] Installing voice server dependencies into AMD venv..." -ForegroundColor Yellow
 $env:GIT_CLONE_PROTECTION_ACTIVE = "false"
-& $PythonExe -m pip install git+https://github.com/huggingface/parler-tts.git soundfile openai-whisper plyer requests python-multipart ebooklib beautifulsoup4 qwen-tts
+& $PythonExe -m pip install git+https://github.com/huggingface/parler-tts.git soundfile openai-whisper plyer requests python-multipart ebooklib beautifulsoup4 qwen-tts json_repair
 if ($LASTEXITCODE -ne 0) {
     Write-Error "Pip install failed with exit code $LASTEXITCODE. Please check your network or python venv."
     exit $LASTEXITCODE

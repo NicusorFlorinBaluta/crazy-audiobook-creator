@@ -141,27 +141,19 @@ class ServiceWatchdog:
             self._voice_restarting = False
 
     def _execute_remote_restart(self):
-        """Blocking SSH code to gracefully restart the remote Voice Server"""
-        ssh = paramiko.SSHClient()
-        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        try:
-            ssh.connect(
-                self.ubuntu_host, 
-                username=self.ubuntu_user, 
-                password=self.ubuntu_password, 
-                timeout=10
-            )
-            
-            # Kill exactly the python module being run, ensuring other processes remain untouched
-            kill_cmd = "pkill -9 -f 'voice.tts_server.main'"
-            ssh.exec_command(kill_cmd)
-            
-            import time
-            time.sleep(2)
-            
-            # Relaunch the module isolated within the project directory using its venv
-            start_cmd = f"cd ~/{self.ubuntu_dir} && nohup ./venv/bin/python -m voice.tts_server.main > server.log 2>&1 &"
-            ssh.exec_command(start_cmd)
-            
-        finally:
-            ssh.close()
+        """Restart local Voice Server process."""
+        import sys
+        venv_py = Path(r"E:\PyTorch env\my_venv\Scripts\python.exe")
+        if not venv_py.exists():
+            venv_py = Path(sys.executable)
+
+        logger.info("Watchdog: Relaunching local Voice Server via %s", venv_py)
+        import os
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(Path.cwd())
+
+        subprocess.Popen(
+            [str(venv_py), "-m", "voice.tts_server.main"],
+            cwd=str(Path.cwd()),
+            env=env,
+        )

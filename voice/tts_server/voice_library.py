@@ -102,15 +102,29 @@ class VoiceLibraryManager:
     # ------------------------------------------------------------------
 
     def _load_registry(self, project_id: str) -> dict[str, Any]:
-        """Load the voice registry for a project."""
+        """Load the voice registry for a project (cached in memory)."""
+        if not hasattr(self, "_registry_cache"):
+            self._registry_cache = {}
+
+        if project_id in self._registry_cache:
+            return self._registry_cache[project_id]
+
         registry_path = self.library_dir / project_id / "voices.json"
         if registry_path.exists():
             with open(registry_path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        return {"project_id": project_id, "voices": {}}
+                data = json.load(f)
+                self._registry_cache[project_id] = data
+                return data
+        data = {"project_id": project_id, "voices": {}}
+        self._registry_cache[project_id] = data
+        return data
 
     def _save_registry(self, project_id: str, registry: dict[str, Any]) -> None:
-        """Save the voice registry for a project."""
+        """Save the voice registry for a project and update cache."""
+        if not hasattr(self, "_registry_cache"):
+            self._registry_cache = {}
+
+        self._registry_cache[project_id] = registry
         project_dir = self.library_dir / project_id
         project_dir.mkdir(parents=True, exist_ok=True)
         registry_path = project_dir / "voices.json"

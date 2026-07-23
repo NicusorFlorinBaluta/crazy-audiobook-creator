@@ -28,11 +28,11 @@ tts:
 # --- Quality Validation ---
 validation:
   enabled: true
-  whisper_model: "medium"            # "tiny" | "base" | "small" | "medium" | "large-v3"
-  whisper_device: "auto"             # "auto" | "cuda" | "cpu"
+  whisper_model: "small"           # "tiny" | "base" | "small" | "medium" | "large-v3"
+  whisper_device: "cuda"            # "auto" | "cuda" | "cpu"
 
   # Thresholds
-  wer_threshold: 0.05               # 5%
+  wer_threshold: 0.20               # 20%
   max_retries: 3
 
   # Audio checks

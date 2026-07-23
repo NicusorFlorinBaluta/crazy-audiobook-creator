@@ -169,35 +169,36 @@ class LoudnessNormalizer:
         return audio
 
     def _apply_noise_gate(self, audio: np.ndarray, sample_rate: int) -> np.ndarray:
-        """Apply a noise gate to clean up silence portions."""
+        """Apply a noise gate to clean up silence portions (vectorized)."""
         threshold = 10 ** (self.noise_gate_threshold / 20)
-        attack_samples = int(sample_rate * self.noise_gate_attack_ms / 1000)
-        release_samples = int(sample_rate * self.noise_gate_release_ms / 1000)
+        attack_samples = max(1, int(sample_rate * self.noise_gate_attack_ms / 1000))
+        release_samples = max(1, int(sample_rate * self.noise_gate_release_ms / 1000))
 
-        # Calculate envelope (RMS in short windows)
+        # Calculate envelope using fast moving average of squared signal
         window_size = max(1, int(sample_rate * 0.01))  # 10ms windows
-        envelope = np.zeros_like(audio)
+        kernel = np.ones(window_size) / window_size
+        squared_env = np.convolve(audio ** 2, kernel, mode="same")
+        envelope = np.sqrt(np.maximum(0, squared_env))
 
-        for i in range(0, len(audio) - window_size, window_size):
-            rms = np.sqrt(np.mean(audio[i : i + window_size] ** 2))
-            envelope[i : i + window_size] = rms
+        # Gate binary mask
+        gate = (envelope > threshold).astype(np.float64)
 
-        # Gate: where envelope is below threshold, apply attenuation
-        gate = np.where(envelope > threshold, 1.0, 0.0)
+        # Smooth gate with 1-pole exponential filter
+        alpha_attack = 1.0 - np.exp(-1.0 / attack_samples)
+        alpha_release = 1.0 - np.exp(-1.0 / release_samples)
 
-        # Smooth the gate with attack/release
-        smoothed = np.zeros_like(gate)
-        current = 0.0
-        for i in range(len(gate)):
-            if gate[i] > current:
-                # Attack (opening)
-                rate = 1.0 / max(1, attack_samples)
-                current = min(1.0, current + rate)
-            else:
-                # Release (closing)
-                rate = 1.0 / max(1, release_samples)
-                current = max(0.0, current - rate)
-            smoothed[i] = current
+        try:
+            from scipy.signal import lfilter
+            alpha_avg = (alpha_attack + alpha_release) / 2.0
+            smoothed = lfilter([alpha_avg], [1.0, -(1.0 - alpha_avg)], gate)
+            smoothed = np.clip(smoothed, 0.0, 1.0)
+        except ImportError:
+            smoothed = np.zeros_like(gate)
+            curr = 0.0
+            rates = np.where(gate > 0.5, alpha_attack, alpha_release)
+            for i in range(len(gate)):
+                curr += rates[i] * (gate[i] - curr)
+                smoothed[i] = curr
 
         return audio * smoothed
 

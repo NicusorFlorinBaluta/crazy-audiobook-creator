@@ -48,14 +48,22 @@ window.PipelineManager = (() => {
     function updateTracker(currentStage, status, data = null) {
         if (!currentStage) return;
         
-        const currentIndex = STAGES.indexOf(currentStage.toUpperCase());
+        const stageUpper = currentStage.toUpperCase();
+        const statusLower = (status || '').toLowerCase();
+        const isFinished = ['COMPLETE', 'COMPLETED', 'SELECTION_COMPLETE'].includes(stageUpper) || 
+                           ['complete', 'completed', 'selection_complete'].includes(statusLower);
+        
+        let currentIndex = STAGES.indexOf(stageUpper);
+        if (stageUpper === 'SELECTION_COMPLETE' || stageUpper === 'COMPLETED') {
+            currentIndex = STAGES.length - 1;
+        }
         
         document.querySelectorAll('.pipeline-stage').forEach((el, idx) => {
             el.className = 'pipeline-stage'; // reset
             const percentEl = el.querySelector('.stage-percent');
             if (percentEl) percentEl.textContent = '';
             
-            if (idx < currentIndex || status === 'complete') {
+            if (isFinished || idx < currentIndex) {
                 el.classList.add('done');
                 if (percentEl) percentEl.textContent = '100%';
             } else if (idx === currentIndex) {
@@ -71,26 +79,24 @@ window.PipelineManager = (() => {
                         const totalCh = data.total_chapters || 0;
                         const totalLines = data.total_lines || 0;
                         
-                        // SCRIPTING runs locally via Ollama. We'd need to poll the script dir, 
-                        // but we can't add a new API endpoint without restarting the server (which would interrupt the E2E test).
                         if (stage === 'SCRIPTING' && data.completed_script_chapters) {
                             pct = (data.completed_script_chapters.length / totalCh) * 100;
                         } else if (stage === 'SCRIPTING') {
-                            // If we don't have hard metrics, show an active animation instead of blank!
                             percentEl.innerHTML = '<span class="loading-dots">⏳</span>';
                         } else if (stage === 'BOOTSTRAPPING') {
                             pct = data.bootstrapping_completed ? 100 : 25;
                         } else if (stage === 'GENERATING' && totalCh > 0) {
-                            const doneCount = data.completed_gen_chapters ? data.completed_gen_chapters.length : 0;
-                            // Since chapter generation is a blocking call, we estimate progress based on completed chapters.
-                            // Add 0.5 to show it is currently working on a chapter.
-                            pct = ((doneCount + (doneCount < totalCh ? 0.5 : 0)) / totalCh) * 100;
+                            const genSet = new Set(data.generated_chapters || []);
+                            const curCh = data.current_gen_chapter || 1;
+                            const curDetail = data.chapter_details ? data.chapter_details.find(d => d.number === curCh) : null;
+                            const curPct = curDetail ? (curDetail.progress_percent / 100) : 0;
+                            pct = ((genSet.size + curPct) / totalCh) * 100;
                         } else if (stage === 'VALIDATING' && totalCh > 0) {
-                            const doneCount = data.completed_gen_chapters ? data.completed_gen_chapters.length : 0;
-                            pct = ((doneCount + (doneCount < totalCh ? 0.5 : 0)) / totalCh) * 100;
+                            const genSet = new Set(data.generated_chapters || []);
+                            pct = (genSet.size / totalCh) * 100;
                         } else if (stage === 'MASTERING' && totalCh > 0) {
-                            const doneCount = data.completed_master_chapters ? data.completed_master_chapters.length : 0;
-                            pct = (doneCount / totalCh) * 100;
+                            const masterSet = new Set(data.mastered_chapters || []);
+                            pct = (masterSet.size / totalCh) * 100;
                         } else if (stage === 'EXPORTING') {
                             pct = 50; // coarse
                         }
@@ -104,7 +110,7 @@ window.PipelineManager = (() => {
         });
         
         // Hide live progress if not running
-        if (status !== 'running') {
+        if (!['running', 'in_progress'].includes(statusLower) || isFinished) {
             els.live.classList.remove('active');
         }
     }
@@ -125,13 +131,24 @@ window.PipelineManager = (() => {
         `;
     }
 
-    function toggleControls(status, isRunning) {
-        // Find DOM elements directly since this is in a separate module scope
+    function toggleControls(status, isRunning, data = null) {
         const btnResetStage = document.getElementById('btn-reset-stage');
         const selectResetStage = document.getElementById('select-reset-stage');
         const btnDownloadAudiobook = document.getElementById('btn-download-audiobook');
 
-        if (isRunning) {
+        const statusLower = (status || '').toLowerCase();
+        const isDone = ['complete', 'completed', 'selection_complete'].includes(statusLower);
+        const hasMastered = data && data.mastered_chapters && data.mastered_chapters.length > 0;
+
+        if (btnDownloadAudiobook) {
+            if (isDone || hasMastered) {
+                btnDownloadAudiobook.classList.remove('hidden');
+            } else {
+                btnDownloadAudiobook.classList.add('hidden');
+            }
+        }
+
+        if (isRunning && !isDone) {
             els.btnStart.classList.add('hidden');
             els.btnPause.classList.remove('hidden');
             if (selectResetStage) selectResetStage.classList.add('hidden');
@@ -141,15 +158,12 @@ window.PipelineManager = (() => {
             els.btnPause.classList.add('hidden');
             if (selectResetStage) selectResetStage.classList.remove('hidden');
             
-            if (status === 'complete' || status === 'completed') {
-                els.btnStart.textContent = '▶ Run Again';
-                if (btnDownloadAudiobook) btnDownloadAudiobook.classList.remove('hidden');
-            } else if (status === 'error' || status === 'paused') {
+            if (isDone) {
+                els.btnStart.textContent = '▶ Run Again / Selection';
+            } else if (statusLower === 'error' || statusLower === 'paused') {
                 els.btnStart.textContent = '▶ Resume Pipeline';
-                if (btnDownloadAudiobook) btnDownloadAudiobook.classList.add('hidden');
             } else {
                 els.btnStart.textContent = '▶ Start Pipeline';
-                if (btnDownloadAudiobook) btnDownloadAudiobook.classList.add('hidden');
             }
         }
     }

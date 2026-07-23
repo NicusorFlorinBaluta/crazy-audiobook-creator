@@ -234,9 +234,15 @@ function setupEventListeners() {
 // Navigation
 // ============================================================================
 
+let detailPollTimer = null;
+
 function showProjectsView(isHashLoad = false) {
     if (!isHashLoad) {
         window.history.pushState(null, '', '#');
+    }
+    if (detailPollTimer) {
+        clearInterval(detailPollTimer);
+        detailPollTimer = null;
     }
     state.currentProjectId = null;
     els.viewDetail.classList.add('hidden');
@@ -256,6 +262,13 @@ async function showDetailView(projectId, isHashLoad = false) {
     document.querySelector('.tab[data-tab="tab-characters"]').click();
     
     await fetchProjectDetails(projectId);
+
+    if (detailPollTimer) clearInterval(detailPollTimer);
+    detailPollTimer = setInterval(() => {
+        if (state.currentProjectId) {
+            fetchProjectDetails(state.currentProjectId, true);
+        }
+    }, 2000);
 
     // Connect log console in background (non-blocking)
     if (window.LogConsole) {
@@ -285,7 +298,7 @@ async function fetchProjects() {
     }
 }
 
-async function fetchProjectDetails(projectId) {
+async function fetchProjectDetails(projectId, isPoll = false) {
     try {
         const response = await fetch(`/api/projects/${projectId}/status`);
         if (!response.ok) throw new Error('Failed to fetch project details');
@@ -295,20 +308,25 @@ async function fetchProjectDetails(projectId) {
         
         // Let pipeline.js and script-viewer.js update their parts
         if (window.PipelineManager) {
-            // Backend 'status' is actually the stage. Compute coarse status (running/error/paused/completed).
-            const stage = data.status;
-            const coarseStatus = ['error', 'paused', 'complete'].includes(stage) ? stage : 'running';
-            window.PipelineManager.updateTracker(stage, coarseStatus, data);
-            window.PipelineManager.toggleControls(stage, coarseStatus === 'running');
+            const stage = (data.status || '').toLowerCase();
+            const activeStages = ['extracting', 'scripting', 'bootstrapping', 'generating', 'validating', 'mastering', 'exporting'];
+            const isDoneStage = ['complete', 'completed', 'selection_complete', 'paused', 'error', 'deploy_paused'].includes(stage);
+            const isRunning = (data.running === true || activeStages.includes(stage)) && !isDoneStage;
+            const coarseStatus = isRunning ? 'running' : stage;
+            
+            window.PipelineManager.updateTracker(data.status, isRunning ? 'running' : coarseStatus, data);
+            window.PipelineManager.toggleControls(data.status, isRunning, data);
         }
         
-        if (window.ScriptViewer) {
+        if (window.ScriptViewer && !isPoll) {
             window.ScriptViewer.loadData(projectId);
         }
         
     } catch (error) {
-        showToast(`Error loading project details: ${error.message}`, 'error');
-        showProjectsView();
+        if (!isPoll) {
+            showToast(`Error loading project details: ${error.message}`, 'error');
+            showProjectsView();
+        }
     }
 }
 
@@ -433,15 +451,19 @@ async function startPipeline() {
     if (!state.currentProjectId) return;
     
     try {
+        if (window.PipelineManager) {
+            window.PipelineManager.toggleControls('generating', true);
+        }
         const response = await fetch(`/api/projects/${state.currentProjectId}/start`, { method: 'POST' });
         if (!response.ok) {
             const err = await response.json();
             throw new Error(err.detail || 'Failed to start pipeline');
         }
         showToast('Pipeline started', 'info');
-        fetchProjectDetails(state.currentProjectId); // Refresh status immediately
+        setTimeout(() => fetchProjectDetails(state.currentProjectId), 500);
     } catch (error) {
         showToast(error.message, 'error');
+        if (state.currentProjectId) fetchProjectDetails(state.currentProjectId);
     }
 }
 
@@ -552,6 +574,9 @@ function renderChapterGrid(project) {
     const grid = document.getElementById('chapter-grid');
     if (!grid) return;
     grid.innerHTML = '';
+    grid.style.maxHeight = '420px';
+    grid.style.overflowY = 'auto';
+    grid.style.paddingRight = '6px';
 
     const total = project.total_chapters || 0;
     const scripted = new Set(project.scripted_chapters || []);
@@ -560,40 +585,93 @@ function renderChapterGrid(project) {
     const currentScript = project.current_script_chapter;
     const currentGen = project.current_gen_chapter;
     const selection = project.generation_chapter_selection ? new Set(project.generation_chapter_selection) : null;
+    const detailsMap = {};
+    if (project.chapter_details) {
+        project.chapter_details.forEach(d => { detailsMap[d.number] = d; });
+    }
+
+    const summaryBadge = document.getElementById('chapter-summary-badge');
+    if (summaryBadge) {
+        const completedCount = mastered.size || generated.size || 0;
+        summaryBadge.textContent = `${completedCount} / ${total} Completed`;
+    }
 
     for (let i = 1; i <= total; i++) {
         const cell = document.createElement('div');
         cell.className = 'chapter-cell';
-        cell.style.cssText = 'padding: 6px 10px; border-radius: 6px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); display: flex; align-items: center; justify-content: space-between; font-size: 0.85em;';
+        cell.style.cssText = 'padding: 10px 14px; border-radius: 10px; background: rgba(24, 24, 37, 0.9); border: 1px solid rgba(255,255,255,0.08); display: flex; flex-direction: column; gap: 6px; font-size: 0.85em; transition: all 0.2s ease; box-shadow: 0 2px 8px rgba(0,0,0,0.2);';
+
+        cell.onmouseenter = () => {
+            cell.style.borderColor = 'rgba(99, 102, 241, 0.4)';
+            cell.style.transform = 'translateY(-2px)';
+            cell.style.boxShadow = '0 4px 12px rgba(99, 102, 241, 0.15)';
+        };
+        cell.onmouseleave = () => {
+            cell.style.borderColor = 'rgba(255,255,255,0.08)';
+            cell.style.transform = 'none';
+            cell.style.boxShadow = '0 2px 8px rgba(0,0,0,0.2)';
+        };
+
+        const detail = detailsMap[i] || {};
+        const title = detail.title || `Chapter ${i}`;
+        const totalLines = detail.total_lines || 0;
+        const genLines = detail.lines_generated || 0;
+        let pct = detail.progress_percent || 0;
 
         let statusText = '⬜ Pending';
-        let statusColor = '#aaa';
+        let statusBg = 'rgba(148, 163, 184, 0.12)';
+        let statusColor = '#94a3b8';
+        let downloadBtn = '';
+
+        const stageLower = (project.stage || project.status || '').toLowerCase();
+        const isGeneratingStage = stageLower.includes('gen');
+        const isScriptingStage = stageLower.includes('script');
 
         if (mastered.has(i)) {
             statusText = '✅ Done';
-            statusColor = '#4caf50';
+            statusBg = 'rgba(16, 185, 129, 0.15)';
+            statusColor = '#34d399';
+            pct = 100;
+            downloadBtn = `<a href="/api/projects/${project.project_id}/download/chapter/${i}" target="_blank" title="Download Mastered Chapter WAV" style="color: #34d399; text-decoration: none; font-size: 1.1em; margin-left: 6px; transition: transform 0.2s ease;">⬇</a>`;
         } else if (generated.has(i)) {
-            statusText = '🟣 Master';
-            statusColor = '#9c27b0';
-        } else if (currentGen === i) {
-            statusText = '🔵 Gen...';
-            statusColor = '#2196f3';
+            statusText = '🟣 Mastered';
+            statusBg = 'rgba(168, 85, 247, 0.15)';
+            statusColor = '#c084fc';
+            pct = 100;
+        } else if (isGeneratingStage && currentGen === i) {
+            statusText = `🔵 Gen (${genLines}/${totalLines})`;
+            statusBg = 'rgba(59, 130, 246, 0.15)';
+            statusColor = '#60a5fa';
         } else if (scripted.has(i)) {
-            statusText = '🟢 Scripted';
-            statusColor = '#8bc34a';
-        } else if (currentScript === i) {
-            statusText = '🟡 Script...';
-            statusColor = '#ffeb3b';
+            statusText = `🟢 Scripted (${totalLines}l)`;
+            statusBg = 'rgba(132, 204, 22, 0.15)';
+            statusColor = '#a3e635';
+        } else if (isScriptingStage && (currentScript === i || (!currentScript && i === (scripted.size + 1)))) {
+            statusText = '🟡 Scripting...';
+            statusBg = 'rgba(234, 179, 8, 0.15)';
+            statusColor = '#facc15';
         }
 
         const isChecked = selection === null || selection.has(i);
 
         cell.innerHTML = `
-            <div style="display: flex; align-items: center; gap: 6px;">
-                <input type="checkbox" class="chapter-select-cb" data-ch="${i}" ${isChecked ? 'checked' : ''}>
-                <span>Ch ${i}</span>
+            <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+                <div style="display: flex; align-items: center; gap: 6px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; flex: 1;">
+                    <input type="checkbox" class="chapter-select-cb" data-ch="${i}" ${isChecked ? 'checked' : ''} style="cursor: pointer; accent-color: #6366f1; flex-shrink: 0;">
+                    <span style="background: rgba(99, 102, 241, 0.2); color: #a5b4fc; padding: 1px 5px; border-radius: 4px; font-weight: 700; font-size: 0.78em; flex-shrink: 0;">Ch ${i}</span>
+                    <span style="font-weight: 600; color: #f3f4f6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.84em;" title="${title}">${title}</span>
+                </div>
+                <div style="display: flex; align-items: center; flex-shrink: 0;">
+                    <span style="background: ${statusBg}; color: ${statusColor}; border: 1px solid ${statusColor}33; padding: 2px 8px; border-radius: 12px; font-weight: 600; font-size: 0.76em; letter-spacing: 0.02em;">${statusText}</span>
+                    ${downloadBtn}
+                </div>
             </div>
-            <span style="color: ${statusColor}; font-weight: bold; font-size: 0.8em;">${statusText}</span>
+            <div style="display: flex; align-items: center; gap: 8px; margin-top: 2px;">
+                <div style="flex: 1; height: 5px; background: rgba(255,255,255,0.06); border-radius: 3px; overflow: hidden;">
+                    <div style="height: 100%; width: ${pct}%; background: ${statusColor}; transition: width 0.4s ease; border-radius: 3px;"></div>
+                </div>
+                <span style="font-size: 0.75em; color: #9ca3af; font-weight: 500; width: 32px; text-align: right;">${pct}%</span>
+            </div>
         `;
 
         const cb = cell.querySelector('.chapter-select-cb');
@@ -736,7 +814,10 @@ function connectWebSocket() {
 function handleWsMessage(data) {
     // Refresh project details if we are viewing the updated project
     if (data.project_id && state.currentProjectId === data.project_id) {
-        if (data.type === 'progress' || data.type === 'stage_change') {
+        if (data.type === 'status_update' && data.status) {
+            renderProjectHeader(data.status);
+            renderChapterGrid(data.status);
+        } else if (data.type === 'progress' || data.type === 'stage_change') {
             fetchProjectDetails(state.currentProjectId);
             
             // Show live progress line

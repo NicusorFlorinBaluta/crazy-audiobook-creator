@@ -34,6 +34,16 @@ from shared.constants import PipelineStage
 
 logger = logging.getLogger(__name__)
 
+class AsyncioConnectionResetFilter(logging.Filter):
+    """Filter out benign Windows asyncio socket connection reset errors."""
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        if "_call_connection_lost" in msg or "10054" in msg:
+            return False
+        return True
+
+logging.getLogger("asyncio").addFilter(AsyncioConnectionResetFilter())
+
 # Global state
 pipeline: Pipeline | None = None
 job_queue: JobQueue | None = None
@@ -84,6 +94,15 @@ class ProjectLogHandler(logging.Handler):
                 _project_logs[pid] = collections.deque(maxlen=500)
             _project_logs[pid].append(line)
 
+            # Append to disk log file so logs survive server restarts
+            try:
+                log_file = Path("brain/projects") / pid / "pipeline.log"
+                log_file.parent.mkdir(parents=True, exist_ok=True)
+                with open(log_file, "a", encoding="utf-8") as f:
+                    f.write(line + "\n")
+            except Exception:
+                pass
+
             # Fan out to SSE subscribers — MUST be thread-safe because
             # the pipeline runs in a thread-pool executor, not the event loop.
             loop = self._loop
@@ -131,6 +150,13 @@ async def lifespan(app: FastAPI):
     """Application lifespan handler."""
     global pipeline, job_queue, watchdog
 
+    from shared.single_instance import SingleInstanceLock
+    lock = SingleInstanceLock("dashboard.lock")
+    if not lock.acquire():
+        logger.error("Another Dashboard API instance is already running! Exiting.")
+        import sys
+        sys.exit(1)
+
     config = load_config()
     pipeline = Pipeline(config_path="brain/config.yaml")
     job_queue = pipeline.job_queue
@@ -138,16 +164,45 @@ async def lifespan(app: FastAPI):
     watchdog = ServiceWatchdog(check_interval_seconds=60)
     watchdog.start()
 
+    logging.getLogger().setLevel(logging.INFO)
     logger.info("Brain Dashboard starting...")
+
+    # Periodic background task to push live project updates via WebSocket
+    async def ws_broadcast_loop():
+        while True:
+            await asyncio.sleep(2)
+            if ws_connections and job_queue:
+                try:
+                    jobs = job_queue.list_jobs()
+                    for job in jobs:
+                        pid = job.get("project_id")
+                        if pid and job.get("running"):
+                            st = await get_pipeline_status(pid)
+                            for ws in list(ws_connections):
+                                try:
+                                    await ws.send_json({
+                                        "type": "status_update",
+                                        "project_id": pid,
+                                        "status": st
+                                    })
+                                except Exception:
+                                    pass
+                except Exception:
+                    pass
+
+    broadcast_task = asyncio.create_task(ws_broadcast_loop())
 
     yield
 
-    # Cleanup
+    broadcast_task.cancel()
     if watchdog:
         await watchdog.stop()
     if pipeline:
-        pipeline.ollama.close()
-        pipeline.ubuntu.close()
+        try:
+            pipeline.ollama.close()
+        except Exception:
+            pass
+    lock.release()
 
 
 app = FastAPI(
@@ -219,8 +274,13 @@ async def create_project(
     try:
         content = await file.read()
         temp_path.write_bytes(content)
+        logger.info("[DashboardAPI] Uploaded EPUB '%s' (%d bytes) for project creation", file.filename, len(content))
 
         status = pipeline.create_project(str(temp_path))
+        logger.info("[DashboardAPI] Created project '%s' (%d chapters detected)", status.project_id, status.total_chapters)
+
+        # Automatically fetch metadata and artwork in background
+        asyncio.create_task(asyncio.to_thread(_auto_fetch_metadata_sync, status.project_id))
 
         return {
             "project_id": status.project_id,
@@ -231,7 +291,7 @@ async def create_project(
         }
 
     except Exception as e:
-        logger.error("Failed to create project: %s", e)
+        logger.error("[DashboardAPI] Failed to create project from '%s': %s", file.filename, e)
         raise HTTPException(status_code=400, detail=str(e))
 
     finally:
@@ -270,11 +330,14 @@ async def delete_project(project_id: str):
 @app.post("/api/projects/{project_id}/start")
 async def start_pipeline(project_id: str):
     """Start the pipeline for a project."""
-    if not pipeline:
+    if not pipeline or not job_queue:
         raise HTTPException(status_code=503, detail="Server not initialized")
 
     if project_id in running_tasks and not running_tasks[project_id].done():
         raise HTTPException(status_code=409, detail="Pipeline already running")
+
+    # Clear old deployment request flag and set running=True immediately
+    job_queue.update_job(project_id, {"deployment_requested": False, "running": True})
 
     # Clear old logs for this project on a fresh start
     _project_logs[project_id] = collections.deque(maxlen=500)
@@ -312,7 +375,7 @@ async def start_pipeline(project_id: str):
 
 @app.post("/api/projects/{project_id}/stop")
 async def stop_pipeline(project_id: str):
-    """Stop a running pipeline."""
+    """Stop a running pipeline and immediately unload GPU models."""
     if not pipeline or not job_queue:
         raise HTTPException(status_code=503, detail="Server not initialized")
         
@@ -322,6 +385,15 @@ async def stop_pipeline(project_id: str):
         pass
 
     pipeline.stop(project_id)
+
+    # Immediately trigger GPU model unload on Voice Server so VRAM is 100% released
+    import httpx
+    try:
+        async with httpx.AsyncClient() as client:
+            await client.post("http://127.0.0.1:8100/unload", timeout=5.0)
+    except Exception:
+        pass
+
     return {"status": "stopped", "project_id": project_id}
 
 
@@ -356,9 +428,13 @@ async def download_audiobook(project_id: str):
     """Download the final mastered audiobook."""
     m4b_path = Path(f"brain/projects/{project_id}/{project_id}.m4b")
     if not m4b_path.exists():
-        # Check for partial M4B export if full M4B does not exist yet (sorted by modification time)
+        m4b_path = Path(f"workspace/{project_id}/output/{project_id}.m4b")
+    if not m4b_path.exists():
         project_dir = Path(f"brain/projects/{project_id}")
         partials = sorted(project_dir.glob("*.m4b"), key=lambda p: p.stat().st_mtime)
+        if not partials:
+            project_dir_ws = Path(f"workspace/{project_id}")
+            partials = sorted(project_dir_ws.glob("**/*.m4b"), key=lambda p: p.stat().st_mtime)
         if partials:
             m4b_path = partials[-1]
         else:
@@ -371,9 +447,24 @@ async def download_audiobook(project_id: str):
     )
 
 
+@app.get("/api/projects/{project_id}/download/chapter/{chapter_num}")
+async def download_chapter_audio(project_id: str, chapter_num: int):
+    """Download the mastered WAV file for a specific chapter."""
+    ch_file = Path(f"workspace/{project_id}/chapters/chapter_{chapter_num:03d}.wav")
+    if not ch_file.exists():
+        ch_file = Path(f"brain/projects/{project_id}/chapters/chapter_{chapter_num:03d}.wav")
+    if not ch_file.exists():
+        raise HTTPException(status_code=404, detail=f"Chapter {chapter_num} mastered audio not found")
+    return FileResponse(
+        path=ch_file,
+        filename=f"{project_id}_chapter_{chapter_num:03d}.wav",
+        media_type="audio/wav"
+    )
+
+
 @app.get("/api/projects/{project_id}/status")
 async def get_pipeline_status(project_id: str):
-    """Get the current pipeline status."""
+    """Get the current pipeline status with detailed per-chapter metrics."""
     if not job_queue:
         raise HTTPException(status_code=503, detail="Server not initialized")
     try:
@@ -382,6 +473,75 @@ async def get_pipeline_status(project_id: str):
             project_id in running_tasks
             and not running_tasks[project_id].done()
         )
+
+        # Enrich state with per-chapter progress details
+        project_dir = Path("brain/projects") / project_id
+        workspace_dir = Path("workspace") / project_id
+        script_dir = project_dir / "script"
+        segments_dir = workspace_dir / "segments"
+
+        chapter_details = []
+        total_chapters = state.get("total_chapters") or 0
+
+        book_json_path = project_dir / "book.json"
+        if total_chapters == 0 and book_json_path.exists():
+            try:
+                import json
+                bdata = json.loads(book_json_path.read_text(encoding="utf-8"))
+                total_chapters = len(bdata.get("chapters", [])) or bdata.get("metadata", {}).get("total_chapters", 0)
+            except Exception:
+                pass
+
+        for ch_num in range(1, total_chapters + 1):
+            ch_script_file = script_dir / f"chapter_{ch_num:03d}.json"
+            title = f"Chapter {ch_num}"
+            total_lines = 0
+
+            if ch_script_file.exists():
+                try:
+                    import json
+                    script_data = json.loads(ch_script_file.read_text(encoding="utf-8"))
+                    title = script_data.get("chapter_title", title)
+                    raw_lines = script_data.get("lines", [])
+
+                    # Count merged line batches matching TTS generation merging
+                    merged_count = 0
+                    prev_speaker = None
+                    prev_emotion = None
+                    prev_words = 0
+
+                    for l in raw_lines:
+                        spk = l.get("speaker")
+                        emo = (l.get("emotion") or "").strip().lower()
+                        words = len((l.get("text") or "").split())
+                        if prev_speaker == spk and prev_emotion == emo and (prev_words + words < 250):
+                            prev_words += words
+                        else:
+                            merged_count += 1
+                            prev_speaker = spk
+                            prev_emotion = emo
+                            prev_words = words
+
+                    total_lines = merged_count or len(raw_lines)
+                except Exception:
+                    pass
+
+            # Count generated segment files for this chapter
+            gen_count = 0
+            if segments_dir.exists() and total_lines > 0:
+                ch_prefix = f"ch{ch_num:02d}_"
+                gen_count = len(list(segments_dir.glob(f"{ch_prefix}*.wav")))
+
+            pct = int((gen_count / total_lines) * 100) if total_lines > 0 else 0
+            chapter_details.append({
+                "number": ch_num,
+                "title": title,
+                "total_lines": total_lines,
+                "lines_generated": gen_count,
+                "progress_percent": min(pct, 100)
+            })
+
+        state["chapter_details"] = chapter_details
         return state
     except KeyError:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -407,6 +567,33 @@ async def update_schedule(request: Request):
     if pipeline:
         pipeline.config = pipeline._load_config()
     return {"status": "success", "schedule": data}
+
+
+def _auto_fetch_metadata_sync(project_id: str) -> None:
+    """Helper to automatically fetch artwork and description in background."""
+    try:
+        project_dir = Path("brain/projects") / project_id
+        book_json = project_dir / "book.json"
+        if not book_json.exists():
+            return
+        import json
+        from brain.extractor.metadata_fetcher import MetadataFetcher
+        book_data = json.loads(book_json.read_text(encoding="utf-8"))
+        meta = book_data.get("metadata", {})
+        fetched = MetadataFetcher.fetch(meta.get("title", ""), meta.get("author", ""))
+
+        if fetched.cover_image_bytes:
+            cover_file = project_dir / "cover.jpg"
+            cover_file.write_bytes(fetched.cover_image_bytes)
+            book_data["metadata"]["cover_image_path"] = str(cover_file)
+
+        if fetched.description:
+            book_data["metadata"]["description"] = fetched.description
+
+        book_json.write_text(json.dumps(book_data, indent=2), encoding="utf-8")
+        logger.info("Auto-fetched artwork/metadata for project %s", project_id)
+    except Exception as e:
+        logger.warning("Auto metadata fetch failed for %s: %s", project_id, e)
 
 
 @app.post("/api/projects/{project_id}/fetch-metadata")
@@ -494,6 +681,17 @@ async def export_partial_m4b(project_id: str):
 async def get_log_history(project_id: str):
     """Return all buffered log lines for a project (up to last 500)."""
     lines = list(_project_logs.get(project_id, []))
+    if not lines:
+        log_file = Path("brain/projects") / project_id / "pipeline.log"
+        if log_file.exists():
+            try:
+                with open(log_file, "r", encoding="utf-8") as f:
+                    all_lines = [line.rstrip() for line in f if line.strip()]
+                    lines = all_lines[-500:]
+                    # Hydrate RAM buffer
+                    _project_logs[project_id] = collections.deque(lines, maxlen=500)
+            except Exception:
+                pass
     return {"project_id": project_id, "lines": lines}
 
 

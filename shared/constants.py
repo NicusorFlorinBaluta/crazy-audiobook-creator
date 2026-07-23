@@ -88,7 +88,7 @@ VOICE_DESIGN_TEST_SENTENCES = {
 # Validation thresholds
 # ---------------------------------------------------------------------------
 
-DEFAULT_WER_THRESHOLD = 0.05         # 5% word error rate
+DEFAULT_WER_THRESHOLD = 0.20         # 20% word error rate
 MAX_VALIDATION_RETRIES = 3
 ARTIFACT_NOISE_THRESHOLD_DB = -50.0
 CLIPPING_THRESHOLD_DBFS = -0.5
