@@ -346,6 +346,12 @@ class Pipeline:
             if self._ollama_server_proc.poll() is not None:
                 code = self._ollama_server_proc.returncode
                 self._ollama_server_proc = None
+                if getattr(self, "_ollama_server_log_handle", None) is not None:
+                    try:
+                        self._ollama_server_log_handle.close()
+                    except Exception:
+                        pass
+                    self._ollama_server_log_handle = None
                 raise RuntimeError(
                     f"Managed Ollama exited during startup with code {code}"
                 )

@@ -884,13 +884,7 @@ async def delete_project(project_id: str):
             _project_dir(project_id),
             _workspace_project_dir(project_id),
         ]
-        voice_root = Path("voice_library").resolve()
-        voice_project = (voice_root / project_id).resolve()
-        if (
-            not voice_project.is_relative_to(voice_root)
-            or voice_project == voice_root
-        ):
-            raise HTTPException(status_code=400, detail="Invalid project ID")
+        voice_project = _voice_project_dir(project_id)
         roots.append(voice_project)
         try:
             _purge_project_cache(project_id, voice_project)

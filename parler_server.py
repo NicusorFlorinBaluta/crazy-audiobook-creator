@@ -126,7 +126,7 @@ def load_model():
         GenerationMixin._get_initial_cache_position = _get_initial_cache_position
 
         model_name = "parler-tts/parler-tts-large-v1"
-        dtype = torch.float32
+        dtype = torch.float16 if device == "cuda" else torch.float32
         model = ParlerTTSForConditionalGeneration.from_pretrained(model_name, torch_dtype=dtype).to(device)
         
         from transformers import GenerationConfig

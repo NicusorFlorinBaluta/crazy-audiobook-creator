@@ -87,7 +87,7 @@ class VoiceClient:
         start = time.time()
         while time.time() - start < max_wait_seconds:
             try:
-                health = self.health_check()
+                health = self.health_check_once(timeout_seconds=5.0)
                 if health.status == "ok":
                     logger.info("Voice server is ready: %s", health.model_loaded)
                     return True

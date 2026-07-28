@@ -38,9 +38,10 @@ def dashboard_request_authorized(
     client_host: str | None,
     configured_token: str,
     presented_token: str | None,
+    is_forwarded: bool = False,
 ) -> bool:
-    """Allow loopback requests, otherwise require a constant-time token match."""
-    if is_loopback_client(client_host):
+    """Allow direct loopback requests, otherwise require a constant-time token match."""
+    if is_loopback_client(client_host) and not is_forwarded:
         return True
     return bool(
         configured_token
