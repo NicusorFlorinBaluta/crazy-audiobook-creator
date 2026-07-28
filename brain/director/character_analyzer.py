@@ -38,9 +38,16 @@ def _load_prompt(name: str) -> str:
 _SYSTEM_PROMPT = """You are an expert audiobook director and strict data extraction system. Analyze book text and extract all characters and their voice mappings.
 
 ### Character Extraction Guidelines
-- CRITICAL: ONLY extract characters who ACTUALLY SPEAK SPOKEN DIALOGUE in quotation marks ("...").
-- Do NOT extract personified locations, islands, ships, animals, or non-speaking entities (e.g. islands like Vathi/Patji, ships, inanimate objects, or creatures that never speak dialogue).
-- If an entity is mentioned in narration but NEVER speaks spoken dialogue, do NOT include them in the character registry.
+- Extract every entity that actually speaks, regardless of whether it is a
+  person, animal, artificial intelligence, ship, location, or personified object.
+- Recognize dialogue in straight/curly quotes, single typographic quotes, and
+  em-dash dialogue conventions.
+- Exclude an entity only when the supplied text provides no spoken dialogue.
+- Never infer an entity's type or ability to speak from its name. Determine it
+  only from explicit evidence in the supplied text.
+- A named or personified place/object is not a speaking character unless the
+  text explicitly attributes spoken dialogue to that entity. Thoughts,
+  descriptions, invocations, and figurative personification are not dialogue.
 
 ### Voice Description Guidelines
 
@@ -84,7 +91,8 @@ CRITICAL REMINDER: You MUST output ONLY valid JSON matching the Output Schema be
       "age_range": "string",
       "personality_traits": ["trait1", "trait2"],
       "voice_description": "detailed voice description for TTS",
-      "speaking_style": "how this character typically speaks"
+      "speaking_style": "how this character typically speaks",
+      "dialogue_count": 0
     }}
   }}
 }}
@@ -127,7 +135,7 @@ class CharacterAnalyzer:
         import time as _time
         t0 = _time.time()
 
-        if total_chars <= 25_000 or len(book.chapters) <= 1:
+        if total_chars <= 25_000:
             # Single pass for short books
             book_text = self._prepare_book_text(book)
             system_prompt = _SYSTEM_PROMPT.format(genre=self.genre)
@@ -147,7 +155,15 @@ class CharacterAnalyzer:
             book_author = book.metadata.author
             tone_desc = ""
 
-            for idx, ch in enumerate(book.chapters):
+            analysis_units = [
+                (ch, part_index, part)
+                for ch in book.chapters
+                for part_index, part in enumerate(
+                    self._iter_text_chunks(ch.text, 12_000),
+                    1,
+                )
+            ]
+            for idx, (ch, part_index, part) in enumerate(analysis_units):
                 # Format current accumulated characters for context
                 existing_summary = ""
                 if accumulated_chars:
@@ -156,11 +172,23 @@ class CharacterAnalyzer:
                         for cid, info in accumulated_chars.items()
                     )
 
-                ch_prompt = f"Chapter {ch.number}: {ch.title}\n{existing_summary}\n\nChapter Text:\n{ch.text[:12000]}"
+                ch_prompt = (
+                    f"Chapter {ch.number}: {ch.title} "
+                    f"(part {part_index})\n{existing_summary}\n\n"
+                    f"Chapter Text:\n{part}"
+                )
                 system_prompt = _SYSTEM_PROMPT.format(genre=self.genre)
 
                 try:
-                    logger.info("[CharacterAnalyzer] Analyzing chapter %d/%d: '%s' (%d words)...", idx + 1, len(book.chapters), ch.title, ch.word_count)
+                    logger.info(
+                        "[CharacterAnalyzer] Analyzing unit %d/%d: chapter %d "
+                        "part %d '%s'...",
+                        idx + 1,
+                        len(analysis_units),
+                        ch.number,
+                        part_index,
+                        ch.title,
+                    )
                     raw_ch = self.ollama.generate_json(
                         ch_prompt,
                         temperature=self.temperature,
@@ -174,17 +202,54 @@ class CharacterAnalyzer:
                     for cid, cinfo in new_chars.items():
                         if not isinstance(cinfo, dict):
                             continue
-                        norm_id = cid.lower().replace(" ", "_").replace("-", "_")
-                        if norm_id not in accumulated_chars:
-                            accumulated_chars[norm_id] = cinfo
+                        norm_id = self._normalize_id(cid)
+                        display_key = self._normalize_id(
+                            str(cinfo.get("name", norm_id))
+                        )
+                        canonical_id = next(
+                            (
+                                existing_id
+                                for existing_id, existing in accumulated_chars.items()
+                                if existing_id == norm_id
+                                or self._normalize_id(
+                                    str(existing.get("name", existing_id))
+                                )
+                                == display_key
+                            ),
+                            norm_id,
+                        )
+                        if canonical_id not in accumulated_chars:
+                            accumulated_chars[canonical_id] = cinfo
                         else:
-                            # Update if existing info is sparse
-                            old_desc = accumulated_chars[norm_id].get("voice_description", "")
+                            existing = accumulated_chars[canonical_id]
+                            existing["dialogue_count"] = self._safe_dialogue_count(
+                                existing.get("dialogue_count", 0)
+                            ) + self._safe_dialogue_count(
+                                cinfo.get("dialogue_count", 0)
+                            )
+                            existing["personality_traits"] = list(
+                                dict.fromkeys(
+                                    list(existing.get("personality_traits", []))
+                                    + list(cinfo.get("personality_traits", []))
+                                )
+                            )
+                            old_desc = existing.get("voice_description", "")
                             new_desc = cinfo.get("voice_description", "")
                             if len(new_desc) > len(old_desc):
-                                accumulated_chars[norm_id] = cinfo
+                                preserved_count = existing["dialogue_count"]
+                                preserved_traits = existing["personality_traits"]
+                                accumulated_chars[canonical_id] = cinfo
+                                accumulated_chars[canonical_id][
+                                    "dialogue_count"
+                                ] = preserved_count
+                                accumulated_chars[canonical_id][
+                                    "personality_traits"
+                                ] = preserved_traits
                 except Exception as e:
-                    logger.warning("[CharacterAnalyzer] Failed to analyze chapter %d: %s", idx + 1, e)
+                    raise RuntimeError(
+                        f"Character analysis failed for chapter {ch.number}, "
+                        f"part {part_index}"
+                    ) from e
 
             # Build final raw dict for parser
             final_raw = {
@@ -267,6 +332,43 @@ class CharacterAnalyzer:
     def _build_prompt(self, book_text: str, title: str, author: str) -> str:
         return ""
 
+    @staticmethod
+    def _normalize_id(value: str) -> str:
+        import re
+
+        normalized = re.sub(r"[^\w]+", "_", value.lower()).strip("_")
+        return normalized or "unknown"
+
+    @staticmethod
+    def _safe_dialogue_count(value: object) -> int:
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _iter_text_chunks(text: str, max_chars: int) -> list[str]:
+        """Cover complete chapter text without truncating later characters."""
+        chunks: list[str] = []
+        start = 0
+        while start < len(text):
+            end = min(start + max_chars, len(text))
+            if end < len(text):
+                boundary = max(
+                    text.rfind("\n\n", start, end),
+                    text.rfind("\n", start, end),
+                    text.rfind(" ", start, end),
+                )
+                if boundary > start + max_chars // 2:
+                    end = boundary
+            chunk = text[start:end].strip()
+            if chunk:
+                chunks.append(chunk)
+            start = end
+            while start < len(text) and text[start].isspace():
+                start += 1
+        return chunks
+
     def _parse_registry(
         self,
         raw: dict,
@@ -288,7 +390,7 @@ class CharacterAnalyzer:
                 continue
 
             # Normalize character ID
-            normalized_id = char_id.lower().replace(" ", "_").replace("-", "_")
+            normalized_id = self._normalize_id(char_id)
 
             # Parse gender
             gender_str = str(char_data.get("gender", "other")).lower()
@@ -301,6 +403,14 @@ class CharacterAnalyzer:
                 )
                 gender = Gender.OTHER
 
+            try:
+                dialogue_count = max(
+                    0,
+                    int(char_data.get("dialogue_count", 0) or 0),
+                )
+            except (TypeError, ValueError):
+                dialogue_count = 0
+
             characters[normalized_id] = Character(
                 id=normalized_id,
                 name=char_data.get("name", normalized_id.replace("_", " ").title()),
@@ -309,6 +419,7 @@ class CharacterAnalyzer:
                 personality_traits=char_data.get("personality_traits", []),
                 voice_description=str(char_data.get("voice_description", "")),
                 speaking_style=str(char_data.get("speaking_style", "")),
+                dialogue_count=dialogue_count,
             )
             logger.info(
                 "[CharacterAnalyzer]   + '%s' (%s) | %s | voice: %s",
@@ -335,20 +446,50 @@ class CharacterAnalyzer:
             )
             logger.warning("[CharacterAnalyzer] LLM didn't produce a narrator — using default")
 
-        # Cap unique voices
+        # Keep every speaking character for attribution, but cap distinct voice
+        # references by assigning low-dialogue characters a stable shared voice.
         if len(characters) > self.max_unique_voices:
             logger.info(
                 "[CharacterAnalyzer] Capping %d → %d unique voices",
                 len(characters),
                 self.max_unique_voices,
             )
-            important = {"narrator"}
-            for k in list(raw_chars.keys()):
-                normalized = k.lower().replace(" ", "_").replace("-", "_")
-                important.add(normalized)
-                if len(important) >= self.max_unique_voices:
-                    break
-            characters = {k: v for k, v in characters.items() if k in important}
+            ranked = sorted(
+                (
+                    character
+                    for character in characters.values()
+                    if character.id != "narrator"
+                ),
+                key=lambda character: (
+                    character.dialogue_count,
+                    len(character.voice_description),
+                ),
+                reverse=True,
+            )
+            selected_order = ["narrator"] + [
+                character.id
+                for character in ranked[: self.max_unique_voices - 1]
+            ]
+            important = set(selected_order)
+            representatives: dict[Gender, list[str]] = {
+                gender: [
+                    character_id
+                    for character_id in selected_order
+                    if characters[character_id].gender == gender
+                ]
+                for gender in Gender
+            }
+            for character_id, character in characters.items():
+                if character_id in important:
+                    character.voice_id = character_id
+                    continue
+                same_gender = representatives.get(character.gender, [])
+                character.voice_id = (
+                    same_gender[0] if same_gender else "narrator"
+                )
+        else:
+            for character_id, character in characters.items():
+                character.voice_id = character_id
 
         return CharacterRegistry(
             book_title=raw.get("book_title", fallback_title),

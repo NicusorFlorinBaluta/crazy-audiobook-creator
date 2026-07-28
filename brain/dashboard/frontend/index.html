@@ -5,11 +5,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="description" content="Crazy Audiobook Creator — AI-powered audiobook production pipeline">
     <title>Crazy Audiobook Creator</title>
-    <link rel="icon" type="image/png" href="/static/img/favicon.png">
+    <link rel="icon" type="image/png" href="static/img/favicon.png">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/css/styles.css?v=5">
+    <link rel="stylesheet" href="static/css/styles.css?v=20260728.1">
 </head>
 <body>
     <!-- ============================================ -->
@@ -26,7 +26,7 @@
     <!-- ============================================ -->
     <nav class="top-nav">
         <div class="nav-brand" id="nav-home-btn">
-            <img class="brand-logo" src="/static/img/logo.png" alt="Logo">
+            <img class="brand-logo" src="static/img/logo.png" alt="Logo">
             <div class="brand-text">
                 <span class="brand-title">Crazy Audiobook Creator</span>
                 <span class="brand-subtitle">AI-Powered Pipeline</span>
@@ -88,14 +88,13 @@
                     <button class="btn btn-warning hidden" id="btn-pause-pipeline">
                         ⏸ Pause
                     </button>
+                    <button class="btn btn-ghost hidden" id="btn-request-deploy">Park at Boundary</button>
+                    <button class="btn btn-primary hidden" id="btn-resume-deploy">Resume Parked</button>
                     <select id="select-reset-stage" class="select">
                         <option value="" disabled selected>Reset to Stage...</option>
-                        <option value="created">Created</option>
-                        <option value="extracting">Extracting</option>
                         <option value="scripting">Scripting</option>
                         <option value="bootstrapping">Bootstrapping</option>
                         <option value="generating">Generating</option>
-                        <option value="validating">Validating</option>
                         <option value="mastering">Mastering</option>
                     </select>
                     <button class="btn btn-warning hidden" id="btn-reset-stage">Reset</button>
@@ -124,38 +123,91 @@
                 <h2>Pipeline Progress</h2>
                 <div class="pipeline-tracker" id="pipeline-tracker"></div>
                 <div class="pipeline-live" id="pipeline-live"></div>
-                
-                <!-- Chapter Progress & Selection Grid -->
-                <div class="chapter-progress-section" id="chapter-progress-section" style="margin-top: 20px; background: rgba(18, 18, 26, 0.7); backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.08); padding: 18px 20px; border-radius: 14px; box-shadow: 0 8px 24px rgba(0,0,0,0.3);">
-                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; flex-wrap: wrap; gap: 10px;">
-                        <div style="display: flex; align-items: center; gap: 10px;">
-                            <h3 style="margin: 0; font-size: 1.15em; font-weight: 700; letter-spacing: -0.01em; color: #f3f4f6;">Chapter Progress & Selection</h3>
-                            <span id="chapter-summary-badge" style="font-size: 0.78em; padding: 3px 10px; border-radius: 20px; background: rgba(99, 102, 241, 0.15); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.3); font-weight: 600;">0 / 0 Completed</span>
+                <div class="work-status-panel" id="work-status-panel">
+                    <div class="work-status-main">
+                        <span class="work-status-kicker">Current activity</span>
+                        <strong id="work-status-title">Waiting to start</strong>
+                        <span id="work-status-detail">No pipeline work is active.</span>
+                    </div>
+                    <div class="work-status-metrics">
+                        <div><strong id="work-overall-percent">0%</strong><span id="work-overall-label">Current stage</span></div>
+                        <div><strong id="work-chapter-position">—</strong><span id="work-chapter-label">Current chapter</span></div>
+                        <div><strong id="work-line-position">—</strong><span id="work-line-label">Current utterance</span></div>
+                    </div>
+                    <div class="work-overall-track"><span id="work-overall-fill"></span></div>
+                </div>
+
+                <div class="chapter-progress-section" id="chapter-progress-section">
+                    <div class="chapter-section-heading">
+                        <div>
+                            <div class="chapter-heading-line">
+                                <h3>Chapters</h3>
+                                <span id="chapter-summary-badge">0 / 0 completed</span>
+                            </div>
+                            <p>Select the next audio batch. Analysis and scripting remain book-wide.</p>
                         </div>
-                        <div class="chapter-selection-toolbar" style="display: flex; gap: 8px; align-items: center;">
-                            <button class="btn btn-ghost btn-sm" id="btn-select-all-chapters" style="padding: 4px 10px; font-size: 0.82em; border-radius: 6px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12);">All</button>
-                            <button class="btn btn-ghost btn-sm" id="btn-select-none-chapters" style="padding: 4px 10px; font-size: 0.82em; border-radius: 6px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12);">None</button>
-                            <input type="text" id="chapter-range-input" class="input-sm" placeholder="e.g. 1-5" style="width: 75px; padding: 4px 8px; font-size: 0.82em; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.5); color: #f3f4f6; text-align: center;">
-                            <button class="btn btn-ghost btn-sm" id="btn-apply-range" style="padding: 4px 12px; font-size: 0.82em; border-radius: 6px; background: rgba(99, 102, 241, 0.2); color: #a5b4fc; border: 1px solid rgba(99, 102, 241, 0.4); font-weight: 600;">Apply Range</button>
+                        <div class="chapter-selection-summary" id="chapter-selection-summary">All chapters selected</div>
+                    </div>
+                    <div class="chapter-selection-toolbar">
+                        <div class="chapter-toolbar-group">
+                            <button class="btn btn-ghost btn-sm" id="btn-select-all-chapters">Select all</button>
+                            <button class="btn btn-ghost btn-sm" id="btn-select-none-chapters">Clear</button>
+                            <input type="text" id="chapter-range-input" class="input-sm" placeholder="1-5, 8, 12-14">
+                            <button class="btn btn-primary btn-sm" id="btn-apply-range">Apply range</button>
+                        </div>
+                        <div class="chapter-toolbar-group chapter-toolbar-search">
+                            <input type="search" id="chapter-search-input" class="input-sm" placeholder="Search chapter titles">
+                            <select id="chapter-status-filter" class="input-sm">
+                                <option value="all">All statuses</option>
+                                <option value="active">Active</option>
+                                <option value="pending">Pending</option>
+                                <option value="scripted">Scripted</option>
+                                <option value="generated">Generated</option>
+                                <option value="done">Mastered</option>
+                            </select>
                         </div>
                     </div>
-                    <div class="chapter-grid" id="chapter-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; max-height: 400px; overflow-y: auto; padding-right: 4px;"></div>
+                    <div class="chapter-list-header" aria-hidden="true">
+                        <span></span><span>Chapter</span><span>Status</span><span>Progress</span><span></span>
+                    </div>
+                    <div class="chapter-grid" id="chapter-grid"></div>
                 </div>
+
+                <details class="schedule-section" id="schedule-section">
+                    <summary>
+                        <span><strong>Automatic working hours</strong><small id="schedule-summary">Scheduling is off</small></span>
+                        <span class="schedule-state" id="schedule-state">Off</span>
+                    </summary>
+                    <div class="schedule-body">
+                        <div class="schedule-intro">
+                            <label class="toggle-row"><input type="checkbox" id="schedule-enabled"><span>Automatically work only during these windows</span></label>
+                            <label>Timezone <input type="text" id="schedule-timezone" class="input-sm" value="Europe/Bucharest"></label>
+                        </div>
+                        <div id="schedule-windows" class="schedule-windows"></div>
+                        <div class="schedule-actions">
+                            <button class="btn btn-ghost btn-sm" id="btn-add-schedule-window">Add window</button>
+                            <button class="btn btn-primary btn-sm" id="btn-save-schedule">Save working hours</button>
+                        </div>
+                        <p class="schedule-help">The pipeline parks at a safe boundary and resumes automatically when a working window opens. Overnight windows are supported.</p>
+                    </div>
+                </details>
             </div>
 
             <!-- Tab navigation -->
             <div class="tab-bar" id="detail-tabs">
-                <button class="tab active" data-tab="tab-characters">Characters</button>
+                <button class="tab active" data-tab="tab-characters">Voice casting</button>
                 <button class="tab" data-tab="tab-script">Script</button>
                 <button class="tab" data-tab="tab-quality">Quality</button>
                 <button class="tab tab-logs" data-tab="tab-logs">🖥 Logs</button>
             </div>
 
-            <!-- Character Registry Tab -->
+            <!-- Speaking-only Voice Casting Tab -->
             <div class="tab-content active" id="tab-characters">
+                <section class="voice-review-banner hidden" id="voice-review-banner"></section>
+                <div class="casting-summary" id="casting-summary"></div>
                 <div class="character-grid" id="character-grid">
                     <div class="empty-state small">
-                        <p>Characters will appear after the LLM analysis completes</p>
+                        <p>Casting becomes available after the script identifies who actually speaks.</p>
                     </div>
                 </div>
             </div>
@@ -250,9 +302,9 @@
     <div class="toast-container" id="toast-container"></div>
 
     <!-- Scripts -->
-    <script src="/static/js/app.js?v=5"></script>
-    <script src="/static/js/pipeline.js?v=5"></script>
-    <script src="/static/js/script-viewer.js?v=5"></script>
-    <script src="/static/js/log-console.js?v=5"></script>
+    <script src="static/js/app.js?v=20260728.1"></script>
+    <script src="static/js/pipeline.js?v=20260728.1"></script>
+    <script src="static/js/script-viewer.js?v=20260728.1"></script>
+    <script src="static/js/log-console.js?v=20260728.1"></script>
 </body>
 </html>

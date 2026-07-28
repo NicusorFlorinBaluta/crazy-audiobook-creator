@@ -2,83 +2,111 @@
 # Brain (Windows) — Configuration
 # ============================================================
 
-# --- Ollama LLM Settings ---
+# Book-wide LLM analysis and script annotation
 ollama:
-  host: "http://localhost:11434"
-  model: "qwen2.5:32b"
-  temperature_pass1: 0.3           # Lower = more consistent character analysis
-  temperature_pass2: 0.4           # Slightly higher for creative emotion descriptions
+  # Use an app-owned port so the pipeline can enforce the discrete Vulkan GPU
+  # even when the Ollama desktop service is also running on its default port.
+  host: http://127.0.0.1:11435
+  model: qwen2.5:32b
+  auto_start: true
+  executable: C:\Users\nicus\AppData\Local\Programs\Ollama\ollama.exe
+  models_dir: E:\.ollama\models
+  vulkan_visible_devices: '0'     # Vulkan0 = Radeon RX 7900 XTX on this PC
+  startup_timeout_seconds: 90
+  log_path: brain/projects/ollama-managed.log
+  debug: true
+  temperature_pass1: 0.3
+  temperature_pass2: 0.4
   top_p: 0.9
-  context_window: 10               # Paragraphs before/after for emotion context
-  timeout: 600                     # Seconds to wait for LLM response
-  max_retries: 15
+  context_window: 6144
+  timeout: 600
+  max_retries: 3
+  max_retry_seconds: 900       # Total budget for failed attempts/backoff; healthy streams may run longer
+  unload_after_scripting: true     # Free GPU memory before Qwen TTS loads
 
-# --- Voice Server Connection & Management ---
+# Managed local Voice service
 voice_server:
-  host: "http://127.0.0.1:8100"
-  venv: "E:\\PyTorch env\\my_venv"
+  host: http://127.0.0.1:8100
+  api_token: ''
+  venv: E:\PyTorch env\my_venv
   auto_start: true
   startup_timeout_seconds: 120
   timeout: 30
   retries: 5
   retry_delay: 2
+  rocm_target_family: custom       # Avoid broken offload-arch shim on spaced paths
 
-
-# --- EPUB Text Extraction ---
+# EPUB text extraction
 extraction:
   skip_toc: true
   skip_appendices: true
   skip_front_matter: true
   min_chapter_words: 100
   max_chapter_words: 20000
-  chapter_detection: "auto"        # "auto" | "heading" | "pattern" | "none"
+  chapter_detection: auto         # auto | heading | pattern | none
   preserve_poetry: true
-
-# --- Script Generation ---
+# Source-preserving script construction
 script:
   max_segment_sentences: 4
   min_segment_words: 3
   default_speed: 1.0
-
-  # Pause settings (milliseconds)
+  group_utterances: true
+  utterance_target_chars: 260      # Bounded same-speaker TTS grouping
+  utterance_max_words: 45
+  narrator_target_chars: 340       # Longer neutral narration reduces TTS call overhead
+  narrator_max_words: 58
+  expressive_target_chars: 180    # Keep intense/whispered delivery controllable
+  expressive_max_words: 30
+  speaker_confidence_threshold: 0.55
   narrator_pause_ms: 500
   dialogue_pause_ms: 300
   scene_transition_pause_ms: 1500
   chapter_start_pause_ms: 1000
   chapter_end_pause_ms: 2000
   paragraph_pause_ms: 600
-
-  # Character handling
   max_unique_voices: 20
   minor_character_threshold: 3
   group_minor_characters: true
-
-  # Chunking for long chapters
   chunk_size_words: 600
   chunk_overlap_words: 150
-
-# --- Web Dashboard ---
+# Local dashboard
 dashboard:
   port: 8000
-  host: "0.0.0.0"
-  cors_origins: ["*"]
-  static_dir: "dashboard/frontend"
-
-  # Project storage
-  projects_dir: "projects"
+  # The CLI requires CRAZY_AUDIOBOOK_DASHBOARD_TOKEN before it will honor this
+  # LAN bind. Local Electron/start_app launches remain explicitly loopback-only.
+  host: 0.0.0.0
+  cors_origins:
+  - http://127.0.0.1:8000
+  - http://localhost:8000
+  api_token: ''
+  static_dir: dashboard/frontend
+  max_upload_size_mb: 100
+  max_epub_expanded_mb: 1000
+  projects_dir: projects
   max_projects: 50
-  auto_cleanup_days: 0              # 0 = never
-
-# --- Pipeline Behavior ---
+  auto_cleanup_days: 0
+# External metadata lookup is opt-in
+metadata:
+  auto_fetch_external: false
+# Pipeline state and artifact behavior
 pipeline:
   auto_start_tts: true
   auto_master: true
   auto_export: true
   cleanup_intermediates: true
-
-  # State persistence
-  state_db: "pipeline_state.db"
-  checkpoint_frequency: 5           # Save state every N lines
-
-  # Generation batching
-  batch_mode: "chapter"             # "chapter" | "line"
+  state_db: pipeline_state.db
+  checkpoint_frequency: 5
+  batch_mode: chapter
+# Automatic safe-boundary working hours
+schedule:
+  enabled: false
+  timezone: Europe/Bucharest
+  windows:
+  - days:
+    - Monday
+    - Tuesday
+    - Wednesday
+    - Thursday
+    - Friday
+    start: '10:00'
+    end: 05:00

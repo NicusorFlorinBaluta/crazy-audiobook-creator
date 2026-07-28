@@ -44,14 +44,17 @@ class VoiceClient:
         timeout: int = 3600,
         retries: int = 3,
         retry_delay: int = 2,
+        api_token: str = "",
     ):
         self.host = host.rstrip("/")
         self.timeout = timeout
         self.retries = retries
         self.retry_delay = retry_delay
+        headers = {"X-API-Token": api_token} if api_token else None
         self._client = httpx.Client(
             timeout=httpx.Timeout(float(timeout), connect=10.0),
             follow_redirects=True,
+            headers=headers,
         )
 
     # ------------------------------------------------------------------
@@ -62,6 +65,15 @@ class VoiceClient:
         """Check if the Voice server is running and healthy."""
         data = self._get("/health")
         return VoiceHealthResponse(**data)
+
+    def health_check_once(self, timeout_seconds: float = 2.0) -> VoiceHealthResponse:
+        """Perform a quiet single preflight check before launching a managed server."""
+        response = self._client.get(
+            f"{self.host}/health",
+            timeout=httpx.Timeout(timeout_seconds),
+        )
+        response.raise_for_status()
+        return VoiceHealthResponse(**response.json())
 
     def wait_for_server(self, max_wait_seconds: int = 120) -> bool:
         """Wait for the Voice server to become available.
@@ -131,7 +143,7 @@ class VoiceClient:
         )
         data = self._post(
             "/generate/chapter",
-            request.model_dump(),
+            request.model_dump(by_alias=True),
             timeout=7200,  # 2 hours max for a chapter
         )
         return GenerateChapterResponse(**data)
@@ -176,6 +188,14 @@ class VoiceClient:
             timeout=600,
         )
         return ExportM4BResponse(**data)
+
+    def cancel_project(self, project_id: str) -> dict[str, Any]:
+        """Request cancellation at the next TTS segment boundary."""
+        return self._post(f"/cancel/{project_id}", timeout=10)
+
+    def unload_models(self) -> dict[str, Any]:
+        """Unload models after active generation has stopped."""
+        return self._post("/unload", timeout=30)
 
     # ------------------------------------------------------------------
     # Internal HTTP helpers
@@ -249,7 +269,7 @@ class VoiceClient:
                     e,
                     error_details,
                 )
-                if e.response.status_code in (401, 403, 404, 422):
+                if e.response.status_code in (401, 403, 404, 409, 422):
                     raise VoiceClientError(
                         f"{method} {path} failed: {e.response.status_code} {e.response.reason_phrase}\nDetails: {error_details}"
                     ) from e

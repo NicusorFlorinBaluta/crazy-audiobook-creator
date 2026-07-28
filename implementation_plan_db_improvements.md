@@ -1,5 +1,11 @@
 # SQLite Embedding Cache & Comprehensive Pipeline Improvements
 
+> **Historical implementation plan — substantially completed and superseded.**
+> Current cache, validation, lifecycle, and artifact behavior is documented in
+> [docs/architecture.md](docs/architecture.md) and
+> [docs/quality-assurance.md](docs/quality-assurance.md). Claims and line
+> numbers below describe an earlier code revision.
+
 ## Background
 
 The pipeline currently relies on in-memory caching for speaker embeddings and voice references, re-reads `voices.json` from disk on every line, re-extracts audio features on every server restart, and has several architectural inefficiencies that hurt speed, consistency, and quality. This plan introduces a unified SQLite DB as the central state store for embeddings, quality data, and generation metadata, alongside targeted performance and quality improvements identified through a deep codebase audit.
@@ -12,10 +18,10 @@ The pipeline currently relies on in-memory caching for speaker embeddings and vo
 > **Whisper STT Model Size:** The current config uses `whisper_model: "tiny"` for speed, but `"small"` or `"base"` would significantly improve WER accuracy (and reduce false validation failures). Upgrading to `"base"` adds ~150 MB VRAM. Upgrading to `"small"` adds ~500 MB VRAM. Recommend `"base"` as the sweet spot for your 7900 XTX (24 GB VRAM).
 
 > [!IMPORTANT]  
-> **WER Constant Mismatch:** [constants.py](file:///e:/Projects/crazy-audiobook-creator/shared/constants.py#L91) still says `DEFAULT_WER_THRESHOLD = 0.05` (5%) while the actual runtime uses `0.35` from config.yaml. Should I update the constant to `0.35` to match, preventing confusion if anything falls back to the default?
+> **WER Constant Mismatch:** [constants.py](shared/constants.py#L91) still says `DEFAULT_WER_THRESHOLD = 0.05` (5%) while the actual runtime uses `0.35` from config.yaml. Should I update the constant to `0.35` to match, preventing confusion if anything falls back to the default?
 
 > [!WARNING]
-> **Noise Gate Performance:** The current noise gate in [normalizer.py](file:///e:/Projects/crazy-audiobook-creator/voice/mastering/normalizer.py#L171-L202) uses a **per-sample Python loop** (`for i in range(len(gate))`) which is extremely slow on long chapters (~6M samples = 6 million loop iterations). This will be replaced with a vectorized NumPy implementation.
+> **Noise Gate Performance:** The current noise gate in [normalizer.py](voice/mastering/normalizer.py#L171-L202) uses a **per-sample Python loop** (`for i in range(len(gate))`) which is extremely slow on long chapters (~6M samples = 6 million loop iterations). This will be replaced with a vectorized NumPy implementation.
 
 ---
 
@@ -25,7 +31,7 @@ The pipeline currently relies on in-memory caching for speaker embeddings and vo
 
 Creates a new `voice_cache.db` SQLite database that stores pre-computed speaker embeddings, voice metadata, and generation fingerprints. This eliminates cold-start penalties, guarantees bit-perfect voice consistency across sessions, and enables instant speaker switching.
 
-#### [NEW] [embedding_store.py](file:///e:/Projects/crazy-audiobook-creator/voice/tts_server/embedding_store.py)
+#### [NEW] [embedding_store.py](voice/tts_server/embedding_store.py)
 
 New SQLite-backed store with the following schema:
 
@@ -84,7 +90,7 @@ CREATE TABLE generation_fingerprints (
 
 ---
 
-#### [MODIFY] [qwen3_engine.py](file:///e:/Projects/crazy-audiobook-creator/voice/tts_server/qwen3_engine.py)
+#### [MODIFY] [qwen3_engine.py](voice/tts_server/qwen3_engine.py)
 
 - Import `EmbeddingStore` and accept it as optional `__init__` parameter
 - In `_generate()` (line 263-305): Before calling `generate_voice_clone()`, check `embedding_store.get_embedding()`. If found, pass the pre-loaded tensor directly (skipping audio file I/O and feature extraction). If not found, generate normally, then call `embedding_store.save_embedding()` to cache for future use
@@ -94,7 +100,7 @@ CREATE TABLE generation_fingerprints (
 
 ---
 
-#### [MODIFY] [validation_loop.py](file:///e:/Projects/crazy-audiobook-creator/voice/validator/validation_loop.py)
+#### [MODIFY] [validation_loop.py](voice/validator/validation_loop.py)
 
 - Accept `EmbeddingStore` in `__init__`
 - In Phase 1 `process_chapter()` (line 110-119): Replace the existing `output_path.exists() and st_size > 1000` skip check with a smarter fingerprint check via `embedding_store.line_needs_regeneration()`. This detects cases where the text was edited, the speaker changed, or the emotion was adjusted — and only re-generates those specific lines
@@ -104,7 +110,7 @@ CREATE TABLE generation_fingerprints (
 
 ---
 
-#### [MODIFY] [voice/tts_server/main.py](file:///e:/Projects/crazy-audiobook-creator/voice/tts_server/main.py)
+#### [MODIFY] [voice/tts_server/main.py](voice/tts_server/main.py)
 
 - In `lifespan()`: Instantiate `EmbeddingStore(db_path="voice_cache.db")` and pass it to `Qwen3TTSEngine` and `ValidationLoop`
 
@@ -112,7 +118,7 @@ CREATE TABLE generation_fingerprints (
 
 ### Component 2: Noise Gate Vectorization (Performance Critical)
 
-#### [MODIFY] [normalizer.py](file:///e:/Projects/crazy-audiobook-creator/voice/mastering/normalizer.py)
+#### [MODIFY] [normalizer.py](voice/mastering/normalizer.py)
 
 Replace the per-sample Python loop in `_apply_noise_gate()` (lines 190-200) with a fully vectorized NumPy implementation using `np.convolve()` or `scipy.signal.lfilter()` for the attack/release envelope follower.
 
@@ -140,11 +146,11 @@ release_coeff = 1.0 / max(1, release_samples)
 
 ### Component 3: Quality & Accuracy Improvements
 
-#### [MODIFY] [constants.py](file:///e:/Projects/crazy-audiobook-creator/shared/constants.py)
+#### [MODIFY] [constants.py](shared/constants.py)
 
 - Update `DEFAULT_WER_THRESHOLD` from `0.05` to `0.35` (line 91) to match the actual runtime value in `voice/config.yaml`. This prevents any code path that falls back to the constant from triggering the infinite-retry bug.
 
-#### [MODIFY] [whisper_validator.py](file:///e:/Projects/crazy-audiobook-creator/voice/validator/whisper_validator.py)
+#### [MODIFY] [whisper_validator.py](voice/validator/whisper_validator.py)
 
 - **Text normalization improvements** in `_normalize_text()` (line 172-189):
   - Add number expansion: `"6th"` → `"sixth"`, `"100"` → `"one hundred"` (the #1 cause of WER inflation)
@@ -153,7 +159,7 @@ release_coeff = 1.0 / max(1, release_samples)
 
 **Impact:** Reduces WER by 5-15% on lines with numbers, significantly reducing false retry loops.
 
-#### [MODIFY] [voice/config.yaml](file:///e:/Projects/crazy-audiobook-creator/voice/config.yaml)
+#### [MODIFY] [voice/config.yaml](voice/config.yaml)
 
 - Change `whisper_model` from `"tiny"` to `"base"` — ~3x better accuracy for only ~150 MB additional VRAM
 - Add new `embedding_cache` section:
@@ -168,7 +174,7 @@ release_coeff = 1.0 / max(1, release_samples)
 
 ### Component 4: Pipeline Performance Optimizations
 
-#### [MODIFY] [validation_loop.py](file:///e:/Projects/crazy-audiobook-creator/voice/validator/validation_loop.py)
+#### [MODIFY] [validation_loop.py](voice/validator/validation_loop.py)
 
 **TTS/Whisper VRAM Coexistence:**
 
@@ -184,7 +190,7 @@ With `whisper_model: "base"` (~150 MB VRAM) and Qwen3-TTS (~3.5 GB VRAM), both m
 
 **Impact:** Eliminates ~20-30 seconds of model load/unload overhead per chapter. Enables instant per-line quality feedback.
 
-#### [MODIFY] [pipeline.py](file:///e:/Projects/crazy-audiobook-creator/brain/orchestrator/pipeline.py)
+#### [MODIFY] [pipeline.py](brain/orchestrator/pipeline.py)
 
 **Line merging word limit increase:**
 - Line 617: Change `under_limit = len(prev.text.split()) + len(line.text.split()) < 180` to `< 250`
@@ -197,7 +203,7 @@ With `whisper_model: "base"` (~150 MB VRAM) and Qwen3-TTS (~3.5 GB VRAM), both m
 
 ### Component 5: Voice Library Disk I/O Reduction
 
-#### [MODIFY] [voice_library.py](file:///e:/Projects/crazy-audiobook-creator/voice/tts_server/voice_library.py)
+#### [MODIFY] [voice_library.py](voice/tts_server/voice_library.py)
 
 - Add an in-memory LRU cache for `_load_registry()` (line 104-110). Currently, every call to `get_voice_path()` or `get_voice_ref_text()` reads and parses `voices.json` from disk. For a 150-line chapter with 5 speakers, this means 150 file reads.
 - Use `functools.lru_cache` or a simple dict cache that invalidates on `register_voice()` / `delete_voice()`.
@@ -210,17 +216,17 @@ With `whisper_model: "base"` (~150 MB VRAM) and Qwen3-TTS (~3.5 GB VRAM), both m
 
 | File | Change Type | Impact |
 |------|-------------|--------|
-| [embedding_store.py](file:///e:/Projects/crazy-audiobook-creator/voice/tts_server/embedding_store.py) | **NEW** | Core embedding cache DB |
-| [qwen3_engine.py](file:///e:/Projects/crazy-audiobook-creator/voice/tts_server/qwen3_engine.py) | MODIFY | Use cached embeddings, remove in-memory FX cache |
-| [validation_loop.py](file:///e:/Projects/crazy-audiobook-creator/voice/validator/validation_loop.py) | MODIFY | Smart fingerprint skip, inline validation, save quality to DB |
-| [whisper_validator.py](file:///e:/Projects/crazy-audiobook-creator/voice/validator/whisper_validator.py) | MODIFY | Better text normalization (numbers, contractions) |
-| [normalizer.py](file:///e:/Projects/crazy-audiobook-creator/voice/mastering/normalizer.py) | MODIFY | Vectorized noise gate (~100x speedup) |
-| [voice_library.py](file:///e:/Projects/crazy-audiobook-creator/voice/tts_server/voice_library.py) | MODIFY | In-memory registry cache |
-| [voice/tts_server/main.py](file:///e:/Projects/crazy-audiobook-creator/voice/tts_server/main.py) | MODIFY | Initialize EmbeddingStore, keep Whisper loaded |
-| [constants.py](file:///e:/Projects/crazy-audiobook-creator/shared/constants.py) | MODIFY | Fix WER threshold constant |
-| [voice/config.yaml](file:///e:/Projects/crazy-audiobook-creator/voice/config.yaml) | MODIFY | Whisper "base", embedding cache config |
-| [brain/config.yaml](file:///e:/Projects/crazy-audiobook-creator/brain/config.yaml) | MODIFY | Checkpoint frequency |
-| [pipeline.py](file:///e:/Projects/crazy-audiobook-creator/brain/orchestrator/pipeline.py) | MODIFY | Increase merge word limit |
+| [embedding_store.py](voice/tts_server/embedding_store.py) | **NEW** | Core embedding cache DB |
+| [qwen3_engine.py](voice/tts_server/qwen3_engine.py) | MODIFY | Use cached embeddings, remove in-memory FX cache |
+| [validation_loop.py](voice/validator/validation_loop.py) | MODIFY | Smart fingerprint skip, inline validation, save quality to DB |
+| [whisper_validator.py](voice/validator/whisper_validator.py) | MODIFY | Better text normalization (numbers, contractions) |
+| [normalizer.py](voice/mastering/normalizer.py) | MODIFY | Vectorized noise gate (~100x speedup) |
+| [voice_library.py](voice/tts_server/voice_library.py) | MODIFY | In-memory registry cache |
+| [voice/tts_server/main.py](voice/tts_server/main.py) | MODIFY | Initialize EmbeddingStore, keep Whisper loaded |
+| [constants.py](shared/constants.py) | MODIFY | Fix WER threshold constant |
+| [voice/config.yaml](voice/config.yaml) | MODIFY | Whisper "base", embedding cache config |
+| [brain/config.yaml](brain/config.yaml) | MODIFY | Checkpoint frequency |
+| [pipeline.py](brain/orchestrator/pipeline.py) | MODIFY | Increase merge word limit |
 
 ---
 

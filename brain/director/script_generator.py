@@ -12,14 +12,21 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
 from brain.director.ollama_client import OllamaClient
 from shared.constants import CHUNK_OVERLAP_WORDS, CHUNK_SIZE_WORDS
+from shared.artifacts import (
+    assert_script_covers_source,
+    atomic_write_json,
+    atomic_write_text,
+    script_fingerprint,
+)
 from shared.models import (
-    Character,
     CharacterRegistry,
     ExtractedChapter,
     ScriptChapter,
@@ -27,6 +34,13 @@ from shared.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class SourceFragment:
+    text: str
+    start: int
+    end: int
 
 _PROMPT_DIR = Path(__file__).parent / "prompts"
 
@@ -45,10 +59,15 @@ _SYSTEM_PROMPT = """You are a STRICT AUDIOBOOK SCRIPT METADATA ANNOTATOR. Your O
 ### Audio Direction Guidelines
 
 #### Speaker Attribution Guidelines
-- CRITICAL: EVERY fragment that is NOT inside quotation marks ("...") is NARRATION -> speaker MUST be "narrator".
-- Dialogue tags (e.g., "he said", "she whispered", "Vathi replied", "Dusk looked at her") are NARRATOR lines -> speaker MUST be "narrator".
-- ONLY spoken words inside quotation marks ("...") get a character speaker ID!
-- Identify the dialogue speaker from the surrounding context and dialogue tags (e.g. if tag says "she whispered", speaker MUST be a female character like vathi or frond, NEVER male dusk).
+- CRITICAL: EVERY fragment that is not marked as dialogue is narration and its speaker MUST be "narrator".
+- Dialogue tags (e.g., "he said", "she whispered", "the captain replied", "the child looked at her") are NARRATOR lines -> speaker MUST be "narrator".
+- Dialogue may use straight/curly double quotes, typographic single quotes, or an em dash at the start of a dialogue turn.
+- ONLY the spoken fragment gets a character speaker ID.
+- Identify the dialogue speaker from surrounding context and explicit dialogue
+  tags. Do not guess from a name, gender stereotype, nearby named entity, or
+  personification. If a named place/object is mentioned near dialogue, assign
+  it as speaker only when the text explicitly establishes that it literally
+  speaks.
 - If you cannot determine the speaker with high confidence, use "narrator".
 
 #### Emotion Mapping & Inflection Taxonomy
@@ -78,6 +97,8 @@ CRITICAL REMINDER: You MUST output ONLY valid JSON matching the Output Schema be
     {{
       "id": 0,
       "speaker": "character_id",
+      "speaker_confidence": 0.95,
+      "speaker_evidence": "short dialogue tag or context cue; empty for narration",
       "emotion": "descriptive emotion state",
       "speed": 1.0,
       "pause_before_ms": 0,
@@ -106,11 +127,87 @@ class ScriptGenerator:
         temperature: float = 0.4,
         chunk_size_words: int = CHUNK_SIZE_WORDS,
         chunk_overlap_words: int = CHUNK_OVERLAP_WORDS,
+        max_fragments_per_chunk: int = 48,
+        group_utterances: bool = True,
+        utterance_target_chars: int = 260,
+        utterance_max_words: int = 45,
+        narrator_target_chars: int = 340,
+        narrator_max_words: int = 58,
+        expressive_target_chars: int = 180,
+        expressive_max_words: int = 30,
+        speaker_confidence_threshold: float = 0.55,
     ):
         self.ollama = ollama
         self.temperature = temperature
         self.chunk_size_words = chunk_size_words
         self.chunk_overlap_words = chunk_overlap_words
+        self.max_fragments_per_chunk = max(1, max_fragments_per_chunk)
+        self.group_utterances = group_utterances
+        self.utterance_target_chars = max(80, utterance_target_chars)
+        self.utterance_max_words = max(10, utterance_max_words)
+        self.narrator_target_chars = max(
+            self.utterance_target_chars, narrator_target_chars
+        )
+        self.narrator_max_words = max(
+            self.utterance_max_words, narrator_max_words
+        )
+        self.expressive_target_chars = max(80, expressive_target_chars)
+        self.expressive_max_words = max(10, expressive_max_words)
+        self.speaker_confidence_threshold = max(
+            0.0, min(1.0, speaker_confidence_threshold)
+        )
+
+    def chapter_fingerprint(
+        self,
+        chapter: ExtractedChapter,
+        registry: CharacterRegistry,
+    ) -> str:
+        """Fingerprint every input that can change one script artifact."""
+        return script_fingerprint(
+            source_text=chapter.text,
+            # Only attribution context rendered into _SYSTEM_PROMPT belongs in
+            # the script dependency. Voice descriptions, assignments, and FX
+            # affect audio manifests—not speaker/emotion metadata.
+            registry=self._format_registry(registry),
+            model_name=getattr(self.ollama, "model", "unknown"),
+            prompt_text=_SYSTEM_PROMPT + _USER_PROMPT,
+            chunk_size_words=self.chunk_size_words,
+            group_utterances=self.group_utterances,
+            utterance_target_chars=self.utterance_target_chars,
+            utterance_max_words=self.utterance_max_words,
+            narrator_target_chars=self.narrator_target_chars,
+            narrator_max_words=self.narrator_max_words,
+            expressive_target_chars=self.expressive_target_chars,
+            expressive_max_words=self.expressive_max_words,
+            speaker_confidence_threshold=self.speaker_confidence_threshold,
+        )
+
+    def cached_scripts_are_current(
+        self,
+        chapters: list[ExtractedChapter],
+        registry: CharacterRegistry,
+        scripts_dir: Path,
+    ) -> bool:
+        """Return whether every cached chapter matches current dependencies."""
+        for chapter in chapters:
+            script_path = scripts_dir / f"chapter_{chapter.number:03d}.json"
+            metadata_path = scripts_dir / f"chapter_{chapter.number:03d}.meta.json"
+            if not script_path.exists() or not metadata_path.exists():
+                return False
+            try:
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                if metadata.get("fingerprint") != self.chapter_fingerprint(
+                    chapter,
+                    registry,
+                ):
+                    return False
+                script = ScriptChapter.model_validate_json(
+                    script_path.read_text(encoding="utf-8")
+                )
+                assert_script_covers_source(script, chapter.text)
+            except Exception:
+                return False
+        return True
 
     def generate_chapter_script(
         self,
@@ -138,18 +235,26 @@ class ScriptGenerator:
             chapter.word_count,
         )
 
-        if chapter.word_count <= self.chunk_size_words:
-            # Process entire chapter in one shot
-            return self._process_chunk(
-                chapter.text,
+        fragments = self._split_into_fragment_spans(chapter.text)
+        if not fragments and chapter.text.strip():
+            raise ValueError(f"Chapter {chapter.number} could not be fragmented")
+
+        if sum(len(fragment.text.split()) for fragment in fragments) <= self.chunk_size_words:
+            script = self._process_fragments(
+                fragments,
                 chapter.number,
                 chapter.title,
                 registry,
                 previous_summary,
+                id_offset=0,
             )
         else:
-            # Split into overlapping chunks and merge
-            return self._process_chunked(chapter, registry, previous_summary)
+            script = self._process_chunked(chapter, registry, previous_summary)
+
+        if self.group_utterances:
+            script = self._group_adjacent_utterances(script, chapter.text)
+        assert_script_covers_source(script, chapter.text)
+        return script
 
     def generate_all_chapters(
         self,
@@ -185,10 +290,26 @@ class ScriptGenerator:
             script_path = None
             if scripts_dir:
                 script_path = scripts_dir / f"chapter_{chapter.number:03d}.json"
-                if script_path.exists():
-                    logger.info("[ScriptGenerator] Skipping Chapter %d (already exists)", chapter.number)
+                metadata_path = (
+                    scripts_dir / f"chapter_{chapter.number:03d}.meta.json"
+                )
+                expected_fingerprint = self.chapter_fingerprint(
+                    chapter,
+                    registry,
+                )
+                if script_path.exists() and metadata_path.exists():
                     try:
+                        metadata = json.loads(
+                            metadata_path.read_text(encoding="utf-8")
+                        )
+                        if metadata.get("fingerprint") != expected_fingerprint:
+                            raise ValueError("script dependency fingerprint changed")
                         script = ScriptChapter.model_validate_json(script_path.read_text(encoding="utf-8"))
+                        assert_script_covers_source(script, chapter.text)
+                        logger.info(
+                            "[ScriptGenerator] Reusing Chapter %d (fingerprint matches)",
+                            chapter.number,
+                        )
                         scripts.append(script)
                         previous_summary = script.chapter_summary
                         if progress_callback:
@@ -206,10 +327,16 @@ class ScriptGenerator:
             scripts.append(script)
             previous_summary = script.chapter_summary
 
+            # Validate attribution before committing a resumable script artifact.
+            self._detect_new_characters(script, registry)
+
             # Save incrementally
             if script_path:
-                with open(script_path, "w", encoding="utf-8") as f:
-                    f.write(script.model_dump_json(indent=2))
+                atomic_write_text(script_path, script.model_dump_json(indent=2))
+                atomic_write_json(
+                    scripts_dir / f"chapter_{chapter.number:03d}.meta.json",
+                    {"fingerprint": expected_fingerprint},
+                )
                 logger.info("[ScriptGenerator] Incrementally saved %s", script_path.name)
 
             logger.info(
@@ -221,14 +348,8 @@ class ScriptGenerator:
                 (script.chapter_summary or "")[:80],
             )
 
-            # Check for new characters discovered during script generation
-            self._detect_new_characters(script, registry)
-
             if progress_callback:
-                try:
-                    progress_callback(script)
-                except Exception as e:
-                    logger.warning("Progress callback failed: %s", e)
+                progress_callback(script)
 
         total_elapsed = _time.time() - pipeline_t0
         total_lines = sum(len(s.lines) for s in scripts)
@@ -242,15 +363,16 @@ class ScriptGenerator:
 
         return scripts
 
-    def _process_chunk(
+    def _process_fragments(
         self,
-        text: str,
+        fragments: list[SourceFragment],
         chapter_number: int,
         chapter_title: str,
         registry: CharacterRegistry,
         previous_summary: str,
+        id_offset: int,
     ) -> ScriptChapter:
-        """Process a single chunk of text through the LLM."""
+        """Annotate a non-overlapping set of immutable source fragments."""
         char_summary = self._format_registry(registry)
 
         system_prompt = _SYSTEM_PROMPT.format(
@@ -260,9 +382,14 @@ class ScriptGenerator:
             chapter_title=chapter_title,
             chapter_number_padded=f"{chapter_number:02d}",
         )
-        # Pre-process text into static fragments
-        fragments = self._split_into_fragments(text)
-        fragment_dicts = [{"id": i, "text": f} for i, f in enumerate(fragments)]
+        fragment_dicts = [
+            {
+                "id": i,
+                "text": fragment.text,
+                "dialogue": self._is_dialogue_fragment(fragment.text),
+            }
+            for i, fragment in enumerate(fragments)
+        ]
         chapter_text_json = json.dumps(fragment_dicts, indent=2)
         
         prompt = _USER_PROMPT.format(chapter_text_json=chapter_text_json)
@@ -285,14 +412,59 @@ class ScriptGenerator:
 
         import time as _time
         t0 = _time.time()
-        raw = self.ollama.generate_json(
-            prompt,
-            temperature=self.temperature,
-            system=system_prompt,
-        )
+        raw = None
+        last_error: Exception | None = None
+        allowed_speakers = set(registry.characters)
+        for attempt in range(1, 3):
+            try:
+                request_prompt = prompt
+                if last_error is not None:
+                    request_prompt += (
+                        "\n\nCORRECTION REQUIRED: Your previous metadata was "
+                        f"invalid: {last_error}. For dialogue, use only one of "
+                        f"these exact speaker IDs: "
+                        f"{', '.join(sorted(allowed_speakers))}. If the speaker "
+                        "cannot be identified with high confidence, use "
+                        "'narrator'. Do not invent generic speaker labels."
+                    )
+                candidate = self.ollama.generate_json(
+                    request_prompt,
+                    temperature=self.temperature if attempt == 1 else 0.1,
+                    system=system_prompt,
+                )
+                self._validate_metadata_ids(candidate, len(fragments))
+                self._validate_metadata_speakers(
+                    candidate,
+                    fragments,
+                    allowed_speakers,
+                    id_offset=id_offset,
+                    confidence_threshold=self.speaker_confidence_threshold,
+                )
+                raw = candidate
+                break
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "Metadata annotation attempt %d failed for chapter %d: %s",
+                    attempt,
+                    chapter_number,
+                    exc,
+                )
+        if raw is None:
+            raise RuntimeError(
+                f"LLM did not return complete fragment metadata for chapter "
+                f"{chapter_number}"
+            ) from last_error
         elapsed = _time.time() - t0
 
-        result = self._parse_script_chapter(raw, chapter_number, chapter_title, fragments)
+        result = self._parse_script_chapter(
+            raw,
+            chapter_number,
+            chapter_title,
+            fragments,
+            id_offset=id_offset,
+            allowed_speakers=allowed_speakers,
+        )
         logger.info(
             "[ScriptGenerator] Ch%d LLM done in %.1fs | %d lines generated",
             chapter_number,
@@ -307,123 +479,86 @@ class ScriptGenerator:
         registry: CharacterRegistry,
         previous_summary: str,
     ) -> ScriptChapter:
-        """Process a long chapter by splitting into overlapping chunks."""
-        words = chapter.text.split()
-        total_words = len(words)
+        """Process complete source fragments in non-overlapping batches."""
+        fragments = self._split_into_fragment_spans(chapter.text)
         all_lines: list[ScriptLine] = []
-        chunk_num = 0
-        summary = ""
+        summaries: list[str] = []
+        chunks = self._chunk_fragments(fragments)
 
-        i = 0
-        while i < total_words:
-            chunk_num += 1
-            end = min(i + self.chunk_size_words, total_words)
-            chunk_text = " ".join(words[i:end])
+        offset = 0
+        for chunk_num, chunk in enumerate(chunks, 1):
+            context_summary = " ".join(summaries)[-2000:]
 
             logger.info(
-                "Processing chunk %d (words %d-%d of %d)",
+                "Processing fragment chunk %d/%d (%d fragments)",
                 chunk_num,
-                i,
-                end,
-                total_words,
+                len(chunks),
+                len(chunk),
             )
 
-            chunk_script = self._process_chunk(
-                chunk_text,
+            chunk_script = self._process_fragments(
+                chunk,
                 chapter.number,
                 chapter.title,
                 registry,
-                previous_summary if chunk_num == 1 else summary,
+                previous_summary
+                if chunk_num == 1
+                else f"{previous_summary}\nCurrent chapter so far: {context_summary}",
+                id_offset=offset,
             )
-
-            if chunk_num == 1:
-                # First chunk: take all lines
-                all_lines.extend(chunk_script.lines)
-            else:
-                # Subsequent chunks: skip overlap lines
-                overlap_line_count = self._estimate_overlap_lines(
-                    chunk_script.lines, all_lines
-                )
-                all_lines.extend(chunk_script.lines[overlap_line_count:])
-
-            summary = chunk_script.chapter_summary
-            i = end - self.chunk_overlap_words if end < total_words else total_words
-
-        # Re-number all line IDs
-        for idx, line in enumerate(all_lines, 1):
-            line.line_id = f"ch{chapter.number:02d}_{idx:03d}"
+            all_lines.extend(chunk_script.lines)
+            if chunk_script.chapter_summary:
+                summaries.append(chunk_script.chapter_summary)
+            offset += len(chunk)
 
         return ScriptChapter(
             chapter_number=chapter.number,
             chapter_title=chapter.title,
-            chapter_summary=summary,
+            chapter_summary=" ".join(summaries)[-2000:],
             lines=all_lines,
         )
 
-    def _estimate_overlap_lines(
+    def _chunk_fragments(
         self,
-        new_lines: list[ScriptLine],
-        existing_lines: list[ScriptLine],
-    ) -> int:
-        """Estimate how many lines at the start of new_lines overlap with existing.
-
-        Uses text similarity to detect duplicate segments from the overlap region.
-        """
-        if not existing_lines or not new_lines:
-            return 0
-
-        # Get the last few existing lines' text for comparison
-        last_texts = {line.text.strip().lower()[:80] for line in existing_lines[-20:]}
-
-        overlap_count = 0
-        for line in new_lines:
-            prefix = line.text.strip().lower()[:80]
-            if prefix in last_texts:
-                overlap_count += 1
-            else:
-                break  # No more overlap
-
-        return overlap_count
+        fragments: list[SourceFragment],
+    ) -> list[list[SourceFragment]]:
+        """Bound both source words and JSON metadata rows per LLM response."""
+        chunks: list[list[SourceFragment]] = []
+        current: list[SourceFragment] = []
+        current_words = 0
+        for fragment in fragments:
+            fragment_words = max(1, len(fragment.text.split()))
+            if current and (
+                current_words + fragment_words > self.chunk_size_words
+                or len(current) >= self.max_fragments_per_chunk
+            ):
+                chunks.append(current)
+                current = []
+                current_words = 0
+            current.append(fragment)
+            current_words += fragment_words
+        if current:
+            chunks.append(current)
+        return chunks
 
     def _detect_new_characters(
         self,
         script: ScriptChapter,
         registry: CharacterRegistry,
     ) -> None:
-        """Check for speakers not in the registry (discovered in Pass 2)."""
+        """Reject speakers not established by the book-wide analysis."""
         known_ids = set(registry.characters.keys())
-        new_found = []
-
-        for line in script.lines:
-            speaker = line.speaker.lower().replace(" ", "_")
-            if speaker not in known_ids:
-                new_found.append(speaker)
-                # Add a placeholder character
-                registry.characters[speaker] = Character(
-                    id=speaker,
-                    name=speaker.replace("_", " ").title(),
-                    gender="other",
-                    age_range="unknown",
-                    personality_traits=[],
-                    voice_description=(
-                        f"A neutral voice for the character {speaker.replace('_', ' ')}."
-                    ),
-                    speaking_style="",
-                    discovered_in_pass2=True,
-                )
-                known_ids.add(speaker)
-
-        if new_found:
-            logger.info(
-                "[ScriptGenerator] Ch%d: %d new character(s) discovered in Pass 2: %s",
-                script.chapter_number,
-                len(new_found),
-                new_found,
-            )
-        else:
-            logger.info(
-                "[ScriptGenerator] Ch%d: no new characters (all speakers known)",
-                script.chapter_number,
+        unknown = sorted(
+            {
+                line.speaker.lower().replace(" ", "_")
+                for line in script.lines
+                if line.speaker.lower().replace(" ", "_") not in known_ids
+            }
+        )
+        if unknown:
+            raise ValueError(
+                f"Chapter {script.chapter_number} references unknown speakers: "
+                f"{unknown}. Re-run book-wide character analysis."
             )
 
     @staticmethod
@@ -439,33 +574,153 @@ class ScriptGenerator:
 
     @staticmethod
     def _split_into_fragments(text: str) -> list[str]:
-        """Split text into an array of sentence and dialogue fragments."""
-        import re
-        paragraphs = [p.strip() for p in text.split('\n') if p.strip()]
-        fragments = []
-        for p in paragraphs:
-            # Split by quotes first to isolate dialogue blocks
-            quote_pattern = re.compile(r'([\"“”].*?[\"“”])')
-            parts = quote_pattern.split(p)
-            for part in parts:
-                if not part.strip():
-                    continue
-                is_quote = bool(re.match(r'^[\"“”].*[\"“”]$', part.strip()))
-                if is_quote:
-                    fragments.append(part.strip())
-                else:
-                    # Split narrative text into sentences
-                    pattern = re.compile(r'.*?(?:[.!?]+(?=\s|$)|$)', re.DOTALL)
-                    sentences = [match.group(0).strip() for match in pattern.finditer(part) if match.group(0).strip()]
-                    fragments.extend(sentences)
+        """Compatibility wrapper returning immutable fragment text."""
+        return [
+            fragment.text
+            for fragment in ScriptGenerator._split_into_fragment_spans(text)
+        ]
+
+    @staticmethod
+    def _split_into_fragment_spans(text: str) -> list[SourceFragment]:
+        """Split source without rewriting it and retain exact character spans."""
+        quote_pattern = re.compile(
+            r'"(?:[^"\n]|\\")*?"|“[^”\n]*?”|‘[^’\n]*?’|'
+            r"(?<!\w)'[^'\n]+?'(?!\w)"
+        )
+        fragments: list[SourceFragment] = []
+
+        def append_trimmed(start: int, end: int) -> None:
+            while start < end and text[start].isspace():
+                start += 1
+            while end > start and text[end - 1].isspace():
+                end -= 1
+            if end > start:
+                fragments.append(SourceFragment(text[start:end], start, end))
+
+        def append_narrative(start: int, end: int) -> None:
+            if start >= end:
+                return
+            segment = text[start:end]
+            cursor = 0
+            sentence_pattern = re.compile(
+                r".+?(?:[.!?…]+(?:[\"”’])?(?=\s|$)|$)",
+                re.DOTALL,
+            )
+            for match in sentence_pattern.finditer(segment):
+                append_trimmed(start + match.start(), start + match.end())
+                cursor = match.end()
+            if cursor < len(segment):
+                append_trimmed(start + cursor, end)
+
+        for line_match in re.finditer(r"[^\n]+", text):
+            line_start, line_end = line_match.span()
+            cursor = line_start
+            for quote_match in quote_pattern.finditer(text, line_start, line_end):
+                append_narrative(cursor, quote_match.start())
+                append_trimmed(quote_match.start(), quote_match.end())
+                cursor = quote_match.end()
+            append_narrative(cursor, line_end)
+
+        if not fragments and text.strip():
+            start = len(text) - len(text.lstrip())
+            end = len(text.rstrip())
+            fragments.append(SourceFragment(text[start:end], start, end))
+
+        from shared.artifacts import normalize_for_coverage
+
+        if normalize_for_coverage("".join(f.text for f in fragments)) != (
+            normalize_for_coverage(text)
+        ):
+            raise ValueError("Fragmentation did not cover source text exactly once")
         return fragments
+
+    @staticmethod
+    def _is_dialogue_fragment(text: str) -> bool:
+        value = text.strip()
+        if value.startswith(("—", "–")):
+            return True
+        pairs = (('"', '"'), ("“", "”"), ("‘", "’"), ("'", "'"))
+        return any(
+            value.startswith(opening) and value.endswith(closing)
+            for opening, closing in pairs
+        )
+
+    @staticmethod
+    def _validate_metadata_ids(raw: dict[str, Any], expected_count: int) -> None:
+        raw_lines = raw.get("lines")
+        if not isinstance(raw_lines, list):
+            raise ValueError("LLM response has no lines array")
+        ids: list[int] = []
+        for line in raw_lines:
+            if not isinstance(line, dict) or "id" not in line:
+                raise ValueError("LLM response contains an invalid metadata item")
+            ids.append(int(line["id"]))
+        expected = list(range(expected_count))
+        if sorted(ids) != expected or len(ids) != len(set(ids)):
+            raise ValueError(
+                "Fragment metadata IDs are incomplete or duplicated; "
+                f"expected={expected}, received={sorted(ids)}"
+            )
+
+    @staticmethod
+    def _normalize_speaker_id(value: object) -> str:
+        return (
+            re.sub(r"[^\w]+", "_", str(value or "narrator").lower()).strip("_")
+            or "narrator"
+        )
+
+    @staticmethod
+    def _validate_metadata_speakers(
+        raw: dict[str, Any],
+        fragments: list[SourceFragment],
+        allowed_speakers: set[str],
+        *,
+        id_offset: int = 0,
+        confidence_threshold: float = 0.55,
+    ) -> None:
+        """Reject invented dialogue speakers while the LLM retry is still available."""
+        metadata_map = {
+            int(item["id"]): item
+            for item in raw.get("lines", [])
+            if isinstance(item, dict) and "id" in item
+        }
+        for i, fragment in enumerate(fragments):
+            if not ScriptGenerator._is_dialogue_fragment(fragment.text):
+                continue
+            speaker = ScriptGenerator._normalize_speaker_id(
+                metadata_map.get(i, {}).get("speaker", "narrator")
+            )
+            if speaker not in allowed_speakers:
+                raise ValueError(
+                    f"Fragment {id_offset + i} uses unknown speaker '{speaker}'"
+                )
+            confidence = metadata_map.get(i, {}).get("speaker_confidence")
+            if confidence is not None:
+                try:
+                    parsed_confidence = float(confidence)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        f"Fragment {id_offset + i} has invalid speaker confidence"
+                    ) from exc
+                if (
+                    parsed_confidence < confidence_threshold
+                    and speaker != "narrator"
+                ):
+                    raise ValueError(
+                        f"Fragment {id_offset + i} assigns '{speaker}' with "
+                        f"low confidence ({parsed_confidence:.2f}); use narrator "
+                        "when attribution is uncertain"
+                    )
 
     @staticmethod
     def _parse_script_chapter(
         raw: dict,
         fallback_number: int,
         fallback_title: str,
-        fragments: list[str] = None,
+        fragments: list[SourceFragment] | None = None,
+        *,
+        id_offset: int = 0,
+        allowed_speakers: set[str] | None = None,
     ) -> ScriptChapter:
         """Parse LLM JSON metadata output into a ScriptChapter using static fragments."""
         raw_lines = raw.get("lines", [])
@@ -484,42 +739,225 @@ class ScriptGenerator:
                 except (ValueError, TypeError):
                     pass
 
-        # Reconstruct exactly from static fragments to guarantee 100% text fidelity
-        import re
-        quote_pattern = re.compile(r'^[\"“”\'‘].*[\"“”\'’]$', re.DOTALL)
-
-        for i, text in enumerate(fragments):
+        allowed_speakers = allowed_speakers or {"narrator"}
+        for i, fragment in enumerate(fragments):
             meta = metadata_map.get(i, {})
             
             # Safely parse speed which might come back as a string like "normal"
             try:
-                speed = float(meta.get("speed", 1.0))
+                speed = max(0.5, min(2.0, float(meta.get("speed", 1.0))))
             except (ValueError, TypeError):
                 speed = 1.0
 
-            text_trimmed = text.strip()
-            is_quote = bool(quote_pattern.match(text_trimmed))
-            
-            # CRITICAL RULE: Non-dialogue text outside quotation marks MUST be narrator!
-            speaker = str(meta.get("speaker", "narrator")).lower().replace(" ", "_")
-            if not is_quote:
+            is_dialogue = ScriptGenerator._is_dialogue_fragment(fragment.text)
+            speaker = ScriptGenerator._normalize_speaker_id(
+                meta.get("speaker", "narrator")
+            )
+            if not is_dialogue:
                 speaker = "narrator"
-                
+            elif speaker not in allowed_speakers:
+                raise ValueError(
+                    f"Fragment {id_offset + i} uses unknown speaker '{speaker}'"
+                )
+
+            try:
+                pause_before_raw = int(
+                    float(meta.get("pause_before_ms", 0) or 0)
+                )
+            except (TypeError, ValueError):
+                pause_before_raw = 0
+            try:
+                pause_after_raw = int(
+                    float(meta.get("pause_after_ms", 500) or 500)
+                )
+            except (TypeError, ValueError):
+                pause_after_raw = 500
+            pause_before = max(0, min(5000, pause_before_raw))
+            pause_after = max(0, min(5000, pause_after_raw))
+            global_id = id_offset + i
+            try:
+                speaker_confidence = (
+                    max(
+                        0.0,
+                        min(1.0, float(meta["speaker_confidence"])),
+                    )
+                    if meta.get("speaker_confidence") is not None
+                    else None
+                )
+            except (TypeError, ValueError):
+                speaker_confidence = None
+
             lines.append(
                 ScriptLine(
-                    line_id=f"ch{fallback_number:02d}_{i:03d}",
+                    line_id=f"ch{fallback_number:02d}_{global_id:04d}",
                     speaker=speaker,
-                    text=text,
-                    emotion=str(meta.get("emotion", "neutral")),
+                    speaker_confidence=speaker_confidence,
+                    speaker_evidence=str(
+                        meta.get("speaker_evidence", "")
+                    )[:500],
+                    text=fragment.text,
+                    emotion=str(meta.get("emotion", "neutral"))[:200],
                     speed=speed,
-                    pause_before_ms=int(meta.get("pause_before_ms", 0) or 0),
-                    pause_after_ms=int(meta.get("pause_after_ms", 500) or 500),
+                    pause_before_ms=pause_before,
+                    pause_after_ms=pause_after,
+                    source_fragment_id=global_id,
+                    source_fragment_ids=[global_id],
+                    source_start=fragment.start,
+                    source_end=fragment.end,
                 )
             )
 
         return ScriptChapter(
-            chapter_number=raw.get("chapter_number", fallback_number),
-            chapter_title=raw.get("chapter_title", fallback_title),
+            chapter_number=fallback_number,
+            chapter_title=fallback_title,
             chapter_summary=raw.get("chapter_summary", ""),
             lines=lines,
         )
+
+    def _group_adjacent_utterances(
+        self,
+        script: ScriptChapter,
+        source_text: str,
+    ) -> ScriptChapter:
+        """Merge bounded adjacent turns without crossing speaker/paragraph edges."""
+        if len(script.lines) < 2:
+            return script
+
+        grouped: list[ScriptLine] = []
+        bucket: list[ScriptLine] = []
+
+        expressive_terms = (
+            "shout",
+            "scream",
+            "panic",
+            "terrified",
+            "cry",
+            "whisper",
+            "breathless",
+            "urgent",
+            "angry",
+        )
+
+        def limits(lines: list[ScriptLine]) -> tuple[int, int]:
+            if any(
+                any(term in line.emotion.lower() for term in expressive_terms)
+                for line in lines
+            ):
+                return (
+                    self.expressive_target_chars,
+                    self.expressive_max_words,
+                )
+            if all(line.speaker == "narrator" for line in lines):
+                return self.narrator_target_chars, self.narrator_max_words
+            return self.utterance_target_chars, self.utterance_max_words
+
+        def flush() -> None:
+            if not bucket:
+                return
+            if len(bucket) == 1:
+                line = bucket[0].model_copy(deep=True)
+                if not line.source_fragment_ids and line.source_fragment_id is not None:
+                    line.source_fragment_ids = [line.source_fragment_id]
+                grouped.append(line)
+                bucket.clear()
+                return
+
+            first, last = bucket[0], bucket[-1]
+            if first.source_start is None or last.source_end is None:
+                grouped.extend(line.model_copy(deep=True) for line in bucket)
+                bucket.clear()
+                return
+            text = source_text[first.source_start:last.source_end]
+            longest = max(bucket, key=lambda line: len(line.text))
+            total_chars = max(1, sum(len(line.text) for line in bucket))
+            speed = sum(
+                line.speed * len(line.text) for line in bucket
+            ) / total_chars
+            fragment_ids = [
+                fragment_id
+                for line in bucket
+                for fragment_id in (
+                    line.source_fragment_ids
+                    or (
+                        [line.source_fragment_id]
+                        if line.source_fragment_id is not None
+                        else []
+                    )
+                )
+            ]
+            confidences = [
+                line.speaker_confidence
+                for line in bucket
+                if line.speaker_confidence is not None
+            ]
+            evidence = "; ".join(
+                dict.fromkeys(
+                    line.speaker_evidence.strip()
+                    for line in bucket
+                    if line.speaker_evidence.strip()
+                )
+            )[:500]
+            grouped.append(
+                first.model_copy(
+                    update={
+                        "text": text,
+                        "emotion": longest.emotion,
+                        "speed": round(speed, 3),
+                        "pause_after_ms": last.pause_after_ms,
+                        "speaker_confidence": (
+                            min(confidences) if confidences else None
+                        ),
+                        "speaker_evidence": evidence,
+                        "source_fragment_ids": fragment_ids,
+                        "source_end": last.source_end,
+                    },
+                    deep=True,
+                )
+            )
+            bucket.clear()
+
+        for line in script.lines:
+            if not bucket:
+                bucket.append(line)
+                continue
+            previous = bucket[-1]
+            between = ""
+            if previous.source_end is not None and line.source_start is not None:
+                between = source_text[previous.source_end:line.source_start]
+            candidate_chars = (
+                (line.source_end or 0) - (bucket[0].source_start or 0)
+                if line.source_end is not None
+                and bucket[0].source_start is not None
+                else sum(len(item.text) for item in bucket) + len(line.text)
+            )
+            candidate_words = sum(
+                len(item.text.split()) for item in [*bucket, line]
+            )
+            same_fx = (
+                previous.voice_fx.model_dump() if previous.voice_fx else None
+            ) == (
+                line.voice_fx.model_dump() if line.voice_fx else None
+            )
+            target_chars, max_words = limits([*bucket, line])
+            can_merge = (
+                line.speaker == previous.speaker
+                and (line.voice_id or line.speaker)
+                == (previous.voice_id or previous.speaker)
+                and same_fx
+                and "\n\n" not in between
+                and candidate_chars <= target_chars
+                and candidate_words <= max_words
+            )
+            if not can_merge:
+                flush()
+            bucket.append(line)
+        flush()
+
+        if len(grouped) < len(script.lines):
+            logger.info(
+                "Grouped chapter %d from %d fragments into %d TTS utterances",
+                script.chapter_number,
+                len(script.lines),
+                len(grouped),
+            )
+        return script.model_copy(update={"lines": grouped}, deep=True)

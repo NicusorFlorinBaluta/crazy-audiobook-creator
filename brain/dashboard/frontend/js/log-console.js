@@ -82,7 +82,7 @@ window.LogConsole = (() => {
 
         // 1. Fetch buffered history
         try {
-            const resp = await fetch(`/api/projects/${projectId}/logs`);
+            const resp = await fetch(`api/projects/${projectId}/logs`);
             if (resp.ok) {
                 const data = await resp.json();
                 (data.lines || []).forEach(appendLine);
@@ -93,7 +93,7 @@ window.LogConsole = (() => {
 
         // 2. Open SSE stream for live updates
         setStatus('connecting', '◌ Connecting…');
-        const es = new EventSource(`/api/projects/${projectId}/logs/stream`);
+        const es = new EventSource(`api/projects/${projectId}/logs/stream`);
         eventSource = es;
 
         es.onopen = () => setStatus('live', '● Live');

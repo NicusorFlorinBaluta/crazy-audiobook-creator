@@ -1,579 +1,140 @@
-# Architecture Guide
+# Architecture
 
-## Overview
+This document describes the current implementation. Historical implementation plans describe earlier two-machine and Ubuntu designs and are not authoritative.
 
-The Crazy Audiobook Creator is a **two-machine pipeline** that splits the workload between a "Brain" (Windows PC with AMD 7900 XTX) and a "Voice" (Ubuntu PC with NVIDIA RTX 2080 Super). This separation exploits each machine's strengths:
+## Runtime layout
 
-- **Windows (24GB VRAM)**: Runs a large LLM that analyzes books, detects characters, and generates emotionally-tagged scripts
-- **Ubuntu (8GB VRAM + CUDA)**: Runs Qwen3-TTS for high-quality speech synthesis with native GPU acceleration
+The supported default is one Windows workstation:
 
-The machines communicate over the local network via REST APIs and WebSocket connections.
-
----
-
-## Pipeline Stages
-
-The pipeline has 9 stages, executing sequentially with automatic retry loops for quality assurance.
-
-```
-EPUB → ① Extract → ② Script → ③ Bootstrap Voices → ④ Generate Audio
-                                                          ↓
-                          M4B ← ⑦ Export ← ⑥ Master ← ⑤ Validate
-                                                     ↗ (retry if failed)
-```
-
-### Stage ① — Text Extraction (Windows)
-
-**Purpose**: Convert EPUB files into clean, structured text organized by chapters.
-
-**Process**:
-1. Parse EPUB using `ebooklib` to extract HTML content
-2. Process HTML with `BeautifulSoup4` to strip tags and extract clean text
-3. Detect chapter boundaries using heading patterns (h1/h2 tags, "Chapter X" patterns, numbered sections)
-4. Handle fantasy-specific content:
-   - Skip/separate maps, appendices, glossaries, dramatis personae
-   - Preserve special names, places, and invented words
-   - Handle epigraphs and in-chapter poetry/songs
-5. Clean text artifacts: page numbers, headers/footers, ligatures, smart quotes
-6. Output: Array of `Chapter` objects, each containing title and clean text
-
-**Output Schema**:
-```json
-{
-  "book": {
-    "title": "The Name of the Wind",
-    "author": "Patrick Rothfuss",
-    "total_chapters": 92
-  },
-  "chapters": [
-    {
-      "number": 1,
-      "title": "A Place for Demons",
-      "text": "It was night again. The Waystone Inn lay in silence..."
-    }
-  ]
-}
+```text
+Browser / Electron shell
+        │
+        ▼
+Dashboard API :8000 ─── Ollama :11434
+        │
+        ▼
+Voice API :8100 ─── Qwen VoiceDesign bootstrap helper :8101
+        │
+        ├── Qwen3-TTS Base voice cloning
+        ├── Whisper transcription
+        ├── audio/speaker validation
+        └── mastering + FFmpeg M4B export
 ```
 
-**Key Decisions**:
-- We preserve paragraph structure (double newlines) since it affects pacing
-- Chapter detection uses a priority system: explicit HTML markers > heading tags > text patterns
-- Tables of contents and front matter are stripped automatically
-- If chapter detection fails, the entire book is treated as a single chapter with a warning
+All services bind to `127.0.0.1` by default. The dashboard serializes project runs, while the voice service also protects model lifecycle and GPU inference with a process-wide lock.
 
----
+## Processing stages
 
-### Stage ② — LLM Script Director (Windows)
+1. **Extraction** parses the EPUB, preserves chapter order, and copies cover art into the project directory.
+2. **Character analysis** scans all book text. Long chapters are divided into bounded analysis units; no chapter is omitted simply because it is large.
+3. **Script generation** annotates immutable source fragments with speaker, emotion, speed, and pauses. It runs for the complete book before audio starts.
+4. **Voice bootstrap** derives a speaking-only cast, compiles checked voice directions, and uses Qwen VoiceDesign to speak a known sentence. Whisper verifies that reference before it is registered. New projects pause once for manual casting approval. Qwen Base later caches a full voice-clone prompt derived from the reference audio and its exact transcript.
+5. **Generation and validation** synthesize one file per script line, measure speaker similarity, transcribe it, inspect the waveform, retry failed or flagged attempts, and keep the best attempt.
+6. **Mastering** assembles the exact ordered line set, adds a narrator chapter-title announcement, applies timing once, measures loudness, and writes a chapter WAV.
+7. **Export** packages mastered chapter WAVs and metadata as AAC in an M4B.
 
-**Purpose**: Transform raw chapter text into a structured audiobook script with speaker attribution, emotion tags, and pacing instructions.
+## Why analysis is book-wide but audio is incremental
 
-**LLM**: Qwen3 32B Q4_K_M via Ollama (Vulkan backend for AMD GPU)
+Speaker identity and characterization require book context. The pipeline therefore completes character analysis, the character registry, and scripts for all chapters as one logical phase.
 
-**Two-Pass Analysis**:
+Audio work is chapter-selectable. `generation_chapter_selection` has two meanings:
 
-#### Pass 1 — Character & World Analysis (once per book)
+- `null`: all chapters; after missing chapters are complete, create the canonical full M4B.
+- Nonempty list: generate/master those chapters and create a partial M4B named with the actual chapter set.
 
-The LLM reads the full book text (or chapter summaries if context window is limited) to build a comprehensive character registry.
+An empty list is invalid. Completed chapters remain usable while later batches run. Selecting a chapter again is safe: current fingerprints allow reuse, while any changed dependency invalidates the relevant artifact.
 
-**Outputs per character**:
-- `id`: Unique identifier (lowercase, underscore-separated)
-- `name`: Display name
-- `gender`: male/female/other
-- `age_range`: Approximate age bracket
-- `personality_traits`: Key personality characteristics
-- `voice_description`: Detailed natural language description for Qwen3-TTS Voice Design
-- `speaking_style`: How the character typically speaks (formal, casual, clipped, etc.)
+## Source-fidelity invariant
 
-**Narrator voice**:
-- Always generated as a separate "character"
-- Voice description crafted to suit the book's genre and tone
-- Fantasy books typically get a warm, measured, storyteller-type narrator
+The script generator owns segmentation, not the LLM:
 
-**Example Output**:
-```json
-{
-  "characters": {
-    "narrator": {
-      "name": "Narrator",
-      "gender": "male",
-      "age_range": "40s",
-      "personality_traits": ["wise", "reflective", "measured"],
-      "voice_description": "A warm, mature male voice, early 40s, with a rich baritone quality. Measured pace with a natural storyteller's cadence. Slight gravitas but not overly dramatic. Clear British RP pronunciation.",
-      "speaking_style": "Descriptive, flowing prose with natural pauses at paragraph breaks"
-    },
-    "kvothe": {
-      "name": "Kvothe",
-      "gender": "male",
-      "age_range": "late teens to early 20s",
-      "personality_traits": ["clever", "passionate", "arrogant", "vulnerable"],
-      "voice_description": "A young male voice, late teens to early 20s. Quick and clever-sounding with a slightly musical quality. Medium pitch, confident delivery that occasionally cracks with vulnerability. No strong accent.",
-      "speaking_style": "Articulate, sometimes rambling when excited, precise when angry"
-    }
-  }
-}
+1. It converts a chapter into a non-overlapping sequence of immutable fragments.
+2. Each fragment has an exact source start/end span.
+3. The LLM may only return metadata for the supplied fragment IDs.
+4. Missing, duplicate, or extra IDs reject the response.
+5. Reassembling every script line must equal the normalized source exactly once.
+
+This prevents overlap duplication, silent omissions, rewritten prose, and line-count drift. Dialogue recognition supports straight and curly quotes, guarded single quotes, and em-dash dialogue. Unknown speakers are rejected rather than invented during script parsing.
+
+## Character and voice model
+
+The character analyzer retains every speaking entity. It assigns a unique voice to the most important speakers up to `script.max_unique_voices`. Less prominent speakers deterministically share a compatible major-character voice or the narrator; the character remains distinct in script and metadata through its `voice_id`.
+
+A character-analysis fingerprint includes the full extracted book, model, prompt, and voice cap. A change invalidates scripts and voice bootstrap. Voice reference hashes are included in generation fingerprints, so regenerated references invalidate dependent line audio.
+
+## Artifact model
+
+File existence is never sufficient evidence of completion.
+
+- Script metadata records a dependency fingerprint and schema version.
+- A generated-chapter manifest records every expected line ID, text hash, voice ID, source span, and generation fingerprint.
+- A mastered-chapter manifest records the source segment-manifest hash and output hash.
+- Output audio is checked for a readable, nonzero waveform.
+
+At run start, generated and mastered chapter sets are independently reconstructed from these artifacts. A valid generated chapter does not imply a valid master, and a master is not trusted without its own matching manifest.
+
+Atomic replacement is used for JSON state and final audio writes. Individual line cache entries are committed only after a selected attempt passes validation.
+
+## Validation policy
+
+Validation is fail-closed. A chapter response must contain exactly the expected unique line IDs and no failed lines. Hard failures include:
+
+- word error rate over the configured threshold
+- clipping
+- excessive internal silence
+- implausible duration/pacing
+- speaker similarity below threshold
+- missing, empty, or unreadable audio
+
+Duration and noise anomalies may first be flagged, but both flagged and failed segments are retried. If no attempt passes, the chapter is not marked generated and mastering cannot proceed.
+
+## Timing and mastering
+
+There is one timing owner. When adjacent lines both request a boundary pause, the assembler uses the larger pause rather than summing both. Crossfades are applied only to directly adjacent audio, never across an intended silence.
+
+Loudness normalization is chapter-integrated. The peak ceiling uses an oversampled true-peak estimate. The optional noise gate uses asymmetric attack/release smoothing and is disabled by default for generated audio.
+
+The default `-19 LUFS` target is an internal playback choice, not a claim of ACX compliance.
+
+## State, pause, and cancellation
+
+The SQLite job queue performs atomic read-modify-write transactions and closes connections after each operation.
+
+- User pause sets a transitional `pausing` state and requests cooperative cancellation.
+- Generation checks cancellation at safe segment boundaries.
+- Scheduled and deployment pauses park a live worker at chapter boundaries and preserve `active_stage`.
+- Models unload only after the active operation releases the model lock, or after true idle time.
+- A second project cannot start while another project owns the GPU pipeline.
+
+## Storage
+
+```text
+brain/projects/<project-id>/
+  book.json
+  characters.json
+  characters.meta.json
+  script/
+  book_script.json
+  *.m4b
+
+workspace/<project-id>/
+  segments/
+  manifests/
+  chapters/
+  output/
+
+voice_library/<project-id>/
+  voices.json
+  *.wav
+
+voice_cache.db
+pipeline_state.db
 ```
 
-#### Pass 2 — Line-by-Line Script Generation (per chapter)
+Project and download paths are resolved beneath their configured roots. EPUB uploads are streamed with size limits and inspected for traversal, extreme expansion, and suspicious compression ratios.
 
-For each chapter, the LLM processes the text with a **10-paragraph sliding context window** to maintain emotional awareness.
+## Privacy and network boundary
 
-**For each text segment, the LLM determines**:
-- `speaker`: Who is speaking (narrator for non-dialogue, character ID for dialogue)
-- `text`: The exact text to speak (with dialogue attribution stripped)
-- `emotion`: Current emotional state described in natural language
-- `speed`: Delivery speed multiplier (0.8x for slow/dramatic, 1.0x for normal, 1.2x for excited/fast)
-- `pause_before_ms`: Silence before this segment (0-2000ms)
-- `pause_after_ms`: Silence after this segment (0-2000ms)
+Book text is sent to the locally configured Ollama endpoint. Audio remains in local project/workspace storage. Google Books metadata lookup is off by default and only occurs after an explicit dashboard action or when `metadata.auto_fetch_external` is enabled.
 
-**Context Window Strategy**:
-The LLM sees the current paragraph plus 5 paragraphs before and 5 after. This is critical because:
-- "Don't go" is desperate if the previous paragraph describes a lover leaving
-- "Don't go" is menacing if the previous paragraph describes a villain cornering someone
-- Emotion isn't in the words alone — it's in the narrative context
-
-**Dialogue Detection Rules**:
-1. Text within quotation marks → dialogue (assigned to detected speaker)
-2. Text with dialogue attribution ("he said", "she whispered") → dialogue
-3. Internal monologue (often in italics) → character with "internal, thoughtful" emotion
-4. Everything else → narrator
-
-**Segment Granularity**:
-- Each dialogue line becomes one segment
-- Narration paragraphs become one segment (unless very long, then split at sentence boundaries)
-- Keep segments between 1-4 sentences for optimal TTS quality
-- Never split mid-sentence
-
----
-
-### Stage ③ — Voice Bootstrapping (Ubuntu)
-
-**Purpose**: Generate a unique, consistent voice reference clip for each character using Qwen3-TTS Voice Design mode.
-
-**Process**:
-1. Receive character registry from Stage ②
-2. For each character, send their `voice_description` to Qwen3-TTS in VoiceDesign mode
-3. Generate a 10-second reference clip of the voice speaking a neutral test sentence
-4. Save the clip to the project's Voice Library as `{character_id}.wav`
-5. These clips are the "voice fingerprint" — every subsequent generation for that character uses this exact clip
-
-**Voice Design → Clone Workflow**:
-```
-Text Description ──→ Qwen3-TTS VoiceDesign ──→ Reference .wav ──→ Saved to Library
-                                                       ↓
-                     All future generations use this clip as reference
-                     via Qwen3-TTS Base model (voice cloning mode)
-```
-
-**Why This Ensures Consistency**:
-- VoiceDesign is non-deterministic — running it twice produces slightly different voices
-- By generating ONCE and saving, every line by that character uses the exact same voice identity
-- Emotion and speed vary per line, but the underlying voice timbre stays constant
-- This is the same technique professional audiobook studios use with real voice actors
-
-**Test Sentences for Voice Generation**:
-- Male: "The ancient tower stood against the darkening sky, its stones weathered by centuries of wind and rain."
-- Female: "She walked through the moonlit garden, her footsteps barely disturbing the fallen leaves."
-- These are chosen to exercise a range of phonemes while being emotionally neutral.
-
----
-
-### Stage ④ — TTS Generation (Ubuntu)
-
-**Purpose**: Generate audio for every line in the script using Qwen3-TTS with character voice references and per-line emotion instructions.
-
-**Engine**: Qwen3-TTS 1.7B (~6-8GB VRAM on RTX 2080 Super)
-
-**Per-Line Generation**:
-```python
-# Pseudocode for each line
-audio = qwen3_tts.generate(
-    text=line.text,
-    voice_reference=voice_library.get(line.speaker),  # Character's saved .wav
-    instruction=f"Speak with {line.emotion} emotion, at {line.speed}x speed",
-    language="en"
-)
-save(audio, f"chapter_{ch}_line_{n}.wav")
-```
-
-**Emotion Instruction Format**:
-Qwen3-TTS accepts natural language instructions. Our LLM generates these as emotion descriptions that map to TTS instructions:
-
-| Script Emotion | TTS Instruction |
-|---------------|-----------------|
-| `"contemplative, somber"` | `"Speak in a contemplative, somber tone with measured pacing"` |
-| `"fearful, whispering"` | `"Speak fearfully in a hushed whisper"` |
-| `"angry, explosive"` | `"Speak with explosive anger, raised voice, sharp consonants"` |
-| `"warm, gentle"` | `"Speak warmly and gently, with a soft, comforting quality"` |
-
-**Batching Strategy**:
-- Process all lines for a chapter sequentially
-- Keep the model loaded in VRAM throughout (no swapping needed — single engine)
-- Generate ~1-5 seconds of audio per line
-- Average novel chapter (3000-5000 words) ≈ 200-400 segments ≈ 15-30 minutes of audio
-- Generation speed: ~1-3x real-time on RTX 2080 Super
-
-**Error Handling**:
-- If generation fails (OOM, timeout), retry with smaller chunk
-- If text contains unusual characters, normalize before sending
-- Log all generation parameters for reproducibility
-
----
-
-### Stage ⑤ — AI Quality Validator (Ubuntu)
-
-**Purpose**: Automatically validate every generated audio segment without human intervention.
-
-**Three-Layer Validation**:
-
-#### Layer 1 — Intelligibility Check (Whisper STT + WER)
-1. Run `faster-whisper` (medium model, ~2GB) on the generated audio
-2. Transcribe audio back to text
-3. Normalize both original and transcribed text (lowercase, strip punctuation)
-4. Calculate Word Error Rate (WER) using `jiwer`
-5. **Pass**: WER < 5%
-6. **Fail**: WER ≥ 5% → regenerate
-
-**Why 5% threshold**: Whisper itself has ~2% baseline error. A TTS segment with clear pronunciation should be transcribed almost perfectly. WER > 5% indicates the TTS garbled words, skipped phrases, or hallucinated.
-
-#### Layer 2 — Audio Artifact Detection
-Analyze the raw audio signal for technical issues:
-- **Clipping**: Check if signal exceeds ±1.0 (or -0.5 dBFS peak)
-- **Silence gaps**: Detect unnatural silences > 3 seconds within a segment
-- **Noise floor**: Check that silence portions are below -50 dB
-- **Duration sanity**: Compare actual duration vs expected (based on word count × average speaking rate)
-  - Expected rate: ~150 words per minute (adjusted by speed parameter)
-  - **Pass**: Actual duration within ±30% of expected
-  - **Fail**: Duration wildly off → regenerate
-
-#### Layer 3 — Quality Score Aggregation
-Each segment receives a composite quality score:
-```
-quality_score = (1 - WER) * 0.6 + artifact_score * 0.3 + duration_score * 0.1
-```
-- Logged to SQLite for the quality dashboard
-- Segments below 0.7 score are flagged for optional manual review
-
-**Retry Logic**:
-```
-attempt = 1
-while attempt <= 3:
-    audio = generate(line)
-    if validate(audio).passed:
-        save(audio)
-        break
-    attempt += 1
-if attempt > 3:
-    save(audio)  # Save best attempt
-    flag_for_review(line)  # Mark in dashboard
-    log_warning(f"Line {line.id} failed validation after 3 attempts")
-```
-
-**VRAM Management**:
-- TTS and Whisper are run sequentially, not concurrently
-- Option A: Generate all chapter segments → validate all (batch mode, recommended)
-- Option B: Generate one → validate one → next (streaming mode, slower but catches issues early)
-- Default: Batch mode per chapter
-
----
-
-### Stage ⑥ — Audio Mastering (Ubuntu)
-
-**Purpose**: Assemble individual segments into polished chapter-length audio files.
-
-**Process**:
-
-#### Step 1 — Concatenation with Silence
-- Insert configured `pause_before_ms` and `pause_after_ms` between segments
-- Add chapter-start silence: 1000ms
-- Add chapter-end silence: 2000ms
-
-#### Step 2 — Cross-fading
-- Apply 25-50ms cross-fade between adjacent segments
-- This prevents audible "clicks" at segment boundaries
-- Use raised-cosine fade curve for smoothness
-
-#### Step 3 — Loudness Normalization
-- Target: **-19 LUFS** (audiobook standard, between ACX's -18 and -23 range)
-- Use integrated loudness measurement (full chapter)
-- Apply gain to reach target
-- Library: `pyloudnorm`
-
-#### Step 4 — Peak Limiting
-- True peak limit: **-1.0 dBTP**
-- Prevents digital clipping on any playback system
-- Use FFmpeg's `loudnorm` filter or `pyloudnorm`
-
-#### Step 5 — Noise Gate
-- Threshold: -50 dB
-- Attack: 5ms, Release: 50ms
-- Cleans up any low-level hiss or model artifacts during pauses
-
-#### Step 6 — Sample Rate & Format
-- Intermediate: 24kHz WAV (Qwen3-TTS native output rate)
-- Upsample to 44.1kHz for final output (audiobook standard)
-- Bit depth: 16-bit
-
-**Output**: One WAV file per chapter, named `chapter_001.wav`, `chapter_002.wav`, etc.
-
----
-
-### Stage ⑦ — M4B Export (Ubuntu)
-
-**Purpose**: Package all chapter audio into a single, chaptered M4B audiobook file.
-
-**M4B Format**:
-- Container: MP4/M4A with `.m4b` extension
-- Codec: AAC-LC at 64-128 kbps (mono) — standard for audiobooks
-- Chapters: Embedded chapter markers with titles
-- Metadata: Title, Author, Narrator, Genre, Year, Description
-- Cover art: Embedded as JPEG/PNG (if available in EPUB or provided)
-
-**Process**:
-1. Encode each chapter WAV → AAC using FFmpeg
-2. Concatenate chapters into single M4B with chapter markers
-3. Embed metadata from the original EPUB + project config
-4. Embed cover art if available
-5. Verify playback in standard players
-
-**FFmpeg Command (simplified)**:
-```bash
-ffmpeg -f concat -i chapters.txt \
-  -c:a aac -b:a 128k -ar 44100 -ac 1 \
-  -metadata title="Book Title" \
-  -metadata artist="Author Name" \
-  output.m4b
-```
-
-**Chapter markers** are written as an FFmpeg metadata file:
-```ini
-;FFMETADATA1
-[CHAPTER]
-TIMEBASE=1/1000
-START=0
-END=1834000
-title=Chapter 1: A Place for Demons
-
-[CHAPTER]
-TIMEBASE=1/1000
-START=1834000
-END=3421000
-title=Chapter 2: A Beautiful Day
-```
-
----
-
-### Stage ⑧ — Web Dashboard (Windows)
-
-**Purpose**: Provide a monitoring interface for the pipeline with the ability to review and override.
-
-**The dashboard is NOT required for the pipeline to run** — the pipeline is fully automated. The dashboard is for monitoring, reviewing quality reports, and making manual corrections when needed.
-
-**Features**:
-
-| Feature | Description |
-|---------|-------------|
-| **Project Manager** | Create projects, import EPUBs, configure settings |
-| **Pipeline Monitor** | Real-time progress: current chapter, current line, ETA |
-| **Script Viewer** | Color-coded by speaker, with emotion/speed annotations |
-| **Quality Report** | WER scores per segment, flagged segments, overall stats |
-| **Voice Library** | Listen to character reference clips, regenerate if needed |
-| **Manual Override** | Re-trigger generation for specific segments with tweaked params |
-| **Export History** | Past projects with download links and stats |
-
-**Technology**: FastAPI backend serving a vanilla HTML/CSS/JS frontend. WebSocket for real-time updates from the Ubuntu machine.
-
----
-
-## Data Flow
-
-```
-Windows                              Network                    Ubuntu
-────────                              ───────                    ──────
-
-EPUB file
-    ↓
-Text Extraction
-    ↓
-Chapter JSON
-    ↓
-LLM Analysis ───→ Character Registry ──→ POST /voices/bootstrap
-                                                    ↓
-                                         Voice Design generation
-                                                    ↓
-                                         Voice Library (.wav files)
-    ↓
-LLM Script Gen ──→ Script JSON ─────────→ POST /generate/chapter
-                                                    ↓
-                                         TTS generation (per line)
-                                                    ↓
-                                         Whisper validation
-                                                    ↓
-                                         Retry loop (if needed)
-                                                    ↓
-                                         Audio mastering
-                                                    ↓
-                                         M4B export
-                                                    ↓
-Dashboard ←──── WebSocket status ←──────── Progress updates
-    ↓
-GET /download/audiobook ←───────────────── Final .m4b file
-```
-
----
-
-## Voice Consistency Model
-
-This is the most critical architectural decision. Here's why we use a single engine with the Voice Design → Clone pattern:
-
-### The Problem
-If you generate Character A's voice fresh for every line, Qwen3-TTS might produce slightly different timbres each time (it's non-deterministic). Over 10+ hours of audio, these small variations accumulate and the character sounds inconsistent.
-
-### The Solution
-```
-                      ┌─────────────────────────────────┐
-                      │       Voice Library              │
-                      │                                  │
-  Voice Description ──→  VoiceDesign ──→ narrator.wav   │
-  "warm male, 40s"   │  (ONE TIME)      (10 seconds)   │
-                      │                                  │
-                      │  Every line by "narrator":       │
-                      │  generate(text, ref=narrator.wav) │
-                      │  ↑ Same voice, different emotion │
-                      └─────────────────────────────────┘
-```
-
-- **Voice identity** = locked to the reference clip (generated once, reused forever)
-- **Emotion** = varies per line via instruction parameter
-- **Speed/pacing** = varies per line via speed parameter
-- **Result**: Same person, different performances. Exactly like a real voice actor.
-
-### Why Not Multiple Engines?
-Even if Engine A and Engine B both produce great audio independently, they have fundamentally different acoustic signatures. Mixing them means:
-- Different room acoustics
-- Different formant characteristics
-- Different noise profiles
-- Different prosody patterns
-
-A listener would subconsciously notice — it's like cutting between two different recording studios mid-conversation.
-
----
-
-## Error Recovery & Resilience
-
-### Pipeline State Persistence
-The pipeline's state is persisted to SQLite after every stage completion:
-```
-project_state = {
-    "stage": "tts_generation",
-    "chapter": 15,
-    "line": 247,
-    "total_lines": 3850,
-    "started_at": "2026-07-13T22:30:00Z",
-    "voice_library": "bootstrapped",
-    "completed_chapters": [1, 2, ..., 14]
-}
-```
-
-If the pipeline crashes or is interrupted:
-- Restart picks up from the last completed segment
-- Already-generated audio is not regenerated
-- Voice library is preserved across restarts
-
-### Network Failure & Autonomous Watchdog Recovery
-- REST API calls have been extended to **15 retries** with up to **30-second backoff delays** (allowing up to 5 minutes of patient waiting).
-- A background **Watchdog Service** (`brain/orchestrator/watchdog.py`) constantly polls both the local Ollama LLM and the remote Voice Server.
-- If Ollama goes down, the Watchdog silently executes a local PowerShell script to restart the `ollama serve` process.
-- If the Ubuntu Voice Server crashes or locks up (e.g. PyTorch zombie process), the Watchdog connects via SSH (`paramiko`), safely kills the specific Python module, and automatically respawns the backend.
-- During these Watchdog recoveries, the pipeline seamlessly "pauses" (by waiting out the HTTP retries) and automatically resumes once the service is healthy again. 
-- The Watchdog limits its automatic interventions to a maximum of 5 consecutive restarts, logging all actions to `watchdog.log`.
-- WebSocket reconnects automatically.
-
-### GPU OOM
-- If Qwen3-TTS hits OOM on a long segment, the segment is split at the nearest sentence boundary and retried
-- If Whisper hits OOM, validation falls back to CPU (slower but functional)
-
----
-
-## Performance Estimates
-
-Based on Qwen3-TTS 1.7B benchmarks on RTX 2080 Super (8GB):
-
-| Metric | Estimate |
-|--------|----------|
-| TTS generation speed | ~1-3x real-time |
-| Whisper validation speed | ~10-30x real-time |
-| Audio mastering speed | ~50-100x real-time |
-| Full novel (80,000 words, ~10 hrs audio) | ~5-15 hours total |
-| Short story (10,000 words, ~1.5 hrs audio) | ~30-90 minutes total |
-
-**Bottleneck**: TTS generation is by far the slowest stage. All other stages are negligible in comparison.
-
-**LLM script generation** (on Windows): Qwen3 32B Q4 processes ~20-40 tokens/second on 7900 XTX. A full novel (~100K tokens) takes ~30-60 minutes for the full script.
-
----
-
-## Configuration
-
-All settings are configurable via YAML files:
-
-### `brain/config.yaml`
-```yaml
-ollama:
-  host: "http://localhost:11434"
-  model: "qwen3:32b"
-  context_window: 10  # paragraphs before/after for emotion tagging
-
-ubuntu:
-  host: "http://192.168.1.XXX:8100"  # Ubuntu machine IP
-  timeout: 30
-  retries: 3
-
-extraction:
-  skip_toc: true
-  skip_appendices: true
-  min_chapter_words: 100
-
-script:
-  max_segment_sentences: 4
-  default_speed: 1.0
-  narrator_pause_ms: 500
-  dialogue_pause_ms: 300
-  chapter_start_pause_ms: 1000
-  chapter_end_pause_ms: 2000
-
-dashboard:
-  port: 8000
-  host: "0.0.0.0"
-```
-
-### `voice/config.yaml`
-```yaml
-tts:
-  model: "Qwen/Qwen3-TTS-1.7B"
-  device: "cuda"
-  dtype: "float16"
-  sample_rate: 24000
-
-validation:
-  whisper_model: "medium"  # or "large-v3" for higher accuracy
-  wer_threshold: 0.05
-  max_retries: 3
-  artifact_noise_threshold: -50  # dB
-  duration_tolerance: 0.3  # ±30%
-
-mastering:
-  target_lufs: -19
-  peak_limit_dbfs: -1.0
-  crossfade_ms: 30
-  noise_gate_threshold: -50  # dB
-  output_sample_rate: 44100
-
-export:
-  codec: "aac"
-  bitrate: "128k"
-  channels: 1  # mono (audiobook standard)
-
-server:
-  port: 8100
-  host: "0.0.0.0"
-```
+Loopback binding is the supported default. If either service is bound beyond loopback, configure matching API tokens and restrictive CORS origins; startup otherwise refuses the unsafe bind.

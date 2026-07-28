@@ -14,12 +14,14 @@ class PipelineStage(StrEnum):
     EXTRACTING = "extracting"
     SCRIPTING = "scripting"
     BOOTSTRAPPING = "bootstrapping"
+    VOICE_REVIEW = "voice_review"
     GENERATING = "generating"
     VALIDATING = "validating"
     MASTERING = "mastering"
     EXPORTING = "exporting"
     COMPLETE = "complete"
     ERROR = "error"
+    PAUSING = "pausing"
     PAUSED = "paused"
     PAUSED_SCHEDULED = "paused_scheduled"
     DEPLOY_PAUSED = "deploy_paused"
@@ -68,19 +70,21 @@ DEFAULT_SPEED = 1.0
 MIN_SPEED = 0.7
 MAX_SPEED = 1.3
 
-# Test sentences for voice design (phoneme-rich, emotionally neutral)
+# Test sentences for voice design. Keep these short enough to finish inside the
+# default 10-second reference window; truncated references poison Full-ICL
+# cloning because the registered transcript no longer matches the audio.
 VOICE_DESIGN_TEST_SENTENCES = {
     "male": (
-        "The ancient tower stood against the darkening sky, "
-        "its stones weathered by centuries of wind and rain."
+        "The ancient tower stood against the darkening sky as rain "
+        "swept across the weathered stone."
     ),
     "female": (
-        "She walked through the moonlit garden, "
-        "her footsteps barely disturbing the fallen leaves."
+        "She walked through the moonlit garden, listening as fallen "
+        "leaves whispered beneath each careful step."
     ),
     "other": (
-        "The library was vast and silent, "
-        "filled with the scent of old paper and forgotten memories."
+        "The library was vast and silent, filled with old paper, dust, "
+        "and half-forgotten memories."
     ),
 }
 
@@ -102,6 +106,14 @@ QUALITY_WEIGHT_WER = 0.6
 QUALITY_WEIGHT_ARTIFACT = 0.3
 QUALITY_WEIGHT_DURATION = 0.1
 QUALITY_SCORE_PASS_THRESHOLD = 0.7
+
+# Bump these when a change intentionally invalidates previously generated
+# metadata or audio. They are included in artifact fingerprints.
+SCRIPT_SCHEMA_VERSION = "3"
+GENERATION_SCHEMA_VERSION = "3"
+VALIDATION_SCHEMA_VERSION = "3"
+MASTERING_SCHEMA_VERSION = "2"
+VOICE_CAST_SCHEMA_VERSION = "1"
 
 # ---------------------------------------------------------------------------
 # Script generation defaults

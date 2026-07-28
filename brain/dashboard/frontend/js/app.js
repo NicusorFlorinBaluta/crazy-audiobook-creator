@@ -8,7 +8,9 @@ const state = window.state = {
     projects: [],
     currentProjectId: null,
     ws: null,
-    voiceServerOnline: false
+    voiceServerOnline: false,
+    schedule: null,
+    lastScheduleRefresh: 0
 };
 
 // DOM Elements
@@ -55,7 +57,7 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 async function initApp() {
-    await fetchProjects();
+    await Promise.all([fetchProjects(), loadSchedule()]);
     handleHash();
     window.addEventListener('hashchange', handleHash);
 }
@@ -89,7 +91,7 @@ function setupEventListeners() {
         if (!stage || !state.currentProjectId) return;
         
         try {
-            const resp = await fetch(`/api/projects/${state.currentProjectId}/reset`, {
+            const resp = await fetch(`api/projects/${state.currentProjectId}/reset`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ stage })
@@ -109,7 +111,7 @@ function setupEventListeners() {
     
     els.btnDownloadAudiobook.addEventListener('click', () => {
         if (!state.currentProjectId) return;
-        window.location.href = `/api/projects/${state.currentProjectId}/download`;
+        window.location.href = `api/projects/${state.currentProjectId}/download`;
     });
 
     // Modal
@@ -152,7 +154,7 @@ function setupEventListeners() {
             if (!state.currentProjectId) return;
             showToast('Fetching artwork and info...', 'info');
             try {
-                const res = await fetch(`/api/projects/${state.currentProjectId}/fetch-metadata`, { method: 'POST' });
+                const res = await fetch(`api/projects/${state.currentProjectId}/fetch-metadata`, { method: 'POST' });
                 if (!res.ok) throw new Error('Metadata fetch failed');
                 const data = await res.json();
                 showToast('Artwork & metadata updated!', 'success');
@@ -168,7 +170,7 @@ function setupEventListeners() {
         btnReqDeploy.addEventListener('click', async () => {
             if (!state.currentProjectId) return;
             try {
-                const res = await fetch(`/api/projects/${state.currentProjectId}/request-deploy`, { method: 'POST' });
+                const res = await fetch(`api/projects/${state.currentProjectId}/request-deploy`, { method: 'POST' });
                 if (!res.ok) throw new Error('Failed to request deployment pause');
                 showToast('Deployment pause requested — will park at next chapter', 'warning');
                 fetchProjectDetails(state.currentProjectId);
@@ -183,7 +185,7 @@ function setupEventListeners() {
         btnResDeploy.addEventListener('click', async () => {
             if (!state.currentProjectId) return;
             try {
-                const res = await fetch(`/api/projects/${state.currentProjectId}/resume-deploy`, { method: 'POST' });
+                const res = await fetch(`api/projects/${state.currentProjectId}/resume-deploy`, { method: 'POST' });
                 if (!res.ok) throw new Error('Failed to resume deployment');
                 showToast('Resuming pipeline from deploy pause...', 'success');
                 fetchProjectDetails(state.currentProjectId);
@@ -214,20 +216,29 @@ function setupEventListeners() {
     if (btnApplyRange) {
         btnApplyRange.addEventListener('click', () => {
             const input = document.getElementById('chapter-range-input').value.trim();
-            const match = input.match(/^(\d+)-(\d+)$/);
-            if (!match) {
-                showToast('Use format 1-5', 'warning');
+            const chapters = parseChapterRange(input);
+            if (!chapters) {
+                showToast('Use a range such as 1-5, 8, 12-14', 'warning');
                 return;
             }
-            const start = parseInt(match[1], 10);
-            const end = parseInt(match[2], 10);
             document.querySelectorAll('.chapter-select-cb').forEach(cb => {
                 const ch = parseInt(cb.dataset.ch, 10);
-                cb.checked = (ch >= start && ch <= end);
+                cb.checked = chapters.has(ch);
             });
             updateChapterSelectionState();
         });
     }
+
+    document.getElementById('chapter-search-input')?.addEventListener('input', filterChapterRows);
+    document.getElementById('chapter-status-filter')?.addEventListener('change', filterChapterRows);
+    document.getElementById('btn-add-schedule-window')?.addEventListener('click', () => {
+        addScheduleWindow({
+            days: ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'],
+            start: '09:00',
+            end: '17:00'
+        });
+    });
+    document.getElementById('btn-save-schedule')?.addEventListener('click', saveSchedule);
 }
 
 // ============================================================================
@@ -282,7 +293,7 @@ async function showDetailView(projectId, isHashLoad = false) {
 
 async function fetchProjects() {
     try {
-        const response = await fetch('/api/projects');
+        const response = await fetch('api/projects');
         if (!response.ok) throw new Error('Failed to fetch projects');
         
         const projectsObj = await response.json();
@@ -300,21 +311,39 @@ async function fetchProjects() {
 
 async function fetchProjectDetails(projectId, isPoll = false) {
     try {
-        const response = await fetch(`/api/projects/${projectId}/status`);
+        const [response, logsResponse] = await Promise.all([
+            fetch(`api/projects/${projectId}/status`),
+            fetch(`api/projects/${projectId}/logs?limit=160`).catch(() => null)
+        ]);
         if (!response.ok) throw new Error('Failed to fetch project details');
         
         const data = await response.json();
+        if (logsResponse?.ok) {
+            const logData = await logsResponse.json();
+            data.work_progress = deriveWorkProgress(
+                logData.lines || [],
+                data.total_chapters || 0
+            );
+        }
         renderProjectDetails(data);
+
+        const scheduleEditor = document.getElementById('schedule-section');
+        if (
+            Date.now() - state.lastScheduleRefresh > 30000
+            && !scheduleEditor?.open
+        ) {
+            loadSchedule();
+        }
         
         // Let pipeline.js and script-viewer.js update their parts
         if (window.PipelineManager) {
             const stage = (data.status || '').toLowerCase();
-            const activeStages = ['extracting', 'scripting', 'bootstrapping', 'generating', 'validating', 'mastering', 'exporting'];
-            const isDoneStage = ['complete', 'completed', 'selection_complete', 'paused', 'error', 'deploy_paused'].includes(stage);
+            const activeStages = ['extracting', 'scripting', 'bootstrapping', 'generating', 'validating', 'mastering', 'exporting', 'pausing', 'paused_scheduled', 'deploy_paused'];
+            const isDoneStage = ['complete', 'completed', 'selection_complete', 'paused', 'error'].includes(stage);
             const isRunning = (data.running === true || activeStages.includes(stage)) && !isDoneStage;
             const coarseStatus = isRunning ? 'running' : stage;
             
-            window.PipelineManager.updateTracker(data.status, isRunning ? 'running' : coarseStatus, data);
+            window.PipelineManager.updateTracker(data.active_stage || data.status, isRunning ? 'running' : coarseStatus, data);
             window.PipelineManager.toggleControls(data.status, isRunning, data);
         }
         
@@ -415,7 +444,7 @@ async function handleUploadSubmit() {
     // You could also add title/author inputs to the modal and append them here
 
     try {
-        const response = await fetch('/api/projects', {
+        const response = await fetch('api/projects', {
             method: 'POST',
             body: formData
         });
@@ -449,12 +478,30 @@ async function handleUploadSubmit() {
 
 async function startPipeline() {
     if (!state.currentProjectId) return;
+    const chapterCheckboxes = [...document.querySelectorAll('.chapter-select-cb')];
+    if (chapterCheckboxes.length && !chapterCheckboxes.some(cb => cb.checked)) {
+        showToast('Select at least one chapter before starting', 'warning');
+        return;
+    }
     
     try {
+        if (_selectionDebounceTimer) {
+            clearTimeout(_selectionDebounceTimer);
+            _selectionDebounceTimer = null;
+        }
+        if (chapterCheckboxes.length) {
+            const selected = chapterCheckboxes
+                .filter(cb => cb.checked)
+                .map(cb => parseInt(cb.dataset.ch, 10));
+            const selectionValue = selected.length === chapterCheckboxes.length
+                ? null
+                : selected;
+            await saveChapterSelection(state.currentProjectId, selectionValue);
+        }
         if (window.PipelineManager) {
             window.PipelineManager.toggleControls('generating', true);
         }
-        const response = await fetch(`/api/projects/${state.currentProjectId}/start`, { method: 'POST' });
+        const response = await fetch(`api/projects/${state.currentProjectId}/start`, { method: 'POST' });
         if (!response.ok) {
             const err = await response.json();
             throw new Error(err.detail || 'Failed to start pipeline');
@@ -471,7 +518,7 @@ async function pausePipeline() {
     if (!state.currentProjectId) return;
     
     try {
-        const response = await fetch(`/api/projects/${state.currentProjectId}/stop`, { method: 'POST' });
+        const response = await fetch(`api/projects/${state.currentProjectId}/stop`, { method: 'POST' });
         if (!response.ok) {
             const err = await response.json();
             throw new Error(err.detail || 'Failed to pause pipeline');
@@ -493,7 +540,7 @@ async function deleteProject() {
     }
     
     try {
-        const response = await fetch(`/api/projects/${state.currentProjectId}`, { method: 'DELETE' });
+        const response = await fetch(`api/projects/${state.currentProjectId}`, { method: 'DELETE' });
         if (!response.ok) throw new Error('Failed to delete project');
         
         showToast('Project deleted', 'success');
@@ -520,6 +567,8 @@ function renderProjectsList() {
     els.projectsGrid.innerHTML = '';
     
     state.projects.forEach(project => {
+        const status = String(project.status || 'created').toLowerCase();
+        const statusToken = status.replace(/[^a-z_]/g, '');
         const card = document.createElement('div');
         card.className = 'project-card';
         card.innerHTML = `
@@ -538,9 +587,9 @@ function renderProjectsList() {
                     <span class="card-stat-value">${formatDate(project.created_at)}</span>
                 </div>
             </div>
-            <div class="card-stage" style="background: var(--stage-${project.status.toLowerCase()}-bg, var(--bg-elevated)); color: var(--stage-${project.status.toLowerCase()}, var(--text-primary))">
-                ${['error', 'paused', 'complete'].includes(project.status) ? (project.status === 'complete' ? '✅ ' : '⚠️ ') : '⏳ '}
-                ${project.status.replace('_', ' ')}
+            <div class="card-stage" style="background: var(--stage-${statusToken}-bg, var(--bg-elevated)); color: var(--stage-${statusToken}, var(--text-primary))">
+                ${['error', 'paused', 'complete'].includes(status) ? (status === 'complete' ? '✅ ' : '⚠️ ') : '⏳ '}
+                ${escapeHtml(status.replaceAll('_', ' '))}
             </div>
         `;
         
@@ -550,27 +599,318 @@ function renderProjectsList() {
 }
 
 function renderProjectDetails(project) {
+    renderProjectHeader(project);
+    renderChapterList(project);
+}
+
+function renderProjectHeader(project) {
     document.getElementById('project-title').textContent = (project.title && project.title !== 'Unknown') ? project.title : 'Untitled';
     document.getElementById('project-author').textContent = (project.author && project.author !== 'Unknown') ? project.author : 'Unknown Author';
     
+    const status = String(project.status || 'created').toLowerCase();
+    const statusToken = status.replace(/[^a-z_]/g, '');
     document.getElementById('project-stats').innerHTML = `
         <span>${project.total_chapters || 0} Chapters</span>
-        <span>ID: ${project.project_id.split('-')[0]}</span>
+        <span>ID: ${escapeHtml(String(project.project_id || ''))}</span>
         <span>Started: ${formatDate(project.created_at)}</span>
     `;
     
-    const stageColor = `var(--stage-${project.status.toLowerCase()}, var(--text-primary))`;
-    const coarseStatus = ['error', 'paused', 'complete'].includes(project.status) ? project.status : 'running';
+    const stageColor = `var(--stage-${statusToken}, var(--text-primary))`;
+    const coarseStatus = project.running === true ? 'running' : status;
+    const displayStatus = coarseStatus.replaceAll('_', ' ');
     document.getElementById('project-stage').innerHTML = `
         <span class="card-stage" style="border: 1px solid ${stageColor}; color: ${stageColor}">
-            Status: ${coarseStatus.toUpperCase()} | Stage: ${project.status.replace('_', ' ').toUpperCase()}
+            Status: ${displayStatus.toUpperCase()} | Stage: ${escapeHtml(status.replaceAll('_', ' ').toUpperCase())}
         </span>
     `;
-
-    renderChapterGrid(project);
 }
 
-function renderChapterGrid(project) {
+function renderChapterList(project) {
+    const grid = document.getElementById('chapter-grid');
+    if (!grid) return;
+    grid.innerHTML = '';
+
+    const total = project.total_chapters || 0;
+    const scripted = new Set(project.scripted_chapters || []);
+    const generated = new Set(project.generated_chapters || []);
+    const mastered = new Set(project.mastered_chapters || []);
+    const currentScript = project.current_script_chapter;
+    const currentGen = project.current_gen_chapter;
+    const selectedNumbers = project.active_generation_chapter_selection
+        || project.generation_chapter_selection;
+    const selection = selectedNumbers ? new Set(selectedNumbers) : null;
+    const selectionLocked = project.running === true;
+    const detailsMap = new Map(
+        (project.chapter_details || []).map(detail => [detail.number, detail])
+    );
+
+    document.getElementById('chapter-summary-badge').textContent =
+        `${mastered.size} / ${total} mastered`;
+
+    for (let chapter = 1; chapter <= total; chapter++) {
+        const detail = detailsMap.get(chapter) || {};
+        const title = detail.title || `Chapter ${chapter}`;
+        const totalLines = detail.total_lines || 0;
+        const generatedLines = detail.lines_generated || 0;
+        let percent = detail.progress_percent || 0;
+        let statusKey = 'pending';
+        let statusText = 'Pending';
+        let statusBackground = 'rgba(148, 163, 184, 0.12)';
+        let statusColor = '#94a3b8';
+        let download = '<span></span>';
+        const stage = String(project.active_stage || project.status || '').toLowerCase();
+
+        if (mastered.has(chapter)) {
+            statusKey = 'done';
+            statusText = 'Mastered';
+            statusBackground = 'rgba(16, 185, 129, 0.15)';
+            statusColor = '#34d399';
+            percent = 100;
+            download = `<a class="chapter-download" href="api/projects/${encodeURIComponent(project.project_id)}/download/chapter/${chapter}" target="_blank" title="Download mastered chapter WAV">↓</a>`;
+        } else if (generated.has(chapter)) {
+            statusKey = 'generated';
+            statusText = 'Generated';
+            statusBackground = 'rgba(168, 85, 247, 0.15)';
+            statusColor = '#c084fc';
+            percent = 100;
+        } else if (stage.includes('generat') && currentGen === chapter) {
+            statusKey = 'active';
+            statusText = totalLines > 0 && generatedLines >= totalLines
+                ? `Validating ${generatedLines}/${totalLines}`
+                : `Generating ${generatedLines}/${totalLines}`;
+            statusBackground = 'rgba(59, 130, 246, 0.15)';
+            statusColor = '#60a5fa';
+            if (totalLines > 0 && generatedLines >= totalLines) percent = 99;
+        } else if (scripted.has(chapter)) {
+            statusKey = 'scripted';
+            statusText = `Scripted · ${totalLines} lines`;
+            statusBackground = 'rgba(132, 204, 22, 0.15)';
+            statusColor = '#a3e635';
+        } else if (stage.includes('script') && (
+            currentScript === chapter || (!currentScript && chapter === scripted.size + 1)
+        )) {
+            statusKey = 'active';
+            statusText = 'Scripting';
+            statusBackground = 'rgba(234, 179, 8, 0.15)';
+            statusColor = '#facc15';
+        }
+
+        const row = document.createElement('div');
+        row.className = `chapter-cell${statusKey === 'active' ? ' chapter-active' : ''}`;
+        const isInActiveBatch = selectionLocked && selection?.has(chapter);
+        if (isInActiveBatch) row.classList.add('chapter-selected');
+        row.dataset.title = title.toLowerCase();
+        row.dataset.status = statusKey;
+        const isChecked = selection === null || selection.has(chapter);
+        row.innerHTML = `
+            <input type="checkbox" class="chapter-select-cb" data-ch="${chapter}"
+                ${isChecked ? 'checked' : ''} ${selectionLocked ? 'disabled' : ''}
+                title="${selectionLocked ? 'The active batch is locked while the pipeline runs' : 'Include this chapter in the next audio batch'}">
+            <div class="chapter-title-wrap">
+                <span class="chapter-number">${chapter}</span>
+                <span class="chapter-title" title="${escapeHtml(title)}">${escapeHtml(title)}</span>
+                ${isInActiveBatch ? '<span class="chapter-run-badge">In this run</span>' : ''}
+            </div>
+            <span class="chapter-status-pill" style="background:${statusBackground};color:${statusColor}">${statusText}</span>
+            <div class="chapter-progress-value">
+                <div class="bar"><span style="width:${Math.min(percent, 100)}%;background:${statusColor}"></span></div>
+                <span>${Math.min(percent, 100)}%</span>
+            </div>
+            ${download}
+        `;
+        row.querySelector('.chapter-select-cb').addEventListener(
+            'change',
+            updateChapterSelectionState
+        );
+        grid.appendChild(row);
+    }
+
+    updateSelectionSummary(project);
+    renderWorkStatus(project);
+    filterChapterRows();
+
+    const requestDeploy = document.getElementById('btn-request-deploy');
+    const resumeDeploy = document.getElementById('btn-resume-deploy');
+    requestDeploy?.classList.toggle(
+        'hidden',
+        !project.running || project.status === 'deploy_paused'
+    );
+    resumeDeploy?.classList.toggle('hidden', project.status !== 'deploy_paused');
+}
+
+function parseChapterRange(value) {
+    if (!value) return null;
+    const result = new Set();
+    for (const rawToken of value.split(',')) {
+        const token = rawToken.trim();
+        if (!token) continue;
+        const match = token.match(/^(\d+)(?:\s*-\s*(\d+))?$/);
+        if (!match) return null;
+        const start = parseInt(match[1], 10);
+        const end = parseInt(match[2] || match[1], 10);
+        if (start < 1 || end < start || end - start > 10000) return null;
+        for (let chapter = start; chapter <= end; chapter++) result.add(chapter);
+    }
+    return result.size ? result : null;
+}
+
+function filterChapterRows() {
+    const search = (document.getElementById('chapter-search-input')?.value || '')
+        .trim().toLowerCase();
+    const status = document.getElementById('chapter-status-filter')?.value || 'all';
+    document.querySelectorAll('.chapter-cell').forEach(row => {
+        const titleMatch = !search || row.dataset.title.includes(search);
+        const statusMatch = status === 'all' || row.dataset.status === status;
+        row.hidden = !(titleMatch && statusMatch);
+    });
+}
+
+function updateSelectionSummary(project = null) {
+    const summary = document.getElementById('chapter-selection-summary');
+    if (!summary) return;
+    const checkboxes = [...document.querySelectorAll('.chapter-select-cb')];
+    const selected = checkboxes.filter(cb => cb.checked).length;
+    const locked = project?.running === true;
+    summary.textContent = selected === checkboxes.length
+        ? `All ${selected} chapters${locked ? ' · active batch' : ''}`
+        : `${selected} of ${checkboxes.length} selected${locked ? ' · active batch' : ''}`;
+}
+
+function renderWorkStatus(project) {
+    const details = project.chapter_details || [];
+    const detailMap = new Map(details.map(item => [item.number, item]));
+    const selected = project.active_generation_chapter_selection
+        || project.generation_chapter_selection
+        || Array.from({length: project.total_chapters || 0}, (_, index) => index + 1);
+    const selectedSet = new Set(selected);
+    const mastered = new Set(project.mastered_chapters || []);
+    const generated = new Set(project.generated_chapters || []);
+    const currentChapter = project.current_gen_chapter || project.current_script_chapter;
+    const currentDetail = detailMap.get(currentChapter) || {};
+    const stage = String(project.active_stage || project.status || 'created').toLowerCase();
+    const chapterTitle = currentDetail.title || (
+        currentChapter ? `Chapter ${currentChapter}` : ''
+    );
+    const workProgress = project.work_progress || {};
+    const selectedNames = selected.map(chapter => {
+        const title = detailMap.get(chapter)?.title || `Chapter ${chapter}`;
+        return `Chapter ${chapter} — ${title}`;
+    });
+    const batchDescription = selectedNames.length <= 3
+        ? selectedNames.join(', ')
+        : `${selectedNames.length} selected chapters`;
+
+    let completedUnits = 0;
+    for (const chapter of selectedSet) {
+        if (mastered.has(chapter)) completedUnits += 1;
+        else if (generated.has(chapter)) completedUnits += 0.85;
+        else if (chapter === currentChapter) {
+            completedUnits += Math.min((currentDetail.progress_percent || 0) / 100, 0.8);
+        }
+    }
+    let overall = selectedSet.size
+        ? Math.round((completedUnits / selectedSet.size) * 100)
+        : 0;
+    let overallLabel = 'Audio batch';
+    let chapterMetric = currentChapter
+        ? `${selected.indexOf(currentChapter) >= 0 ? selected.indexOf(currentChapter) + 1 : '?'} / ${selected.length}`
+        : '—';
+    let chapterLabel = 'Batch chapter';
+    let lineMetric = currentDetail.total_lines
+        ? `${currentDetail.lines_generated || 0} / ${currentDetail.total_lines}`
+        : '—';
+    let lineLabel = 'Current utterance';
+
+    let activity = 'Waiting to start';
+    let description = 'Choose chapters and start the pipeline.';
+    if (stage === 'paused_scheduled') {
+        activity = 'Waiting for working hours';
+        description = project.pause_reason ||
+            'The pipeline will resume automatically when a configured window opens.';
+    } else if (stage === 'deploy_paused') {
+        activity = 'Parked safely';
+        description = project.pause_reason ||
+            'The current chapter boundary is safe for maintenance.';
+    } else if (stage === 'paused' || stage === 'pausing') {
+        activity = stage === 'pausing'
+            ? 'Finishing the current safe unit'
+            : 'Pipeline paused';
+        description = project.pause_reason || 'Resume when you are ready.';
+    } else if (stage.includes('script')) {
+        overall = Number.isFinite(workProgress.stagePercent)
+            ? workProgress.stagePercent
+            : Math.round(
+                100 * (project.scripted_chapters || []).length
+                / Math.max(project.total_chapters || 0, 1)
+            );
+        overallLabel = 'Scripting stage';
+        chapterMetric = workProgress.position || '—';
+        chapterLabel = workProgress.phase === 'character_analysis'
+            ? 'Analysis unit'
+            : 'Book chapter';
+        lineMetric = workProgress.tokens ? `${workProgress.tokens}` : '—';
+        lineLabel = workProgress.tokens ? 'Current response tokens' : 'LLM response';
+        activity = workProgress.current || (
+            chapterTitle ? `Scripting — ${chapterTitle}` : 'Analyzing and scripting the full book'
+        );
+        description = `${workProgress.detail || `${(project.scripted_chapters || []).length} of ${project.total_chapters || 0} chapters scripted.`} Audio generation is queued for: ${batchDescription}.`;
+    } else if (stage === 'voice_review') {
+        overall = 100;
+        overallLabel = 'Voice preparation';
+        chapterMetric = 'Ready';
+        chapterLabel = 'Speaking cast';
+        lineMetric = 'Approval';
+        lineLabel = 'Next action';
+        activity = 'Waiting for voice-cast approval';
+        description = 'Preview or change the speaking voices in the Voice casting tab, then approve them once to begin audio generation.';
+    } else if (stage.includes('bootstrap')) {
+        activity = 'Preparing character voice references';
+        description = 'Creating reusable voice identities before chapter generation.';
+    } else if (stage.includes('generat') && currentChapter) {
+        const validating = currentDetail.total_lines > 0
+            && currentDetail.lines_generated >= currentDetail.total_lines;
+        activity = `${validating ? 'Validating' : 'Generating'} — ${chapterTitle}`;
+        description = validating
+            ? 'All audio files exist; acceptance checks and retries are finishing.'
+            : `Utterance ${currentDetail.lines_generated || 0} of ${currentDetail.total_lines || 0}.`;
+    } else if (stage.includes('validat')) {
+        activity = chapterTitle
+            ? `Validating — ${chapterTitle}`
+            : 'Validating generated audio';
+        description = 'Checking transcription, duration, silence, and pacing.';
+    } else if (stage.includes('master')) {
+        activity = chapterTitle
+            ? `Mastering — ${chapterTitle}`
+            : 'Mastering completed chapter audio';
+        description = `${mastered.size} of ${selectedSet.size} selected chapters mastered.`;
+    } else if (stage.includes('export')) {
+        activity = 'Exporting audiobook';
+        description = 'Packaging mastered chapters and metadata.';
+    } else if (['complete', 'completed', 'selection_complete'].includes(stage)) {
+        activity = stage === 'selection_complete'
+            ? 'Selected batch complete'
+            : 'Audiobook complete';
+        description = `${mastered.size} chapters are mastered and available.`;
+    } else if (stage === 'error') {
+        activity = 'Pipeline stopped on an error';
+        description = project.error ||
+            'Inspect the logs, then resume after correcting the issue.';
+    }
+
+    document.getElementById('work-status-title').textContent = activity;
+    document.getElementById('work-status-detail').textContent = description;
+    document.getElementById('work-overall-percent').textContent = `${overall}%`;
+    document.getElementById('work-overall-fill').style.width = `${overall}%`;
+    document.getElementById('work-overall-label').textContent = overallLabel;
+    document.getElementById('work-chapter-position').textContent = chapterMetric;
+    document.getElementById('work-chapter-label').textContent = chapterLabel;
+    document.getElementById('work-line-position').textContent = lineMetric;
+    document.getElementById('work-line-label').textContent = lineLabel;
+}
+
+// Retained temporarily for compatibility with older embedded shells. New
+// dashboard renders use the scalable row-based implementation above.
+function renderChapterGridLegacy(project) {
     const grid = document.getElementById('chapter-grid');
     if (!grid) return;
     grid.innerHTML = '';
@@ -632,14 +972,21 @@ function renderChapterGrid(project) {
             statusBg = 'rgba(16, 185, 129, 0.15)';
             statusColor = '#34d399';
             pct = 100;
-            downloadBtn = `<a href="/api/projects/${project.project_id}/download/chapter/${i}" target="_blank" title="Download Mastered Chapter WAV" style="color: #34d399; text-decoration: none; font-size: 1.1em; margin-left: 6px; transition: transform 0.2s ease;">⬇</a>`;
+            downloadBtn = `<a href="api/projects/${encodeURIComponent(project.project_id)}/download/chapter/${i}" target="_blank" title="Download Mastered Chapter WAV" style="color: #34d399; text-decoration: none; font-size: 1.1em; margin-left: 6px; transition: transform 0.2s ease;">⬇</a>`;
         } else if (generated.has(i)) {
-            statusText = '🟣 Mastered';
+            statusText = '🟣 Generated';
             statusBg = 'rgba(168, 85, 247, 0.15)';
             statusColor = '#c084fc';
             pct = 100;
         } else if (isGeneratingStage && currentGen === i) {
-            statusText = `🔵 Gen (${genLines}/${totalLines})`;
+            if (totalLines > 0 && genLines >= totalLines) {
+                statusText = `🔎 Validating (${genLines}/${totalLines})`;
+                // WAVs exist, but the chapter is incomplete until validation
+                // accepts every required line.
+                pct = 99;
+            } else {
+                statusText = `🔵 Gen (${genLines}/${totalLines})`;
+            }
             statusBg = 'rgba(59, 130, 246, 0.15)';
             statusColor = '#60a5fa';
         } else if (scripted.has(i)) {
@@ -659,7 +1006,7 @@ function renderChapterGrid(project) {
                 <div style="display: flex; align-items: center; gap: 6px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; flex: 1;">
                     <input type="checkbox" class="chapter-select-cb" data-ch="${i}" ${isChecked ? 'checked' : ''} style="cursor: pointer; accent-color: #6366f1; flex-shrink: 0;">
                     <span style="background: rgba(99, 102, 241, 0.2); color: #a5b4fc; padding: 1px 5px; border-radius: 4px; font-weight: 700; font-size: 0.78em; flex-shrink: 0;">Ch ${i}</span>
-                    <span style="font-weight: 600; color: #f3f4f6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.84em;" title="${title}">${title}</span>
+                    <span style="font-weight: 600; color: #f3f4f6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.84em;" title="${escapeHtml(title)}">${escapeHtml(title)}</span>
                 </div>
                 <div style="display: flex; align-items: center; flex-shrink: 0;">
                     <span style="background: ${statusBg}; color: ${statusColor}; border: 1px solid ${statusColor}33; padding: 2px 8px; border-radius: 12px; font-weight: 600; font-size: 0.76em; letter-spacing: 0.02em;">${statusText}</span>
@@ -696,6 +1043,98 @@ function renderChapterGrid(project) {
 
 let _selectionDebounceTimer = null;
 
+async function saveChapterSelection(projectId, chapters) {
+    const res = await fetch(`api/projects/${projectId}/set-selection`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chapters })
+    });
+    if (!res.ok) {
+        const error = await res.json().catch(() => ({}));
+        throw new Error(error.detail || 'Failed to save chapter selection');
+    }
+}
+
+function deriveWorkProgress(lines, totalChapters) {
+    const progress = {
+        phase: null,
+        stagePercent: null,
+        current: null,
+        detail: null,
+        position: null,
+        tokens: null,
+        chapterIndex: null,
+        chapterTotal: null,
+        chapterTitle: null
+    };
+
+    for (const line of lines) {
+        let match = line.match(/Analyzing unit\s+(\d+)\/(\d+):\s*(.+?)(?:\.\.\.)?$/i);
+        if (match) {
+            const current = Number(match[1]);
+            const total = Number(match[2]);
+            progress.phase = 'character_analysis';
+            progress.stagePercent = Math.round(20 * current / Math.max(total, 1));
+            progress.current = `Character analysis — unit ${current} of ${total}`;
+            progress.detail = match[3].replace(/\.\.\.$/, '');
+            progress.position = `${current} / ${total}`;
+            progress.tokens = null;
+            continue;
+        }
+
+        match = line.match(/\[ScriptGenerator\].*Chapter\s+(\d+)\/(\d+):\s*['"](.+?)['"]/i);
+        if (match) {
+            const current = Number(match[1]);
+            const total = Number(match[2]) || totalChapters;
+            const title = match[3];
+            progress.phase = 'chapter_scripting';
+            progress.stagePercent = 20 + Math.round(80 * (current - 1) / Math.max(total, 1));
+            progress.current = `Scripting — chapter ${current} of ${total}: ${title}`;
+            progress.detail = `Generating the production script for ${title}.`;
+            progress.position = `${current} / ${total}`;
+            progress.tokens = null;
+            progress.chapterIndex = current;
+            progress.chapterTotal = total;
+            progress.chapterTitle = title;
+            continue;
+        }
+
+        match = line.match(/Processing fragment chunk\s+(\d+)\/(\d+)/i);
+        if (match && progress.phase === 'chapter_scripting') {
+            const chunk = Number(match[1]);
+            const chunks = Number(match[2]);
+            progress.stagePercent = 20 + Math.round(
+                80 * (
+                    (progress.chapterIndex - 1) + ((chunk - 1) / Math.max(chunks, 1))
+                ) / Math.max(progress.chapterTotal, 1)
+            );
+            progress.detail = `Processing fragment chunk ${chunk} of ${chunks} for ${progress.chapterTitle}.`;
+            progress.tokens = null;
+            continue;
+        }
+
+        match = line.match(/\[ScriptGenerator\].*Chapter\s+(\d+)\/(\d+)\s+done/i);
+        if (match) {
+            const current = Number(match[1]);
+            const total = Number(match[2]) || totalChapters;
+            progress.phase = 'chapter_scripting';
+            progress.stagePercent = 20 + Math.round(80 * current / Math.max(total, 1));
+            progress.current = `Scripting — chapter ${current} of ${total} complete`;
+            progress.detail = `${current} of ${total} chapter scripts complete.`;
+            progress.position = `${current} / ${total}`;
+            progress.tokens = null;
+            continue;
+        }
+
+        match = line.match(/Streaming\D+(\d+)\s+tokens/i);
+        if (match && progress.phase) {
+            progress.tokens = Number(match[1]);
+        }
+    }
+
+    return progress;
+}
+
 function updateChapterSelectionState() {
     if (!state.currentProjectId) return;
     if (_selectionDebounceTimer) clearTimeout(_selectionDebounceTimer);
@@ -712,22 +1151,123 @@ function updateChapterSelectionState() {
 
     const selectionValue = selected.length === total ? null : selected;
     const targetProjectId = state.currentProjectId;
+    updateSelectionSummary();
 
     _selectionDebounceTimer = setTimeout(async () => {
+        if (selected.length === 0) {
+            showToast('No chapters selected. Choose one or more before starting.', 'warning');
+            return;
+        }
         try {
-            const res = await fetch(`/api/projects/${targetProjectId}/set-selection`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ chapters: selectionValue })
-            });
-            if (!res.ok) {
-                console.error('Failed to update chapter selection (status ' + res.status + ')');
-                showToast('Failed to save chapter selection', 'error');
-            }
+            await saveChapterSelection(targetProjectId, selectionValue);
         } catch (e) {
             console.error('Failed to update selection', e);
+            showToast(e.message || 'Failed to save chapter selection', 'error');
         }
     }, 300);
+}
+
+const SCHEDULE_DAYS = [
+    'Monday', 'Tuesday', 'Wednesday', 'Thursday',
+    'Friday', 'Saturday', 'Sunday'
+];
+
+async function loadSchedule() {
+    try {
+        const response = await fetch('api/schedule');
+        if (!response.ok) throw new Error('Failed to load working hours');
+        const data = await response.json();
+        state.schedule = data.schedule;
+        state.lastScheduleRefresh = Date.now();
+        renderSchedule(data.schedule, data.is_open);
+    } catch (error) {
+        console.error(error);
+        const summary = document.getElementById('schedule-summary');
+        if (summary) summary.textContent = 'Could not load schedule';
+    }
+}
+
+function renderSchedule(schedule, isOpen) {
+    document.getElementById('schedule-enabled').checked = Boolean(schedule.enabled);
+    document.getElementById('schedule-timezone').value =
+        schedule.timezone || 'Europe/Bucharest';
+    const windows = document.getElementById('schedule-windows');
+    windows.innerHTML = '';
+    (schedule.windows || []).forEach(addScheduleWindow);
+    if (!(schedule.windows || []).length) {
+        addScheduleWindow({
+            days: ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'],
+            start: '09:00',
+            end: '17:00'
+        });
+    }
+
+    const statePill = document.getElementById('schedule-state');
+    statePill.className = 'schedule-state';
+    if (!schedule.enabled) {
+        statePill.textContent = 'Off';
+        document.getElementById('schedule-summary').textContent =
+            'Scheduling is off; manual starts run at any time';
+    } else {
+        statePill.textContent = isOpen ? 'Open now' : 'Closed now';
+        statePill.classList.add(isOpen ? 'open' : 'closed');
+        document.getElementById('schedule-summary').textContent =
+            `${schedule.windows.length} working window${schedule.windows.length === 1 ? '' : 's'} · ${schedule.timezone}`;
+    }
+}
+
+function addScheduleWindow(windowConfig) {
+    const container = document.getElementById('schedule-windows');
+    if (!container) return;
+    const row = document.createElement('div');
+    row.className = 'schedule-window';
+    const selectedDays = new Set(windowConfig.days || []);
+    row.innerHTML = `
+        <div class="schedule-days">
+            ${SCHEDULE_DAYS.map(day => `
+                <label class="schedule-day" title="${day}">
+                    <input type="checkbox" value="${day}" ${selectedDays.has(day) ? 'checked' : ''}>
+                    <span>${day.slice(0, 2)}</span>
+                </label>
+            `).join('')}
+        </div>
+        <input class="input-sm schedule-start" type="time" value="${windowConfig.start || '09:00'}" aria-label="Start time">
+        <span>to</span>
+        <input class="input-sm schedule-end" type="time" value="${windowConfig.end || '17:00'}" aria-label="End time">
+        <button type="button" class="schedule-remove" title="Remove window">×</button>
+    `;
+    row.querySelector('.schedule-remove').addEventListener('click', () => row.remove());
+    container.appendChild(row);
+}
+
+async function saveSchedule() {
+    const button = document.getElementById('btn-save-schedule');
+    const windows = [...document.querySelectorAll('.schedule-window')].map(row => ({
+        days: [...row.querySelectorAll('.schedule-day input:checked')].map(input => input.value),
+        start: row.querySelector('.schedule-start').value,
+        end: row.querySelector('.schedule-end').value
+    }));
+    const payload = {
+        enabled: document.getElementById('schedule-enabled').checked,
+        timezone: document.getElementById('schedule-timezone').value.trim(),
+        windows
+    };
+    button.disabled = true;
+    try {
+        const response = await fetch('api/schedule', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload)
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.detail || 'Failed to save working hours');
+        showToast('Working hours saved', 'success');
+        await loadSchedule();
+    } catch (error) {
+        showToast(error.message, 'error');
+    } finally {
+        button.disabled = false;
+    }
 }
 
 // ============================================================================
@@ -783,10 +1323,10 @@ function escapeHtml(unsafe) {
 // ============================================================================
 
 function connectWebSocket() {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws/updates`;
-    
-    state.ws = new WebSocket(wsUrl);
+    const wsUrl = new URL('ws/updates', window.location.href);
+    wsUrl.protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+
+    state.ws = new WebSocket(wsUrl.href);
     
     state.ws.onopen = () => {
         console.log('WebSocket connected');
@@ -816,7 +1356,6 @@ function handleWsMessage(data) {
     if (data.project_id && state.currentProjectId === data.project_id) {
         if (data.type === 'status_update' && data.status) {
             renderProjectHeader(data.status);
-            renderChapterGrid(data.status);
         } else if (data.type === 'progress' || data.type === 'stage_change') {
             fetchProjectDetails(state.currentProjectId);
             
@@ -840,12 +1379,20 @@ function handleWsMessage(data) {
 async function checkVoiceServerStatus() {
     els.voiceStatusDot.className = 'status-dot checking';
     els.voiceStatusText.textContent = 'Voice Server: Checking...';
-    
-    // In a real implementation, we might call a Brain API endpoint that proxies to Voice /health
-    // For now, we simulate success since they are run locally
-    setTimeout(() => {
-        state.voiceServerOnline = true;
-        els.voiceStatusDot.className = 'status-dot online';
-        els.voiceStatusText.textContent = 'Voice Server: Online';
-    }, 1000);
+
+    try {
+        const response = await fetch('api/voice/health');
+        const health = await response.json();
+        state.voiceServerOnline = Boolean(health.online);
+        els.voiceStatusDot.className = health.online
+            ? 'status-dot online'
+            : 'status-dot offline';
+        els.voiceStatusText.textContent = health.online
+            ? `Voice Server: Online${health.model ? ` · ${health.model.split('/').pop()}` : ''}`
+            : 'Voice Server: Offline (starts on demand)';
+    } catch {
+        state.voiceServerOnline = false;
+        els.voiceStatusDot.className = 'status-dot offline';
+        els.voiceStatusText.textContent = 'Voice Server: Unavailable';
+    }
 }

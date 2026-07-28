@@ -1,38 +1,23 @@
-import os
+"""Start the local Voice API in the current Python environment.
+
+This replaces the legacy SSH launcher. It intentionally does not stop existing
+processes or read remote-host credentials.
+"""
+
+from __future__ import annotations
+
+import subprocess
 import sys
+from pathlib import Path
 
-try:
-    from dotenv import load_dotenv
-    import paramiko
-except ImportError:
-    print("Please install python-dotenv and paramiko")
-    sys.exit(1)
 
-load_dotenv()
+def main() -> int:
+    repo_root = Path(__file__).resolve().parent.parent
+    return subprocess.call(
+        [sys.executable, "-m", "voice.tts_server.main"],
+        cwd=repo_root,
+    )
 
-HOST = os.getenv("HA_SERVER_SSH_HOST", "192.168.50.180")
-USER = os.getenv("HA_SERVER_SSH_USER", "crazywiz")
-PASSWORD = os.getenv("HA_SERVER_SSH_PASSWORD", "")
-REMOTE_DIR = "crazy-audiobook-creator"
-
-def start_server():
-    ssh = paramiko.SSHClient()
-    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    try:
-        ssh.connect(HOST, username=USER, password=PASSWORD, timeout=10)
-        
-        # Kill any existing instance first
-        ssh.exec_command("pkill -f 'python -m voice.tts_server.main'")
-        
-        # Start server with nice -n 10 in the background
-        cmd = f"cd ~/{REMOTE_DIR} && source venv/bin/activate && nohup nice -n 10 python -m voice.tts_server.main > server.log 2>&1 &"
-        stdin, stdout, stderr = ssh.exec_command(cmd)
-        
-        print("Voice server started on Ubuntu in the background (nice -n 10).")
-    except Exception as e:
-        print(f"Failed to start server: {e}")
-    finally:
-        ssh.close()
 
 if __name__ == "__main__":
-    start_server()
+    raise SystemExit(main())

@@ -1,118 +1,101 @@
-# 🎧 Crazy Audiobook Creator
+# Crazy Audiobook Creator
 
-A fully local, two-machine audiobook production pipeline that converts fantasy/fiction EPUB books into professional-grade, multi-speaker, emotionally expressive audiobooks — fully automated with AI quality validation.
+Crazy Audiobook Creator turns an EPUB into a multi-speaker, chaptered M4B on one Windows workstation. Ollama performs book-wide character analysis and script annotation; Qwen3-TTS VoiceDesign creates reusable reference voices; Qwen3-TTS Base clones those references; Whisper and audio checks validate every generated segment before mastering.
 
-## ✨ Features
+## What works
 
-- **Electron Desktop Shell** — Native desktop application (`desktop/`) with automated subprocess management and 100% guaranteed process/VRAM cleanup on quit
-- **Fully Automated Pipeline** — Drop an EPUB, get a chaptered M4B audiobook
-- **Multi-Speaker & Narrator Chapter Announcements** — LLM identifies all characters and assigns distinct voices; Narrator voice automatically speaks chapter title announcements
-- **Standardized Audiobook Formatting** — Professional silence spacing (1.0s intro, 1.5s post-announcement pause, 0.5s inter-segment gap, 2.0s chapter outro)
-- **Emotional Narration** — Context-aware emotion tagging for every line
-- **Voice Design & SQLite Embedding Cache** — Unique voices generated from text descriptions with SQLite caching (`voice_cache.db`)
-- **AI Quality Validation** — Whisper `small` STT transcription + generic text normalization (`num2words` + `EnglishTextNormalizer`) with WER threshold checks
-- **Single-Instance Protection & Auto-VRAM Release** — OS-level file locking (`app.lock`) prevents duplicate app runs; GPU memory auto-cleans (`torch.cuda.empty_cache()`) after 5 mins idle
-- **Professional Audio** — Vectorized noise gate, LUFS loudness normalization (-19 LUFS target), cross-fading
-- **100% Local** — No cloud APIs, no subscriptions, complete privacy
+- Book-wide character analysis before audio generation
+- Source-preserving scripts with exact fragment IDs and source spans
+- Bounded same-speaker utterance grouping to reduce TTS calls without losing source traceability
+- Stable character voices, including deterministic sharing when a book exceeds the voice cap
+- Speaking-only casting with checked descriptions, previews, text redesign, and recorded-reference upload
+- Chapter-selectable, resumable audio generation
+- Per-line fingerprint cache that invalidates when text, voice, pronunciation, emotion, speed, or generation settings change
+- Fail-closed validation for transcription accuracy, clipping, silence, pacing, and speaker similarity
+- Narrated chapter-title announcements, chapter WAV mastering, and full or partial M4B export
+- Cooperative pause/cancel, scheduled chapter-boundary parking, and serialized GPU work
+- Local dashboard with scalable chapter search/filtering, explicit current-work progress, editable working hours, script, character, quality, and log views
 
-## 🏗️ Architecture
+## Partial-book workflow
 
-```
-┌─────────────────────────────────────┐     ┌─────────────────────────────────────┐
-│     🖥️ Windows PC (The Brain)       │     │     🐧 Ubuntu PC (The Voice)         │
-│     AMD 7900 XTX · 24GB VRAM       │     │     RTX 2080 Super · 8GB VRAM       │
-│                                     │     │                                     │
-│  📚 EPUB Input                      │     │  🎤 Qwen3-TTS 1.7B                  │
-│  ↓                                  │     │     Voice Design + Emotion Control  │
-│  📝 Text Extraction                 │     │                                     │
-│  ↓                                  │     │  ✅ Whisper Quality Validator        │
-│  🧠 LLM Script Director             │────→│     WER Check + Artifact Detection  │
-│     (Ollama · Qwen3 32B)           │     │                                     │
-│     • Character detection          │     │  🎚️ Audio Mastering                  │
-│     • Voice descriptions           │     │     LUFS Norm + Cross-fade          │
-│     • Emotion tagging              │     │                                     │
-│  🖥️ Web Dashboard                   │←────│  📦 M4B Export                       │
-│     Monitor · Review · Override    │     │     Chapters + Metadata             │
-└─────────────────────────────────────┘     └─────────────────────────────────────┘
-```
+Character analysis and script generation intentionally cover the whole book first. This provides consistent identities, aliases, speaking styles, and voice assignments.
 
-## 🔧 Tech Stack
+Audio is incremental:
 
-| Layer | Technology |
-|-------|-----------|
-| LLM | Ollama + Qwen3 32B Q4 (Windows, Vulkan) |
-| TTS | Qwen3-TTS 1.7B (Ubuntu, CUDA) |
-| Validation | faster-whisper + jiwer |
-| Audio | FFmpeg, pyloudnorm, pydub |
-| Backend | Python 3.12+ / FastAPI |
-| Frontend | Vanilla HTML/CSS/JS |
-| Database | SQLite |
-| Communication | REST API + WebSocket |
+1. Upload the EPUB and let analysis, scripting, and speaking-only voice bootstrap finish.
+2. Preview or change the actual speaking cast and approve it once.
+3. Select one or more chapters in the dashboard.
+4. Start or continue the pipeline. Only those chapters are generated, validated, mastered, and exported.
+5. Use the mastered chapter WAVs or the partial M4B immediately.
+6. Select another batch later. Valid artifacts are reused with no repeated casting gate.
+7. Select **All** to finish missing chapters and create the canonical full-book M4B.
 
-## 📂 Project Structure
+Partial exports include the actual chapter set in the filename, for example `book_chapters_1-3_7.m4b`. A full export is refused until every chapter has a valid mastered artifact.
+When script prompts, grouping rules, character dependencies, or schema versions change, the next run performs one book-wide script refresh before generating the selected audio batch. Existing partial M4B files remain on disk for listening during that one-time migration.
 
-```
-crazy-audiobook-creator/
-├── brain/          # Windows — LLM orchestrator + web dashboard
-├── voice/          # Ubuntu — TTS server + audio mastering
-├── shared/         # Shared Pydantic models and constants
-├── docs/           # Setup guides and architecture docs
-├── scripts/        # Install scripts
-└── projects/       # Generated audiobook projects (gitignored)
+## Requirements
+
+- Windows 10/11
+- A PyTorch environment capable of running Qwen3-TTS VoiceDesign and Base on the local GPU
+- Ollama with the model configured in `brain/config.yaml`
+- FFmpeg on `PATH`
+- Node.js only if using the Electron wrapper
+
+The checked-in defaults assume the Python environment at `E:\PyTorch env\my_venv`. Change `voice_server.venv` in `brain/config.yaml` if yours is elsewhere.
+
+## Quick start
+
+```powershell
+# From the repository root
+.\scripts\setup-voice-server.ps1 -VenvPath "E:\PyTorch env\my_venv"
+
+# Pull the model once; the pipeline starts its isolated Ollama service on demand
+ollama pull qwen2.5:32b
+& "E:\PyTorch env\my_venv\Scripts\python.exe" -m uvicorn brain.dashboard.api.main:app --host 127.0.0.1 --port 8000
 ```
 
-## 🚀 Quick Start
+Open `http://127.0.0.1:8000`. The dashboard starts the local voice service on demand when `voice_server.auto_start` is enabled.
+The checked-in workstation configuration also starts an app-owned Ollama server
+on port 11435 with only Vulkan device 0 (the RX 7900 XTX) visible. This avoids
+Ollama splitting the 32B model across the discrete and integrated GPUs.
+The desktop wrapper follows the same single-owner lifecycle; it no longer starts a competing Voice process.
 
-### Prerequisites
-- **Windows PC**: AMD/NVIDIA GPU with 16GB+ VRAM, Python 3.12+, Ollama
-- **Ubuntu PC**: NVIDIA GPU with 8GB+ VRAM, Python 3.12+, CUDA 12.x
-- Both machines on the same local network
+For the Electron shell:
 
-### Setup
-```bash
-# Windows — install brain
-cd brain
-pip install -r requirements.txt
-ollama pull qwen3:32b
-
-# Ubuntu — install voice
-cd voice
-pip install -r requirements.txt
-# Models download automatically on first run
+```powershell
+cd desktop
+npm install
+cd ..
+.\start_desktop.cmd
 ```
 
-### Run
-```bash
-# Ubuntu — start TTS server
-cd voice && python -m tts_server.main
+## Important behavior
 
-# Windows — start pipeline + dashboard
-cd brain && python -m dashboard.api.main
+- Qwen3-TTS Base voice cloning does not expose a natural-language per-utterance instruction parameter. The project therefore applies requested speed plus restrained pitch/tone post-processing for emotion cues; it does not claim native clone-mode emotion control.
+- Mastered output targets internal listening quality. It is not an ACX submission validator or an ACX MP3 export pipeline.
+- External metadata lookup is opt-in and contacts Google Books only when requested or explicitly enabled.
+- Both HTTP services bind to loopback by default. Non-loopback binding is refused unless an API token is configured.
+- **Pause** interrupts active Ollama streaming and releases GPU models. Closing
+  the Electron app performs the same cleanup. Closing a browser tab opened by
+  `start_app.pyw` only closes the UI; the background dashboard intentionally
+  keeps running for scheduled/unattended work.
+
+## Documentation
+
+- [Architecture](docs/architecture.md)
+- [Windows setup](docs/setup-windows.md)
+- [Configuration](docs/configuration.md)
+- [API reference](docs/api-reference.md)
+- [Quality assurance](docs/quality-assurance.md)
+- [Voice design](docs/voice-design.md)
+- [Prompt and source-fidelity rules](docs/prompts.md)
+
+`implementation_plan*.md` and `chat-history.md` are historical records, not current specifications.
+
+## Tests
+
+```powershell
+& "E:\PyTorch env\my_venv\Scripts\python.exe" -m unittest discover -s tests -v
 ```
 
-Then open `http://localhost:8000` in your browser, upload an EPUB, and let it run.
-
-## 📖 Documentation
-
-- [Architecture Guide](docs/architecture.md) — Detailed pipeline design (stages, data flow, error recovery)
-- [Windows Setup](docs/setup-windows.md) — Brain machine setup (Ollama, AMD GPU, Python)
-- [Ubuntu Setup](docs/setup-ubuntu.md) — Voice machine setup (CUDA, models, systemd service)
-- [LLM Prompts](docs/prompts.md) — Script director prompt engineering (templates, examples, strategies)
-- [Voice Design](docs/voice-design.md) — Character voice creation (archetypes, consistency, fantasy tips)
-- [Quality Assurance](docs/quality-assurance.md) — AI validation system (Whisper, WER, retry logic)
-- [API Reference](docs/api-reference.md) — TTS server and dashboard APIs (endpoints, schemas)
-- [Configuration](docs/configuration.md) — All config options explained (YAML reference, profiles)
-
-## 📊 Quality Targets
-
-| Metric | Target |
-|--------|--------|
-| Word Error Rate | < 5% per segment |
-| Loudness | -18 to -20 LUFS |
-| Noise Floor | < -50 dB |
-| Peak Level | < -1 dBFS |
-| Voice Consistency | Same reference clip per character |
-
-## 📄 License
-
-MIT
+The unit suite does not load the production TTS models. A real end-to-end smoke test still requires the configured Ollama, GPU models, and FFmpeg.

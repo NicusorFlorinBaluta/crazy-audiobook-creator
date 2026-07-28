@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
@@ -68,12 +69,17 @@ class JobQueue:
             """)
             conn.commit()
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self):
         """Create a database connection."""
-        conn = sqlite3.connect(self.db_path)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
-        return conn
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA foreign_keys=ON")
+            conn.execute("PRAGMA busy_timeout=30000")
+            yield conn
+        finally:
+            conn.close()
 
     # ------------------------------------------------------------------
     # Job management
@@ -85,7 +91,7 @@ class JobQueue:
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT OR REPLACE INTO jobs (project_id, state, created_at, updated_at)
+                INSERT INTO jobs (project_id, state, created_at, updated_at)
                 VALUES (?, ?, ?, ?)
                 """,
                 (project_id, json.dumps(state, default=str), now, now),
@@ -109,12 +115,18 @@ class JobQueue:
         return state
 
     def update_job(self, project_id: str, updates: dict[str, Any]) -> None:
-        """Update job state with partial updates (merge)."""
-        current = self.get_job(project_id)
-        current.update(updates)
-        now = datetime.now(timezone.utc).isoformat()
-
+        """Update job state with a serialized read-modify-write transaction."""
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT state FROM jobs WHERE project_id = ?",
+                (project_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"Job not found: {project_id}")
+            current = json.loads(row[0])
+            current.update(updates)
+            now = datetime.now(timezone.utc).isoformat()
             conn.execute(
                 "UPDATE jobs SET state = ?, updated_at = ? WHERE project_id = ?",
                 (json.dumps(current, default=str), now, project_id),
@@ -141,6 +153,13 @@ class JobQueue:
     def delete_job(self, project_id: str) -> None:
         """Delete a job and its quality logs."""
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            exists = conn.execute(
+                "SELECT 1 FROM jobs WHERE project_id = ?",
+                (project_id,),
+            ).fetchone()
+            if exists is None:
+                raise KeyError(f"Job not found: {project_id}")
             conn.execute("DELETE FROM quality_logs WHERE project_id = ?", (project_id,))
             conn.execute("DELETE FROM jobs WHERE project_id = ?", (project_id,))
             conn.commit()
@@ -181,6 +200,26 @@ class JobQueue:
                     now,
                 ),
             )
+            conn.commit()
+
+    def clear_quality_logs(
+        self,
+        project_id: str,
+        chapter_number: int | None = None,
+    ) -> None:
+        """Clear stale validation attempts before persisting a fresh run."""
+        with self._connect() as conn:
+            if chapter_number is None:
+                conn.execute(
+                    "DELETE FROM quality_logs WHERE project_id = ?",
+                    (project_id,),
+                )
+            else:
+                conn.execute(
+                    "DELETE FROM quality_logs "
+                    "WHERE project_id = ? AND chapter_number = ?",
+                    (project_id, chapter_number),
+                )
             conn.commit()
 
     def get_quality_report(self, project_id: str) -> list[dict[str, Any]]:
@@ -246,4 +285,44 @@ class JobQueue:
             "worst_wer": row[5] or 0.0,
             "average_quality_score": row[6] or 0.0,
             "total_retries": row[7] or 0,
+        }
+
+    def get_project_quality_summary(self, project_id: str) -> dict[str, Any]:
+        """Aggregate only each line's final validation attempt for a project."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                WITH final_attempts AS (
+                    SELECT line_id, MAX(attempt) AS max_attempt
+                    FROM quality_logs
+                    WHERE project_id = ?
+                    GROUP BY line_id
+                )
+                SELECT
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN q.status = 'pass' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN q.status = 'fail' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN q.status = 'flagged' THEN 1 ELSE 0 END),
+                    AVG(q.wer),
+                    MAX(q.wer),
+                    SUM(MAX(0, f.max_attempt - 1))
+                FROM final_attempts f
+                JOIN quality_logs q
+                  ON q.project_id = ?
+                 AND q.line_id = f.line_id
+                 AND q.attempt = f.max_attempt
+                """,
+                (project_id, project_id),
+            ).fetchone()
+
+        if row is None:
+            return {}
+        return {
+            "total_segments": row[0] or 0,
+            "passed": row[1] or 0,
+            "failed": row[2] or 0,
+            "flagged": row[3] or 0,
+            "average_wer": row[4] or 0.0,
+            "worst_wer": row[5] or 0.0,
+            "total_retries": row[6] or 0,
         }

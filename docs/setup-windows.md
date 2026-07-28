@@ -1,279 +1,188 @@
-# Windows Setup Guide — "The Brain"
+# Windows Setup
 
-## Overview
-
-The Windows machine runs:
-- **Ollama** with a Qwen3 32B model for LLM script analysis
-- **The Orchestrator** — Python pipeline that coordinates everything
-- **The Web Dashboard** — FastAPI + HTML frontend for monitoring
+The supported default runs the Brain, Voice, Ollama, dashboard, and audio tools on one Windows workstation.
 
 ## Prerequisites
 
-| Requirement | Minimum | Recommended |
-|-------------|---------|-------------|
-| OS | Windows 10/11 | Windows 11 |
-| GPU | 16GB+ VRAM | AMD 7900 XTX (24GB) |
-| RAM | 16 GB | 32 GB |
-| Python | 3.11+ | 3.12 |
-| Storage | 25 GB free | 50 GB free |
-| Network | Connected to Ubuntu machine | Same LAN, gigabit ethernet |
+- Windows 10/11
+- Python environment with a GPU-enabled PyTorch build appropriate for the machine
+- Ollama
+- FFmpeg and ffprobe on `PATH`
+- Git
+- Optional: Node.js for the Electron shell
 
----
+The repository’s current defaults target the existing environment `E:\PyTorch env\my_venv`. A path without spaces is preferable for GPU toolchains that launch helper executables; otherwise a Windows 8.3 short path may be needed by launchers.
 
-## Step 1: Install Ollama
-
-Ollama is the LLM runtime. It handles model management and provides an API.
-
-### Install
-1. Download Ollama from [ollama.com](https://ollama.com)
-2. Run the installer
-3. Verify installation:
-   ```powershell
-   ollama --version
-   ```
-
-### Configure for AMD GPU (Vulkan)
-
-The 7900 XTX works best with Ollama's Vulkan backend on Windows:
+## 1. Clone and open the repository
 
 ```powershell
-# Set environment variable for Vulkan backend (if ROCm gives issues)
-[System.Environment]::SetEnvironmentVariable("OLLAMA_VULKAN", "1", "User")
+git clone <repository-url> crazy-audiobook-creator
+Set-Location crazy-audiobook-creator
 ```
 
-If using ROCm instead:
+All commands and path safety checks assume the repository root is the current directory.
+
+## 2. Prepare Python
+
+Install the GPU-enabled PyTorch build separately according to the selected runtime. Then install application dependencies into the same environment:
+
 ```powershell
-# For ROCm (if Vulkan isn't performing well)
-[System.Environment]::SetEnvironmentVariable("HSA_OVERRIDE_GFX_VERSION", "11.0.0", "User")
+$python = "E:\PyTorch env\my_venv\Scripts\python.exe"
+& $python -m pip install -r brain\requirements.txt
+& $python -m pip install -r voice\requirements.txt
+.\scripts\setup-voice-server.ps1 -VenvPath "E:\PyTorch env\my_venv"
 ```
 
-Restart your terminal after setting environment variables.
+The setup script adds the Qwen/Parler/Whisper packages used by this implementation and checks for FFmpeg. Review its third-party compatibility patch before using a different package version.
 
-### Download the LLM Model
+Verify core imports:
 
 ```powershell
-# Qwen3 32B — recommended for best script quality
-# Q4_K_M quantization: ~20GB download, fits in 24GB VRAM
-ollama pull qwen3:32b
+& $python -c "import torch, fastapi, soundfile; print(torch.__version__, torch.cuda.is_available())"
+ffmpeg -version
+ffprobe -version
+```
 
-# Verify
+The application expects the GPU PyTorch build to expose the device through PyTorch’s `cuda` interface, including compatible AMD-on-Windows environments.
+
+## 3. Configure Ollama
+
+Install/start Ollama and pull the model named by `brain/config.yaml`:
+
+```powershell
+ollama pull qwen2.5:32b
 ollama list
 ```
 
-**Alternative models** (if Qwen3 32B is too slow):
-```powershell
-# Qwen3 14B — faster, slightly lower quality
-ollama pull qwen3:14b
+If using another model, update `ollama.model`. Character and script fingerprints include the model name, so changing it correctly invalidates dependent scripts.
 
-# Llama 3.3 70B Q2 — fits in 24GB but very slow
-ollama pull llama3.3:70b-q2_K
-```
+The checked-in configuration starts a second, app-owned Ollama endpoint on
+`127.0.0.1:11435` and reuses `E:\.ollama\models`. It sets
+`GGML_VK_VISIBLE_DEVICES=0` for that process because Vulkan device 0 is the RX
+7900 XTX on the configured workstation. If hardware enumeration changes, use
+`ollama ps`/the Ollama server log to identify the discrete index and update
+`ollama.vulkan_visible_devices`.
 
-### Test the LLM
+## 4. Review local configuration
 
-```powershell
-ollama run qwen3:32b "Describe the speaking voice of a gruff dwarven blacksmith in a fantasy novel. Be specific about tone, pitch, pace, and accent."
-```
-
-You should get a detailed voice description. If it works, the LLM is ready.
-
----
-
-## Step 2: Install Python
-
-### Option A: Official Python
-1. Download Python 3.12 from [python.org](https://python.org)
-2. During install, **check "Add Python to PATH"**
-3. Verify:
-   ```powershell
-   python --version
-   ```
-
-### Option B: via Conda/Miniconda
-```powershell
-# Create a dedicated environment
-conda create -n audiobook python=3.12
-conda activate audiobook
-```
-
----
-
-## Step 3: Install the Brain
-
-```powershell
-# Navigate to the project
-cd e:\Projects\crazy-audiobook-creator\brain
-
-# Create virtual environment (if not using conda)
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-
-# Install dependencies
-pip install -r requirements.txt
-```
-
-### Dependencies (brain/requirements.txt)
-```
-# Web framework
-fastapi>=0.115.0
-uvicorn>=0.30.0
-websockets>=13.0
-
-# EPUB parsing
-ebooklib>=0.18
-beautifulsoup4>=4.12.0
-lxml>=5.0
-
-# LLM client
-httpx>=0.27.0
-
-# Data validation
-pydantic>=2.9.0
-
-# Database
-aiosqlite>=0.20.0
-
-# Utilities
-pyyaml>=6.0
-rich>=13.0          # Pretty console output
-click>=8.1          # CLI interface
-```
-
----
-
-## Step 4: Configure
-
-Edit `brain/config.yaml`:
+At minimum verify:
 
 ```yaml
+# brain/config.yaml
 ollama:
-  host: "http://localhost:11434"
-  model: "qwen3:32b"
-  context_window: 10
+  host: "http://127.0.0.1:11435"
+  model: "qwen2.5:32b"
+  auto_start: true
+  models_dir: "E:\\.ollama\\models"
+  vulkan_visible_devices: "0"
 
-ubuntu:
-  host: "http://UBUNTU_IP_ADDRESS:8100"  # ← Replace with your Ubuntu machine's IP
-  timeout: 30
-  retries: 3
-
-extraction:
-  skip_toc: true
-  skip_appendices: true
-  min_chapter_words: 100
-
-script:
-  max_segment_sentences: 4
-  default_speed: 1.0
-  narrator_pause_ms: 500
-  dialogue_pause_ms: 300
-  chapter_start_pause_ms: 1000
-  chapter_end_pause_ms: 2000
+voice_server:
+  host: "http://127.0.0.1:8100"
+  venv: "E:\\PyTorch env\\my_venv"
+  auto_start: true
 
 dashboard:
+  host: "127.0.0.1"
   port: 8000
-  host: "0.0.0.0"
 ```
 
-### Find Your Ubuntu Machine's IP
+And:
 
-On Ubuntu, run:
-```bash
-ip addr show | grep "inet " | grep -v 127.0.0.1
+```yaml
+# voice/config.yaml
+tts:
+  model: "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
+  device: "cuda"
+
+server:
+  host: "127.0.0.1"
+  port: 8100
+  workers: 1
 ```
 
----
+Keep both services on loopback unless remote access is intentionally engineered. For non-loopback binding, configure matching Voice tokens, a Dashboard token, and explicit CORS origins. The bundled browser UI is intended for local loopback use.
 
-## Step 5: Network Setup
+## 5. Run tests
 
-Both machines need to communicate over the LAN.
-
-### Windows Firewall
-Allow inbound connections on port 8000 (dashboard):
 ```powershell
-New-NetFirewallRule -DisplayName "Audiobook Dashboard" -Direction Inbound -Port 8000 -Protocol TCP -Action Allow
+& $python -m compileall shared brain voice tests parler_server.py start_app.pyw
+& $python -m unittest discover -s tests -v
 ```
 
-### Test Connectivity
+These tests verify state/artifact/source/validation logic with fake engines. They do not download or run production models.
+
+## 6. Start the application
+
+Start the dashboard directly:
+
 ```powershell
-# Test that you can reach the Ubuntu machine
-# (run this AFTER setting up the Ubuntu machine)
-curl http://UBUNTU_IP_ADDRESS:8100/health
+& $python -m uvicorn brain.dashboard.api.main:app --host 127.0.0.1 --port 8000
 ```
 
----
+Open `http://127.0.0.1:8000`. With `voice_server.auto_start: true`, the pipeline launches the voice service in the configured environment when needed.
 
-## Step 6: Run
+Alternatively run `start_app.pyw` to launch the dashboard silently and open the browser. It reuses an existing dashboard on port 8000 and does not kill unrelated processes. Closing that browser tab does not stop the background dashboard; use Pause first when you want GPU work to stop.
 
-### Start Ollama (if not auto-started)
+For the Electron wrapper:
+
 ```powershell
-ollama serve
+Set-Location desktop
+npm install
+npm start
 ```
 
-### Start the Pipeline + Dashboard
-```powershell
-cd e:\Projects\crazy-audiobook-creator\brain
-python -m dashboard.api.main
-```
+## 7. First smoke test
 
-Open `http://localhost:8000` in your browser.
+Use a short EPUB:
 
----
+1. Upload it and wait for book-wide scripting/voice bootstrap.
+2. Select one chapter.
+3. Start the pipeline and download its WAV/partial M4B.
+4. Re-run unchanged to confirm cache reuse.
+5. Select a second batch.
+6. Select All only when ready to generate remaining chapters and produce the full M4B.
+
+Model downloads and the first voice bootstrap can take substantially longer than subsequent work.
 
 ## Troubleshooting
 
-### Ollama doesn't detect GPU
+### Ollama unavailable
+
 ```powershell
-# Check GPU visibility
-ollama ps
-
-# Force Vulkan
-$env:OLLAMA_VULKAN = "1"
-ollama serve
+Invoke-RestMethod http://127.0.0.1:11435/api/tags
 ```
 
-### Model is too slow
-- Try `qwen3:14b` instead of `qwen3:32b`
-- Check GPU utilization: Task Manager → Performance → GPU
-- Ensure no other GPU-intensive apps are running
+Confirm the service, host, and configured model.
 
-### Can't reach Ubuntu machine
+### Ollama scripting is unexpectedly slow
+
+Inspect the Ollama server log. A 32B model split between a discrete GPU and an
+integrated GPU can be many times slower even though both devices are reported as
+GPU offload. Confirm the managed process logged only the configured discrete
+Vulkan device. Pause the project after changing device selection so the old
+model is unloaded before retrying.
+
+### Voice health unavailable
+
 ```powershell
-# Ping test
-ping UBUNTU_IP_ADDRESS
-
-# Check if TTS server is running on Ubuntu
-curl http://UBUNTU_IP_ADDRESS:8100/health
+Invoke-RestMethod http://127.0.0.1:8100/health
+Get-Content .\parler.log -Tail 100
 ```
 
-### Python version issues
-```powershell
-# Verify pip installs to the right environment
-pip --version
-which python  # Should point to your venv/conda env
-```
+The Parler log is relevant only during reference bootstrap. Qwen/Whisper lifecycle appears in dashboard project logs.
 
----
+### FFmpeg export failure
 
-## Directory Structure After Setup
+Ensure both `ffmpeg` and `ffprobe` resolve in the environment inherited by the dashboard, not only in another terminal profile.
 
-```
-brain/
-├── .venv/              # Python virtual environment
-├── config.yaml         # Configuration
-├── requirements.txt    # Python dependencies
-├── extractor/          # EPUB parsing module
-├── director/           # LLM script generation
-├── orchestrator/       # Pipeline coordination
-├── dashboard/          # Web UI
-│   ├── api/            # FastAPI backend
-│   └── frontend/       # HTML/CSS/JS
-└── projects/           # Generated audiobook data
-    └── {project_name}/
-        ├── book.json           # Extracted text
-        ├── characters.json     # Character registry
-        ├── script/             # Generated scripts per chapter
-        │   ├── chapter_001.json
-        │   └── ...
-        ├── quality_report.json # Validation results
-        └── audiobook.m4b       # Final output (downloaded from Ubuntu)
-```
+### GPU out of memory
+
+Keep `server.workers: 1`. Do not start parallel project pipelines. The service intentionally unloads Parler before validation/Qwen and swaps Qwen/Whisper phases.
+
+### Python path with spaces warning
+
+If a GPU SDK helper mishandles `E:\PyTorch env\...`, create the environment under a path without spaces or update the configured path to a working short-path alias. This warning originates in the installed runtime, not in EPUB/script logic.
+
+### Stale output after a change
+
+Do not delete random files first. Re-select the chapter and run it: dependency fingerprints should invalidate changed artifacts. If they do not, capture the script/manifest/state files and logs as a reproducible bug.

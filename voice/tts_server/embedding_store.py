@@ -14,6 +14,7 @@ import io
 import json
 import logging
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -30,12 +31,16 @@ class EmbeddingStore:
         self.db_path = str(db_path)
         self._init_db()
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self):
         """Create a database connection with WAL mode."""
         conn = sqlite3.connect(self.db_path)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
-        return conn
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA foreign_keys=ON")
+            yield conn
+        finally:
+            conn.close()
 
     def _init_db(self) -> None:
         """Initialize database schema."""
@@ -92,6 +97,32 @@ class EmbeddingStore:
                     UNIQUE(project_id, line_id)
                 )
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS voice_clone_prompts (
+                    ref_audio_hash TEXT NOT NULL,
+                    ref_text_hash TEXT NOT NULL,
+                    model_id TEXT NOT NULL,
+                    prompt_blob BLOB NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (ref_audio_hash, ref_text_hash, model_id)
+                )
+            """)
+            columns = {
+                row[1]
+                for row in conn.execute(
+                    "PRAGMA table_info(generation_fingerprints)"
+                ).fetchall()
+            }
+            if "fingerprint_hash" not in columns:
+                conn.execute(
+                    "ALTER TABLE generation_fingerprints "
+                    "ADD COLUMN fingerprint_hash TEXT DEFAULT ''"
+                )
+            if "output_hash" not in columns:
+                conn.execute(
+                    "ALTER TABLE generation_fingerprints "
+                    "ADD COLUMN output_hash TEXT DEFAULT ''"
+                )
             conn.commit()
 
     @staticmethod
@@ -246,6 +277,70 @@ class EmbeddingStore:
             conn.commit()
 
     # ------------------------------------------------------------------
+    # Qwen voice-clone prompt cache
+    # ------------------------------------------------------------------
+
+    def get_voice_clone_prompt(
+        self,
+        ref_audio_path: str | Path,
+        ref_text: str,
+        model_id: str,
+    ) -> list[dict[str, Any]] | None:
+        """Load cached prompt tensors as plain dictionaries."""
+        audio_hash = self.hash_file(ref_audio_path)
+        if not audio_hash:
+            return None
+        ref_text_hash = self.hash_text(ref_text or "")
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT prompt_blob FROM voice_clone_prompts
+                WHERE ref_audio_hash = ? AND ref_text_hash = ? AND model_id = ?
+                """,
+                (audio_hash, ref_text_hash, model_id),
+            ).fetchone()
+        if not row:
+            return None
+        try:
+            return torch.load(io.BytesIO(row[0]), map_location="cpu", weights_only=True)
+        except TypeError:
+            return torch.load(io.BytesIO(row[0]), map_location="cpu")
+        except Exception as exc:
+            logger.warning("Failed to load cached voice-clone prompt: %s", exc)
+            return None
+
+    def save_voice_clone_prompt(
+        self,
+        ref_audio_path: str | Path,
+        ref_text: str,
+        model_id: str,
+        items: list[dict[str, Any]],
+    ) -> None:
+        audio_hash = self.hash_file(ref_audio_path)
+        if not audio_hash:
+            return
+        ref_text_hash = self.hash_text(ref_text or "")
+        buffer = io.BytesIO()
+        torch.save(items, buffer)
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO voice_clone_prompts
+                    (ref_audio_hash, ref_text_hash, model_id, prompt_blob, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    audio_hash,
+                    ref_text_hash,
+                    model_id,
+                    buffer.getvalue(),
+                    now,
+                ),
+            )
+            conn.commit()
+
+    # ------------------------------------------------------------------
     # Generation Fingerprints for Incremental Generation
     # ------------------------------------------------------------------
 
@@ -259,18 +354,26 @@ class EmbeddingStore:
         speed: float = 1.0,
         fx_dict: dict[str, Any] | None = None,
         output_path: str | Path | None = None,
+        generation_context: dict[str, Any] | None = None,
     ) -> bool:
         """Check if a line needs to be re-synthesized based on fingerprint match."""
         if output_path and (not Path(output_path).exists() or Path(output_path).stat().st_size < 1000):
             return True
 
-        text_hash = self.hash_text(text)
-        fx_hash = self.hash_text(json.dumps(fx_dict or {}, sort_keys=True))
+        expected_fingerprint = self._generation_fingerprint(
+            text=text,
+            speaker=speaker,
+            emotion=emotion,
+            speed=speed,
+            fx_dict=fx_dict,
+            generation_context=generation_context,
+        )
+        current_output_hash = self.hash_file(output_path) if output_path else ""
 
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT text_hash, speaker_id, emotion, speed, fx_hash
+                SELECT fingerprint_hash, output_hash, validation_status
                 FROM generation_fingerprints
                 WHERE project_id = ? AND line_id = ?
                 """,
@@ -280,17 +383,13 @@ class EmbeddingStore:
         if not row:
             return True
 
-        cached_text_hash, cached_speaker, cached_emotion, cached_speed, cached_fx_hash = row
-        if (
-            cached_text_hash == text_hash
-            and cached_speaker == speaker
-            and (cached_emotion or "").strip().lower() == (emotion or "").strip().lower()
-            and abs(cached_speed - speed) < 1e-3
-            and cached_fx_hash == fx_hash
-        ):
-            return False
-
-        return True
+        cached_fingerprint, cached_output_hash, validation_status = row
+        return not (
+            cached_fingerprint == expected_fingerprint
+            and cached_output_hash
+            and cached_output_hash == current_output_hash
+            and validation_status == "pass"
+        )
 
     def save_generation_fingerprint(
         self,
@@ -306,18 +405,30 @@ class EmbeddingStore:
         wer: float = -1.0,
         quality_score: float = -1.0,
         validation_status: str = "pass",
+        generation_context: dict[str, Any] | None = None,
     ) -> None:
         """Save line generation fingerprint after validation."""
         text_hash = self.hash_text(text)
         fx_hash = self.hash_text(json.dumps(fx_dict or {}, sort_keys=True))
+        fingerprint_hash = self._generation_fingerprint(
+            text=text,
+            speaker=speaker,
+            emotion=emotion,
+            speed=speed,
+            fx_dict=fx_dict,
+            generation_context=generation_context,
+        )
+        output_hash = self.hash_file(output_path)
         now = datetime.now(timezone.utc).isoformat()
 
         with self._connect() as conn:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO generation_fingerprints
-                    (project_id, line_id, text_hash, speaker_id, emotion, speed, fx_hash, output_path, duration_seconds, wer, quality_score, validation_status, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (project_id, line_id, text_hash, speaker_id, emotion, speed,
+                     fx_hash, output_path, duration_seconds, wer, quality_score,
+                     validation_status, created_at, fingerprint_hash, output_hash)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     project_id,
@@ -333,6 +444,30 @@ class EmbeddingStore:
                     quality_score,
                     validation_status,
                     now,
+                    fingerprint_hash,
+                    output_hash,
                 ),
             )
             conn.commit()
+
+    def _generation_fingerprint(
+        self,
+        *,
+        text: str,
+        speaker: str,
+        emotion: str,
+        speed: float,
+        fx_dict: dict[str, Any] | None,
+        generation_context: dict[str, Any] | None,
+    ) -> str:
+        payload = {
+            "text": text,
+            "speaker": speaker,
+            "emotion": (emotion or "").strip().lower(),
+            "speed": round(float(speed), 6),
+            "fx": fx_dict or {},
+            "context": generation_context or {},
+        }
+        return self.hash_text(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        )

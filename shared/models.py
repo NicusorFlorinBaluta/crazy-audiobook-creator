@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from shared.constants import (
     DEFAULT_SPEED,
@@ -30,6 +30,9 @@ class BookMetadata(BaseModel):
     title: str
     author: str
     language: str = "en"
+    description: str = ""
+    genre: str = ""
+    year: str = ""
     total_chapters: int = 0
     total_words: int = 0
     cover_image_path: str | None = None
@@ -94,6 +97,15 @@ class Character(BaseModel):
         default=None,
         description="Voice FX settings (pitch, speed, tone) for this character",
     )
+    dialogue_count: int = Field(
+        default=0,
+        ge=0,
+        description="Estimated number of spoken dialogue turns; used only for voice prioritization",
+    )
+    voice_id: str | None = Field(
+        default=None,
+        description="Voice-library ID; minor characters may intentionally share a voice",
+    )
 
 
 class CharacterRegistry(BaseModel):
@@ -114,8 +126,26 @@ class CharacterRegistry(BaseModel):
 class ScriptLine(BaseModel):
     """A single speech segment in the audiobook script."""
 
-    line_id: str = Field(description="Unique ID, e.g. 'ch01_001'")
+    line_id: str = Field(
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
+        description="Unique path-safe ID, e.g. 'ch01_0001'",
+    )
     speaker: str = Field(description="Character ID from the registry")
+    speaker_confidence: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Director confidence in dialogue speaker attribution",
+    )
+    speaker_evidence: str = Field(
+        default="",
+        max_length=500,
+        description="Short source-context reason for the selected speaker",
+    )
+    voice_id: str | None = Field(
+        default=None,
+        description="Voice-library ID when it differs from the character/speaker ID",
+    )
     text: str = Field(description="The text to speak")
     emotion: str = Field(
         default="neutral",
@@ -142,6 +172,25 @@ class ScriptLine(BaseModel):
         ge=0,
         le=5000,
         description="Silence after this segment (ms)",
+    )
+    source_fragment_id: int | None = Field(
+        default=None,
+        ge=0,
+        description="Stable zero-based fragment index within the source chapter",
+    )
+    source_fragment_ids: list[int] = Field(
+        default_factory=list,
+        description="All source fragment IDs represented by a grouped utterance",
+    )
+    source_start: int | None = Field(
+        default=None,
+        ge=0,
+        description="Inclusive character offset in the extracted chapter text",
+    )
+    source_end: int | None = Field(
+        default=None,
+        ge=0,
+        description="Exclusive character offset in the extracted chapter text",
     )
 
 
@@ -212,7 +261,10 @@ class GenerateLineResponse(BaseModel):
     """Response after generating audio for a single line."""
 
     status: str = "success"
-    line_id: str
+    line_id: str = Field(
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
+        description="Stable path-safe line identifier",
+    )
     audio_file: str
     duration_seconds: float
     sample_rate: int = 24000
@@ -221,12 +273,22 @@ class GenerateLineResponse(BaseModel):
 class GenerateChapterRequest(BaseModel):
     """Request to generate audio for an entire chapter."""
 
+    model_config = ConfigDict(populate_by_name=True)
+
     project_id: str
     chapter_number: int
     lines: list[ScriptLine]
-    validate: bool = True
+    validation_enabled: bool = Field(
+        default=True,
+        validation_alias="validate",
+        serialization_alias="validate",
+    )
     auto_retry: bool = True
     max_retries: int = 3
+    validation_terms: list[str] = Field(
+        default_factory=list,
+        description="Approved names/glossary terms eligible for fuzzy ASR matching",
+    )
 
 
 class GenerateChapterResponse(BaseModel):
@@ -241,6 +303,9 @@ class GenerateChapterResponse(BaseModel):
     total_duration_seconds: float = 0.0
     quality_report: ChapterQualityReport | None = None
     segment_files_dir: str = ""
+    generated_line_ids: list[str] = Field(default_factory=list)
+    failed_line_ids: list[str] = Field(default_factory=list)
+    quality_results: list[QualityResult] = Field(default_factory=list)
 
 
 # ===================================================================
@@ -254,6 +319,7 @@ class BootstrapVoicesRequest(BaseModel):
     project_id: str
     characters: dict[str, Character]
     force_regenerate: bool = False
+    design_fingerprints: dict[str, str] = Field(default_factory=dict)
 
 
 class BootstrapVoiceResult(BaseModel):
@@ -262,6 +328,9 @@ class BootstrapVoiceResult(BaseModel):
     file: str
     duration_seconds: float
     sample_rate: int = 24000
+    transcription_wer: float | None = Field(default=None, ge=0.0)
+    acoustic_metrics: dict[str, float] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class BootstrapVoicesResponse(BaseModel):
@@ -296,6 +365,18 @@ class QualityResult(BaseModel):
     peak_dbfs: float = 0.0
     noise_floor_db: float = 0.0
     clipping_detected: bool = False
+    duration_ok: bool = True
+    has_long_silence: bool = False
+    pacing_anomaly: bool = False
+    text_similarity: float = Field(default=0.0, ge=0.0, le=1.0)
+    effective_text_error: float = Field(default=1.0, ge=0.0, le=1.0)
+    acceptance_reason: str = ""
+    speaker_similarity: float | None = Field(
+        default=None,
+        ge=-1.0,
+        le=1.0,
+        description="Cosine similarity between generated and reference speaker embeddings",
+    )
     quality_score: float = Field(
         default=0.0,
         ge=0.0,
@@ -353,6 +434,8 @@ class MasterChapterRequest(BaseModel):
     chapter_number: int
     segments: list[MasterSegmentInfo]
     mastering_config: MasteringConfig | None = None
+    chapter_title: str = ""
+    announce_chapter: bool = True
 
 
 class MasterSegmentInfo(BaseModel):
@@ -398,6 +481,7 @@ class ExportM4BRequest(BaseModel):
     chapters: list[ExportChapterInfo]
     cover_art: str | None = None
     output_config: ExportConfig | None = None
+    output_name: str | None = None
 
 
 class AudiobookMetadata(BaseModel):
@@ -473,6 +557,9 @@ class ProjectStatus(BaseModel):
     # Safe deployment and selective generation controls
     deployment_requested: bool = False
     generation_chapter_selection: list[int] | None = None
+    active_generation_chapter_selection: list[int] | None = None
+    active_stage: PipelineStage | None = None
+    pause_reason: str | None = None
 
 
 class ProjectSummary(BaseModel):
@@ -555,4 +642,5 @@ class VoiceHealthResponse(BaseModel):
     vram_total_gb: float = 0.0
     vram_used_gb: float = 0.0
     model_loaded: str = ""
+    attention_backend: str = ""
     uptime_seconds: float = 0.0

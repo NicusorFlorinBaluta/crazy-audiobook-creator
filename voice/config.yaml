@@ -1,5 +1,5 @@
 # ============================================================
-# Voice (Ubuntu) — Configuration
+# Voice (Local Windows GPU Service) — Configuration
 # ============================================================
 
 # --- TTS Engine ---
@@ -9,13 +9,16 @@ tts:
   dtype: "float16"                   # "float16" | "bfloat16" | "float32"
   sample_rate: 24000                 # Native output sample rate (Hz)
   max_text_length: 500               # Max characters per generation call
+  language: "English"                # Avoid unreliable auto-detection on short lines
+  attn_implementation: "sdpa"        # ~16% faster wall time than eager in the local smoke benchmark
 
-  # Voice Design settings
+  # Reference-voice design settings
+  voice_design_model: "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign"
   voice_design_duration: 10          # Duration of reference clips (seconds)
   voice_design_test_sentences:
-    male: "The ancient tower stood against the darkening sky, its stones weathered by centuries of wind and rain."
-    female: "She walked through the moonlit garden, her footsteps barely disturbing the fallen leaves."
-    neutral: "The library was vast and silent, filled with the scent of old paper and forgotten memories."
+    male: "The ancient tower stood against the darkening sky as rain swept across the weathered stone."
+    female: "She walked through the moonlit garden, listening as fallen leaves whispered beneath each careful step."
+    neutral: "The library was vast and silent, filled with old paper, dust, and half-forgotten memories."
 
   # Generation parameters
   generation:
@@ -28,19 +31,23 @@ tts:
 # --- Quality Validation ---
 validation:
   enabled: true
+  keep_tts_and_whisper_resident: false  # Enable only after the residency benchmark and a long-chapter soak test
   whisper_model: "small"           # "tiny" | "base" | "small" | "medium" | "large-v3"
   whisper_device: "cuda"            # "auto" | "cuda" | "cpu"
 
   # Thresholds
   wer_threshold: 0.20               # 20%
   max_retries: 3
+  speaker_similarity_threshold: 0.55
+  voice_profile_similarity_warning: 0.88
+  voice_profile_acoustic_regenerations: 1
 
   # Audio checks
   artifact_noise_threshold: -50      # dB
   clipping_threshold: -0.5           # dBFS
   min_duration_seconds: 0.3
   max_silence_seconds: 3.0
-  duration_tolerance: 0.3            # ±30%
+  duration_tolerance: 0.6            # ±60%, plus 0.8s allowance for short lines
 
   # Text normalization for WER
   normalize_text: true
@@ -49,13 +56,13 @@ validation:
 
 # --- Audio Mastering ---
 mastering:
-  target_lufs: -19                   # ACX standard range: -18 to -23
+  target_lufs: -19                   # Internal playback target (LUFS)
   peak_limit_dbfs: -1.0
   crossfade_ms: 30
   fade_curve: "cosine"               # "linear" | "cosine" | "exponential"
 
   # Noise gate
-  noise_gate_enabled: true
+  noise_gate_enabled: false          # Generated audio normally needs no gate
   noise_gate_threshold: -50
   noise_gate_attack_ms: 5
   noise_gate_release_ms: 50
@@ -79,9 +86,11 @@ export:
 # --- FastAPI Server ---
 server:
   port: 8100
-  host: "0.0.0.0"
+  host: "127.0.0.1"
   workers: 1                         # Keep at 1 for GPU
-  cors_origins: ["*"]
+  cors_origins: ["http://127.0.0.1:8000", "http://localhost:8000"]
+  api_token: ""
+  idle_unload_seconds: 300
   max_upload_size_mb: 100
 
 # --- Storage ---

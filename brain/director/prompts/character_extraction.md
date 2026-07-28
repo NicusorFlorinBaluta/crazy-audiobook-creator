@@ -3,7 +3,13 @@ You are an expert audiobook director preparing a novel for multi-voice narration
 ## Instructions
 
 1. Read the following text carefully
-2. Identify ALL speaking characters (anyone who has dialogue)
+2. Identify ALL speaking entities (anyone or anything that actually has dialogue)
+   - Recognize straight/curly quotes, typographic single quotes, and em-dash dialogue
+   - Do not exclude an animal, ship, place, AI, or object merely because of its type
+   - Do not infer an entity's type or ability to speak from its name
+   - A named or personified place/object is not a speaking entity unless the
+     text explicitly attributes spoken dialogue to it; descriptions,
+     invocations, thoughts, and figurative personification do not count
 3. For each character, determine:
    - Their gender, approximate age, and key personality traits
    - A detailed voice description suitable for voice synthesis
@@ -49,7 +55,8 @@ The narrator voice should suit {genre} storytelling — authoritative but warm, 
       "age_range": "string",
       "personality_traits": ["trait1", "trait2"],
       "voice_description": "detailed voice description for TTS",
-      "speaking_style": "how this character typically speaks"
+      "speaking_style": "how this character typically speaks",
+      "dialogue_count": 0
     }}
   }}
 }}

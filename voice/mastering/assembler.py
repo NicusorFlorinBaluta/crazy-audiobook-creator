@@ -72,11 +72,16 @@ class AudioAssembler:
             # 1.5s pause after chapter announcement before body text
             parts.append(self._silence(1500))
 
+        previous_pause_after = 0
+        previous_was_audio = False
         for i, segment in enumerate(segments):
-            # Insert pre-segment silence
+            # One timing owner: adjacent pause directives are combined with
+            # max(), never added together. Chapter edges are owned here.
             pause_before = getattr(segment, "pause_before_ms", 0)
-            if pause_before > 0:
-                parts.append(self._silence(pause_before))
+            gap_before = 0 if i == 0 else max(previous_pause_after, pause_before)
+            if gap_before > 0:
+                parts.append(self._silence(gap_before))
+                previous_was_audio = False
 
             # Load audio segment
             audio_path = Path(segment.file)
@@ -84,10 +89,11 @@ class AudioAssembler:
                 audio_path = workspace / segment.file
 
             if not audio_path.exists():
-                logger.warning("Segment file not found: %s", audio_path)
-                continue
+                raise FileNotFoundError(f"Segment file not found: {audio_path}")
 
             audio, sr = sf.read(str(audio_path))
+            if audio.size == 0:
+                raise ValueError(f"Segment file is empty: {audio_path}")
             if audio.ndim > 1:
                 audio = audio.mean(axis=1)
 
@@ -102,18 +108,23 @@ class AudioAssembler:
             audio = audio.astype(np.float32)
 
             # Cross-fade with previous segment
-            if self.crossfade_ms > 0 and len(parts) > 0 and len(parts[-1]) > 0:
+            if (
+                self.crossfade_ms > 0
+                and previous_was_audio
+                and len(parts) > 0
+                and len(parts[-1]) > 0
+            ):
                 audio = self._apply_crossfade(parts[-1], audio)
 
             parts.append(audio)
+            previous_was_audio = True
+            previous_pause_after = getattr(segment, "pause_after_ms", 500)
 
-            # Insert post-segment silence (default 500ms inter-segment gap)
-            pause_after = getattr(segment, "pause_after_ms", 500)
-            if pause_after > 0:
-                parts.append(self._silence(pause_after))
-
-        # Chapter end silence (2.0s standard audiobook outro)
-        parts.append(self._silence(self.chapter_end_silence_ms))
+        # The final script pause and chapter outro are alternatives, not
+        # cumulative delays.
+        final_pause = max(previous_pause_after, self.chapter_end_silence_ms)
+        if final_pause > 0:
+            parts.append(self._silence(final_pause))
 
         # Concatenate all parts
         assembled = np.concatenate([p for p in parts if len(p) > 0])

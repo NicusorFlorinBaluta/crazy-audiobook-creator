@@ -1,0 +1,455 @@
+from __future__ import annotations
+
+import tempfile
+import unittest
+from pathlib import Path
+
+import numpy as np
+import soundfile as sf
+
+from shared.constants import ValidationStatus
+from shared.models import ScriptLine
+from voice.validator.validation_loop import ValidationLoop
+
+
+class FakeEngine:
+    sample_rate = 24000
+    model_name = "fake"
+    generation_config = {}
+
+    def __init__(self, fail_text: str | None = None):
+        self.fail_text = fail_text
+        self.is_loaded = True
+        self.calls: list[str] = []
+
+    def load(self) -> None:
+        self.is_loaded = True
+
+    def unload(self) -> None:
+        self.is_loaded = False
+
+    def generate_speech(self, *, text: str, output_path: Path, **kwargs):
+        self.calls.append(text)
+        if text == self.fail_text:
+            raise RuntimeError("synthetic failure")
+        audio = np.ones(2400, dtype=np.float32) * 0.01
+        sf.write(output_path, audio, self.sample_rate)
+        return audio
+
+    def speaker_similarity(self, generated_audio_path, reference_audio_path) -> float:
+        return 0.95
+
+
+class FakeWhisper:
+    is_loaded = False
+
+    def load(self) -> None:
+        self.is_loaded = True
+
+    def unload(self) -> None:
+        self.is_loaded = False
+
+    def transcribe(self, audio_file: str) -> str:
+        return "hello"
+
+    def calculate_wer(self, reference: str, hypothesis: str) -> float:
+        return 0.0 if reference.lower() == hypothesis.lower() else 1.0
+
+    def calculate_text_similarity(
+        self,
+        reference: str,
+        hypothesis: str,
+    ) -> float:
+        return 1.0 if reference.lower() == hypothesis.lower() else 0.0
+
+    @staticmethod
+    def is_orthographic_segmentation_match(
+        reference: str,
+        hypothesis: str,
+    ) -> bool:
+        compact_reference = "".join(
+            char for char in reference.casefold() if char.isalnum()
+        )
+        compact_hypothesis = "".join(
+            char for char in hypothesis.casefold() if char.isalnum()
+        )
+        return bool(
+            compact_reference
+            and compact_reference == compact_hypothesis
+        )
+
+    @staticmethod
+    def _normalize_text(text: str) -> str:
+        return text.lower()
+
+
+class FakeAnalyzer:
+    noise_threshold = -50.0
+
+    def analyze(self, audio_file: str, expected_text: str, speed: float):
+        return {
+            "artifact_score": 1.0,
+            "duration_score": 1.0,
+            "duration_seconds": 0.1,
+            "expected_duration_seconds": 0.1,
+            "duration_ok": True,
+            "peak_dbfs": -20.0,
+            "noise_floor_db": -80.0,
+            "clipping_detected": False,
+            "has_long_silence": False,
+            "pacing_anomaly": False,
+        }
+
+
+class FlaggingAnalyzer(FakeAnalyzer):
+    def analyze(self, audio_file: str, expected_text: str, speed: float):
+        result = super().analyze(audio_file, expected_text, speed)
+        result["duration_ok"] = False
+        return result
+
+
+class FakeLibrary:
+    def __init__(self, reference: Path):
+        self.reference = reference
+
+    def get_voice_path(self, project_id: str, speaker: str) -> Path:
+        return self.reference
+
+    def get_voice_ref_text(self, project_id: str, speaker: str) -> str:
+        return "reference"
+
+
+class ValidationLoopTests(unittest.TestCase):
+    def make_loop(self, root: Path, fail_text: str | None = None):
+        reference = root / "reference.wav"
+        sf.write(reference, np.ones(2400, dtype=np.float32) * 0.01, 24000)
+        engine = FakeEngine(fail_text=fail_text)
+        loop = ValidationLoop(
+            whisper=FakeWhisper(),
+            analyzer=FakeAnalyzer(),
+            engine=engine,
+            library=FakeLibrary(reference),
+            max_retries=2,
+        )
+        return loop, engine
+
+    def test_retries_progressively_reduce_extreme_delivery(self) -> None:
+        line = ScriptLine(
+            line_id="ch01_0000",
+            speaker="starling",
+            text="Uncle!",
+            emotion="excited shout",
+            speed=1.25,
+        )
+
+        emotion2, speed2, fx2 = ValidationLoop._retry_delivery(line, 2)
+        emotion3, speed3, fx3 = ValidationLoop._retry_delivery(line, 3)
+
+        self.assertEqual(emotion2, "neutral clear articulation")
+        self.assertGreater(speed2, 1.0)
+        self.assertLess(speed2, line.speed)
+        self.assertIs(fx2, line.voice_fx)
+        self.assertEqual(emotion3, "neutral clear articulation")
+        self.assertEqual(speed3, 1.0)
+        self.assertIsNone(fx3)
+
+    def test_final_retry_uses_plain_normalized_synthesis_text(self) -> None:
+        class PlainTextWhisper(FakeWhisper):
+            @staticmethod
+            def _normalize_text(text: str) -> str:
+                return "uncle she shouted"
+
+        line = ScriptLine(
+            line_id="ch01_0046",
+            speaker="narrator",
+            text="\"UNCLE!\" she shouted.",
+            emotion="panicked shout",
+            speed=1.15,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            loop, _ = self.make_loop(Path(directory))
+            loop.whisper = PlainTextWhisper()
+            self.assertEqual(loop._retry_synthesis_text(line, 2), line.text)
+            self.assertEqual(
+                loop._retry_synthesis_text(line, 3),
+                "uncle she shouted",
+            )
+
+    def test_concatenated_repetitions_are_separated_for_synthesis(self) -> None:
+        self.assertEqual(
+            ValidationLoop._prepare_synthesis_text(
+                "\"Letsgoletsgoletsgo!\""
+            ),
+            "\"Let's go, let's go, let's go!\"",
+        )
+
+    def test_two_part_word_is_not_rewritten_for_synthesis(self) -> None:
+        self.assertEqual(
+            ValidationLoop._prepare_synthesis_text("couscous"),
+            "couscous",
+        )
+
+    def test_stretched_single_letter_is_not_rewritten_for_synthesis(self) -> None:
+        self.assertEqual(
+            ValidationLoop._prepare_synthesis_text("Nooooo!"),
+            "Nooooo!",
+        )
+
+    def test_word_boundary_only_transcript_difference_passes(self) -> None:
+        class SegmentationWhisper(FakeWhisper):
+            def transcribe(self, audio_file: str) -> str:
+                return "Let's go, let's go, let's go!"
+
+            def calculate_wer(self, reference: str, hypothesis: str) -> float:
+                return 1.0
+
+            def calculate_text_similarity(
+                self,
+                reference: str,
+                hypothesis: str,
+            ) -> float:
+                return 0.85
+
+            @staticmethod
+            def _normalize_text(text: str) -> str:
+                return text.casefold()
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            loop, _ = self.make_loop(root)
+            loop.whisper = SegmentationWhisper()
+            audio = root / "line.wav"
+            sf.write(audio, np.ones(2400, dtype=np.float32) * 0.01, 24000)
+            result = loop._validate_segment(
+                str(audio),
+                "Letsgoletsgoletsgo!",
+                "ch01_0068",
+                1.0,
+            )
+
+        self.assertEqual(result.status, ValidationStatus.PASS)
+        self.assertEqual(result.effective_text_error, 0.0)
+        self.assertEqual(
+            result.acceptance_reason,
+            "orthographic_segmentation_equivalent",
+        )
+
+    def test_changed_word_is_not_a_segmentation_match(self) -> None:
+        class ChangedWordWhisper(FakeWhisper):
+            def transcribe(self, audio_file: str) -> str:
+                return "Let's go, let's go, let's stop!"
+
+            def calculate_wer(self, reference: str, hypothesis: str) -> float:
+                return 1.0
+
+            def calculate_text_similarity(
+                self,
+                reference: str,
+                hypothesis: str,
+            ) -> float:
+                return 0.80
+
+            @staticmethod
+            def _normalize_text(text: str) -> str:
+                return text.casefold()
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            loop, _ = self.make_loop(root)
+            loop.whisper = ChangedWordWhisper()
+            audio = root / "line.wav"
+            sf.write(audio, np.ones(2400, dtype=np.float32) * 0.01, 24000)
+            result = loop._validate_segment(
+                str(audio),
+                "Letsgoletsgoletsgo!",
+                "ch01_0068",
+                1.0,
+            )
+
+        self.assertEqual(result.status, ValidationStatus.FAIL)
+
+    def test_configured_wer_threshold_applies_to_longer_lines(self) -> None:
+        class ThresholdWhisper(FakeWhisper):
+            def transcribe(self, audio_file: str) -> str:
+                return "synthetic transcript"
+
+            def calculate_wer(self, reference: str, hypothesis: str) -> float:
+                return 0.143
+
+            def calculate_text_similarity(
+                self,
+                reference: str,
+                hypothesis: str,
+            ) -> float:
+                return 0.5
+
+            @staticmethod
+            def _normalize_text(text: str) -> str:
+                return text
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            loop, _ = self.make_loop(root)
+            loop.whisper = ThresholdWhisper()
+            audio = root / "line.wav"
+            sf.write(audio, np.ones(2400, dtype=np.float32) * 0.01, 24000)
+            result = loop._validate_segment(
+                str(audio),
+                "one two three four five six seven",
+                "ch01_0000",
+                1.0,
+            )
+
+        self.assertEqual(result.status, ValidationStatus.PASS)
+
+    def test_spelling_variant_can_pass_when_compact_text_matches(self) -> None:
+        class VariantWhisper(FakeWhisper):
+            def transcribe(self, audio_file: str) -> str:
+                return "Tuca noted"
+
+            def calculate_wer(self, reference: str, hypothesis: str) -> float:
+                return 0.5
+
+            def calculate_text_similarity(
+                self,
+                reference: str,
+                hypothesis: str,
+            ) -> float:
+                return 0.89
+
+            @staticmethod
+            def _normalize_text(text: str) -> str:
+                return text.lower()
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            loop, _ = self.make_loop(root)
+            loop.whisper = VariantWhisper()
+            audio = root / "line.wav"
+            sf.write(audio, np.ones(2400, dtype=np.float32) * 0.01, 24000)
+            result = loop._validate_segment(
+                str(audio),
+                "Tuka noted",
+                "ch01_0000",
+                1.0,
+                validation_terms={"Tuka"},
+            )
+
+        self.assertEqual(result.status, ValidationStatus.PASS)
+
+    def test_spelling_variant_without_approved_term_is_rejected(self) -> None:
+        class VariantWhisper(FakeWhisper):
+            def transcribe(self, audio_file: str) -> str:
+                return "ordinary noted"
+
+            def calculate_wer(self, reference: str, hypothesis: str) -> float:
+                return 0.5
+
+            def calculate_text_similarity(
+                self,
+                reference: str,
+                hypothesis: str,
+            ) -> float:
+                return 0.89
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            loop, _ = self.make_loop(root)
+            loop.whisper = VariantWhisper()
+            audio = root / "line.wav"
+            sf.write(audio, np.ones(2400, dtype=np.float32) * 0.01, 24000)
+            result = loop._validate_segment(
+                str(audio),
+                "ordinarie noted",
+                "ch01_0000",
+                1.0,
+            )
+
+        self.assertEqual(result.status, ValidationStatus.FAIL)
+
+    def test_missing_generation_is_reported_as_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            loop, _ = self.make_loop(root, fail_text="fail")
+            response = loop.process_chapter(
+                project_id="book",
+                chapter_number=1,
+                lines=[
+                    ScriptLine(
+                        line_id="ch01_0000",
+                        speaker="narrator",
+                        text="fail",
+                    )
+                ],
+                workspace=root,
+                max_retries=2,
+            )
+            self.assertEqual(response.status, "failed")
+            self.assertEqual(response.generated, 0)
+            self.assertEqual(response.failed_line_ids, ["ch01_0000"])
+
+    def test_cache_skip_does_not_shift_progress_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            loop, engine = self.make_loop(root)
+            segments = root / "book" / "segments"
+            segments.mkdir(parents=True)
+            sf.write(
+                segments / "ch01_0000.wav",
+                np.ones(2400, dtype=np.float32) * 0.01,
+                24000,
+            )
+            progress: list[dict] = []
+            response = loop.process_chapter(
+                project_id="book",
+                chapter_number=1,
+                lines=[
+                    ScriptLine(
+                        line_id="ch01_0000",
+                        speaker="narrator",
+                        text="hello",
+                    ),
+                    ScriptLine(
+                        line_id="ch01_0001",
+                        speaker="narrator",
+                        text="hello",
+                    ),
+                ],
+                workspace=root,
+                progress_callback=progress.append,
+            )
+            self.assertEqual(response.status, "success")
+            self.assertEqual(
+                response.generated_line_ids,
+                ["ch01_0000", "ch01_0001"],
+            )
+            self.assertEqual(
+                [message["line_id"] for message in progress],
+                ["ch01_0000", "ch01_0001"],
+            )
+            self.assertEqual(engine.calls, ["hello"])
+
+    def test_flagged_segment_is_not_accepted_as_complete(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            loop, _ = self.make_loop(root)
+            loop.analyzer = FlaggingAnalyzer()
+            response = loop.process_chapter(
+                project_id="book",
+                chapter_number=1,
+                lines=[
+                    ScriptLine(
+                        line_id="ch01_0000",
+                        speaker="narrator",
+                        text="hello",
+                    )
+                ],
+                workspace=root,
+            )
+            self.assertEqual(response.status, "failed")
+            self.assertEqual(response.failed_line_ids, ["ch01_0000"])
+
+
+if __name__ == "__main__":
+    unittest.main()

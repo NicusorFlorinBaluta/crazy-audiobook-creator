@@ -11,9 +11,11 @@ Handles:
 from __future__ import annotations
 
 import logging
+import os
+import re
+import tempfile
 import time
 from pathlib import Path
-from typing import Any
 from typing import Any
 
 import numpy as np
@@ -34,6 +36,10 @@ class Qwen3TTSEngine:
         dtype: str = "float16",
         sample_rate: int = 24000,
         embedding_store: Any | None = None,
+        generation_config: dict[str, Any] | None = None,
+        max_text_length: int = 500,
+        language: str = "English",
+        attn_implementation: str = "sdpa",
     ):
         self.model_name = model_name
         self.device = device
@@ -41,9 +47,12 @@ class Qwen3TTSEngine:
         self.sample_rate = sample_rate
         self.fx = AudioPostProcessor()
         self.embedding_store = embedding_store
+        self.generation_config = generation_config or {}
+        self.max_text_length = max(100, int(max_text_length))
+        self.language = language
+        self.attn_implementation = attn_implementation
 
         self._model = None
-        self._processor = None
         self._is_loaded = False
         self._load_time: float = 0.0
 
@@ -79,17 +88,41 @@ class Qwen3TTSEngine:
             model_path = snapshot_download(repo_id=self.model_name, local_files_only=False)
 
             # Load model directly using qwen_tts with local path
-            self._model = Qwen3TTSModel.from_pretrained(
-                model_path,
-                device_map=self.device if self.device != "cpu" else "cpu",
-                dtype=torch_dtype,
-                attn_implementation="eager" # Fallback to eager if flash-attn is not installed
-            )
+            load_kwargs = {
+                "device_map": self.device if self.device != "cpu" else "cpu",
+                "dtype": torch_dtype,
+                "attn_implementation": self.attn_implementation,
+            }
+            try:
+                self._model = Qwen3TTSModel.from_pretrained(
+                    model_path,
+                    **load_kwargs,
+                )
+            except Exception:
+                if self.attn_implementation == "eager":
+                    raise
+                logger.exception(
+                    "Attention backend '%s' failed; falling back to eager",
+                    self.attn_implementation,
+                )
+                self._model = None
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                load_kwargs["attn_implementation"] = "eager"
+                self._model = Qwen3TTSModel.from_pretrained(
+                    model_path,
+                    **load_kwargs,
+                )
+                self.attn_implementation = "eager"
 
             self._is_loaded = True
             self._load_time = time.time() - start
 
-            logger.info("Model loaded in %.1fs", self._load_time)
+            logger.info(
+                "Model loaded in %.1fs (attention=%s)",
+                self._load_time,
+                self.attn_implementation,
+            )
 
             # Log VRAM usage
             if self.device == "cuda":
@@ -126,48 +159,6 @@ class Qwen3TTSEngine:
 
         logger.info("Model unloaded")
 
-    def generate_voice_design(
-        self,
-        voice_description: str,
-        text: str,
-        output_path: str | Path,
-    ) -> dict[str, Any]:
-        """Generate a voice reference clip from a text description.
-
-        Uses Qwen3-TTS VoiceDesign mode to create a unique voice
-        matching the given description.
-
-        Args:
-            voice_description: Natural language voice description.
-            text: Text to speak in the generated voice.
-            output_path: Path to save the generated .wav file.
-
-        Returns:
-            Dict with file path, duration, and sample rate.
-        """
-        self._ensure_loaded()
-        output_path = Path(output_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-
-        logger.info("Generating voice design: %s", voice_description[:80])
-
-        audio = self._generate(
-            text=text,
-            instruction=voice_description,
-            voice_reference=None,
-        )
-
-        sf.write(str(output_path), audio, self.sample_rate)
-        duration = len(audio) / self.sample_rate
-
-        logger.info("Voice design saved: %s (%.1fs)", output_path.name, duration)
-
-        return {
-            "file": str(output_path),
-            "duration_seconds": duration,
-            "sample_rate": self.sample_rate,
-        }
-
     def generate_speech(
         self,
         text: str,
@@ -180,14 +171,14 @@ class Qwen3TTSEngine:
     ) -> np.ndarray:
         """Generate speech audio for a script line.
 
-        Uses the saved reference clip to clone the voice character,
-        applying per-line emotion instructions and optional audio FX.
+        Uses the saved reference clip to clone the voice character and applies
+        supported pacing/tone post-processing.
 
         Args:
             text: Text to speak.
             voice_reference_path: Path to the character's voice reference .wav.
             ref_text: Reference text transcript for Full ICL mode.
-            emotion_instruction: Natural language emotion/delivery instruction.
+            emotion_instruction: Mood label used for restrained post-processing.
             speed: Speed multiplier (0.8=slow, 1.0=normal, 1.2=fast).
             voice_fx: Optional VoiceFXSettings for pitch/tone processing.
             output_path: If provided, save the audio to this file.
@@ -197,47 +188,40 @@ class Qwen3TTSEngine:
         """
         self._ensure_loaded()
 
-        # Build instruction from emotion and speed
-        instruction = self._build_instruction(emotion_instruction, speed)
-        
-        # Prepare the reference audio with pitch FX if requested (with persistent DB caching)
-        fx_reference_path = None
-        if self.fx and voice_fx and not voice_fx.is_identity():
-            fx_dict = voice_fx.model_dump()
-            cached_fx_path = None
-            if self.embedding_store:
-                cached_fx_path = self.embedding_store.get_fx_prompt(voice_reference_path, fx_dict)
-
-            if cached_fx_path and cached_fx_path.exists():
-                fx_reference_path = cached_fx_path
-            else:
-                if not hasattr(self, "_fx_prompt_cache"):
-                    self._fx_prompt_cache = {}
-                cache_key = (str(voice_reference_path), str(fx_dict))
-                if cache_key in self._fx_prompt_cache and Path(self._fx_prompt_cache[cache_key]).exists():
-                    fx_reference_path = Path(self._fx_prompt_cache[cache_key])
-                else:
-                    fx_reference_path = self.fx.prepare_prompt_audio(str(voice_reference_path), voice_fx)
-                    if fx_reference_path:
-                        self._fx_prompt_cache[cache_key] = str(fx_reference_path)
-                        if self.embedding_store:
-                            self.embedding_store.save_fx_prompt(voice_reference_path, fx_dict, fx_reference_path)
-
-        audio = self._generate(
-            text=text,
-            instruction=instruction,
-            voice_reference=str(fx_reference_path) if fx_reference_path else str(voice_reference_path),
-            ref_text=ref_text,
+        parts = self._split_tts_text(text)
+        generated_parts = [
+            self._generate(
+                text=part,
+                voice_reference=str(voice_reference_path)
+                if voice_reference_path
+                else None,
+                ref_text=ref_text,
+            )
+            for part in parts
+        ]
+        audio = (
+            np.concatenate(generated_parts)
+            if generated_parts
+            else np.zeros(0, dtype=np.float32)
         )
 
-        # Apply post-processing (speed, tone, normalization)
-        if self.fx and voice_fx and not voice_fx.is_identity():
-            audio = self.fx.apply_post_pipeline(audio, self.sample_rate, voice_fx)
+        effective_fx = self._effective_post_fx(
+            voice_fx,
+            speed=speed,
+            emotion=emotion_instruction,
+        )
+        if self.fx and not effective_fx.is_identity():
+            audio = self.fx.apply(
+                audio,
+                self.sample_rate,
+                effective_fx,
+                blend_override=0.0,
+            )
 
         if output_path:
             output_path = Path(output_path)
             output_path.parent.mkdir(parents=True, exist_ok=True)
-            sf.write(str(output_path), audio, self.sample_rate)
+            self._write_audio_atomic(output_path, audio)
 
         return audio
 
@@ -265,141 +249,190 @@ class Qwen3TTSEngine:
                     output_path=req.get("output_path")
                 )
                 audios.append(audio)
-            except Exception as e:
-                import traceback
-                logger.error("Batched TTS generation failed for item:\n%s", traceback.format_exc())
-                audios.append(np.zeros(int(self.sample_rate * 0.5), dtype=np.float32))
+            except Exception:
+                logger.exception("Sequential TTS generation failed for batch item")
+                raise
                 
         return audios
 
     def _generate(
         self,
         text: str,
-        instruction: str = "",
         voice_reference: str | None = None,
         ref_text: str = "",
     ) -> np.ndarray:
         """Internal generation method using qwen_tts."""
-        import torch
+        if not voice_reference:
+            raise RuntimeError(
+                "Qwen3-TTS Base generation requires a registered voice reference"
+            )
 
-        if voice_reference:
-            use_icl = bool(ref_text and ref_text.strip())
-            x_vec_mode = not use_icl
+        use_icl = bool(ref_text and ref_text.strip())
+        x_vec_mode = not use_icl
 
-            if x_vec_mode:
-                logger.warning(
-                    "No ref_text available for %s — using x_vector_only_mode=True (quality/similarity may be reduced)",
-                    voice_reference,
-                )
-            else:
-                logger.info(
-                    "Using Full ICL mode with ref_text (%d chars) for %s",
-                    len(ref_text),
-                    voice_reference,
-                )
-
-            wavs, sr = self._model.generate_voice_clone(
-                text=text,
-                language="auto",
-                ref_audio=voice_reference,
-                ref_text=ref_text if use_icl else "",
-                x_vector_only_mode=x_vec_mode,
+        if x_vec_mode:
+            logger.warning(
+                "No ref_text available for %s — using x_vector_only_mode=True "
+                "(quality/similarity may be reduced)",
+                voice_reference,
             )
         else:
-            wavs, sr = self._model.generate_custom_voice(
-                text=text,
-                language="auto",
-                speaker="vivian", # fallback default speaker for CustomVoice
-                instruct=instruction,
+            logger.info(
+                "Using Full ICL mode with ref_text (%d chars) for %s",
+                len(ref_text),
+                voice_reference,
             )
+
+        clone_prompt = self._get_voice_clone_prompt(
+            voice_reference,
+            ref_text if use_icl else "",
+            x_vec_mode,
+        )
+        wavs, _ = self._model.generate_voice_clone(
+            text=text,
+            language=self.language,
+            voice_clone_prompt=clone_prompt,
+            **self.generation_config,
+        )
 
         audio = np.asarray(wavs[0], dtype=np.float32)
 
-        # Dynamic Range-Aware Volume Equalization:
-        # Preserves natural loudness differences between whispers (-26dB) and shouts (-15dB),
-        # while preventing jarring out-of-bounds volume jumps across clips.
-        rms = np.sqrt(np.mean(audio**2)) if len(audio) > 0 else 0
-        if rms > 1e-5:
-            rms_db = 20 * np.log10(rms)
-            target_db = -20.0
-            # Apply soft 50% gain compression toward target to preserve emotional dynamic range
-            adjusted_db = rms_db + 0.5 * (target_db - rms_db)
-            gain = 10 ** ((adjusted_db - rms_db) / 20.0)
-            gain = max(0.4, min(gain, 2.5))  # Smooth gain adjustment bounds
-            audio = audio * gain
-            # Peak limiter to prevent clipping
-            max_peak = np.max(np.abs(audio))
-            if max_peak > 0.95:
-                audio = audio * (0.95 / max_peak)
+        # Preserve model dynamics. Only protect the file from numeric clipping;
+        # chapter-level loudness is handled by the mastering stage.
+        max_peak = np.max(np.abs(audio)) if len(audio) else 0.0
+        if max_peak > 0.99:
+            audio = audio * (0.99 / max_peak)
 
         return audio
 
-    def _generate_batch(
+    def _get_voice_clone_prompt(
         self,
-        texts: list[str],
-        instructions: list[str],
-        voice_references: list[np.ndarray | None],
-    ) -> list[np.ndarray]:
-        """Internal batched generation method.
-        
-        Since qwen_tts does not natively support batching yet, we fallback
-        to iterating over the items sequentially.
-        """
-        import torch
-        
-        audios = []
-        for i in range(len(texts)):
-            try:
-                # We need the original path or we can't use np.ndarray directly in _generate
-                # However, since we process voice_references outside, let's just use _generate
-                # Wait, _generate expects voice_reference to be a str/Path.
-                # Actually, we don't pass voice_references in _generate_batch correctly.
-                pass # Replaced entirely below
-            except Exception as e:
-                logger.error("Batched TTS generation failed for item %d: %s", i, e)
-                audios.append(np.zeros(int(self.sample_rate * 0.5), dtype=np.float32))
-        return audios
+        voice_reference: str,
+        ref_text: str,
+        x_vector_only_mode: bool,
+    ) -> list[Any]:
+        """Create or restore the complete Qwen clone prompt, not only an embedding."""
+        from qwen_tts import VoiceClonePromptItem
 
-    def _decode_audio(self, output_tokens: Any) -> np.ndarray:
-        """Decode model output tokens into audio samples.
+        cached = None
+        if self.embedding_store:
+            cached = self.embedding_store.get_voice_clone_prompt(
+                voice_reference,
+                ref_text,
+                self.model_name,
+            )
+        if cached:
+            import torch
 
-        Note: This method will need to be updated to match the
-        actual Qwen3-TTS decoding pipeline.
-        """
-        # Placeholder: actual implementation depends on Qwen3-TTS codec
-        # The model outputs codec tokens that need to be decoded
-        # through the model's audio decoder
-        try:
-            if hasattr(self._processor, "decode_audio"):
-                audio = self._processor.decode_audio(output_tokens)
-                if isinstance(audio, np.ndarray):
-                    return audio
-        except Exception:
-            pass
+            items = []
+            for item in cached:
+                ref_code = item.get("ref_code")
+                ref_embedding = item["ref_spk_embedding"]
+                if torch.is_tensor(ref_code):
+                    ref_code = ref_code.to(self.device)
+                if torch.is_tensor(ref_embedding):
+                    ref_embedding = ref_embedding.to(self.device)
+                items.append(
+                    VoiceClonePromptItem(
+                        ref_code=ref_code,
+                        ref_spk_embedding=ref_embedding,
+                        x_vector_only_mode=bool(item["x_vector_only_mode"]),
+                        icl_mode=bool(item["icl_mode"]),
+                        ref_text=item.get("ref_text"),
+                    )
+                )
+            return items
 
-        # Fallback: return short silence
-        logger.warning("Audio decoding fell back to silence — update _decode_audio for actual Qwen3-TTS API")
-        return np.zeros(int(self.sample_rate * 1.0), dtype=np.float32)
+        items = self._model.create_voice_clone_prompt(
+            ref_audio=voice_reference,
+            ref_text=ref_text if not x_vector_only_mode else None,
+            x_vector_only_mode=x_vector_only_mode,
+        )
+        if self.embedding_store:
+            serializable = []
+            for item in items:
+                serializable.append(
+                    {
+                        "ref_code": item.ref_code.detach().cpu()
+                        if item.ref_code is not None
+                        else None,
+                        "ref_spk_embedding": item.ref_spk_embedding.detach().cpu(),
+                        "x_vector_only_mode": item.x_vector_only_mode,
+                        "icl_mode": item.icl_mode,
+                        "ref_text": item.ref_text,
+                    }
+                )
+            self.embedding_store.save_voice_clone_prompt(
+                voice_reference,
+                ref_text,
+                self.model_name,
+                serializable,
+            )
+        return items
+
+    def _split_tts_text(self, text: str) -> list[str]:
+        """Split oversized input at sentence/whitespace boundaries."""
+        remaining = text.strip()
+        if not remaining:
+            raise ValueError("Cannot synthesize empty text")
+        parts: list[str] = []
+        while len(remaining) > self.max_text_length:
+            window = remaining[: self.max_text_length + 1]
+            boundaries = [
+                match.end()
+                for match in re.finditer(r"[.!?…][\"'”’]?\s+|\s+", window)
+            ]
+            cut = boundaries[-1] if boundaries else self.max_text_length
+            part = remaining[:cut].strip()
+            if not part:
+                cut = self.max_text_length
+                part = remaining[:cut]
+            parts.append(part)
+            remaining = remaining[cut:].lstrip()
+        if remaining:
+            parts.append(remaining)
+        return parts
 
     @staticmethod
-    def _build_instruction(emotion: str, speed: float) -> str:
-        """Build a TTS instruction string from emotion and speed."""
-        parts: list[str] = []
+    def _effective_post_fx(
+        voice_fx: Any | None,
+        *,
+        speed: float,
+        emotion: str,
+    ) -> Any:
+        from shared.models import VoiceFXSettings
 
-        if emotion:
-            parts.append(f"Speak with {emotion}")
+        if voice_fx is None:
+            fx = VoiceFXSettings()
+        else:
+            fx = voice_fx.model_copy(deep=True)
+        fx.speed = max(0.5, min(2.0, float(fx.speed) * float(speed)))
 
-        if speed != 1.0:
-            if speed < 0.9:
-                parts.append("at a slow, measured pace")
-            elif speed < 1.0:
-                parts.append("at a slightly slower pace")
-            elif speed > 1.1:
-                parts.append("at a quick, energetic pace")
-            elif speed > 1.0:
-                parts.append("at a slightly faster pace")
+        mood = (emotion or "").lower()
+        if any(word in mood for word in ("angry", "panic", "urgent", "excited", "shout")):
+            fx.pitch_semitones = max(-12.0, min(12.0, fx.pitch_semitones + 0.25))
+            if fx.tone == "neutral":
+                fx.tone = "bright"
+        elif any(word in mood for word in ("somber", "sad", "weary", "hushed", "whisper")):
+            fx.pitch_semitones = max(-12.0, min(12.0, fx.pitch_semitones - 0.2))
+            if fx.tone == "neutral":
+                fx.tone = "warm"
+        return fx
 
-        return ". ".join(parts) + "." if parts else ""
+    def _write_audio_atomic(self, output_path: Path, audio: np.ndarray) -> None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary_name = tempfile.mkstemp(
+            prefix=f".{output_path.stem}.",
+            suffix=".wav",
+            dir=str(output_path.parent),
+        )
+        os.close(fd)
+        temporary = Path(temporary_name)
+        try:
+            sf.write(str(temporary), audio, self.sample_rate)
+            os.replace(temporary, output_path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def _ensure_loaded(self) -> None:
         """Ensure the model is loaded."""
@@ -428,3 +461,54 @@ class Qwen3TTSEngine:
         except ImportError:
             pass
         return "Unknown"
+
+    def speaker_similarity(
+        self,
+        generated_audio_path: str | Path,
+        reference_audio_path: str | Path,
+    ) -> float:
+        """Compare generated and reference audio with Qwen's speaker encoder."""
+        import torch
+        import torch.nn.functional as functional
+
+        with torch.inference_mode():
+            generated = self.speaker_embedding(generated_audio_path)
+            reference = self.speaker_embedding(reference_audio_path)
+            return float(
+                functional.cosine_similarity(
+                    generated.unsqueeze(0),
+                    reference.unsqueeze(0),
+                ).item()
+            )
+
+    def speaker_embedding(self, audio_path: str | Path):
+        """Extract one reusable Qwen speaker embedding from an audio file."""
+        self._ensure_loaded()
+        import librosa
+
+        target_rate = self._model.model.speaker_encoder_sample_rate
+        audio, sample_rate = sf.read(str(audio_path), dtype="float32")
+        if audio.ndim > 1:
+            audio = audio.mean(axis=1)
+        if sample_rate != target_rate:
+            audio = librosa.resample(
+                audio,
+                orig_sr=sample_rate,
+                target_sr=target_rate,
+            )
+        return self._model.model.extract_speaker_embedding(
+            audio=audio,
+            sr=target_rate,
+        ).flatten()
+
+    @staticmethod
+    def embedding_similarity(left, right) -> float:
+        """Return cosine similarity for two previously extracted embeddings."""
+        import torch.nn.functional as functional
+
+        return float(
+            functional.cosine_similarity(
+                left.unsqueeze(0),
+                right.unsqueeze(0),
+            ).item()
+        )

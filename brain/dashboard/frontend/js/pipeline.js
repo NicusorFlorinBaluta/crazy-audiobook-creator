@@ -10,6 +10,7 @@ window.PipelineManager = (() => {
         'EXTRACTING',
         'SCRIPTING',
         'BOOTSTRAPPING',
+        'VOICE_REVIEW',
         'GENERATING',
         'VALIDATING',
         'MASTERING',
@@ -50,8 +51,10 @@ window.PipelineManager = (() => {
         
         const stageUpper = currentStage.toUpperCase();
         const statusLower = (status || '').toLowerCase();
-        const isFinished = ['COMPLETE', 'COMPLETED', 'SELECTION_COMPLETE'].includes(stageUpper) || 
-                           ['complete', 'completed', 'selection_complete'].includes(statusLower);
+        const selectionComplete = stageUpper === 'SELECTION_COMPLETE'
+            || statusLower === 'selection_complete';
+        const isFinished = ['COMPLETE', 'COMPLETED'].includes(stageUpper) ||
+                           ['complete', 'completed'].includes(statusLower);
         
         let currentIndex = STAGES.indexOf(stageUpper);
         if (stageUpper === 'SELECTION_COMPLETE' || stageUpper === 'COMPLETED') {
@@ -61,15 +64,25 @@ window.PipelineManager = (() => {
         document.querySelectorAll('.pipeline-stage').forEach((el, idx) => {
             el.className = 'pipeline-stage'; // reset
             const percentEl = el.querySelector('.stage-percent');
+            const nameEl = el.querySelector('.stage-name');
             if (percentEl) percentEl.textContent = '';
+            if (nameEl) nameEl.textContent = STAGES[idx].replace('_', ' ');
             
-            if (isFinished || idx < currentIndex) {
+            if (selectionComplete && idx === STAGES.length - 1) {
+                el.classList.add('active');
+                if (nameEl) nameEl.textContent = 'BATCH COMPLETE';
+                if (percentEl) percentEl.textContent = 'PARTIAL';
+            } else if (isFinished || idx < currentIndex) {
                 el.classList.add('done');
                 if (percentEl) percentEl.textContent = '100%';
             } else if (idx === currentIndex) {
                 if (status === 'error') {
                     el.classList.add('error');
-                } else if (status === 'running' || status === 'paused') {
+                } else if (
+                    statusLower === 'running'
+                    || statusLower === 'paused'
+                    || statusLower === 'voice_review'
+                ) {
                     el.classList.add('active');
                     
                     // Compute percentage based on real metrics from the pipeline state!
@@ -77,26 +90,42 @@ window.PipelineManager = (() => {
                         let pct = null;
                         const stage = STAGES[idx];
                         const totalCh = data.total_chapters || 0;
-                        const totalLines = data.total_lines || 0;
+                        const selected = data.active_generation_chapter_selection
+                            || data.generation_chapter_selection
+                            || Array.from({length: totalCh}, (_, index) => index + 1);
+                        const selectedSet = new Set(selected);
+                        const batchTotal = selectedSet.size || totalCh;
                         
-                        if (stage === 'SCRIPTING' && data.completed_script_chapters) {
-                            pct = (data.completed_script_chapters.length / totalCh) * 100;
+                        if (stage === 'SCRIPTING' && data.scripted_chapters) {
+                            pct = Number.isFinite(data.work_progress?.stagePercent)
+                                ? data.work_progress.stagePercent
+                                : (
+                                    totalCh
+                                        ? (data.scripted_chapters.length / totalCh) * 100
+                                        : 0
+                                );
                         } else if (stage === 'SCRIPTING') {
                             percentEl.innerHTML = '<span class="loading-dots">⏳</span>';
                         } else if (stage === 'BOOTSTRAPPING') {
                             pct = data.bootstrapping_completed ? 100 : 25;
-                        } else if (stage === 'GENERATING' && totalCh > 0) {
-                            const genSet = new Set(data.generated_chapters || []);
+                        } else if (stage === 'VOICE_REVIEW') {
+                            pct = 100;
+                        } else if (stage === 'GENERATING' && batchTotal > 0) {
+                            const genSet = new Set(
+                                (data.generated_chapters || []).filter(chapter => selectedSet.has(chapter))
+                            );
                             const curCh = data.current_gen_chapter || 1;
                             const curDetail = data.chapter_details ? data.chapter_details.find(d => d.number === curCh) : null;
                             const curPct = curDetail ? (curDetail.progress_percent / 100) : 0;
-                            pct = ((genSet.size + curPct) / totalCh) * 100;
-                        } else if (stage === 'VALIDATING' && totalCh > 0) {
-                            const genSet = new Set(data.generated_chapters || []);
-                            pct = (genSet.size / totalCh) * 100;
-                        } else if (stage === 'MASTERING' && totalCh > 0) {
-                            const masterSet = new Set(data.mastered_chapters || []);
-                            pct = (masterSet.size / totalCh) * 100;
+                            pct = ((genSet.size + curPct) / batchTotal) * 100;
+                        } else if (stage === 'VALIDATING' && batchTotal > 0) {
+                            const genCount = (data.generated_chapters || [])
+                                .filter(chapter => selectedSet.has(chapter)).length;
+                            pct = (genCount / batchTotal) * 100;
+                        } else if (stage === 'MASTERING' && batchTotal > 0) {
+                            const masterCount = (data.mastered_chapters || [])
+                                .filter(chapter => selectedSet.has(chapter)).length;
+                            pct = (masterCount / batchTotal) * 100;
                         } else if (stage === 'EXPORTING') {
                             pct = 50; // coarse
                         }
@@ -160,7 +189,7 @@ window.PipelineManager = (() => {
             
             if (isDone) {
                 els.btnStart.textContent = '▶ Run Again / Selection';
-            } else if (statusLower === 'error' || statusLower === 'paused') {
+            } else if (['error', 'paused', 'paused_scheduled', 'deploy_paused', 'voice_review'].includes(statusLower)) {
                 els.btnStart.textContent = '▶ Resume Pipeline';
             } else {
                 els.btnStart.textContent = '▶ Start Pipeline';

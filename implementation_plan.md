@@ -1,5 +1,10 @@
 # Crazy Audiobook Creator — Pipeline Design (v2)
 
+> **Historical record — superseded.** This plan describes the abandoned
+> Windows/Ubuntu split and pre-manifest pipeline. It is not a setup guide or
+> current specification. See [README.md](README.md) and
+> [docs/architecture.md](docs/architecture.md).
+
 A fully local, two-machine audiobook production pipeline that converts fantasy/fiction EPUB books into professional-grade, multi-speaker, emotionally expressive audiobooks — fully automated with AI quality validation.
 
 ---
@@ -437,7 +442,7 @@ crazy-audiobook-creator/
 ## Proposed Changes
 
 ### Deployment Scripts
-#### [NEW] [deploy.py](file:///e:/Projects/crazy-audiobook-creator/scripts/deploy.py)
+#### [NEW] [deploy.py](scripts/deploy.py)
 A Python script using `paramiko` and `scp` to safely SSH into the Ubuntu machine using the password from `.env`, copy the codebase over, and start the Voice Server.
 
 ### Git Repository

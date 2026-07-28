@@ -1,0 +1,68 @@
+import os
+import unittest
+from unittest.mock import patch
+
+from brain.dashboard.api.security import (
+    configured_dashboard_token,
+    dashboard_request_authorized,
+    is_loopback_client,
+)
+
+
+class DashboardSecurityTests(unittest.TestCase):
+    def test_loopback_detection_supports_ipv4_ipv6_and_mapped_addresses(self):
+        self.assertTrue(is_loopback_client("127.0.0.1"))
+        self.assertTrue(is_loopback_client("::1"))
+        self.assertTrue(is_loopback_client("::ffff:127.0.0.1"))
+        self.assertTrue(is_loopback_client("localhost"))
+        self.assertFalse(is_loopback_client("192.0.2.10"))
+        self.assertFalse(is_loopback_client(None))
+
+    def test_remote_dashboard_requests_fail_closed_without_a_token(self):
+        self.assertFalse(
+            dashboard_request_authorized(
+                client_host="192.0.2.10",
+                configured_token="",
+                presented_token=None,
+            )
+        )
+
+    def test_remote_dashboard_requests_require_the_exact_token(self):
+        self.assertTrue(
+            dashboard_request_authorized(
+                client_host="192.0.2.10",
+                configured_token="correct",
+                presented_token="correct",
+            )
+        )
+        self.assertFalse(
+            dashboard_request_authorized(
+                client_host="192.0.2.10",
+                configured_token="correct",
+                presented_token="wrong",
+            )
+        )
+
+    def test_loopback_dashboard_requests_do_not_need_the_remote_token(self):
+        self.assertTrue(
+            dashboard_request_authorized(
+                client_host="127.0.0.1",
+                configured_token="configured",
+                presented_token=None,
+            )
+        )
+
+    def test_environment_token_overrides_tracked_config(self):
+        with patch.dict(
+            os.environ,
+            {"CRAZY_AUDIOBOOK_DASHBOARD_TOKEN": "from-environment"},
+            clear=False,
+        ):
+            self.assertEqual(
+                configured_dashboard_token({"api_token": "from-yaml"}),
+                "from-environment",
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
+from difflib import SequenceMatcher
 from typing import Any
 
 import numpy as np
@@ -179,6 +181,50 @@ class WhisperValidator:
         except Exception as e:
             logger.error("WER calculation failed: %s", e)
             return 1.0  # Assume worst case
+
+    def calculate_text_similarity(
+        self,
+        reference: str,
+        hypothesis: str,
+    ) -> float:
+        """Compare compact normalized text for spelling/segmentation variants.
+
+        Whisper commonly renders invented names and compounds with equivalent
+        phonetic spelling or different spaces (for example, ``Tuka``/``Tuca``
+        and ``deathant``/``death hunt``). This is only a secondary signal; the
+        validation loop applies conservative length-dependent thresholds.
+        """
+        norm_ref = re.sub(r"\s+", "", self._normalize_text(reference))
+        norm_hyp = re.sub(r"\s+", "", self._normalize_text(hypothesis))
+        if not norm_ref or not norm_hyp:
+            return 1.0 if norm_ref == norm_hyp else 0.0
+        return SequenceMatcher(None, norm_ref, norm_hyp).ratio()
+
+    @staticmethod
+    def is_orthographic_segmentation_match(
+        reference: str,
+        hypothesis: str,
+    ) -> bool:
+        """Return true when only punctuation or word boundaries differ.
+
+        WER is intentionally sensitive to token boundaries, but audiobook
+        validation should not reject an acoustically equivalent rendering such
+        as ``Letsgoletsgoletsgo`` versus ``Let's go, let's go, let's go``.
+        This signal is deliberately stricter than fuzzy text similarity: after
+        Unicode/case normalization, every letter and digit must be identical
+        and in the same order.
+        """
+
+        def compact(value: str) -> str:
+            normalized = unicodedata.normalize("NFKC", value or "").casefold()
+            return "".join(char for char in normalized if char.isalnum())
+
+        compact_reference = compact(reference)
+        compact_hypothesis = compact(hypothesis)
+        return bool(
+            compact_reference
+            and compact_reference == compact_hypothesis
+        )
 
     @staticmethod
     def _normalize_text(text: str) -> str:

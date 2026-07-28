@@ -18,6 +18,7 @@ class VoiceDesignRequest(BaseModel):
     prompt: str
     text: str
     output_path: str
+    duration_seconds: float = 10.0
 
 # Globals for lazy loading
 model = None
@@ -40,8 +41,9 @@ def load_model():
         def _prepare_model_inputs(self, inputs, bos_token_id, model_kwargs):
             if model_kwargs is not None:
                 if inputs is None:
-                    inputs = model_kwargs.get("prompt_input_ids")
-                model_kwargs.pop("input_ids", None)
+                    inputs = model_kwargs.pop("input_ids", None)
+                else:
+                    model_kwargs.pop("input_ids", None)
             return inputs, "input_ids", model_kwargs
 
         ParlerTTSForConditionalGeneration._prepare_model_inputs = _prepare_model_inputs
@@ -168,12 +170,25 @@ def design_voice(request: VoiceDesignRequest):
     logger.info(f"Designing voice: {request.prompt[:50]}...")
     
     try:
-        prompt_inputs = tokenizer(request.prompt, return_tensors="pt").to(device)
+        description_inputs = tokenizer(
+            request.prompt,
+            return_tensors="pt",
+        ).to(device)
+        text_inputs = tokenizer(
+            request.text,
+            return_tensors="pt",
+        ).to(device)
         
+        # Parler produces about 86 audio-code tokens per second.  Bound the
+        # generation to the configured reference duration instead of using a
+        # long, fixed token budget that can create repeated speech/silence.
+        max_new_tokens = max(86, round(request.duration_seconds * 86))
         generation = model.generate(
-            input_ids=prompt_inputs.input_ids,
-            prompt_input_ids=prompt_inputs.input_ids,
-            prompt_attention_mask=prompt_inputs.attention_mask,
+            input_ids=description_inputs.input_ids,
+            attention_mask=description_inputs.attention_mask,
+            prompt_input_ids=text_inputs.input_ids,
+            prompt_attention_mask=text_inputs.attention_mask,
+            max_new_tokens=max_new_tokens,
         )
         audio_arr = generation.cpu().numpy().squeeze().astype(np.float32)
         
@@ -196,4 +211,4 @@ def health():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8101)
+    uvicorn.run(app, host="127.0.0.1", port=8101)

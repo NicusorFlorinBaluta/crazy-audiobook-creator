@@ -10,6 +10,7 @@ Detects:
 from __future__ import annotations
 
 import logging
+import re
 
 import numpy as np
 import soundfile as sf
@@ -73,7 +74,14 @@ class AudioAnalyzer:
         duration_deviation = 0.0
         if expected_duration > 0:
             duration_deviation = abs(duration - expected_duration) / expected_duration
-            duration_ok = duration_deviation <= self.duration_tolerance
+            # Short utterances have a fixed onset/release cost, so a purely
+            # relative tolerance rejects healthy one- and two-word clips.
+            # The CPS guard below still catches swallowed or repeated speech.
+            allowed_delta = max(
+                1.25,
+                expected_duration * self.duration_tolerance,
+            )
+            duration_ok = abs(duration - expected_duration) <= allowed_delta
 
         # RMS loudness measurement & CPS pacing check
         rms = np.sqrt(np.mean(audio**2)) if len(audio) > 0 else 0
@@ -104,7 +112,13 @@ class AudioAnalyzer:
         artifact_score = max(0.0, artifact_score)
 
         # Duration score
-        duration_score = max(0.0, 1.0 - duration_deviation) if expected_duration > 0 else 1.0
+        # A clip inside the accepted timing envelope should not subsequently
+        # fail the aggregate score for the same duration measurement.
+        duration_score = (
+            1.0
+            if expected_duration <= 0 or duration_ok
+            else max(0.0, 1.0 - duration_deviation)
+        )
 
         return {
             "duration_seconds": duration,
@@ -181,7 +195,12 @@ class AudioAnalyzer:
         if not text:
             return 0.0
 
-        word_count = len(text.split())
+        # Treat punctuation-separated words as distinct spoken words. A plain
+        # whitespace split undercounts prose such as "white-faintly" and
+        # "Starling-finally-felt", producing false slow-duration failures.
+        word_count = len(
+            re.findall(r"[^\W_]+(?:['’][^\W_]+)*|\d+", text, re.UNICODE)
+        )
         wpm = AVERAGE_WORDS_PER_MINUTE * speed
         expected_seconds = (word_count / wpm) * 60
 

@@ -1,5 +1,10 @@
 # Audiobook Creator — Feature Expansion & Windows Consolidation Plan
 
+> **Historical implementation plan — not a current specification.** Most of
+> this work has since been implemented, revised, or replaced. Use
+> [README.md](README.md) and [docs/architecture.md](docs/architecture.md) for
+> current behavior.
+
 ## Overview
 
 This plan covers two parallel tracks:

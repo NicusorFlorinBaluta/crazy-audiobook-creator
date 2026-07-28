@@ -1,6 +1,6 @@
 const { app, BrowserWindow, Tray, Menu, ipcMain } = require('electron');
 const path = require('path');
-const { spawn, execSync } = require('child_process');
+const { spawn, execFileSync, execSync } = require('child_process');
 const http = require('http');
 const fs = require('fs');
 
@@ -8,6 +8,7 @@ let mainWindow = null;
 let tray = null;
 let pythonProcesses = [];
 let isQuitting = false;
+let gpuReleaseRequested = false;
 
 // Project root directory
 const rootDir = path.resolve(__dirname, '..');
@@ -21,9 +22,32 @@ function getPythonExecutable() {
   return 'python';
 }
 
-// Kill all spawned Python process trees cleanly and free ports 8000/8100
+// Ask the dashboard to interrupt active inference and unload Ollama/Voice
+// before its process is terminated. Closing only the UI must not strand a
+// model in GPU memory.
+function releaseGpuResources() {
+  if (gpuReleaseRequested) {
+    return;
+  }
+  gpuReleaseRequested = true;
+  const curl = process.platform === 'win32' ? 'curl.exe' : 'curl';
+  try {
+    execFileSync(curl, [
+      '--silent',
+      '--show-error',
+      '--max-time', '20',
+      '--request', 'POST',
+      'http://127.0.0.1:8000/api/system/release-gpu'
+    ], { stdio: 'ignore', timeout: 22000 });
+  } catch (err) {
+    // The dashboard may already be stopped; process-tree cleanup still runs.
+  }
+}
+
+// Stop only Python process trees launched by this Electron instance.
 function stopPythonProcesses() {
   console.log('[Electron] Cleaning up Python subprocesses...');
+  releaseGpuResources();
   for (const proc of pythonProcesses) {
     if (proc && proc.pid) {
       try {
@@ -39,38 +63,23 @@ function stopPythonProcesses() {
     }
   }
   pythonProcesses = [];
-
-  // Guarantee no orphaned processes remain listening on ports 8000 or 8100
-  if (process.platform === 'win32') {
-    try {
-      execSync('powershell -Command "Stop-Process -Id (Get-NetTCPConnection -LocalPort 8000,8100 -ErrorAction SilentlyContinue).OwningProcess -Force -ErrorAction SilentlyContinue"', { stdio: 'ignore' });
-    } catch (e) {}
-  }
 }
 
-// Start Dashboard API (8000) and Voice Server (8100)
+// Start the Dashboard API. The pipeline owns the Voice server lifecycle so
+// there is never a duplicate process racing for port 8100.
 function startBackendServers() {
-  // First ensure any old/orphaned server processes are completely killed
-  stopPythonProcesses();
-
   const pythonExe = getPythonExecutable();
-  const env = { ...process.env, PYTHONPATH: rootDir };
+  const env = {
+    ...process.env,
+    PYTHONPATH: rootDir,
+    ROCM_SDK_TARGET_FAMILY: process.env.ROCM_SDK_TARGET_FAMILY || 'custom'
+  };
 
   console.log(`[Electron] Using Python: ${pythonExe}`);
   console.log(`[Electron] Working Dir: ${rootDir}`);
 
-  // 1. Start Voice Server (port 8100)
-  const voiceProc = spawn(pythonExe, ['-m', 'voice.tts_server.main'], {
-    cwd: rootDir,
-    env: env,
-    stdio: 'ignore'
-  });
-  if (voiceProc.pid) {
-    pythonProcesses.push(voiceProc);
-    console.log(`[Electron] Launched Voice Server (PID ${voiceProc.pid})`);
-  }
-
-  // 2. Start Dashboard API (port 8000)
+  // The dashboard starts Voice on demand when a pipeline reaches work that
+  // needs it, and releases it after completion or a scheduled pause.
   const dashProc = spawn(pythonExe, ['-m', 'uvicorn', 'brain.dashboard.api.main:app', '--host', '127.0.0.1', '--port', '8000'], {
     cwd: rootDir,
     env: env,

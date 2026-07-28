@@ -3,7 +3,7 @@
 Implements audiobook-standard loudness normalization:
   - Integrated LUFS measurement
   - Target LUFS adjustment (-19 LUFS default)
-  - True peak limiting (-1 dBTP)
+  - Oversampled peak ceiling
   - Noise gate
   - Sample rate conversion to 44.1 kHz
 """
@@ -54,8 +54,8 @@ class LoudnessNormalizer:
         Steps:
         1. Noise gate (clean up silence)
         2. LUFS loudness normalization
-        3. Peak limiting
-        4. Resample to output rate
+        3. Resample to output rate
+        4. Apply an oversampled peak ceiling at the final sample rate
         5. Save to file
 
         Args:
@@ -85,17 +85,19 @@ class LoudnessNormalizer:
                 gain_db,
             )
 
-        # Step 3: Peak limiting
-        audio = self._apply_peak_limiter(audio)
-
-        # Step 4: Resample if needed
+        # Step 3: Resample before the final peak check because conversion can
+        # create new inter-sample peaks.
         if sample_rate != self.output_sample_rate:
             audio = self._resample(audio, sample_rate, self.output_sample_rate)
             sample_rate = self.output_sample_rate
 
+        # Step 4: Transparent peak ceiling. Final loudness is measured again
+        # because peak-constrained material may finish below the LUFS target.
+        audio = self._apply_peak_ceiling(audio)
+
         # Final measurements
         final_lufs = self._measure_lufs(audio, sample_rate)
-        peak = float(np.max(np.abs(audio)))
+        peak = self._measure_true_peak(audio)
         peak_dbfs = float(20 * np.log10(peak)) if peak > 0 else -100.0
 
         # Convert to output format
@@ -156,15 +158,15 @@ class LoudnessNormalizer:
             logger.warning("LUFS measurement failed: %s", e)
             return -70.0
 
-    def _apply_peak_limiter(self, audio: np.ndarray) -> np.ndarray:
-        """Apply a simple peak limiter to prevent clipping."""
+    def _apply_peak_ceiling(self, audio: np.ndarray) -> np.ndarray:
+        """Apply global attenuation against an oversampled peak ceiling."""
         peak_limit = 10 ** (self.peak_limit_dbfs / 20)
-        peak = np.max(np.abs(audio))
+        peak = self._measure_true_peak(audio)
 
         if peak > peak_limit:
             ratio = peak_limit / peak
             audio = audio * ratio
-            logger.debug("Peak limited: %.2f → %.2f", peak, peak_limit)
+            logger.debug("Peak ceiling applied: %.2f -> %.2f", peak, peak_limit)
 
         return audio
 
@@ -189,9 +191,18 @@ class LoudnessNormalizer:
 
         try:
             from scipy.signal import lfilter
-            alpha_avg = (alpha_attack + alpha_release) / 2.0
-            smoothed = lfilter([alpha_avg], [1.0, -(1.0 - alpha_avg)], gate)
-            smoothed = np.clip(smoothed, 0.0, 1.0)
+
+            attack = lfilter(
+                [alpha_attack],
+                [1.0, -(1.0 - alpha_attack)],
+                gate,
+            )
+            release = lfilter(
+                [alpha_release],
+                [1.0, -(1.0 - alpha_release)],
+                gate[::-1],
+            )[::-1]
+            smoothed = np.clip(np.maximum(attack, release), 0.0, 1.0)
         except ImportError:
             smoothed = np.zeros_like(gate)
             curr = 0.0
@@ -201,6 +212,19 @@ class LoudnessNormalizer:
                 smoothed[i] = curr
 
         return audio * smoothed
+
+    @staticmethod
+    def _measure_true_peak(audio: np.ndarray) -> float:
+        """Estimate inter-sample peak with 4x polyphase oversampling."""
+        if len(audio) == 0:
+            return 0.0
+        try:
+            from scipy.signal import resample_poly
+
+            oversampled = resample_poly(audio, 4, 1)
+            return float(np.max(np.abs(oversampled)))
+        except ImportError:
+            return float(np.max(np.abs(audio)))
 
     @staticmethod
     def _resample(audio: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:

@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 import time
 from typing import Any
 
@@ -28,13 +29,36 @@ class OllamaClient:
         host: str = "http://localhost:11434",
         model: str = "qwen3:32b",
         timeout: int = 120,
-        max_retries: int = 15,
+        max_retries: int = 3,
+        max_retry_seconds: int = 900,
+        context_window: int = 8192,
     ):
         self.host = host.rstrip("/")
         self.model = model
         self.timeout = timeout
-        self.max_retries = max_retries
+        self.max_retries = max(1, max_retries)
+        self.max_retry_seconds = max(0, max_retry_seconds)
+        self.context_window = context_window
         self._client = httpx.Client(timeout=httpx.Timeout(timeout, connect=10.0))
+        self._cancel_event = threading.Event()
+
+    def begin_run(self) -> None:
+        """Clear a previous cooperative cancellation before a new pipeline run."""
+        self._cancel_event.clear()
+
+    def cancel_current(self) -> None:
+        """Interrupt the active streaming request at its next response chunk."""
+        self._cancel_event.set()
+        logger.info("[Ollama] Cancellation requested")
+
+    def _raise_if_cancelled(self) -> None:
+        if self._cancel_event.is_set():
+            raise KeyboardInterrupt("Ollama generation cancelled")
+
+    def _wait_for_retry(self, seconds: int) -> None:
+        """Wait between retries while remaining immediately cancellable."""
+        if self._cancel_event.wait(seconds):
+            self._raise_if_cancelled()
 
     def generate(
         self,
@@ -73,7 +97,7 @@ class OllamaClient:
                 "temperature": temperature,
                 "top_p": top_p,
                 "num_predict": -1,
-                "num_ctx": 8192,
+                "num_ctx": self.context_window,
                 "num_gpu": 99,
             },
         }
@@ -81,8 +105,23 @@ class OllamaClient:
             payload["format"] = format
 
         last_error: Exception | None = None
+        retry_started = time.monotonic()
 
         for attempt in range(1, self.max_retries + 1):
+            self._raise_if_cancelled()
+            retry_elapsed = time.monotonic() - retry_started
+            if (
+                attempt > 1
+                and self.max_retry_seconds
+                and retry_elapsed >= self.max_retry_seconds
+            ):
+                logger.error(
+                    "[Ollama] Retry budget exhausted after %.1fs (%d attempt%s)",
+                    retry_elapsed,
+                    attempt - 1,
+                    "" if attempt == 2 else "s",
+                )
+                break
             try:
                 prompt_kb = sum(len(m["content"]) for m in messages) / 1024
                 logger.info(
@@ -118,6 +157,7 @@ class OllamaClient:
                     logger.info("[Ollama] ← HTTP 200 received, streaming tokens...")
 
                     for line in response.iter_lines():
+                        self._raise_if_cancelled()
                         if line:
                             chunk = json.loads(line)
                             if "message" in chunk and "content" in chunk["message"]:
@@ -183,6 +223,7 @@ class OllamaClient:
             except OllamaError:
                 raise
             except Exception as e:
+                self._raise_if_cancelled()
                 last_error = e
                 logger.warning(
                     "[Ollama] ✗ Unexpected error (attempt %d/%d): %s: %s",
@@ -194,11 +235,21 @@ class OllamaClient:
 
             if attempt < self.max_retries:
                 wait = min(30, 2 ** attempt)
+                if self.max_retry_seconds:
+                    remaining = self.max_retry_seconds - (
+                        time.monotonic() - retry_started
+                    )
+                    if remaining <= 0:
+                        logger.error(
+                            "[Ollama] Retry budget exhausted; not starting another request"
+                        )
+                        break
+                    wait = min(wait, max(0, int(remaining)))
                 logger.info("[Ollama] Retrying in %d seconds...", wait)
-                time.sleep(wait)
+                self._wait_for_retry(wait)
 
         raise OllamaError(
-            f"Failed after {self.max_retries} attempts: {last_error}"
+            f"Failed after bounded retries: {last_error}"
         ) from last_error
 
     def generate_json(
@@ -234,6 +285,25 @@ class OllamaClient:
         )
 
         return self._extract_json(raw)
+
+    def unload_model(self) -> bool:
+        """Best-effort release of the model from Ollama GPU memory."""
+        try:
+            response = self._client.post(
+                f"{self.host}/api/generate",
+                json={"model": self.model, "keep_alive": 0},
+                timeout=httpx.Timeout(30.0, connect=5.0),
+            )
+            response.raise_for_status()
+            logger.info("[Ollama] Unloaded model '%s'", self.model)
+            return True
+        except Exception as exc:
+            logger.warning(
+                "[Ollama] Could not unload model '%s': %s",
+                self.model,
+                exc,
+            )
+            return False
 
     def _extract_json(self, text: str) -> dict[str, Any]:
         """Extract and parse JSON from LLM output.
@@ -292,7 +362,7 @@ class OllamaClient:
             f"Response starts with: {text[:200]!r}"
         )
 
-    def check_health(self) -> bool:
+    def check_health(self, *, quiet: bool = False) -> bool:
         """Check if Ollama is running and the model is available."""
         try:
             response = self._client.get(f"{self.host}/api/tags")
@@ -304,7 +374,7 @@ class OllamaClient:
             model_base = self.model.split(":")[0]
             available = any(model_base in m for m in models)
 
-            if not available:
+            if not available and not quiet:
                 logger.warning(
                     "Model '%s' not found. Available: %s",
                     self.model,
@@ -313,7 +383,10 @@ class OllamaClient:
             return available
 
         except Exception as e:
-            logger.error("Ollama health check failed: %s", e)
+            if quiet:
+                logger.debug("Ollama health preflight failed: %s", e)
+            else:
+                logger.error("Ollama health check failed: %s", e)
             return False
 
     def _auto_resolve_model(self) -> str | None:
