@@ -880,7 +880,19 @@ async def get_project(project_id: str):
     if not job_queue:
         raise HTTPException(status_code=503, detail="Server not initialized")
     try:
-        return job_queue.get_job(project_id)
+        job = job_queue.get_job(project_id)
+        try:
+            cast = _load_or_build_voice_cast(project_id)
+            if cast:
+                job["voice_cast"] = cast
+                job_queue.update_job(project_id, {"voice_cast": cast})
+        except Exception:
+            logger.warning(
+                "Could not merge dynamic voice cast for project %s",
+                project_id,
+                exc_info=True,
+            )
+        return job
     except KeyError:
         raise HTTPException(status_code=404, detail="Project not found")
 
