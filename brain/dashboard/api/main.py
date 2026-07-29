@@ -254,7 +254,7 @@ def _load_or_build_voice_cast(
     if cast_path.is_file():
         try:
             cast = json.loads(cast_path.read_text(encoding="utf-8"))
-            if isinstance(cast.get("voices"), dict):
+            if isinstance(cast.get("voices"), dict) and "speaking_characters" in cast:
                 return cast
         except (OSError, json.JSONDecodeError):
             logger.warning("Rebuilding invalid voice cast for %s", project_id)
