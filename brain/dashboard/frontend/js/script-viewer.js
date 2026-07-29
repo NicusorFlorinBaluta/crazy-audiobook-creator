@@ -200,20 +200,20 @@ window.ScriptViewer = (() => {
                 </div>
                 ${warningHtml}
                 <div class="char-voice-preview">${previewHtml}</div>
-                <details class="voice-assignments">
+                <details class="voice-assignments" open>
                     <summary>Character assignments (${assigned.length})</summary>
                     <div class="voice-assignment-list">${assignmentRows}</div>
                 </details>
                 <details class="voice-redesign">
-                    <summary>Redesign with text</summary>
+                    <summary>Redesign with text direction</summary>
                     <textarea class="voice-description-input" rows="4"
                               ${voiceState.editable ? '' : 'disabled'}>${escapeHtml(voice.source_description || voice.description || '')}</textarea>
                     <button class="btn btn-secondary voice-regenerate"
                             ${voiceState.editable ? '' : 'disabled'}>Generate new preview</button>
                     <small>The app enforces this profile's gender and age metadata and marks only dependent chapters stale.</small>
                 </details>
-                <details class="voice-upload">
-                    <summary>Use a recorded voice sample</summary>
+                <details class="voice-upload" open>
+                    <summary>Use a recorded voice sample (Custom Audio Upload)</summary>
                     <label>Audio file
                         <input class="voice-upload-file" type="file"
                                accept=".wav,.flac,.mp3,.m4a,.aac,.ogg,audio/*"

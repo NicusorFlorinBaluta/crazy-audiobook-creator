@@ -66,7 +66,7 @@ from voice.tts_server.voice_library import VoiceLibraryManager
 
 logger = logging.getLogger(__name__)
 
-FRONTEND_BUILD = "2026.07.29.1"
+FRONTEND_BUILD = "2026.07.29.2"
 
 
 class AsyncioConnectionResetFilter(logging.Filter):
