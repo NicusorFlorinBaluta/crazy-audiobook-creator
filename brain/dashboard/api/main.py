@@ -1141,6 +1141,7 @@ async def reset_pipeline_stage(project_id: str, request: Request):
                 "bootstrapping_completed": False,
                 "voice_review_approved": False,
                 "scripted_chapters": [],
+                "generated_chapters": [],
                 "mastered_chapters": [],
                 "force_character_analysis": True,
             })
@@ -1156,6 +1157,7 @@ async def reset_pipeline_stage(project_id: str, request: Request):
                 "bootstrapping_completed": False,
                 "voice_review_approved": False,
                 "scripted_chapters": [],
+                "generated_chapters": [],
                 "mastered_chapters": [],
                 "force_character_analysis": True,
             })
@@ -1170,6 +1172,7 @@ async def reset_pipeline_stage(project_id: str, request: Request):
                 "bootstrapping_completed": False,
                 "voice_review_approved": False,
                 "bootstrapping_fingerprint": None,
+                "generated_chapters": [],
                 "mastered_chapters": [],
             })
             (project_dir / "voice_cast.json").unlink(missing_ok=True)
@@ -1185,11 +1188,18 @@ async def reset_pipeline_stage(project_id: str, request: Request):
                 "voice_review_status": "pending",
                 "voice_review_policy": "required_once",
                 "voice_review_approved": False,
+                "generated_chapters": [],
                 "mastered_chapters": [],
             })
-            
+            for d in [project_dir / "segments", project_dir / "mastered", workspace_dir / "segments", workspace_dir / "mastered"]:
+                if d.exists() and d.is_dir():
+                    shutil.rmtree(d, ignore_errors=True)
+                    
         elif stage == PipelineStage.GENERATING:
-            update.update({"mastered_chapters": []})
+            update.update({
+                "generated_chapters": [],
+                "mastered_chapters": [],
+            })
             for d in [project_dir / "segments", project_dir / "mastered", workspace_dir / "segments", workspace_dir / "mastered"]:
                 if d.exists() and d.is_dir():
                     shutil.rmtree(d, ignore_errors=True)
