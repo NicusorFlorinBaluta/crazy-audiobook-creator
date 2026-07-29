@@ -2180,6 +2180,22 @@ async def get_quality_report(project_id: str):
     return summary
 
 
+@app.post("/api/system/release-gpu")
+async def release_gpu():
+    """Release all app-owned GPU resources."""
+    await _release_gpu_resources()
+    return {"status": "success", "message": "GPU resources released"}
+
+
+@app.post("/api/system/restart")
+async def restart_dashboard_server():
+    """Safely release GPU resources and restart the Dashboard process."""
+    global _dashboard_shutdown_task
+    if _dashboard_shutdown_task is None or _dashboard_shutdown_task.done():
+        _dashboard_shutdown_task = asyncio.create_task(_shutdown_dashboard_process())
+    return {"status": "restarting", "message": "Dashboard process is restarting"}
+
+
 # ---------------------------------------------------------------------------
 # WebSocket
 # ---------------------------------------------------------------------------
