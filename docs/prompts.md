@@ -45,6 +45,12 @@ For every input ID, the LLM may return only:
 
 The source `text`, fragment ID, and source span are restored from the immutable input. LLM-returned prose is never trusted as audiobook text.
 
+### Smart Hybrid Dialogue Attribution (Option D)
+- **Dialogue Fragment Rule**: Quoted text (`"..."`) is guaranteed character attribution. If the LLM returns `narrator` for a dialogue fragment (e.g. `"No,"`), automatic fallback resolution (`_resolve_dialogue_speaker`) infers the character speaker from adjacent tags or context.
+- **Dialogue Tag Merging**: Pure dialogue tags (`"No," Frond said.`) immediately adjacent to character speech are merged directly into the character's utterance line (`frond | "No," Frond said.`). This eliminates 2-word narrator ping-pong while preserving **100.00% exact source coverage** without dropping a single word.
+- **Minor Character Mapping**: Unnamed background speakers (e.g., `"a little girl"`, `"the boy"`) receive dedicated minor voice profiles (`child_female`, `child_male`, `minor_female`, `minor_male`) rather than collapsing into the Narrator.
+- **Gender Normalization**: Register words like `"woman"`, `"female (elderly)"`, `"loremother"` are normalized to `Gender.FEMALE`, and `"boy"`, `"man"` map to `Gender.MALE`.
+
 ## Strict response contract
 
 A metadata response is accepted only when:

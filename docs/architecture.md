@@ -25,13 +25,17 @@ All services bind to `127.0.0.1` by default. The dashboard serializes project ru
 
 ## Processing stages
 
-1. **Extraction** parses the EPUB, preserves chapter order, and copies cover art into the project directory.
-2. **Character analysis** scans all book text. Long chapters are divided into bounded analysis units; no chapter is omitted simply because it is large.
-3. **Script generation** annotates immutable source fragments with speaker, emotion, speed, and pauses. It runs for the complete book before audio starts.
-4. **Voice bootstrap** derives a speaking-only cast, compiles checked voice directions, and uses Qwen VoiceDesign to speak a known sentence. Whisper verifies that reference before it is registered. New projects pause once for manual casting approval. Qwen Base later caches a full voice-clone prompt derived from the reference audio and its exact transcript.
-5. **Generation and validation** synthesize one file per script line, measure speaker similarity, transcribe it, inspect the waveform, retry failed or flagged attempts, and keep the best attempt.
-6. **Mastering** assembles the exact ordered line set, adds a narrator chapter-title announcement, applies timing once, measures loudness, and writes a chapter WAV.
-7. **Export** packages mastered chapter WAVs and metadata as AAC in an M4B.
+1. **Created** (`created`): EPUB upload uploaded and project initialized.
+2. **Extraction** (`extracting`): EPUB text extracted, chapter structure built, cover art saved.
+3. **Scripting** (`scripting`): LLM Pass 1 character analysis & Pass 2 text-to-script annotation.
+   - **Smart Hybrid Dialogue Attribution**: Quoted text (`"..."`) is guaranteed character attribution. Dialogue tags (`"No," Frond said.`) are merged into character lines to prevent voice ping-pong while preserving 100% exact text coverage. Minor background speakers (`a little girl`, `the boy`) receive dedicated minor voice profiles (`child_female`, `child_male`, `minor_female`, `minor_male`).
+4. **Bootstrapping** (`bootstrapping`): Speaking cast derived, voice design directions compiled, reference audio generated via Qwen VoiceDesign. Acoustic speaker embeddings (128-dim log-mel features) verify acoustic distinctness without prompt-text false positives.
+5. **Voice Review** (`voice_review`): Automated pause gate for user approval. Displays voice cards, preview players, and `[Approve voices & continue]` action banner.
+6. **Generating** (`generating`): Qwen3-TTS synthesizes chapter audio line by line with dynamic contextual pauses (250ms same speaker, 380ms narrator, 400ms quote-to-action, 450ms turn change, 900ms paragraph break).
+7. **Validating** (`validating`): Whisper Speech-to-Text transcribes audio to verify Word Error Rate (WER), acoustic clipping, and length bounds.
+8. **Mastering** (`mastering`): Chapter audio assembled with chapter announcements, crossfading, and LUFS volume normalization.
+9. **Exporting** (`exporting`): Mastered chapter WAVs packaged as chaptered M4B (AAC) with metadata and embedded cover art.
+10. **Completed** (`completed`): Audiobook creation complete and ready for download or Home Assistant playback.
 
 ## Why analysis is book-wide but audio is incremental
 
@@ -137,4 +141,24 @@ Project and download paths are resolved beneath their configured roots. EPUB upl
 
 Book text is sent to the locally configured Ollama endpoint. Audio remains in local project/workspace storage. Google Books metadata lookup is off by default and only occurs after an explicit dashboard action or when `metadata.auto_fetch_external` is enabled.
 
-Loopback binding is the supported default. If either service is bound beyond loopback, configure matching API tokens and restrictive CORS origins; startup otherwise refuses the unsafe bind.
+## Feature Maintenance & Impact Guidelines
+
+When modifying or introducing new pipeline features, developers and AI agents MUST observe the following cross-system impact guidelines:
+
+1. **Progress & Status Alignment**:
+   - Every status/stage change must stay synchronized across the SQLite job queue (`pipeline_state.db`), API endpoints (`/status`, `/voices`), and UI components (`app.js`, `pipeline.js`, `script-viewer.js`).
+   - If a stage pauses execution (like `voice_review`), `GET /api/projects/{id}/voices` MUST return `review.required = True` so the UI action banner is rendered.
+
+2. **Stage Reset Endpoint Maintenance (`POST /api/projects/{id}/reset`)**:
+   - Any new file artifact, directory path, or pipeline flag MUST be registered in `reset_pipeline_stage` inside `brain/dashboard/api/main.py`.
+   - Resetting to a stage must clean up downstream state AND delete corresponding disk files to guarantee clean execution upon resume.
+
+3. **Text Coverage Invariant (`assert_script_covers_source`)**:
+   - Any script generator tweak or dialogue tag handler MUST validate against `assert_script_covers_source(script, source_text)`. No source text characters or sentences may be dropped or modified.
+
+4. **Acoustic Similarity Verification**:
+   - Voice prompt similarity MUST filter out template boilerplate words (`"clearly adult speaker"`, `"maintain vocal identity..."`) to prevent false similarity warnings. Acoustic evaluation should compare 128-dim log-mel spectrogram vectors (`compute_audio_similarity`).
+
+5. **Verification Protocol**:
+   - Always run unit test discovery (`python -m unittest discover -s tests -p "test_*.py"`) and verify project reset/progress flows after making backend schema or stage changes.
+

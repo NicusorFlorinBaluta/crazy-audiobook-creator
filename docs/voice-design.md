@@ -27,6 +27,10 @@ explicit gender and age metadata. Contradictory register terms are repaired
 biographical descriptions receive audible pitch/resonance/pacing guidance, and
 near-duplicate profiles receive deterministic contrasting directions.
 
+### Voice Similarity & Acoustic Embeddings
+- **Boilerplate Filtering**: Text token similarity comparison (`_token_similarity`) strips out common prompt template boilerplate words (`"clearly adult speaker"`, `"maintain vocal identity..."`) to prevent false similarity warnings between distinct character prompts.
+- **Acoustic Speaker Embeddings**: `compute_audio_similarity` extracts 128-dimensional log-mel spectrogram feature vectors using `soundfile` and `scipy.signal`. Cosine distance between actual voice audio files measures true acoustic pitch, timbre, and formant overlap.
+
 ## Voice cap and sharing
 
 `script.max_unique_voices` limits generated reference voices, not character

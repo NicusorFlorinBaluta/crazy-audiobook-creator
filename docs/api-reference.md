@@ -29,7 +29,8 @@ Uploads must have an `.epub` suffix, remain under the configured compressed/expa
 |---|---|---|
 | `POST` | `/api/projects/{project_id}/start` | Start/resume the project |
 | `POST` | `/api/projects/{project_id}/stop` | Request cooperative cancellation |
-| `POST` | `/api/projects/{project_id}/reset` | Reset to scripting, bootstrapping, generating, or mastering |
+| `POST` | `/api/projects/{project_id}/reset` | Reset to extracting, scripting, bootstrapping, voice_review, generating, validating, mastering, or exporting |
+| `POST` | `/api/projects/{project_id}/voice-review/approve` | Approve speaking voice cast and continue audio generation |
 | `POST` | `/api/projects/{project_id}/request-deploy` | Park at the next chapter boundary |
 | `POST` | `/api/projects/{project_id}/resume-deploy` | Release deployment parking |
 | `POST` | `/api/schedule` | Replace the schedule section |
@@ -45,9 +46,16 @@ model cleanup finishes.
 exit, and unloads app-managed Ollama and Voice models. The Electron wrapper
 calls it before terminating the dashboard process.
 
-Resetting to scripting forces fresh character analysis and voice bootstrap.
-Resetting to bootstrapping forces reference regeneration. Generating/mastering
-resets preserve current valid artifacts and resume from their manifests.
+#### Reset to Stage (`POST /api/projects/{project_id}/reset`)
+Accepts `{"stage": "<stage_name>"}` where `<stage_name>` is one of 8 supported stages:
+- **`extracting`**: Clears `book.json`, scripts, voice cast, audio segments, and mastered files. Re-extracts text from EPUB.
+- **`scripting`**: Clears script JSONs and character cast, keeping extracted EPUB text. Forces fresh LLM character analysis.
+- **`bootstrapping`**: Clears `voice_cast.json` and reference audio cache. Re-generates voice design profiles.
+- **`voice_review`**: Resets `voice_review_status` to `"pending"` and sets `active_stage = voice_review`, re-opening the Voice Review banner in the UI.
+- **`generating`**: Clears generated segment WAV files and resets `mastered_chapters = []`. Keeps script and voice cast intact.
+- **`validating`**: Sets `active_stage = validating` to re-run Whisper quality checks.
+- **`mastering`**: Clears `mastered/` WAV files and `.m4b` export. Re-runs ffmpeg/sox chapter mastering.
+- **`exporting`**: Removes `.m4b` export file to re-run M4B packaging.
 
 ### Chapter selection
 
