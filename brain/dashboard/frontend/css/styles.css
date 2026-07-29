@@ -828,15 +828,21 @@ body {
     flex-wrap: wrap;
 }
 .chapter-toolbar-group { gap: 7px; flex-wrap: wrap; }
-.chapter-toolbar-group .input-sm {
+.chapter-toolbar-group .input-sm,
+select,
+.select,
+#select-page-size,
+#script-chapter-select {
     height: 32px;
     padding: 5px 9px;
     background: rgba(18, 18, 28, 0.95);
     color: var(--text-primary);
     border: 1px solid var(--glass-border);
     border-radius: 7px;
+    cursor: pointer;
 }
-select option {
+select option,
+.select option {
     background-color: #181825;
     color: #e2e8f0;
     padding: 6px 10px;

@@ -523,7 +523,7 @@ window.ScriptViewer = (() => {
     // ============================================================================
 
     function renderScriptDropdown() {
-        els.chapterSelect.innerHTML = '<option value="">Select Chapter</option>';
+        els.chapterSelect.innerHTML = '';
         els.scriptLegend.innerHTML = '';
         
         if (!currentData.script || !currentData.script.chapters || currentData.script.chapters.length === 0) {
@@ -540,23 +540,6 @@ window.ScriptViewer = (() => {
             opt.textContent = ch.title || `Chapter ${idx + 1}`;
             els.chapterSelect.appendChild(opt);
         });
-        
-        // Build legend based on characters found
-        if (currentData.characters) {
-            const charDict = currentData.characters.characters || currentData.characters;
-            const chars = Object.entries(charDict);
-            chars.forEach(([id, data], idx) => {
-                const colorVar = id.toLowerCase() === 'narrator' ? 'var(--speaker-narrator)' : `var(--speaker-${(idx % 10) + 1})`;
-                els.scriptLegend.innerHTML += `
-                    <div class="legend-item">
-                        <div class="legend-dot" style="background: ${colorVar}"></div>
-                        <span>${escapeHtml(data.name || id)}</span>
-                    </div>
-                `;
-            });
-        }
-        
-        // Select first chapter by default
         els.chapterSelect.value = 0;
         renderScriptLines(0);
         
