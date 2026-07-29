@@ -88,6 +88,7 @@ $env:PYTHONPATH = (
     Select-Object -Unique
 ) -join [IO.Path]::PathSeparator
 
+Get-NetTCPConnection -LocalPort 8000 -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }
 Set-Location -LiteralPath $projectRoot
 & $PythonExecutable -m brain.dashboard.api.main
 exit $LASTEXITCODE
