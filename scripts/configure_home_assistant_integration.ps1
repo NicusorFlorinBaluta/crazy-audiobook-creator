@@ -252,7 +252,7 @@ location = /audiobook {
     return 301 /audiobook/;
 }
 
-location /audiobook/ {
+location ^~ /audiobook/ {
     auth_basic "Crazy Audiobook Creator";
     auth_basic_user_file /data/audiobook.htpasswd;
 
