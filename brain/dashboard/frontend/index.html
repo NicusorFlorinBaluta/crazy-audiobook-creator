@@ -103,7 +103,7 @@
                     <button class="btn btn-ghost hidden" id="btn-request-deploy">Park at Boundary</button>
                     <button class="btn btn-primary hidden" id="btn-resume-deploy">Resume Parked</button>
                     <select id="select-reset-stage" class="select" title="Select a stage to reset project state and restart pipeline execution">
-                        <option value="" disabled selected title="Choose a stage to reset project execution to">Reset to Stage...</option>
+                        <option value="" disabled selected hidden title="Choose a stage to reset project execution to">Reset to Stage...</option>
                         <option value="extracting" title="Extracting: Re-extract text from EPUB file (clears all script, cast, and audio files)">Extracting (re-extract EPUB text)</option>
                         <option value="scripting" title="Scripting: Re-run LLM script & character extraction (clears script JSONs and cast, keeps EPUB text)">Scripting (re-run LLM script & casting)</option>
                         <option value="bootstrapping" title="Bootstrapping: Re-generate voice design profiles and reference audio (keeps script intact)">Bootstrapping (re-design voice audio)</option>

@@ -840,12 +840,14 @@ select,
     border: 1px solid var(--glass-border);
     border-radius: 7px;
     cursor: pointer;
+    color-scheme: dark;
 }
 select option,
 .select option {
     background-color: #181825;
     color: #e2e8f0;
     padding: 6px 10px;
+    color-scheme: dark;
 }
 select option:disabled {
     color: #64748b !important;
