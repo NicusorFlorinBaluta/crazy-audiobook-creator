@@ -10,6 +10,7 @@ Reads the full book text and produces a Character Registry with:
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 
 from brain.director.ollama_client import OllamaClient
@@ -115,11 +116,13 @@ class CharacterAnalyzer:
         temperature: float = 0.3,
         genre: str = "fantasy",
         max_unique_voices: int = 20,
+        single_pass_threshold: int = 80_000,
     ):
         self.ollama = ollama
         self.temperature = temperature
         self.genre = genre
         self.max_unique_voices = max_unique_voices
+        self.single_pass_threshold = single_pass_threshold
 
     def analyze(self, book: ExtractedBook) -> CharacterRegistry:
         """Analyze a book and produce a character registry, using multi-pass for long books."""
@@ -135,8 +138,8 @@ class CharacterAnalyzer:
         import time as _time
         t0 = _time.time()
 
-        if total_chars <= 25_000:
-            # Single pass for short books
+        if total_chars <= self.single_pass_threshold:
+            # Single pass for standard books (fits within Qwen 32k context)
             book_text = self._prepare_book_text(book)
             system_prompt = _SYSTEM_PROMPT.format(genre=self.genre)
             prompt = _USER_PROMPT.format(book_text=book_text)
@@ -392,15 +395,17 @@ class CharacterAnalyzer:
             # Normalize character ID
             normalized_id = self._normalize_id(char_id)
 
-            # Parse gender
-            gender_str = str(char_data.get("gender", "other")).lower()
-            try:
-                gender = Gender(gender_str)
-            except ValueError:
-                logger.warning(
-                    "[CharacterAnalyzer] Unknown gender '%s' for '%s' — defaulting to OTHER",
-                    gender_str, normalized_id,
-                )
+            # Parse gender with robust normalizer
+            gender_str = str(char_data.get("gender", "other")).lower().strip()
+            if gender_str in ("male", "man", "boy", "he", "him", "his", "masculine", "gentleman", "sir", "father", "son", "brother", "husband", "lord", "king"):
+                gender = Gender.MALE
+            elif gender_str in ("female", "woman", "girl", "she", "her", "feminine", "lady", "ma'am", "mother", "daughter", "sister", "wife", "queen", "loremother"):
+                gender = Gender.FEMALE
+            elif re.search(r"\b(female|woman|girl|lady|she|her|mother|daughter)\b", gender_str):
+                gender = Gender.FEMALE
+            elif re.search(r"\b(male|man|boy|he|his|him|father|son)\b", gender_str):
+                gender = Gender.MALE
+            else:
                 gender = Gender.OTHER
 
             try:

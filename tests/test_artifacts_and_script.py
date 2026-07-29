@@ -375,7 +375,7 @@ class ScriptFidelityTests(unittest.TestCase):
 
     def test_large_single_chapter_is_analyzed_in_multiple_units(self) -> None:
         ollama = FakeCharacterOllama()
-        analyzer = CharacterAnalyzer(ollama)
+        analyzer = CharacterAnalyzer(ollama, single_pass_threshold=25000)
         text = "A complete sentence. " * 2000
         registry = analyzer.analyze(
             ExtractedBook(

@@ -893,7 +893,7 @@ async def get_project(project_id: str):
                 project_id,
                 exc_info=True,
             )
-        return job
+        return await get_pipeline_status(project_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Project not found")
 
@@ -1228,9 +1228,31 @@ async def get_pipeline_status(project_id: str):
             except Exception:
                 pass
 
+        book_chapter_titles = {}
+        book_json_path = project_dir / "book.json"
+        if book_json_path.exists():
+            try:
+                import json
+                bdata = json.loads(book_json_path.read_text(encoding="utf-8"))
+                b_chaps = bdata.get("chapters", [])
+                if total_chapters == 0:
+                    total_chapters = len(b_chaps) or bdata.get("metadata", {}).get("total_chapters", 0)
+                for idx, ch in enumerate(b_chaps, 1):
+                    if isinstance(ch, dict) and ch.get("title"):
+                        book_chapter_titles[idx] = ch.get("title")
+            except Exception:
+                pass
+
+        stage = str(state.get("active_stage") or state.get("status") or "").lower()
+        scripted_chapters = set(state.get("scripted_chapters", []))
+        generated_chapters = set(state.get("generated_chapters", []))
+        mastered_chapters = set(state.get("mastered_chapters", []))
+        current_script_ch = state.get("current_script_chapter")
+        work_prog = state.get("work_progress") or {}
+
         for ch_num in range(1, total_chapters + 1):
             ch_script_file = script_dir / f"chapter_{ch_num:03d}.json"
-            title = f"Chapter {ch_num}"
+            title = book_chapter_titles.get(ch_num) or f"Chapter {ch_num}"
             total_lines = 0
 
             if ch_script_file.exists():
@@ -1239,24 +1261,38 @@ async def get_pipeline_status(project_id: str):
                     script_data = json.loads(ch_script_file.read_text(encoding="utf-8"))
                     title = script_data.get("chapter_title", title)
                     raw_lines = script_data.get("lines", [])
-
                     total_lines = len(raw_lines)
                 except Exception:
                     pass
 
-            # Count generated segment files for this chapter
             gen_count = 0
             if segments_dir.exists() and total_lines > 0:
                 ch_prefix = f"ch{ch_num:02d}_"
                 gen_count = len(list(segments_dir.glob(f"{ch_prefix}*.wav")))
 
-            pct = int((gen_count / total_lines) * 100) if total_lines > 0 else 0
+            # Compute stage-aware progress percentage
+            if ch_num in mastered_chapters or ch_num in generated_chapters:
+                pct = 100
+            elif "script" in stage or stage in ["voice_review", "bootstrapping"]:
+                if ch_script_file.exists() or ch_num in scripted_chapters:
+                    pct = 100
+                elif ch_num == current_script_ch:
+                    pct = int(work_prog.get("stagePercent", 50))
+                else:
+                    pct = 0
+            elif total_lines > 0:
+                pct = int((gen_count / total_lines) * 100)
+            elif ch_script_file.exists() or ch_num in scripted_chapters:
+                pct = 100
+            else:
+                pct = 0
+
             chapter_details.append({
                 "number": ch_num,
                 "title": title,
                 "total_lines": total_lines,
                 "lines_generated": gen_count,
-                "progress_percent": min(pct, 100)
+                "progress_percent": min(max(pct, 0), 100)
             })
 
         state["chapter_details"] = chapter_details

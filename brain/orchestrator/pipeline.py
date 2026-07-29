@@ -996,6 +996,12 @@ class Pipeline:
         scripts_dir = project_dir / "script"
         scripts_dir.mkdir(exist_ok=True)
 
+        def on_chapter_start(chapter_num: int):
+            self._check_stop(project_id)
+            self.job_queue.update_job(project_id, {
+                "current_script_chapter": chapter_num,
+            })
+
         def on_chapter_scripted(chapter_script):
             self._check_stop(project_id)
             state = self.job_queue.get_job(project_id)
@@ -1008,7 +1014,11 @@ class Pipeline:
                 })
 
         chapter_scripts = self.script_generator.generate_all_chapters(
-            book.chapters, registry, scripts_dir=scripts_dir, progress_callback=on_chapter_scripted
+            book.chapters,
+            registry,
+            scripts_dir=scripts_dir,
+            progress_callback=on_chapter_scripted,
+            chapter_start_callback=on_chapter_start,
         )
 
         total_lines = 0

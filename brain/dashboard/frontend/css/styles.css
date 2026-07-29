@@ -871,7 +871,8 @@ body {
     transition: background .15s ease, border-color .15s ease;
 }
 .chapter-cell:hover { background: rgba(255,255,255,.045); border-color: rgba(129,140,248,.32); }
-.chapter-cell.chapter-active { border-color: rgba(96,165,250,.55); background: rgba(59,130,246,.08); }
+.chapter-cell.chapter-active { border-color: rgba(96,165,250,.55); background: rgba(59,130,246,.08); box-shadow: 0 0 12px rgba(96,165,250,0.15); }
+.chapter-cell.chapter-skipped { opacity: 0.55; filter: grayscale(0.4); }
 .chapter-cell.chapter-selected {
     border-color: rgba(139,92,246,.6);
     box-shadow: inset 3px 0 0 var(--accent);

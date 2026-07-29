@@ -660,6 +660,8 @@ function renderChapterList(project) {
         let download = '<span></span>';
         const stage = String(project.active_stage || project.status || '').toLowerCase();
 
+        const isSelectedInBatch = selection === null || selection.has(chapter);
+
         if (mastered.has(chapter)) {
             statusKey = 'done';
             statusText = 'Mastered';
@@ -678,21 +680,35 @@ function renderChapterList(project) {
             statusText = totalLines > 0 && generatedLines >= totalLines
                 ? `Validating ${generatedLines}/${totalLines}`
                 : `Generating ${generatedLines}/${totalLines}`;
-            statusBackground = 'rgba(59, 130, 246, 0.15)';
+            statusBackground = 'rgba(59, 130, 246, 0.2)';
             statusColor = '#60a5fa';
             if (totalLines > 0 && generatedLines >= totalLines) percent = 99;
+        } else if (stage.includes('script') && (currentScript === chapter || (!currentScript && chapter === scripted.size + 1 && chapter <= total))) {
+            statusKey = 'active';
+            statusText = 'Scripting...';
+            statusBackground = 'rgba(234, 179, 8, 0.2)';
+            statusColor = '#facc15';
+            percent = detail.progress_percent || 50;
         } else if (scripted.has(chapter)) {
             statusKey = 'scripted';
-            statusText = `Scripted · ${totalLines} lines`;
+            statusText = totalLines > 0 ? `Scripted · ${totalLines} lines` : 'Scripted';
             statusBackground = 'rgba(132, 204, 22, 0.15)';
             statusColor = '#a3e635';
-        } else if (stage.includes('script') && (
-            currentScript === chapter || (!currentScript && chapter === scripted.size + 1)
-        )) {
-            statusKey = 'active';
-            statusText = 'Scripting';
-            statusBackground = 'rgba(234, 179, 8, 0.15)';
-            statusColor = '#facc15';
+            if (stage.includes('script') || stage === 'voice_review') {
+                percent = 100;
+            }
+        } else if (selection !== null && !selection.has(chapter) && (stage.includes('generat') || stage.includes('master') || stage.includes('validat'))) {
+            statusKey = 'skipped';
+            statusText = 'Skipped (Not in batch)';
+            statusBackground = 'rgba(148, 163, 184, 0.08)';
+            statusColor = '#64748b';
+            percent = detail.progress_percent || 0;
+        } else {
+            statusKey = 'pending';
+            statusText = 'Pending';
+            statusBackground = 'rgba(148, 163, 184, 0.12)';
+            statusColor = '#94a3b8';
+            percent = detail.progress_percent || 0;
         }
 
         const row = document.createElement('div');

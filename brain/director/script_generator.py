@@ -262,6 +262,7 @@ class ScriptGenerator:
         registry: CharacterRegistry,
         scripts_dir: Path | None = None,
         progress_callback: Callable[[ScriptChapter], None] = None,
+        chapter_start_callback: Callable[[int], None] | None = None,
     ) -> list[ScriptChapter]:
         """Generate scripts for all chapters sequentially with incremental saving."""
         scripts: list[ScriptChapter] = []
@@ -317,6 +318,9 @@ class ScriptGenerator:
                         continue
                     except Exception as e:
                         logger.warning("Failed to load existing script %s, regenerating. Error: %s", script_path, e)
+
+            if chapter_start_callback:
+                chapter_start_callback(chapter.number)
 
             ch_t0 = _time.time()
             script = self.generate_chapter_script(
@@ -713,6 +717,64 @@ class ScriptGenerator:
                     )
 
     @staticmethod
+    def _is_pure_dialogue_tag(text: str) -> bool:
+        """Check if narrative text is a short dialogue tag attached to speech."""
+        val = text.strip()
+        words = val.split()
+        if len(words) > 12:
+            return False
+        verbs = (
+            "said", "asked", "replied", "whispered", "shouted", "murmured",
+            "exclaimed", "continued", "agreed", "smiled", "nodded", "added",
+            "called", "demanded", "warned", "answered", "thought", "cried", "gasp"
+        )
+        return any(re.search(r"\b" + v, val, re.IGNORECASE) for v in verbs)
+
+    @staticmethod
+    def _resolve_dialogue_speaker(
+        frag_idx: int,
+        fragments: list[SourceFragment],
+        metadata_map: dict[int, dict],
+        allowed_speakers: set[str],
+    ) -> str:
+        """Infer character speaker for a dialogue fragment if LLM assigned narrator."""
+        next_text = fragments[frag_idx + 1].text if frag_idx + 1 < len(fragments) else ""
+        prev_text = fragments[frag_idx - 1].text if frag_idx > 0 else ""
+        combined = (next_text + " " + prev_text).lower()
+
+        # 1. Child / minor descriptors FIRST
+        if re.search(r"\b(girl|little girl|daughter)\b", combined):
+            return "child_female"
+        if re.search(r"\b(boy|little boy|son)\b", combined):
+            return "child_male"
+        if re.search(r"\b(children|child|kids)\b", combined):
+            return "child_female"
+
+        # 2. Exact named character match in adjacent text
+        for spk in allowed_speakers:
+            if spk not in ("narrator", "child_female", "child_male", "minor_female", "minor_male") and re.search(r"\b" + re.escape(spk) + r"\b", combined):
+                return spk
+
+        # 3. Pronoun / gender descriptor match
+        if re.search(r"\b(she|her|woman|lady)\b", combined):
+            female_spks = [s for s in allowed_speakers if s not in ("narrator", "child_female", "child_male", "minor_female", "minor_male")]
+            return female_spks[0] if female_spks else "minor_female"
+        if re.search(r"\b(he|his|him|man|guy)\b", combined):
+            male_spks = [s for s in allowed_speakers if s not in ("narrator", "child_female", "child_male", "minor_female", "minor_male")]
+            return male_spks[0] if male_spks else "minor_male"
+
+        # 4. Adjacent dialogue speaker in nearby window (-3..+3)
+        for delta in (-1, 1, -2, 2, -3, 3):
+            idx = frag_idx + delta
+            if 0 <= idx < len(fragments):
+                spk = ScriptGenerator._normalize_speaker_id(
+                    metadata_map.get(idx, {}).get("speaker", "narrator")
+                )
+                if spk in allowed_speakers and spk != "narrator":
+                    return spk
+        return "child_female"
+
+    @staticmethod
     def _parse_script_chapter(
         raw: dict,
         fallback_number: int,
@@ -755,6 +817,10 @@ class ScriptGenerator:
             )
             if not is_dialogue:
                 speaker = "narrator"
+            elif speaker == "narrator":
+                speaker = ScriptGenerator._resolve_dialogue_speaker(
+                    i, fragments, metadata_map, allowed_speakers
+                )
             elif speaker not in allowed_speakers:
                 raise ValueError(
                     f"Fragment {id_offset + i} uses unknown speaker '{speaker}'"
@@ -939,10 +1005,16 @@ class ScriptGenerator:
                 line.voice_fx.model_dump() if line.voice_fx else None
             )
             target_chars, max_words = limits([*bucket, line])
-            can_merge = (
+            same_speaker_or_tag_merge = (
                 line.speaker == previous.speaker
-                and (line.voice_id or line.speaker)
-                == (previous.voice_id or previous.speaker)
+                and (line.voice_id or line.speaker) == (previous.voice_id or previous.speaker)
+            ) or (
+                previous.speaker != "narrator"
+                and line.speaker == "narrator"
+                and ScriptGenerator._is_pure_dialogue_tag(line.text)
+            )
+            can_merge = (
+                same_speaker_or_tag_merge
                 and same_fx
                 and "\n\n" not in between
                 and candidate_chars <= target_chars
@@ -952,6 +1024,28 @@ class ScriptGenerator:
                 flush()
             bucket.append(line)
         flush()
+        # Apply dynamic contextual pauses across grouped lines
+        for idx in range(len(grouped)):
+            curr_line = grouped[idx]
+            if idx + 1 < len(grouped):
+                next_line = grouped[idx + 1]
+                between = ""
+                if curr_line.source_end is not None and next_line.source_start is not None:
+                    between = source_text[curr_line.source_end:next_line.source_start]
+
+                if "\n\n" in between or "\r\n\r\n" in between:
+                    curr_line.pause_after_ms = 900
+                elif curr_line.speaker != next_line.speaker:
+                    if curr_line.speaker != "narrator" and next_line.speaker == "narrator":
+                        curr_line.pause_after_ms = 400
+                    else:
+                        curr_line.pause_after_ms = 450
+                elif curr_line.speaker == "narrator":
+                    curr_line.pause_after_ms = 380
+                else:
+                    curr_line.pause_after_ms = 250
+            else:
+                curr_line.pause_after_ms = 1200
 
         if len(grouped) < len(script.lines):
             logger.info(

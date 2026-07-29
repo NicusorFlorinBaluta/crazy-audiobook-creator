@@ -1,11 +1,12 @@
-"""Deterministic voice-casting profiles derived from completed book scripts.
-
-Character analysis intentionally keeps every potentially relevant entity.  Voice
-casting is narrower: only characters that actually own a spoken script line may
-receive assignments or cause a reference voice to be generated.
-"""
-
 from __future__ import annotations
+
+import hashlib
+import re
+from pathlib import Path
+from typing import Any, Iterable
+import numpy as np
+import soundfile as sf
+import scipy.signal as signal
 
 import hashlib
 import re
@@ -165,12 +166,58 @@ def _normalized_signature(value: str) -> str:
     return " ".join(re.findall(r"[a-z]+", value.lower()))
 
 
+_PROMPT_BOILERPLATE = {
+    "a", "an", "clearly", "speaker", "speaking", "style", "maintain", "this",
+    "vocal", "identity", "consistently", "and", "prioritize", "intelligible",
+    "natural", "audiobook", "speech", "distinguishing", "direction", "adult",
+    "speaker", "with", "a", "hint", "of", "emotional", "baseline"
+}
+
+
 def _token_similarity(left: str, right: str) -> float:
-    left_tokens = set(_normalized_signature(left).split())
-    right_tokens = set(_normalized_signature(right).split())
+    left_tokens = set(_normalized_signature(left).split()) - _PROMPT_BOILERPLATE
+    right_tokens = set(_normalized_signature(right).split()) - _PROMPT_BOILERPLATE
     if not left_tokens or not right_tokens:
         return 0.0
     return len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
+
+
+_AUDIO_SIMILARITY_THRESHOLD = 0.88
+
+
+def extract_acoustic_embedding(audio_path: str | Path) -> np.ndarray | None:
+    """Extract a normalized acoustic spectral feature vector from audio."""
+    p = Path(audio_path)
+    if not p.exists() or p.stat().st_size < 100:
+        return None
+    try:
+        data, sample_rate = sf.read(str(p))
+        if data.size == 0:
+            return None
+        if data.ndim > 1:
+            data = data.mean(axis=1)
+        if sample_rate != 16000:
+            num_samples = int(len(data) * 16000 / sample_rate)
+            data = signal.resample(data, num_samples)
+            sample_rate = 16000
+        f, t, Sxx = signal.spectrogram(data, fs=sample_rate, nperseg=512, noverlap=256)
+        log_spec = np.log(Sxx + 1e-6)
+        mean_feat = log_spec.mean(axis=1)
+        std_feat = log_spec.std(axis=1)
+        embedding = np.concatenate([mean_feat, std_feat])
+        norm = np.linalg.norm(embedding)
+        return embedding / norm if norm > 0 else embedding
+    except Exception:
+        return None
+
+
+def compute_audio_similarity(path_a: str | Path, path_b: str | Path) -> float | None:
+    """Compute acoustic cosine similarity between two voice audio files (0.0 to 1.0)."""
+    emb_a = extract_acoustic_embedding(path_a)
+    emb_b = extract_acoustic_embedding(path_b)
+    if emb_a is None or emb_b is None:
+        return None
+    return max(0.0, min(1.0, float(np.dot(emb_a, emb_b))))
 
 
 def _contrast_for(voice_id: str, used: set[str]) -> str:

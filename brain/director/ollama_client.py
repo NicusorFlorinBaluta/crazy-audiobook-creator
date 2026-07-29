@@ -333,15 +333,24 @@ class OllamaClient:
         except json.JSONDecodeError as e:
             logger.debug("[JSON] Direct parse failed: %s", e)
 
+        # Check for markdown code fence block ```json ... ```
+        fenced_match = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", text, re.DOTALL)
+        if fenced_match:
+            try:
+                result = json.loads(fenced_match.group(1))
+                logger.info("[JSON] Parsed from markdown fenced block successfully (try 2).")
+                return result
+            except json.JSONDecodeError:
+                pass
+
         import json_repair
         
         # Try robust parsing using json_repair
         try:
             logger.info("[JSON] Attempting robust json_repair parsing...")
-            # We want to feed json_repair just the text after the think block, or the whole text
-            # Usually extracting from the first { to the end helps it.
-            brace_match = re.search(r"\{.*\}", text, re.DOTALL)
-            json_text = brace_match.group(0) if brace_match else text
+            target_str = fenced_match.group(1) if fenced_match else text
+            brace_match = re.search(r"\{.*\}", target_str, re.DOTALL)
+            json_text = brace_match.group(0) if brace_match else target_str
             
             result = json_repair.loads(json_text)
             if isinstance(result, dict):
