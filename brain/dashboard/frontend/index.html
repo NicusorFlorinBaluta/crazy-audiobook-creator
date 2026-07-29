@@ -102,12 +102,16 @@
                     </button>
                     <button class="btn btn-ghost hidden" id="btn-request-deploy">Park at Boundary</button>
                     <button class="btn btn-primary hidden" id="btn-resume-deploy">Resume Parked</button>
-                    <select id="select-reset-stage" class="select">
-                        <option value="" disabled selected>Reset to Stage...</option>
-                        <option value="scripting">Scripting</option>
-                        <option value="bootstrapping">Bootstrapping</option>
-                        <option value="generating">Generating</option>
-                        <option value="mastering">Mastering</option>
+                    <select id="select-reset-stage" class="select" title="Select a stage to reset project state and restart pipeline execution">
+                        <option value="" disabled selected title="Choose a stage to reset project execution to">Reset to Stage...</option>
+                        <option value="extracting" title="Extracting: Re-extract text from EPUB file (clears all script, cast, and audio files)">Extracting (re-extract EPUB text)</option>
+                        <option value="scripting" title="Scripting: Re-run LLM script & character extraction (clears script JSONs and cast, keeps EPUB text)">Scripting (re-run LLM script & casting)</option>
+                        <option value="bootstrapping" title="Bootstrapping: Re-generate voice design profiles and reference audio (keeps script intact)">Bootstrapping (re-design voice audio)</option>
+                        <option value="voice_review" title="Voice Review: Re-open the Voice Review banner to change speaking voices or tweak cast without re-scripting">Voice Review (re-open voice cast approval)</option>
+                        <option value="generating" title="Generating: Re-generate chapter audio segments (clears audio segments, keeps script and voice cast)">Generating (re-generate chapter audio)</option>
+                        <option value="validating" title="Validating: Re-run Whisper Speech-to-Text quality validation checks">Validating (re-validate Whisper WER)</option>
+                        <option value="mastering" title="Mastering: Re-run ffmpeg/sox chapter audio mastering (clears mastered audio and M4B)">Mastering (re-master chapter audio)</option>
+                        <option value="exporting" title="Exporting: Re-run M4B audiobook packaging over mastered chapter files">Exporting (re-package M4B audiobook)</option>
                     </select>
                     <button class="btn btn-warning hidden" id="btn-reset-stage">Reset</button>
                     <button class="btn btn-success hidden" id="btn-download-audiobook">

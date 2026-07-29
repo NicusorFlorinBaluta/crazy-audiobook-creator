@@ -1106,44 +1106,100 @@ async def reset_pipeline_stage(project_id: str, request: Request):
     except ValueError:
         raise HTTPException(status_code=400, detail=f"Invalid stage: {stage_value}")
     supported = {
+        PipelineStage.EXTRACTING,
         PipelineStage.SCRIPTING,
         PipelineStage.BOOTSTRAPPING,
+        PipelineStage.VOICE_REVIEW,
         PipelineStage.GENERATING,
+        PipelineStage.VALIDATING,
         PipelineStage.MASTERING,
+        PipelineStage.EXPORTING,
     }
     if stage not in supported:
         raise HTTPException(
             status_code=422,
-            detail=(
-                "Reset supports scripting, bootstrapping, generating, "
-                "or mastering"
-            ),
+            detail=f"Stage '{stage_value}' is not supported for reset",
         )
         
     try:
+        project_dir = _project_dir(project_id)
+        workspace_dir = _workspace_project_dir(project_id)
+        
+        import shutil
+        
         update: dict[str, Any] = {
-            "status": stage.value,
+            "status": stage.value if stage != PipelineStage.VOICE_REVIEW else "paused",
             "active_stage": stage.value,
-            "pause_reason": None,
+            "pause_reason": "voice_review" if stage == PipelineStage.VOICE_REVIEW else None,
             "error_message": None,
             "running": False,
         }
-        if stage == PipelineStage.SCRIPTING:
-            update.update(
-                {
-                    "script_completed": False,
-                    "bootstrapping_completed": False,
-                    "scripted_chapters": [],
-                    "force_character_analysis": True,
-                }
-            )
+        
+        if stage == PipelineStage.EXTRACTING:
+            update.update({
+                "script_completed": False,
+                "bootstrapping_completed": False,
+                "voice_review_approved": False,
+                "scripted_chapters": [],
+                "mastered_chapters": [],
+                "force_character_analysis": True,
+            })
+            for p in [project_dir / "book.json", project_dir / "characters.json", project_dir / "voice_cast.json"]:
+                p.unlink(missing_ok=True)
+            for d in [project_dir / "script", project_dir / "segments", project_dir / "mastered", workspace_dir / "segments", workspace_dir / "mastered"]:
+                if d.exists() and d.is_dir():
+                    shutil.rmtree(d, ignore_errors=True)
+                    
+        elif stage == PipelineStage.SCRIPTING:
+            update.update({
+                "script_completed": False,
+                "bootstrapping_completed": False,
+                "voice_review_approved": False,
+                "scripted_chapters": [],
+                "mastered_chapters": [],
+                "force_character_analysis": True,
+            })
+            for p in [project_dir / "characters.json", project_dir / "voice_cast.json"]:
+                p.unlink(missing_ok=True)
+            for d in [project_dir / "script", project_dir / "segments", project_dir / "mastered", workspace_dir / "segments", workspace_dir / "mastered"]:
+                if d.exists() and d.is_dir():
+                    shutil.rmtree(d, ignore_errors=True)
+                    
         elif stage == PipelineStage.BOOTSTRAPPING:
-            update.update(
-                {
-                    "bootstrapping_completed": False,
-                    "bootstrapping_fingerprint": None,
-                }
-            )
+            update.update({
+                "bootstrapping_completed": False,
+                "voice_review_approved": False,
+                "bootstrapping_fingerprint": None,
+                "mastered_chapters": [],
+            })
+            (project_dir / "voice_cast.json").unlink(missing_ok=True)
+            for d in [project_dir / "segments", project_dir / "mastered", workspace_dir / "segments", workspace_dir / "mastered"]:
+                if d.exists() and d.is_dir():
+                    shutil.rmtree(d, ignore_errors=True)
+                    
+        elif stage == PipelineStage.VOICE_REVIEW:
+            update.update({
+                "status": "paused",
+                "active_stage": "voice_review",
+                "pause_reason": "voice_review",
+                "voice_review_approved": False,
+                "mastered_chapters": [],
+            })
+            
+        elif stage == PipelineStage.GENERATING:
+            update.update({"mastered_chapters": []})
+            for d in [project_dir / "segments", project_dir / "mastered", workspace_dir / "segments", workspace_dir / "mastered"]:
+                if d.exists() and d.is_dir():
+                    shutil.rmtree(d, ignore_errors=True)
+                    
+        elif stage == PipelineStage.MASTERING:
+            update.update({"mastered_chapters": []})
+            for d in [project_dir / "mastered", workspace_dir / "mastered"]:
+                if d.exists() and d.is_dir():
+                    shutil.rmtree(d, ignore_errors=True)
+            (project_dir / f"{project_id}.m4b").unlink(missing_ok=True)
+            (workspace_dir / "output" / f"{project_id}.m4b").unlink(missing_ok=True)
+
         job_queue.update_job(project_id, update)
         return {"status": "success", "project_id": project_id, "stage": stage.value}
     except KeyError:

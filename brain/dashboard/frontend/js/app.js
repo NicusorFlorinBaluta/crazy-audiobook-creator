@@ -79,16 +79,34 @@ function setupEventListeners() {
     els.btnBack.addEventListener('click', showProjectsView);
     document.getElementById('nav-home-btn').addEventListener('click', showProjectsView);
     
+    const STAGE_TOOLTIPS = {
+        extracting: 'Re-extract text from EPUB file (clears all script, cast, and audio files)',
+        scripting: 'Re-run LLM script & character extraction (clears script JSONs and cast, keeps EPUB text)',
+        bootstrapping: 'Re-generate voice design profiles and reference audio (keeps script intact)',
+        voice_review: 'Re-open the Voice Review banner to change speaking voices or tweak cast without re-scripting',
+        generating: 'Re-generate chapter audio segments (clears audio segments, keeps script and voice cast)',
+        validating: 'Re-run Whisper Speech-to-Text quality validation checks',
+        mastering: 'Re-run ffmpeg/sox chapter audio mastering (clears mastered audio and M4B)',
+        exporting: 'Re-run M4B audiobook packaging over mastered chapter files'
+    };
+
     // Reset and Download features
     els.selectResetStage.addEventListener('change', () => {
-        if (els.selectResetStage.value) {
+        const val = els.selectResetStage.value;
+        if (val) {
             els.btnResetStage.classList.remove('hidden');
+            const desc = STAGE_TOOLTIPS[val] || '';
+            els.selectResetStage.title = `${val.toUpperCase()}: ${desc}`;
         }
     });
     
     els.btnResetStage.addEventListener('click', async () => {
         const stage = els.selectResetStage.value;
         if (!stage || !state.currentProjectId) return;
+
+        const desc = STAGE_TOOLTIPS[stage] || '';
+        const confirmed = confirm(`Are you sure you want to reset project '${state.currentProjectId}' to stage '${stage}'?\n\nEffect: ${desc}`);
+        if (!confirmed) return;
         
         try {
             const resp = await fetch(`api/projects/${state.currentProjectId}/reset`, {
