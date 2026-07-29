@@ -9,7 +9,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="static/css/styles.css?v=20260728.1">
+    <link rel="stylesheet" href="static/css/styles.css?v=20260729.1">
 </head>
 <body>
     <!-- ============================================ -->
@@ -296,15 +296,101 @@
         </div>
     </div>
 
+            </div>
+
+            <!-- Script Viewer Tab -->
+            <div class="tab-content" id="tab-script">
+                <div class="script-controls">
+                    <select id="script-chapter-select" class="select">
+                        <option value="">Select Chapter</option>
+                    </select>
+                    <div class="script-legend" id="script-legend"></div>
+                </div>
+                <div class="script-viewer" id="script-viewer">
+                    <div class="empty-state small">
+                        <p>Script will appear after generation completes</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Quality Report Tab -->
+            <div class="tab-content" id="tab-quality">
+                <div class="quality-overview" id="quality-overview">
+                    <div class="empty-state small">
+                        <p>Quality data will appear after audio generation</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Log Console Tab -->
+            <div class="tab-content" id="tab-logs">
+                <div class="log-console-toolbar">
+                    <span class="log-status log-status-disconnected" id="log-status">● Disconnected</span>
+                    <div class="log-toolbar-actions">
+                        <label class="log-toggle">
+                            <input type="checkbox" id="log-autoscroll" checked>
+                            Auto-scroll
+                        </label>
+                        <button class="btn btn-ghost btn-sm" id="log-clear">Clear</button>
+                        <button class="btn btn-ghost btn-sm" id="log-copy">Copy All</button>
+                    </div>
+                </div>
+                <div class="log-console" id="log-console" role="log" aria-live="polite">
+                    <div class="log-empty">No logs yet — start the pipeline or open this tab during a run</div>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <!-- ============================================ -->
+    <!-- Upload Modal                                 -->
+    <!-- ============================================ -->
+    <div class="modal-overlay hidden" id="upload-modal">
+        <div class="modal">
+            <div class="modal-header">
+                <h2>New Audiobook Project</h2>
+                <button class="modal-close" id="modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="upload-zone" id="upload-zone">
+                    <div class="upload-icon">📤</div>
+                    <h3>Drop your EPUB file here</h3>
+                    <p>or click to browse</p>
+                    <input type="file" id="epub-file-input" accept=".epub" hidden>
+                </div>
+                <div class="upload-info hidden" id="upload-info">
+                    <div class="file-icon">📖</div>
+                    <div class="file-details">
+                        <span class="file-name" id="upload-file-name"></span>
+                        <span class="file-size" id="upload-file-size"></span>
+                    </div>
+                    <button class="btn btn-ghost" id="upload-remove">✕</button>
+                </div>
+                <div class="upload-progress hidden" id="upload-progress">
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="upload-progress-fill"></div>
+                    </div>
+                    <span class="progress-text" id="upload-progress-text">Uploading...</span>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-ghost" id="modal-cancel">Cancel</button>
+                <button class="btn btn-primary" id="modal-upload" disabled>
+                    Create Project
+                </button>
+            </div>
+        </div>
+    </div>
+
     <!-- ============================================ -->
     <!-- Toast notifications                          -->
     <!-- ============================================ -->
     <div class="toast-container" id="toast-container"></div>
 
     <!-- Scripts -->
-    <script src="static/js/app.js?v=20260728.1"></script>
-    <script src="static/js/pipeline.js?v=20260728.1"></script>
-    <script src="static/js/script-viewer.js?v=20260728.1"></script>
-    <script src="static/js/log-console.js?v=20260728.1"></script>
+    <script src="static/js/app.js?v=20260729.1"></script>
+    <script src="static/js/pipeline.js?v=20260729.1"></script>
+    <script src="static/js/script-viewer.js?v=20260729.1"></script>
+    <script src="static/js/log-console.js?v=20260729.1"></script>
 </body>
 </html>
