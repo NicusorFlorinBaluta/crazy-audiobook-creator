@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import tempfile
 from copy import deepcopy
 from pathlib import Path
@@ -62,7 +63,10 @@ def atomic_write_text(path: str | Path, text: str) -> None:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, destination)
+        try:
+            os.replace(temporary, destination)
+        except PermissionError:
+            shutil.copyfile(temporary, destination)
     finally:
         temporary.unlink(missing_ok=True)
 

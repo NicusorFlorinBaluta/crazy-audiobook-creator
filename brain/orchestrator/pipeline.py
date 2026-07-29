@@ -728,11 +728,12 @@ class Pipeline:
                 },
             )
 
-        start_time = time.time()
+        state = self.job_queue.get_job(project_id)
+        prev_elapsed = float(state.get("elapsed_seconds") or 0.0)
+        start_time = time.time() - prev_elapsed
         self._stop_flags[project_id] = False
         self.ollama.begin_run()
         ollama_used = False
-        state = self.job_queue.get_job(project_id)
         self.job_queue.update_job(
             project_id,
             {
@@ -740,7 +741,7 @@ class Pipeline:
                     "generation_chapter_selection"
                 ),
                 "last_run_started_at": datetime.now(timezone.utc).isoformat(),
-                "elapsed_seconds": 0.0,
+                "elapsed_seconds": prev_elapsed,
                 "error_message": None,
             },
         )
@@ -1262,19 +1263,20 @@ class Pipeline:
                     )
                     - {chapter_script.chapter_number}
                 )
+                project_quality = self.job_queue.get_project_quality_summary(project_id)
                 self.job_queue.update_job(project_id, {
                     "generated_chapters": generated_chapters,
                     "current_chapter": chapter_script.chapter_number,
                     "lines_generated": response.generated,
                     "lines_failed": response.failed_validation,
-                    "average_wer": quality_summary.get(
-                        "average_wer", 0.0
+                    "average_wer": project_quality.get(
+                        "average_wer", quality_summary.get("average_wer", 0.0)
                     ),
-                    "validation_retries": quality_summary.get(
-                        "total_retries", 0
+                    "validation_retries": project_quality.get(
+                        "total_retries", quality_summary.get("total_retries", 0)
                     ),
-                    "validated_segments": quality_summary.get(
-                        "total_segments", 0
+                    "validated_segments": project_quality.get(
+                        "total_segments", quality_summary.get("total_segments", 0)
                     ),
                     "voice_revision_pending_chapters": voice_revision_pending,
                 })

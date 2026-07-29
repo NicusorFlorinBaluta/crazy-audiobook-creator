@@ -31,7 +31,7 @@ tts:
 # --- Quality Validation ---
 validation:
   enabled: true
-  keep_tts_and_whisper_resident: false  # Enable only after the residency benchmark and a long-chapter soak test
+  keep_tts_and_whisper_resident: true  # Verified on RX 7900 XTX (18.1 GiB free VRAM, 0.6s Whisper latency)
   whisper_model: "small"           # "tiny" | "base" | "small" | "medium" | "large-v3"
   whisper_device: "cuda"            # "auto" | "cuda" | "cpu"
 
