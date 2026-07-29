@@ -159,34 +159,51 @@
                             <div class="chapter-heading-line">
                                 <h3>Chapters</h3>
                                 <span id="chapter-summary-badge">0 / 0 completed</span>
+                                <button class="btn btn-ghost btn-sm" id="btn-toggle-chapters" title="Collapse or expand the chapters table">🔼 Collapse</button>
                             </div>
                             <p>Select the next audio batch. Analysis and scripting remain book-wide.</p>
                         </div>
                         <div class="chapter-selection-summary" id="chapter-selection-summary">All chapters selected</div>
                     </div>
-                    <div class="chapter-selection-toolbar">
-                        <div class="chapter-toolbar-group">
-                            <button class="btn btn-ghost btn-sm" id="btn-select-all-chapters">Select all</button>
-                            <button class="btn btn-ghost btn-sm" id="btn-select-none-chapters">Clear</button>
-                            <input type="text" id="chapter-range-input" class="input-sm" placeholder="1-5, 8, 12-14">
-                            <button class="btn btn-primary btn-sm" id="btn-apply-range">Apply range</button>
+                    <div id="chapter-body-container">
+                        <div class="chapter-selection-toolbar">
+                            <div class="chapter-toolbar-group">
+                                <button class="btn btn-ghost btn-sm" id="btn-select-all-chapters">Select all</button>
+                                <button class="btn btn-ghost btn-sm" id="btn-select-none-chapters">Clear</button>
+                                <input type="text" id="chapter-range-input" class="input-sm" placeholder="1-5, 8, 12-14">
+                                <button class="btn btn-primary btn-sm" id="btn-apply-range">Apply range</button>
+                            </div>
+                            <div class="chapter-toolbar-group chapter-toolbar-search">
+                                <input type="search" id="chapter-search-input" class="input-sm" placeholder="Search chapter titles">
+                                <select id="chapter-status-filter" class="input-sm">
+                                    <option value="all">All statuses</option>
+                                    <option value="active">Active</option>
+                                    <option value="pending">Pending</option>
+                                    <option value="scripted">Scripted</option>
+                                    <option value="generated">Generated</option>
+                                    <option value="done">Mastered</option>
+                                </select>
+                            </div>
                         </div>
-                        <div class="chapter-toolbar-group chapter-toolbar-search">
-                            <input type="search" id="chapter-search-input" class="input-sm" placeholder="Search chapter titles">
-                            <select id="chapter-status-filter" class="input-sm">
-                                <option value="all">All statuses</option>
-                                <option value="active">Active</option>
-                                <option value="pending">Pending</option>
-                                <option value="scripted">Scripted</option>
-                                <option value="generated">Generated</option>
-                                <option value="done">Mastered</option>
-                            </select>
+                        <div class="chapter-list-header" aria-hidden="true">
+                            <span></span><span>Chapter</span><span>Status</span><span>Progress</span><span></span>
+                        </div>
+                        <div class="chapter-grid" id="chapter-grid"></div>
+                        <div class="chapter-pagination-toolbar" id="chapter-pagination-toolbar">
+                            <div class="pagination-info" id="pagination-info">Showing 1-15 of 0 chapters</div>
+                            <div class="pagination-controls">
+                                <button class="btn btn-ghost btn-sm" id="btn-prev-page" disabled>◀ Prev</button>
+                                <span class="pagination-page-num" id="pagination-page-num">Page 1 of 1</span>
+                                <button class="btn btn-ghost btn-sm" id="btn-next-page" disabled>Next ▶</button>
+                                <select id="select-page-size" class="input-sm">
+                                    <option value="15" selected>15 per page</option>
+                                    <option value="30">30 per page</option>
+                                    <option value="50">50 per page</option>
+                                    <option value="all">Show all</option>
+                                </select>
+                            </div>
                         </div>
                     </div>
-                    <div class="chapter-list-header" aria-hidden="true">
-                        <span></span><span>Chapter</span><span>Status</span><span>Progress</span><span></span>
-                    </div>
-                    <div class="chapter-grid" id="chapter-grid"></div>
                 </div>
 
                 <details class="schedule-section" id="schedule-section">

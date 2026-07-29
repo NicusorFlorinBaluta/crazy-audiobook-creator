@@ -247,8 +247,46 @@ function setupEventListeners() {
         });
     }
 
-    document.getElementById('chapter-search-input')?.addEventListener('input', filterChapterRows);
-    document.getElementById('chapter-status-filter')?.addEventListener('change', filterChapterRows);
+    document.getElementById('chapter-search-input')?.addEventListener('input', () => {
+        chapterPaginationState.currentPage = 1;
+        filterChapterRows();
+    });
+    document.getElementById('chapter-status-filter')?.addEventListener('change', () => {
+        chapterPaginationState.currentPage = 1;
+        filterChapterRows();
+    });
+
+    // Chapter Collapse Toggle
+    const btnToggleChapters = document.getElementById('btn-toggle-chapters');
+    const chapterBodyContainer = document.getElementById('chapter-body-container');
+    if (btnToggleChapters && chapterBodyContainer) {
+        btnToggleChapters.addEventListener('click', () => {
+            chapterPaginationState.isCollapsed = !chapterPaginationState.isCollapsed;
+            chapterBodyContainer.classList.toggle('hidden', chapterPaginationState.isCollapsed);
+            const count = document.querySelectorAll('.chapter-cell').length;
+            btnToggleChapters.textContent = chapterPaginationState.isCollapsed 
+                ? `🔽 Expand (${count} chapters)` 
+                : '🔼 Collapse';
+        });
+    }
+
+    // Chapter Pagination Controls
+    document.getElementById('select-page-size')?.addEventListener('change', (e) => {
+        chapterPaginationState.pageSize = e.target.value;
+        chapterPaginationState.currentPage = 1;
+        filterChapterRows();
+    });
+    document.getElementById('btn-prev-page')?.addEventListener('click', () => {
+        if (chapterPaginationState.currentPage > 1) {
+            chapterPaginationState.currentPage--;
+            filterChapterRows();
+        }
+    });
+    document.getElementById('btn-next-page')?.addEventListener('click', () => {
+        chapterPaginationState.currentPage++;
+        filterChapterRows();
+    });
+
     document.getElementById('btn-add-schedule-window')?.addEventListener('click', () => {
         addScheduleWindow({
             days: ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'],
@@ -788,15 +826,64 @@ function parseChapterRange(value) {
     return result.size ? result : null;
 }
 
+const chapterPaginationState = {
+    currentPage: 1,
+    pageSize: '15',
+    isCollapsed: false
+};
+
 function filterChapterRows() {
     const search = (document.getElementById('chapter-search-input')?.value || '')
         .trim().toLowerCase();
     const status = document.getElementById('chapter-status-filter')?.value || 'all';
-    document.querySelectorAll('.chapter-cell').forEach(row => {
+    
+    const rows = Array.from(document.querySelectorAll('.chapter-cell'));
+    const matchingRows = rows.filter(row => {
         const titleMatch = !search || row.dataset.title.includes(search);
         const statusMatch = status === 'all' || row.dataset.status === status;
-        row.hidden = !(titleMatch && statusMatch);
+        return titleMatch && statusMatch;
     });
+
+    const isAll = chapterPaginationState.pageSize === 'all';
+    const pageSize = isAll ? Math.max(1, matchingRows.length) : parseInt(chapterPaginationState.pageSize, 10);
+    const totalPages = Math.max(1, Math.ceil(matchingRows.length / (pageSize || 1)));
+    if (chapterPaginationState.currentPage > totalPages) {
+        chapterPaginationState.currentPage = totalPages;
+    }
+    const currentPage = chapterPaginationState.currentPage;
+
+    const startIndex = (currentPage - 1) * pageSize;
+    const endIndex = isAll ? matchingRows.length : Math.min(startIndex + pageSize, matchingRows.length);
+
+    rows.forEach(row => {
+        row.hidden = true;
+    });
+
+    matchingRows.forEach((row, idx) => {
+        if (isAll || (idx >= startIndex && idx < endIndex)) {
+            row.hidden = false;
+        }
+    });
+
+    const info = document.getElementById('pagination-info');
+    const pageNum = document.getElementById('pagination-page-num');
+    const prevBtn = document.getElementById('btn-prev-page');
+    const nextBtn = document.getElementById('btn-next-page');
+
+    if (info) {
+        if (matchingRows.length === 0) {
+            info.textContent = 'No matching chapters';
+        } else if (isAll) {
+            info.textContent = `Showing all ${matchingRows.length} chapters`;
+        } else {
+            info.textContent = `Showing ${startIndex + 1}-${endIndex} of ${matchingRows.length} chapters`;
+        }
+    }
+    if (pageNum) {
+        pageNum.textContent = `Page ${currentPage} of ${totalPages}`;
+    }
+    if (prevBtn) prevBtn.disabled = currentPage <= 1 || isAll;
+    if (nextBtn) nextBtn.disabled = currentPage >= totalPages || isAll;
 }
 
 function updateSelectionSummary(project = null) {
