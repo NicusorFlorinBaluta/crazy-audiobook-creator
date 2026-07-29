@@ -1182,6 +1182,8 @@ async def reset_pipeline_stage(project_id: str, request: Request):
                 "status": "paused",
                 "active_stage": "voice_review",
                 "pause_reason": "voice_review",
+                "voice_review_status": "pending",
+                "voice_review_policy": "required_once",
                 "voice_review_approved": False,
                 "mastered_chapters": [],
             })
@@ -1807,9 +1809,14 @@ async def get_project_voices(project_id: str):
             ),
             "approved_at": state.get("voice_review_approved_at"),
             "required": (
-                state.get("voice_review_policy", "grandfathered")
-                == "required_once"
-                and state.get("voice_review_status") != "approved"
+                (
+                    state.get("voice_review_policy", "grandfathered")
+                    == "required_once"
+                    and state.get("voice_review_status") != "approved"
+                )
+                or state.get("active_stage") == "voice_review"
+                or state.get("pause_reason") == "voice_review"
+                or not state.get("voice_review_approved", True)
             ),
         },
         "change_policy": (
