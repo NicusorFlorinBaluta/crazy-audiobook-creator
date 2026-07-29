@@ -37,7 +37,7 @@ from zoneinfo import ZoneInfo
 import yaml
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -66,7 +66,7 @@ from voice.tts_server.voice_library import VoiceLibraryManager
 
 logger = logging.getLogger(__name__)
 
-FRONTEND_BUILD = "2026.07.29.2"
+FRONTEND_BUILD = "2026.07.29.1"
 
 
 class AsyncioConnectionResetFilter(logging.Filter):
@@ -733,6 +733,9 @@ async def require_dashboard_token(request: Request, call_next):
 
 
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
 # Static files (frontend)
 # ---------------------------------------------------------------------------
 
@@ -743,10 +746,24 @@ if frontend_dir.exists():
 
 @app.get("/")
 async def serve_dashboard():
-    """Serve the dashboard home page."""
+    """Serve the dashboard home page with dynamic cache busters."""
     index_path = frontend_dir / "index.html"
     if index_path.exists():
-        return FileResponse(str(index_path))
+        content = index_path.read_text(encoding="utf-8")
+        timestamp = str(int(time.time()))
+        content = re.sub(
+            r'((?:src|href)="static/[^"]+?\.(?:js|css))(?:\?v=[^"]*)?(")',
+            rf'\1?v={timestamp}\2',
+            content,
+        )
+        return HTMLResponse(
+            content=content,
+            headers={
+                "Cache-Control": "no-store, no-cache, max-age=0, must-revalidate",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            },
+        )
     return JSONResponse(
         {"message": "Dashboard frontend not found. Place files in brain/dashboard/frontend/"},
         status_code=404,
