@@ -762,6 +762,7 @@ async def serve_dashboard():
                 "Cache-Control": "no-store, no-cache, max-age=0, must-revalidate",
                 "Pragma": "no-cache",
                 "Expires": "0",
+                "Clear-Site-Data": '"cache"',
             },
         )
     return JSONResponse(
