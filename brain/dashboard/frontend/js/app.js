@@ -1275,12 +1275,11 @@ function updateChapterSelectionState() {
     updateSelectionSummary();
 
     _selectionDebounceTimer = setTimeout(async () => {
-        if (selected.length === 0) {
-            showToast('No chapters selected. Choose one or more before starting.', 'warning');
-            return;
-        }
         try {
             await saveChapterSelection(targetProjectId, selectionValue);
+            if (selected.length === 0) {
+                showToast('Cleared chapter selection', 'info');
+            }
         } catch (e) {
             console.error('Failed to update selection', e);
             showToast(e.message || 'Failed to save chapter selection', 'error');

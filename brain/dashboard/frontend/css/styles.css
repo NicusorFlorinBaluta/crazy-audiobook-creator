@@ -831,10 +831,15 @@ body {
 .chapter-toolbar-group .input-sm {
     height: 32px;
     padding: 5px 9px;
-    background: rgba(0,0,0,.26);
+    background: rgba(18, 18, 28, 0.95);
     color: var(--text-primary);
     border: 1px solid var(--glass-border);
     border-radius: 7px;
+}
+select option {
+    background-color: #181825;
+    color: #e2e8f0;
+    padding: 6px 10px;
 }
 #chapter-range-input { width: 150px; }
 #chapter-search-input { width: min(260px, 35vw); }

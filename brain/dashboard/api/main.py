@@ -1609,11 +1609,6 @@ async def set_chapter_selection(
     selection = request.chapters
     if selection is not None:
         selection = sorted(set(selection))
-        if not selection:
-            raise HTTPException(
-                status_code=422,
-                detail="Select at least one chapter, or use null for all chapters",
-            )
         total = int(state.get("total_chapters") or 0)
         invalid = [
             chapter for chapter in selection if chapter < 1 or chapter > total
