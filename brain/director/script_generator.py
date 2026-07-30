@@ -455,10 +455,31 @@ class ScriptGenerator:
                     exc,
                 )
         if raw is None:
-            raise RuntimeError(
-                f"LLM did not return complete fragment metadata for chapter "
-                f"{chapter_number}"
-            ) from last_error
+            logger.warning(
+                "LLM metadata annotation failed for chapter %d after retries. Using smart rule-based fallback metadata.",
+                chapter_number,
+            )
+            fallback_lines = []
+            dummy_meta: dict[int, dict] = {}
+            for i, fragment in enumerate(fragments):
+                speaker = "narrator"
+                if self._is_dialogue_fragment(fragment.text):
+                    speaker = self._resolve_dialogue_speaker(i, fragments, dummy_meta, allowed_speakers) or "narrator"
+                fallback_lines.append({
+                    "id": i,
+                    "speaker": speaker,
+                    "speaker_confidence": 0.90,
+                    "emotion": "neutral",
+                    "speed": 1.0,
+                    "pause_before_ms": 0,
+                    "pause_after_ms": 400 if speaker != "narrator" else 380,
+                })
+            raw = {
+                "chapter_number": chapter_number,
+                "chapter_title": chapter_title,
+                "chapter_summary": "",
+                "lines": fallback_lines,
+            }
         elapsed = _time.time() - t0
 
         result = self._parse_script_chapter(
