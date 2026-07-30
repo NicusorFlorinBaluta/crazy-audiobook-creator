@@ -418,7 +418,8 @@ class ScriptGenerator:
         t0 = _time.time()
         raw = None
         last_error: Exception | None = None
-        allowed_speakers = set(registry.characters)
+        BUILTIN_MINOR_SPEAKERS = {"child_female", "child_male", "minor_female", "minor_male"}
+        allowed_speakers = set(registry.characters) | BUILTIN_MINOR_SPEAKERS
         for attempt in range(1, 3):
             try:
                 request_prompt = prompt
