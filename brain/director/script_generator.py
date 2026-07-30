@@ -418,8 +418,7 @@ class ScriptGenerator:
         t0 = _time.time()
         raw = None
         last_error: Exception | None = None
-        BUILTIN_MINOR_SPEAKERS = {"child_female", "child_male", "minor_female", "minor_male"}
-        allowed_speakers = set(registry.characters) | BUILTIN_MINOR_SPEAKERS
+        allowed_speakers = set(registry.characters)
         for attempt in range(1, 3):
             try:
                 request_prompt = prompt
@@ -572,20 +571,28 @@ class ScriptGenerator:
         script: ScriptChapter,
         registry: CharacterRegistry,
     ) -> None:
-        """Reject speakers not established by the book-wide analysis."""
+        """Dynamically register any newly discovered speaking characters into the registry."""
         known_ids = set(registry.characters.keys())
-        unknown = sorted(
-            {
-                line.speaker.lower().replace(" ", "_")
-                for line in script.lines
-                if line.speaker.lower().replace(" ", "_") not in known_ids
-            }
-        )
-        if unknown:
-            raise ValueError(
-                f"Chapter {script.chapter_number} references unknown speakers: "
-                f"{unknown}. Re-run book-wide character analysis."
-            )
+        for line in script.lines:
+            spk = line.speaker.lower().replace(" ", "_")
+            if spk and spk not in known_ids and spk != "narrator":
+                name_display = spk.replace("_", " ").title()
+                registry.characters[spk] = Character(
+                    id=spk,
+                    name=name_display,
+                    gender=Gender.OTHER,
+                    age_range="unknown",
+                    personality_traits=["discovered in scripting"],
+                    voice_description=f"Character: {name_display}",
+                    speaking_style="standard",
+                    discovered_in_pass2=True,
+                )
+                known_ids.add(spk)
+                logger.info(
+                    "[ScriptGenerator] Dynamically registered newly discovered character '%s' in Chapter %d",
+                    spk,
+                    script.chapter_number,
+                )
 
     @staticmethod
     def _format_registry(registry: CharacterRegistry) -> str:
@@ -764,33 +771,22 @@ class ScriptGenerator:
         prev_text = fragments[frag_idx - 1].text if frag_idx > 0 else ""
         combined = (next_text + " " + prev_text).lower()
 
-        def safe(spk: str) -> str:
-            if spk in allowed_speakers:
-                return spk
-            return "narrator"
-
-        # 1. Child / minor descriptors FIRST
-        if re.search(r"\b(girl|little girl|daughter)\b", combined):
-            return safe("child_female")
-        if re.search(r"\b(boy|little boy|son)\b", combined):
-            return safe("child_male")
-        if re.search(r"\b(children|child|kids)\b", combined):
-            return safe("child_female")
-
-        # 2. Exact named character match in adjacent text
+        # 1. Exact named character match in adjacent text
         for spk in allowed_speakers:
-            if spk not in ("narrator", "child_female", "child_male", "minor_female", "minor_male") and re.search(r"\b" + re.escape(spk) + r"\b", combined):
+            if spk != "narrator" and re.search(r"\b" + re.escape(spk) + r"\b", combined):
                 return spk
 
-        # 3. Pronoun / gender descriptor match
-        if re.search(r"\b(she|her|woman|lady)\b", combined):
-            female_spks = [s for s in allowed_speakers if s not in ("narrator", "child_female", "child_male", "minor_female", "minor_male")]
-            return safe(female_spks[0]) if female_spks else safe("minor_female")
-        if re.search(r"\b(he|his|him|man|guy)\b", combined):
-            male_spks = [s for s in allowed_speakers if s not in ("narrator", "child_female", "child_male", "minor_female", "minor_male")]
-            return safe(male_spks[0]) if male_spks else safe("minor_male")
+        # 2. Pronoun / gender descriptor match
+        if re.search(r"\b(she|her|woman|lady|girl)\b", combined):
+            female_spks = [s for s in allowed_speakers if s != "narrator"]
+            if female_spks:
+                return female_spks[0]
+        if re.search(r"\b(he|his|him|man|guy|boy)\b", combined):
+            male_spks = [s for s in allowed_speakers if s != "narrator"]
+            if male_spks:
+                return male_spks[0]
 
-        # 4. Adjacent dialogue speaker in nearby window (-3..+3)
+        # 3. Adjacent dialogue speaker in nearby window (-3..+3)
         for delta in (-1, 1, -2, 2, -3, 3):
             idx = frag_idx + delta
             if 0 <= idx < len(fragments):
@@ -799,7 +795,7 @@ class ScriptGenerator:
                 )
                 if spk in allowed_speakers and spk != "narrator":
                     return spk
-        return safe("child_female")
+        return "narrator"
 
     @staticmethod
     def _parse_script_chapter(
