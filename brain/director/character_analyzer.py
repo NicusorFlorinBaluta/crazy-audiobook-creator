@@ -125,7 +125,7 @@ class CharacterAnalyzer:
         temperature: float = 0.3,
         genre: str = "fantasy",
         max_unique_voices: int = 20,
-        single_pass_threshold: int = 80_000,
+        single_pass_threshold: int = 25_000,
     ):
         self.ollama = ollama
         self.temperature = temperature
@@ -315,7 +315,7 @@ class CharacterAnalyzer:
         Uses dialogue-aware summaries so the LLM sees every speaking character,
         even in chapters that are sent as summaries.
         """
-        TEXT_BUDGET = 40_000  # ~10K tokens, well within 16K context window
+        TEXT_BUDGET = 15_000  # Cap at ~15k chars (~3.5k words) for 100% character recall precision
 
         total_text = "\n\n---\n\n".join(
             f"## {ch.title}\n\n{ch.text}" for ch in book.chapters
@@ -514,8 +514,6 @@ class CharacterAnalyzer:
                 speaking_style="Flowing descriptive prose, unhurried",
             )
             logger.warning("[CharacterAnalyzer] LLM didn't produce a narrator — using default")
-
-
 
         # Keep every speaking character for attribution, but cap distinct voice
         # references by assigning low-dialogue characters a stable shared voice.
