@@ -1131,12 +1131,14 @@ class Pipeline:
                     "transcription_wer": result.transcription_wer,
                     "acoustic_metrics": result.acoustic_metrics,
                 }
-                existing_warnings = profile.setdefault("warnings", [])
-                existing_warnings.extend(
-                    warning
-                    for warning in result.warnings
-                    if warning not in existing_warnings
-                )
+                existing_warnings = [
+                    w for w in profile.get("warnings", [])
+                    if not w.startswith("Sounds very similar to")
+                ]
+                for warning in result.warnings:
+                    if warning not in existing_warnings:
+                        existing_warnings.append(warning)
+                profile["warnings"] = existing_warnings
             atomic_write_json(project_dir / "voice_cast.json", cast)
             current_state = self.job_queue.get_job(project_id)
             review_status = current_state.get(
