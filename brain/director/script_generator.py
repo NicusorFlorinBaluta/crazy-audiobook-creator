@@ -127,7 +127,7 @@ class ScriptGenerator:
         temperature: float = 0.4,
         chunk_size_words: int = CHUNK_SIZE_WORDS,
         chunk_overlap_words: int = CHUNK_OVERLAP_WORDS,
-        max_fragments_per_chunk: int = 48,
+        max_fragments_per_chunk: int = 30,
         group_utterances: bool = True,
         utterance_target_chars: int = 260,
         utterance_max_words: int = 45,
@@ -763,13 +763,18 @@ class ScriptGenerator:
         prev_text = fragments[frag_idx - 1].text if frag_idx > 0 else ""
         combined = (next_text + " " + prev_text).lower()
 
+        def safe(spk: str) -> str:
+            if spk in allowed_speakers:
+                return spk
+            return "narrator"
+
         # 1. Child / minor descriptors FIRST
         if re.search(r"\b(girl|little girl|daughter)\b", combined):
-            return "child_female"
+            return safe("child_female")
         if re.search(r"\b(boy|little boy|son)\b", combined):
-            return "child_male"
+            return safe("child_male")
         if re.search(r"\b(children|child|kids)\b", combined):
-            return "child_female"
+            return safe("child_female")
 
         # 2. Exact named character match in adjacent text
         for spk in allowed_speakers:
@@ -779,10 +784,10 @@ class ScriptGenerator:
         # 3. Pronoun / gender descriptor match
         if re.search(r"\b(she|her|woman|lady)\b", combined):
             female_spks = [s for s in allowed_speakers if s not in ("narrator", "child_female", "child_male", "minor_female", "minor_male")]
-            return female_spks[0] if female_spks else "minor_female"
+            return safe(female_spks[0]) if female_spks else safe("minor_female")
         if re.search(r"\b(he|his|him|man|guy)\b", combined):
             male_spks = [s for s in allowed_speakers if s not in ("narrator", "child_female", "child_male", "minor_female", "minor_male")]
-            return male_spks[0] if male_spks else "minor_male"
+            return safe(male_spks[0]) if male_spks else safe("minor_male")
 
         # 4. Adjacent dialogue speaker in nearby window (-3..+3)
         for delta in (-1, 1, -2, 2, -3, 3):
@@ -793,7 +798,7 @@ class ScriptGenerator:
                 )
                 if spk in allowed_speakers and spk != "narrator":
                     return spk
-        return "child_female"
+        return safe("child_female")
 
     @staticmethod
     def _parse_script_chapter(
