@@ -1,6 +1,6 @@
 """Brain Dashboard API — FastAPI application.
 
-Serves the web dashboard and orchestrates the audiobook pipeline.
+Serves the web dashboard and orchestrates the audiobook pipeline (v2).
 Endpoints:
   - Static file serving for frontend (HTML/CSS/JS)
   - Project management CRUD
@@ -66,7 +66,7 @@ from voice.tts_server.voice_library import VoiceLibraryManager
 
 logger = logging.getLogger(__name__)
 
-FRONTEND_BUILD = "2026.07.29.1"
+FRONTEND_BUILD = "2026.07.30.1"
 
 
 class AsyncioConnectionResetFilter(logging.Filter):

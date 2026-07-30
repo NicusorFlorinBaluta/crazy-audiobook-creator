@@ -443,7 +443,6 @@ class ScriptGenerator:
                     allowed_speakers,
                     id_offset=id_offset,
                     confidence_threshold=self.speaker_confidence_threshold,
-                    registry=registry,
                 )
                 raw = candidate
                 break
@@ -706,9 +705,15 @@ class ScriptGenerator:
 
 
     @staticmethod
-        registry: CharacterRegistry | None = None,
+    def _validate_metadata_speakers(
+        raw: dict[str, Any],
+        fragments: list[SourceFragment],
+        allowed_speakers: set[str],
+        *,
+        id_offset: int = 0,
+        confidence_threshold: float = 0.55,
     ) -> None:
-        """Dynamically register any new speaking characters discovered during scripting."""
+        """Reject invented dialogue speakers while the LLM retry is still available."""
         metadata_map = {
             int(item["id"]): item
             for item in raw.get("lines", [])
@@ -720,24 +725,10 @@ class ScriptGenerator:
             speaker = ScriptGenerator._normalize_speaker_id(
                 metadata_map.get(i, {}).get("speaker", "narrator")
             )
-            if speaker not in allowed_speakers and speaker != "narrator":
-                name_display = speaker.replace("_", " ").title()
-                if registry is not None and speaker not in registry.characters:
-                    registry.characters[speaker] = Character(
-                        id=speaker,
-                        name=name_display,
-                        gender=Gender.OTHER,
-                        age_range="unknown",
-                        personality_traits=["discovered in scripting"],
-                        voice_description=f"Character: {name_display}",
-                        speaking_style="standard",
-                        discovered_in_pass2=True,
-                    )
-                    logger.info(
-                        "[ScriptGenerator] Dynamically registered new character '%s' in Pass 2",
-                        speaker,
-                    )
-                allowed_speakers.add(speaker)
+            if speaker not in allowed_speakers:
+                raise ValueError(
+                    f"Fragment {id_offset + i} uses unknown speaker '{speaker}'"
+                )
             confidence = metadata_map.get(i, {}).get("speaker_confidence")
             if confidence is not None:
                 try:
@@ -857,24 +848,12 @@ class ScriptGenerator:
                     i, fragments, metadata_map, allowed_speakers
                 )
             elif speaker not in allowed_speakers:
-                name_display = speaker.replace("_", " ").title()
-                if registry is not None and speaker not in registry.characters:
-                    registry.characters[speaker] = Character(
-                        id=speaker,
-                        name=name_display,
-                        gender=Gender.OTHER,
-                        age_range="unknown",
-                        personality_traits=["discovered in scripting"],
-                        voice_description=f"Character: {name_display}",
-                        speaking_style="standard",
-                        discovered_in_pass2=True,
-                    )
-                allowed_speakers.add(speaker)
-                logger.info(
-                    "[ScriptGenerator] Dynamically registered speaker '%s' for fragment %d",
+                logger.warning(
+                    "[ScriptGenerator] Unknown speaker '%s' for fragment %d — mapping to narrator",
                     speaker,
                     id_offset + i,
                 )
+                speaker = "narrator"
 
             try:
                 pause_before_raw = int(
