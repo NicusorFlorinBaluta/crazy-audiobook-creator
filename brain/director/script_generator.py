@@ -726,9 +726,13 @@ class ScriptGenerator:
                 metadata_map.get(i, {}).get("speaker", "narrator")
             )
             if speaker not in allowed_speakers:
-                raise ValueError(
-                    f"Fragment {id_offset + i} uses unknown speaker '{speaker}'"
+                logger.warning(
+                    "[ScriptGenerator] LLM output unknown speaker '%s' for fragment %d — mapping to narrator",
+                    speaker,
+                    id_offset + i,
                 )
+                if i in metadata_map and isinstance(metadata_map[i], dict):
+                    metadata_map[i]["speaker"] = "narrator"
             confidence = metadata_map.get(i, {}).get("speaker_confidence")
             if confidence is not None:
                 try:
