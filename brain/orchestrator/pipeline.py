@@ -757,6 +757,15 @@ class Pipeline:
             self._check_stop(project_id)
             state = self.job_queue.get_job(project_id)
             if not state.get("script_completed", False):
+                self.job_queue.update_job(
+                    project_id,
+                    {
+                        "voice_review_status": "pending",
+                        "voice_review_approved": False,
+                        "voice_review_approved_at": None,
+                        "bootstrapping_completed": False,
+                    },
+                )
                 self._start_ollama_server()
                 ollama_used = True
                 self._run_script_director(project_id, project_dir)
