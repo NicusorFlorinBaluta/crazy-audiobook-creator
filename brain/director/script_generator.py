@@ -489,6 +489,7 @@ class ScriptGenerator:
             fragments,
             id_offset=id_offset,
             allowed_speakers=allowed_speakers,
+            registry=registry,
         )
         logger.info(
             "[ScriptGenerator] Ch%d LLM done in %.1fs | %d lines generated",
@@ -806,6 +807,7 @@ class ScriptGenerator:
         *,
         id_offset: int = 0,
         allowed_speakers: set[str] | None = None,
+        registry: CharacterRegistry | None = None,
     ) -> ScriptChapter:
         """Parse LLM JSON metadata output into a ScriptChapter using static fragments."""
         raw_lines = raw.get("lines", [])
@@ -824,7 +826,7 @@ class ScriptGenerator:
                 except (ValueError, TypeError):
                     pass
 
-        allowed_speakers = allowed_speakers or {"narrator"}
+        allowed_speakers = allowed_speakers if allowed_speakers is not None else {"narrator"}
         for i, fragment in enumerate(fragments):
             meta = metadata_map.get(i, {})
             
@@ -845,8 +847,23 @@ class ScriptGenerator:
                     i, fragments, metadata_map, allowed_speakers
                 )
             elif speaker not in allowed_speakers:
-                raise ValueError(
-                    f"Fragment {id_offset + i} uses unknown speaker '{speaker}'"
+                name_display = speaker.replace("_", " ").title()
+                if registry is not None and speaker not in registry.characters:
+                    registry.characters[speaker] = Character(
+                        id=speaker,
+                        name=name_display,
+                        gender=Gender.OTHER,
+                        age_range="unknown",
+                        personality_traits=["discovered in scripting"],
+                        voice_description=f"Character: {name_display}",
+                        speaking_style="standard",
+                        discovered_in_pass2=True,
+                    )
+                allowed_speakers.add(speaker)
+                logger.info(
+                    "[ScriptGenerator] Dynamically registered speaker '%s' for fragment %d",
+                    speaker,
+                    id_offset + i,
                 )
 
             try:
