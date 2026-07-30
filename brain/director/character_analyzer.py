@@ -515,6 +515,25 @@ class CharacterAnalyzer:
             )
             logger.warning("[CharacterAnalyzer] LLM didn't produce a narrator — using default")
 
+        # Pre-populate standard minor speaker categories if not already present
+        minor_defaults = [
+            ("child_female", "Child (Female)", Gender.FEMALE, "child", "A young female child with a bright, clear, high-pitched voice."),
+            ("child_male", "Child (Male)", Gender.MALE, "child", "A young male child with an energetic, clear, high-pitched voice."),
+            ("minor_female", "Minor Female", Gender.FEMALE, "adult", "A minor female background speaker with a natural, clear voice."),
+            ("minor_male", "Minor Male", Gender.MALE, "adult", "A minor male background speaker with a natural, clear voice."),
+        ]
+        for mid, mname, mgender, mage, mdesc in minor_defaults:
+            if mid not in characters:
+                characters[mid] = Character(
+                    id=mid,
+                    name=mname,
+                    gender=mgender,
+                    age_range=mage,
+                    personality_traits=["minor background speaker"],
+                    voice_description=mdesc,
+                    speaking_style="Standard dialogue delivery",
+                )
+
         # Keep every speaking character for attribution, but cap distinct voice
         # references by assigning low-dialogue characters a stable shared voice.
         if len(characters) > self.max_unique_voices:
