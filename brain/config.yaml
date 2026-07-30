@@ -58,7 +58,7 @@ script:
   expressive_target_chars: 180    # Keep intense/whispered delivery controllable
   expressive_max_words: 30
   speaker_confidence_threshold: 0.55
-  max_fragments_per_chunk: 24
+  max_fragments_per_chunk: 30
   narrator_pause_ms: 500
   dialogue_pause_ms: 300
   scene_transition_pause_ms: 1500
@@ -68,8 +68,8 @@ script:
   max_unique_voices: 20
   minor_character_threshold: 3
   group_minor_characters: true
-  chunk_size_words: 600
-  chunk_overlap_words: 150
+  chunk_size_words: 450
+  chunk_overlap_words: 0
 # Local dashboard
 dashboard:
   port: 8000

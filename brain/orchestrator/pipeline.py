@@ -130,8 +130,9 @@ class Pipeline:
         self.script_generator = ScriptGenerator(
             ollama=self.ollama,
             temperature=ollama_cfg.get("temperature_pass2", 0.4),
-            chunk_size_words=script_cfg.get("chunk_size_words", 5000),
-            chunk_overlap_words=script_cfg.get("chunk_overlap_words", 500),
+            chunk_size_words=script_cfg.get("chunk_size_words", 450),
+            chunk_overlap_words=script_cfg.get("chunk_overlap_words", 0),
+            max_fragments_per_chunk=script_cfg.get("max_fragments_per_chunk", 30),
             group_utterances=script_cfg.get("group_utterances", True),
             utterance_target_chars=script_cfg.get(
                 "utterance_target_chars", 260
