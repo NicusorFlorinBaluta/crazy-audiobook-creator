@@ -125,7 +125,7 @@ class CharacterAnalyzer:
         temperature: float = 0.3,
         genre: str = "fantasy",
         max_unique_voices: int = 20,
-        single_pass_threshold: int = 25_000,
+        single_pass_threshold: int = 15_000,
     ):
         self.ollama = ollama
         self.temperature = temperature
@@ -310,91 +310,15 @@ class CharacterAnalyzer:
         return "\n".join(excerpts)
 
     def _prepare_book_text(self, book: ExtractedBook) -> str:
-        """Prepare book text for the LLM, handling long books.
-
-        Uses dialogue-aware summaries so the LLM sees every speaking character,
-        even in chapters that are sent as summaries.
-        """
-        TEXT_BUDGET = 15_000  # Cap at ~15k chars (~3.5k words) for 100% character recall precision
-
+        """Prepare book text for single-pass analysis."""
         total_text = "\n\n---\n\n".join(
             f"## {ch.title}\n\n{ch.text}" for ch in book.chapters
         )
-        total_len = len(total_text)
-
-        if total_len < TEXT_BUDGET:
-            logger.info(
-                "[CharacterAnalyzer] Book fits in context (%.1f KB) — sending full text",
-                total_len / 1024,
-            )
-            return total_text
-
         logger.info(
-            "[CharacterAnalyzer] Book is large (%.1f KB > %.0f KB limit) — using dialogue-aware summary strategy",
-            total_len / 1024,
-            TEXT_BUDGET / 1024,
+            "[CharacterAnalyzer] Single-pass analysis (%.1f KB) — sending full book text",
+            len(total_text) / 1024,
         )
-        parts: list[str] = []
-        current_len = 0
-
-        for idx, ch in enumerate(book.chapters):
-            if idx == 0 and len(ch.text) < 15_000:
-                text_to_add = f"## {ch.title} [FULL TEXT]\n\n{ch.text}"
-                strategy = "FULL TEXT"
-            else:
-                # Dialogue-aware summary: prose intro + all dialogue lines
-                prose_intro = ch.text[:300].rsplit(".", 1)[0] + "."
-                dialogue = self._extract_dialogue_lines(ch.text, max_chars=2000)
-                if dialogue:
-                    text_to_add = (
-                        f"## {ch.title} [SUMMARY + DIALOGUE]\n\n"
-                        f"{prose_intro}\n\n"
-                        f"### Dialogue in this chapter:\n{dialogue}"
-                    )
-                    strategy = "SUMMARY+DIALOGUE"
-                else:
-                    text_to_add = f"## {ch.title} [SUMMARY]\n\n{prose_intro}"
-                    strategy = "SUMMARY"
-
-            if current_len + len(text_to_add) > TEXT_BUDGET:
-                # Still include this chapter but truncate dialogue if needed
-                remaining = TEXT_BUDGET - current_len - 500
-                if remaining > 500:
-                    prose_intro = ch.text[:200].rsplit(".", 1)[0] + "."
-                    dialogue = self._extract_dialogue_lines(ch.text, max_chars=min(1000, remaining))
-                    text_to_add = (
-                        f"## {ch.title} [TRUNCATED]\n\n"
-                        f"{prose_intro}\n\n"
-                        f"### Dialogue:\n{dialogue}"
-                    )
-                    strategy = "TRUNCATED"
-                else:
-                    logger.warning(
-                        "[CharacterAnalyzer] Budget exhausted at chapter %d/%d (%.1f KB used)",
-                        idx,
-                        len(book.chapters),
-                        current_len / 1024,
-                    )
-                    break
-
-            logger.info(
-                "[CharacterAnalyzer] Ch%d '%s': %s (+%.1f KB, total %.1f KB)",
-                idx + 1,
-                ch.title[:40],
-                strategy,
-                len(text_to_add) / 1024,
-                (current_len + len(text_to_add)) / 1024,
-            )
-            parts.append(text_to_add)
-            current_len += len(text_to_add)
-
-        logger.info(
-            "[CharacterAnalyzer] Prepared %d/%d chapters for LLM (%.1f KB)",
-            len(parts),
-            len(book.chapters),
-            current_len / 1024,
-        )
-        return "\n\n---\n\n".join(parts)
+        return total_text
 
     def _build_prompt(self, book_text: str, title: str, author: str) -> str:
         return ""
