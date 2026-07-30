@@ -39,7 +39,7 @@ validation:
   wer_threshold: 0.20               # 20%
   max_retries: 3
   speaker_similarity_threshold: 0.55
-  voice_profile_similarity_warning: 0.88
+  voice_profile_similarity_warning: 0.97
   voice_profile_acoustic_regenerations: 1
 
   # Audio checks

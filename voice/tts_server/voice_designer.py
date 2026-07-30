@@ -322,6 +322,34 @@ class VoiceDesigner:
                     embeddings[right_id],
                 )
                 if similarity >= self.similarity_warning_threshold:
+                    left_v = voices_generated[left_id]
+                    right_v = voices_generated[right_id]
+
+                    # Suppress false positives across different genders or large pitch deltas (>= 40 Hz)
+                    left_g = str(getattr(left_v, "gender", "") or "").lower()
+                    right_g = str(getattr(right_v, "gender", "") or "").lower()
+                    
+                    left_metrics = getattr(getattr(left_v, "quality", None), "acoustic_metrics", None)
+                    right_metrics = getattr(getattr(right_v, "quality", None), "acoustic_metrics", None)
+                    left_f0 = float(getattr(left_metrics, "median_f0_hz", 0.0) or 0.0) if left_metrics else 0.0
+                    right_f0 = float(getattr(right_metrics, "median_f0_hz", 0.0) or 0.0) if right_metrics else 0.0
+
+                    genders_differ = bool(left_g and right_g and left_g != right_g and left_g != "other" and right_g != "other")
+                    pitch_differs = bool(left_f0 > 0 and right_f0 > 0 and abs(left_f0 - right_f0) >= 40.0)
+
+                    if genders_differ or pitch_differs:
+                        logger.info(
+                            "Suppressing acoustic similarity warning for '%s' and '%s' (similarity: %.3f, gender: %s vs %s, pitch: %.1f Hz vs %.1f Hz)",
+                            left_id,
+                            right_id,
+                            similarity,
+                            left_g,
+                            right_g,
+                            left_f0,
+                            right_f0,
+                        )
+                        continue
+
                     warning = (
                         f"Sounds very similar to {right_id} "
                         f"(speaker similarity {similarity:.3f})."

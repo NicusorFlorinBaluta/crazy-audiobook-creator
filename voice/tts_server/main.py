@@ -251,7 +251,7 @@ async def lifespan(app: FastAPI):
         ),
         wer_threshold=val_cfg.get("wer_threshold", 0.20),
         similarity_warning_threshold=val_cfg.get(
-            "voice_profile_similarity_warning", 0.88
+            "voice_profile_similarity_warning", 0.97
         ),
         acoustic_regeneration_attempts=val_cfg.get(
             "voice_profile_acoustic_regenerations", 1
