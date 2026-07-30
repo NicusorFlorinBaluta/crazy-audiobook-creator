@@ -36,11 +36,14 @@ def _load_prompt(name: str) -> str:
 
 
 # Inline fallback prompt if file doesn't exist yet
-_SYSTEM_PROMPT = """You are an expert audiobook director and strict data extraction system. Analyze book text and extract all characters and their voice mappings.
+_SYSTEM_PROMPT = """You are an expert audiobook director and strict data extraction system. Analyze book text and extract ALL characters and their voice mappings.
 
 ### Character Extraction Guidelines
-- Extract every entity that actually speaks, regardless of whether it is a
+- Extract EVERY entity that actually speaks, regardless of whether it is a
   person, animal, artificial intelligence, ship, location, or personified object.
+- Include ALL speaking characters, even minor or unnamed ones who speak only
+  once (e.g. "a child", "the merchant", "a passing guard"). Create a descriptive
+  ID for unnamed speakers like "child_female", "merchant", "guard".
 - Recognize dialogue in straight/curly quotes, single typographic quotes, and
   em-dash dialogue conventions.
 - Exclude an entity only when the supplied text provides no spoken dialogue.
@@ -49,6 +52,13 @@ _SYSTEM_PROMPT = """You are an expert audiobook director and strict data extract
 - A named or personified place/object is not a speaking character unless the
   text explicitly attributes spoken dialogue to that entity. Thoughts,
   descriptions, invocations, and figurative personification are not dialogue.
+
+### Character ID Guidelines
+- CRITICAL: Use the character's actual name as the character_id in snake_case.
+  For example: "starling", "sixth_of_dusk", "mother_frond".
+- Do NOT use generic IDs like "character_1", "character_2", "char_a".
+- For unnamed speakers, use a descriptive ID: "child_female", "old_merchant",
+  "guard_captain".
 
 ### Voice Description Guidelines
 
@@ -86,7 +96,7 @@ CRITICAL REMINDER: You MUST output ONLY valid JSON matching the Output Schema be
       "voice_description": "detailed voice description for TTS",
       "speaking_style": "how the narrator typically speaks"
     }},
-    "character_id": {{
+    "character_name_in_snake_case": {{
       "name": "Character Display Name",
       "gender": "male|female|other",
       "age_range": "string",
@@ -96,8 +106,7 @@ CRITICAL REMINDER: You MUST output ONLY valid JSON matching the Output Schema be
       "dialogue_count": 0
     }}
   }}
-}}
-"""
+}}"""
 
 _USER_PROMPT = """## Source Book Text
 
@@ -274,14 +283,46 @@ class CharacterAnalyzer:
 
         return registry
 
+    @staticmethod
+    def _extract_dialogue_lines(text: str, max_chars: int = 2000) -> str:
+        """Extract dialogue lines with surrounding attribution tags from chapter text.
+
+        Returns a compact string of dialogue excerpts for character discovery.
+        Each line includes ~30 chars of context before/after for speaker attribution.
+        """
+        # Match quoted dialogue (straight, curly, and single typographic)
+        pattern = re.compile(
+            r'(?:([\w\s,;:]+\s+)?'
+            r'(?:"[^"\n]{3,}?"|\u201c[^\u201d\n]{3,}?\u201d|\u2018[^\u2019\n]{3,}?\u2019)'
+            r'(?:\s*[\w\s,;:]+)?)',
+            re.UNICODE,
+        )
+        excerpts: list[str] = []
+        total = 0
+        for match in pattern.finditer(text):
+            start = max(0, match.start() - 30)
+            end = min(len(text), match.end() + 30)
+            excerpt = text[start:end].strip()
+            if total + len(excerpt) > max_chars:
+                break
+            excerpts.append(excerpt)
+            total += len(excerpt)
+        return "\n".join(excerpts)
+
     def _prepare_book_text(self, book: ExtractedBook) -> str:
-        """Prepare book text for the LLM, handling long books."""
+        """Prepare book text for the LLM, handling long books.
+
+        Uses dialogue-aware summaries so the LLM sees every speaking character,
+        even in chapters that are sent as summaries.
+        """
+        TEXT_BUDGET = 40_000  # ~10K tokens, well within 16K context window
+
         total_text = "\n\n---\n\n".join(
             f"## {ch.title}\n\n{ch.text}" for ch in book.chapters
         )
         total_len = len(total_text)
 
-        if total_len < 25_000:
+        if total_len < TEXT_BUDGET:
             logger.info(
                 "[CharacterAnalyzer] Book fits in context (%.1f KB) — sending full text",
                 total_len / 1024,
@@ -289,8 +330,9 @@ class CharacterAnalyzer:
             return total_text
 
         logger.info(
-            "[CharacterAnalyzer] Book is large (%.1f KB > 25 KB limit) — using strict summary strategy",
+            "[CharacterAnalyzer] Book is large (%.1f KB > %.0f KB limit) — using dialogue-aware summary strategy",
             total_len / 1024,
+            TEXT_BUDGET / 1024,
         )
         parts: list[str] = []
         current_len = 0
@@ -300,18 +342,40 @@ class CharacterAnalyzer:
                 text_to_add = f"## {ch.title} [FULL TEXT]\n\n{ch.text}"
                 strategy = "FULL TEXT"
             else:
-                summary = ch.text[:500].rsplit(".", 1)[0] + "."
-                text_to_add = f"## {ch.title} [SUMMARY]\n\n{summary}"
-                strategy = "SUMMARY"
+                # Dialogue-aware summary: prose intro + all dialogue lines
+                prose_intro = ch.text[:300].rsplit(".", 1)[0] + "."
+                dialogue = self._extract_dialogue_lines(ch.text, max_chars=2000)
+                if dialogue:
+                    text_to_add = (
+                        f"## {ch.title} [SUMMARY + DIALOGUE]\n\n"
+                        f"{prose_intro}\n\n"
+                        f"### Dialogue in this chapter:\n{dialogue}"
+                    )
+                    strategy = "SUMMARY+DIALOGUE"
+                else:
+                    text_to_add = f"## {ch.title} [SUMMARY]\n\n{prose_intro}"
+                    strategy = "SUMMARY"
 
-            if current_len + len(text_to_add) > 25_000:
-                logger.warning(
-                    "[CharacterAnalyzer] Truncated at chapter %d/%d (%.1f KB used) — context limit reached",
-                    idx,
-                    len(book.chapters),
-                    current_len / 1024,
-                )
-                break
+            if current_len + len(text_to_add) > TEXT_BUDGET:
+                # Still include this chapter but truncate dialogue if needed
+                remaining = TEXT_BUDGET - current_len - 500
+                if remaining > 500:
+                    prose_intro = ch.text[:200].rsplit(".", 1)[0] + "."
+                    dialogue = self._extract_dialogue_lines(ch.text, max_chars=min(1000, remaining))
+                    text_to_add = (
+                        f"## {ch.title} [TRUNCATED]\n\n"
+                        f"{prose_intro}\n\n"
+                        f"### Dialogue:\n{dialogue}"
+                    )
+                    strategy = "TRUNCATED"
+                else:
+                    logger.warning(
+                        "[CharacterAnalyzer] Budget exhausted at chapter %d/%d (%.1f KB used)",
+                        idx,
+                        len(book.chapters),
+                        current_len / 1024,
+                    )
+                    break
 
             logger.info(
                 "[CharacterAnalyzer] Ch%d '%s': %s (+%.1f KB, total %.1f KB)",

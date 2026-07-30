@@ -18,7 +18,7 @@ ollama:
   temperature_pass1: 0.3
   temperature_pass2: 0.4
   top_p: 0.9
-  context_window: 6144
+  context_window: 16384
   timeout: 600
   max_retries: 3
   max_retry_seconds: 900       # Total budget for failed attempts/backoff; healthy streams may run longer
