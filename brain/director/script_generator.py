@@ -704,6 +704,38 @@ class ScriptGenerator:
         )
 
     @staticmethod
+    def _canonicalize_speaker_id(
+        speaker_id: str,
+        allowed_speakers: set[str],
+    ) -> str:
+        """Map raw speaker strings or variants (e.g. 'starling_girl', 'sixth_of_dusk')
+        to canonical character IDs in allowed_speakers if available.
+        """
+        norm = speaker_id.lower().strip("_")
+        if not norm or norm == "narrator":
+            return "narrator"
+        if norm in allowed_speakers:
+            return norm
+
+        # 1. Substring / Token Overlap Match against known character IDs
+        for known in allowed_speakers:
+            if known == "narrator":
+                continue
+            if known in norm or norm in known:
+                return known
+
+        # 2. Token set similarity match (e.g. 'dusk_trapper' vs 'dusk')
+        norm_tokens = set(norm.split("_"))
+        for known in allowed_speakers:
+            if known == "narrator":
+                continue
+            known_tokens = set(known.split("_"))
+            if norm_tokens & known_tokens:
+                return known
+
+        return norm
+
+    @staticmethod
     def _validate_metadata_speakers(
         raw: dict[str, Any],
         fragments: list[SourceFragment],
@@ -837,8 +869,11 @@ class ScriptGenerator:
                 speed = 1.0
 
             is_dialogue = ScriptGenerator._is_dialogue_fragment(fragment.text)
-            speaker = ScriptGenerator._normalize_speaker_id(
+            raw_speaker = ScriptGenerator._normalize_speaker_id(
                 meta.get("speaker", "narrator")
+            )
+            speaker = ScriptGenerator._canonicalize_speaker_id(
+                raw_speaker, allowed_speakers
             )
             if not is_dialogue:
                 speaker = "narrator"
@@ -861,7 +896,7 @@ class ScriptGenerator:
                     )
                 allowed_speakers.add(speaker)
                 logger.info(
-                    "[ScriptGenerator] Dynamically registered speaker '%s' for fragment %d",
+                    "[ScriptGenerator] Dynamically registered new character '%s' for fragment %d",
                     speaker,
                     id_offset + i,
                 )
