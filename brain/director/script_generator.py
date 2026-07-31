@@ -124,10 +124,10 @@ class ScriptGenerator:
     def __init__(
         self,
         ollama: OllamaClient,
-        temperature: float = 0.4,
+        temperature: float = 0.2,
         chunk_size_words: int = CHUNK_SIZE_WORDS,
         chunk_overlap_words: int = CHUNK_OVERLAP_WORDS,
-        max_fragments_per_chunk: int = 30,
+        max_fragments_per_chunk: int = 60,
         group_utterances: bool = True,
         utterance_target_chars: int = 260,
         utterance_max_words: int = 45,
@@ -575,8 +575,26 @@ class ScriptGenerator:
         """Dynamically register any newly discovered speaking characters into the registry."""
         known_ids = set(registry.characters.keys())
         for line in script.lines:
-            spk = line.speaker.lower().replace(" ", "_")
-            if spk and spk not in known_ids and spk != "narrator":
+            spk = line.speaker.lower().replace(" ", "_").strip("_")
+            if not spk or spk == "narrator":
+                continue
+            
+            # Check canonical speaker resolution (aliases, display names, name variants)
+            canonical = spk
+            if spk not in known_ids:
+                for cid, char in registry.characters.items():
+                    aliases = getattr(char, "aliases", [])
+                    alias_norms = [a.lower().replace(" ", "_") for a in aliases]
+                    char_name_norm = char.name.lower().replace(" ", "_")
+                    if spk in alias_norms or spk == char_name_norm or (spk in cid or cid in spk) and len(spk) >= 3:
+                        canonical = cid
+                        break
+            
+            if canonical != spk:
+                line.speaker = canonical
+                continue
+
+            if spk not in known_ids:
                 name_display = spk.replace("_", " ").title()
                 registry.characters[spk] = Character(
                     id=spk,
@@ -843,10 +861,21 @@ class ScriptGenerator:
             )
             if not is_dialogue:
                 speaker = "narrator"
-            elif speaker == "narrator":
-                speaker = ScriptGenerator._resolve_dialogue_speaker(
-                    i, fragments, metadata_map, allowed_speakers
-                )
+            else:
+                # Check canonical alias resolution against allowed_speakers
+                if speaker not in allowed_speakers and registry:
+                    for cid, char in registry.characters.items():
+                        aliases = getattr(char, "aliases", [])
+                        alias_norms = [a.lower().replace(" ", "_") for a in aliases]
+                        char_name_norm = char.name.lower().replace(" ", "_")
+                        if speaker in alias_norms or speaker == char_name_norm or (speaker in cid or cid in speaker) and len(speaker) >= 3:
+                            speaker = cid
+                            break
+
+                if speaker == "narrator":
+                    speaker = ScriptGenerator._resolve_dialogue_speaker(
+                        i, fragments, metadata_map, allowed_speakers
+                    )
             elif speaker not in allowed_speakers:
                 logger.warning(
                     "[ScriptGenerator] Unknown speaker '%s' for fragment %d — mapping to narrator",
