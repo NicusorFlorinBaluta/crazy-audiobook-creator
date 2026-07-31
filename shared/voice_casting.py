@@ -251,13 +251,19 @@ def build_voice_cast(
         character = registry.characters[speaker_id]
         owner_id = character.voice_id or speaker_id
         
-        # Check alias relationships (e.g. dusk -> sixth_of_dusk)
+        # Ensure owner_id points to a valid character in the registry
         if owner_id not in registry.characters:
-            owner_id = speaker_id
-        if speaker_id == "dusk" and "sixth_of_dusk" in registry.characters:
-            owner_id = "sixth_of_dusk"
-        elif "sixth_of_dusk" in speaker_id and "sixth_of_dusk" in registry.characters:
-            owner_id = "sixth_of_dusk"
+            # Check if speaker_id matches any registered character's explicit aliases
+            matched_owner = next(
+                (
+                    cid
+                    for cid, c in registry.characters.items()
+                    if speaker_id in getattr(c, "aliases", [])
+                    or speaker_id.lower() in [a.lower() for a in getattr(c, "aliases", [])]
+                ),
+                speaker_id,
+            )
+            owner_id = matched_owner
 
         owner_to_speakers.setdefault(owner_id, []).append(speaker_id)
 

@@ -298,6 +298,8 @@ class Pipeline:
         ).strip()
         if visible_devices:
             env["GGML_VK_VISIBLE_DEVICES"] = visible_devices
+        if ollama_cfg.get("flash_attention", True):
+            env["OLLAMA_FLASH_ATTENTION"] = "1"
         models_dir = str(ollama_cfg.get("models_dir", "")).strip()
         if models_dir:
             env["OLLAMA_MODELS"] = models_dir

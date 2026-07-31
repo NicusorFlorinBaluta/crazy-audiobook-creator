@@ -876,13 +876,13 @@ class ScriptGenerator:
                     speaker = ScriptGenerator._resolve_dialogue_speaker(
                         i, fragments, metadata_map, allowed_speakers
                     )
-            elif speaker not in allowed_speakers:
-                logger.warning(
-                    "[ScriptGenerator] Unknown speaker '%s' for fragment %d — mapping to narrator",
-                    speaker,
-                    id_offset + i,
-                )
-                speaker = "narrator"
+                elif speaker not in allowed_speakers:
+                    logger.warning(
+                        "[ScriptGenerator] Unknown speaker '%s' for fragment %d — mapping to narrator",
+                        speaker,
+                        id_offset + i,
+                    )
+                    speaker = "narrator"
 
             try:
                 pause_before_raw = int(

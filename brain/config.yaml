@@ -12,6 +12,7 @@ ollama:
   executable: C:\Users\nicus\AppData\Local\Programs\Ollama\ollama.exe
   models_dir: E:\.ollama\models
   vulkan_visible_devices: '0'     # Vulkan0 = Radeon RX 7900 XTX on this PC
+  flash_attention: true
   startup_timeout_seconds: 90
   log_path: brain/projects/ollama-managed.log
   debug: true

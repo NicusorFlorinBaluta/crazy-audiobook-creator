@@ -1332,7 +1332,17 @@ async def get_pipeline_status(project_id: str):
         scripted_chapters = set(state.get("scripted_chapters", []))
         generated_chapters = set(state.get("generated_chapters", []))
         mastered_chapters = set(state.get("mastered_chapters", []))
-        current_script_ch = state.get("current_script_chapter")
+        
+        # Dynamically infer the next active scripting chapter if existing scripts exist
+        existing_scripted = [
+            c for c in range(1, total_chapters + 1)
+            if (script_dir / f"chapter_{c:03d}.json").exists() or c in scripted_chapters
+        ]
+        if existing_scripted:
+            current_script_ch = min(max(existing_scripted) + 1, total_chapters)
+        else:
+            current_script_ch = state.get("current_script_chapter") or 1
+            
         work_prog = state.get("work_progress") or {}
 
         for ch_num in range(1, total_chapters + 1):

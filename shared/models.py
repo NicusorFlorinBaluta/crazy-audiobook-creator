@@ -82,6 +82,10 @@ class Character(BaseModel):
     gender: Gender
     age_range: str = Field(description="e.g. '40s', 'late teens'")
     personality_traits: list[str] = Field(default_factory=list)
+    aliases: list[str] = Field(
+        default_factory=list,
+        description="Known nicknames, titles, or alternative names for this character",
+    )
     voice_description: str = Field(
         description="Natural language voice description for TTS Voice Design"
     )
