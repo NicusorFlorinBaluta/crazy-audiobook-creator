@@ -586,7 +586,7 @@ class ScriptGenerator:
                     aliases = getattr(char, "aliases", [])
                     alias_norms = [a.lower().replace(" ", "_") for a in aliases]
                     char_name_norm = char.name.lower().replace(" ", "_")
-                    if spk in alias_norms or spk == char_name_norm or (spk in cid or cid in spk) and len(spk) >= 3:
+                    if spk in alias_norms or spk == char_name_norm:
                         canonical = cid
                         break
             
@@ -868,7 +868,7 @@ class ScriptGenerator:
                         aliases = getattr(char, "aliases", [])
                         alias_norms = [a.lower().replace(" ", "_") for a in aliases]
                         char_name_norm = char.name.lower().replace(" ", "_")
-                        if speaker in alias_norms or speaker == char_name_norm or (speaker in cid or cid in speaker) and len(speaker) >= 3:
+                        if speaker in alias_norms or speaker == char_name_norm:
                             speaker = cid
                             break
 
