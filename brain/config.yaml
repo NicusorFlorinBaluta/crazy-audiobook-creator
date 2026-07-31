@@ -7,7 +7,7 @@ ollama:
   # Use an app-owned port so the pipeline can enforce the discrete Vulkan GPU
   # even when the Ollama desktop service is also running on its default port.
   host: http://127.0.0.1:11435
-  model: qwen2.5:32b
+  model: qwen2.5:14b
   auto_start: true
   executable: C:\Users\nicus\AppData\Local\Programs\Ollama\ollama.exe
   models_dir: E:\.ollama\models
@@ -16,7 +16,7 @@ ollama:
   log_path: brain/projects/ollama-managed.log
   debug: true
   temperature_pass1: 0.3
-  temperature_pass2: 0.4
+  temperature_pass2: 0.2
   top_p: 0.9
   context_window: 16384
   timeout: 600
@@ -58,7 +58,7 @@ script:
   expressive_target_chars: 180    # Keep intense/whispered delivery controllable
   expressive_max_words: 30
   speaker_confidence_threshold: 0.55
-  max_fragments_per_chunk: 30
+  max_fragments_per_chunk: 60
   narrator_pause_ms: 500
   dialogue_pause_ms: 300
   scene_transition_pause_ms: 1500

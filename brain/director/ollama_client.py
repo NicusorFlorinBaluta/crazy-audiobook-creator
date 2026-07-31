@@ -142,7 +142,7 @@ class OllamaClient:
                     "POST",
                     f"{self.host}/api/chat",
                     json=payload,
-                    timeout=httpx.Timeout(self.timeout),
+                    timeout=httpx.Timeout(self.timeout, connect=60.0, read=None),
                 ) as response:
                     if response.status_code == 404:
                         # Model not found on Ollama server — auto-fallback to available model
