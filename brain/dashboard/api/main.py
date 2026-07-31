@@ -687,7 +687,7 @@ _import_config = load_config()
 _dashboard_cfg = _import_config.get("dashboard", {})
 _cors_origins = _dashboard_cfg.get(
     "cors_origins",
-    ["http://127.0.0.1:8000", "http://localhost:8000"],
+    ["*"],
 )
 app.add_middleware(
     CORSMiddleware,
@@ -1303,24 +1303,25 @@ async def get_pipeline_status(project_id: str):
         chapter_details = []
         total_chapters = state.get("total_chapters") or 0
 
-        book_json_path = project_dir / "book.json"
-        if total_chapters == 0 and book_json_path.exists():
-            try:
-                import json
-                bdata = json.loads(book_json_path.read_text(encoding="utf-8"))
-                total_chapters = len(bdata.get("chapters", [])) or bdata.get("metadata", {}).get("total_chapters", 0)
-            except Exception:
-                pass
-
         book_chapter_titles = {}
         book_json_path = project_dir / "book.json"
         if book_json_path.exists():
             try:
                 import json
                 bdata = json.loads(book_json_path.read_text(encoding="utf-8"))
+                meta = bdata.get("metadata", {})
                 b_chaps = bdata.get("chapters", [])
-                if total_chapters == 0:
-                    total_chapters = len(b_chaps) or bdata.get("metadata", {}).get("total_chapters", 0)
+                
+                if not state.get("title") or state.get("title") == "Unknown":
+                    state["title"] = meta.get("title") or "Untitled"
+                if not state.get("author") or state.get("author") == "Unknown":
+                    state["author"] = meta.get("author") or "Unknown Author"
+
+                calc_total = len(b_chaps) or meta.get("total_chapters", 0)
+                if total_chapters == 0 and calc_total > 0:
+                    total_chapters = calc_total
+                state["total_chapters"] = total_chapters
+
                 for idx, ch in enumerate(b_chaps, 1):
                     if isinstance(ch, dict) and ch.get("title"):
                         book_chapter_titles[idx] = ch.get("title")
@@ -1361,7 +1362,28 @@ async def get_pipeline_status(project_id: str):
                 if ch_script_file.exists() or ch_num in scripted_chapters:
                     pct = 100
                 elif ch_num == current_script_ch:
-                    pct = int(work_prog.get("stagePercent", 50))
+                    # Scan recent log lines for active fragment chunk progress (e.g. Chunk 3/5)
+                    cur_chunk = 0
+                    tot_chunks = 1
+                    logs = list(_project_logs.get(project_id, []))
+                    if not logs:
+                        log_file = project_dir / "pipeline.log"
+                        if log_file.exists():
+                            try:
+                                logs = log_file.read_text(encoding="utf-8", errors="ignore").splitlines()[-100:]
+                            except Exception:
+                                pass
+                    for line in reversed(logs):
+                        m_chunk = re.search(r"Processing fragment chunk\s+(\d+)/(\d+)", line)
+                        if m_chunk:
+                            cur_chunk = int(m_chunk.group(1))
+                            tot_chunks = int(m_chunk.group(2))
+                            break
+                    if cur_chunk > 0 and tot_chunks > 0:
+                        pct = int(100 * (cur_chunk - 0.5) / tot_chunks)
+                        pct = min(max(pct, 10), 95)
+                    else:
+                        pct = 15
                 else:
                     pct = 0
             elif total_lines > 0:

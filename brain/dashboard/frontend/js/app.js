@@ -64,9 +64,12 @@ async function initApp() {
 
 function handleHash() {
     const hash = window.location.hash.substring(1);
+    const savedProjectId = localStorage.getItem('activeProjectId');
     if (hash && hash.startsWith('project/')) {
         const projectId = hash.replace('project/', '');
         showDetailView(projectId, true);
+    } else if (savedProjectId && !hash) {
+        showDetailView(savedProjectId, true);
     } else {
         showProjectsView(true);
     }
@@ -304,6 +307,7 @@ function setupEventListeners() {
 let detailPollTimer = null;
 
 function showProjectsView(isHashLoad = false) {
+    localStorage.removeItem('activeProjectId');
     if (!isHashLoad) {
         window.history.pushState(null, '', '#');
     }
@@ -318,6 +322,9 @@ function showProjectsView(isHashLoad = false) {
 }
 
 async function showDetailView(projectId, isHashLoad = false) {
+    if (projectId) {
+        localStorage.setItem('activeProjectId', projectId);
+    }
     if (!isHashLoad) {
         window.history.pushState(null, '', `#project/${projectId}`);
     }

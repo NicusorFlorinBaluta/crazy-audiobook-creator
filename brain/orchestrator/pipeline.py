@@ -1004,9 +1004,6 @@ class Pipeline:
             )
 
         scripts_dir = project_dir / "script"
-        if scripts_dir.exists():
-            for old_file in scripts_dir.glob("chapter_*.json"):
-                old_file.unlink(missing_ok=True)
         scripts_dir.mkdir(exist_ok=True)
 
         def on_chapter_start(chapter_num: int):
