@@ -162,6 +162,10 @@ class Pipeline:
         """Signal the pipeline and interrupt an active Ollama stream."""
         self._stop_flags[project_id] = True
         self.ollama.cancel_current()
+        try:
+            self.ollama.unload_model()
+        except Exception:
+            pass
 
     def _check_stop(self, project_id: str) -> None:
         """Raise KeyboardInterrupt if a stop was requested."""

@@ -412,8 +412,25 @@ class OllamaClient:
             logger.warning("[Ollama] Failed to auto-resolve installed models: %s", e)
         return None
 
+    def unload_model(self, model: str | None = None) -> bool:
+        """Explicitly unload the model from GPU VRAM memory."""
+        target_model = model or self.model
+        try:
+            res = self._client.post(
+                f"{self.host}/api/generate",
+                json={"model": target_model, "keep_alive": 0},
+                timeout=5.0,
+            )
+            if res.status_code == 200:
+                logger.info("[Ollama] Unloaded model '%s' from GPU VRAM", target_model)
+                return True
+        except Exception as e:
+            logger.warning("[Ollama] Failed to unload model '%s': %s", target_model, e)
+        return False
+
     def close(self) -> None:
         """Close the HTTP client."""
+        self.unload_model()
         self._client.close()
 
     def __enter__(self) -> OllamaClient:
