@@ -250,8 +250,15 @@ def build_voice_cast(
     for speaker_id in sorted(speaking_ids):
         character = registry.characters[speaker_id]
         owner_id = character.voice_id or speaker_id
+        
+        # Check alias relationships (e.g. dusk -> sixth_of_dusk)
         if owner_id not in registry.characters:
             owner_id = speaker_id
+        if speaker_id == "dusk" and "sixth_of_dusk" in registry.characters:
+            owner_id = "sixth_of_dusk"
+        elif "sixth_of_dusk" in speaker_id and "sixth_of_dusk" in registry.characters:
+            owner_id = "sixth_of_dusk"
+
         owner_to_speakers.setdefault(owner_id, []).append(speaker_id)
 
     voices: dict[str, dict[str, Any]] = {}
