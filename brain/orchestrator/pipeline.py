@@ -689,6 +689,42 @@ class Pipeline:
         if not project_dir.exists():
             raise ValueError(f"Project not found: {project_id}")
 
+        # Enforce strict single-project execution: pause any other active project
+        for other_id, other_job in self.job_queue.list_jobs().items():
+            if other_id != project_id:
+                other_status = other_job.get("status")
+                other_stage = other_job.get("active_stage")
+                if other_job.get("running") or other_status in (
+                    PipelineStage.EXTRACTING.value,
+                    PipelineStage.SCRIPTING.value,
+                    PipelineStage.BOOTSTRAPPING.value,
+                    PipelineStage.GENERATING.value,
+                    PipelineStage.VALIDATING.value,
+                    PipelineStage.MASTERING.value,
+                ) or other_stage in (
+                    PipelineStage.EXTRACTING.value,
+                    PipelineStage.SCRIPTING.value,
+                    PipelineStage.BOOTSTRAPPING.value,
+                    PipelineStage.GENERATING.value,
+                    PipelineStage.VALIDATING.value,
+                    PipelineStage.MASTERING.value,
+                ):
+                    logger.info(
+                        "[Pipeline] Auto-pausing running project '%s' before starting '%s'",
+                        other_id,
+                        project_id,
+                    )
+                    self.stop(other_id)
+                    self.job_queue.update_job(
+                        other_id,
+                        {
+                            "running": False,
+                            "status": PipelineStage.PAUSED.value,
+                            "active_stage": PipelineStage.PAUSED.value,
+                            "pause_reason": f"Auto-paused because project '{project_id}' was started.",
+                        },
+                    )
+
         state = self.job_queue.get_job(project_id)
         if (
             state.get("script_completed", False)
