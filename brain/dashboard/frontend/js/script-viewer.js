@@ -152,7 +152,13 @@ window.ScriptViewer = (() => {
             const previewHtml = voice.ready
                 ? `<audio class="voice-preview-player" controls preload="none"
                        src="${escapeHtml(voice.preview_url)}"></audio>`
-                : '<span class="voice-preview-pending">Preview is still being prepared.</span>';
+                : `<div class="voice-preview-loading">
+                     <div class="voice-pulse-wave"><span></span><span></span><span></span><span></span></div>
+                     <span class="voice-loading-text">Synthesizing voice audio preview...</span>
+                   </div>`;
+            const badgeHtml = voice.ready
+                ? '<span class="voice-ready-badge ready">Ready</span>'
+                : '<span class="voice-ready-badge preparing active-loading"><span class="voice-spinner-dot"></span> Preparing</span>';
             const warningHtml = (voice.warnings || []).map(warning => `
                 <div class="voice-profile-warning">${escapeHtml(warning)}</div>
             `).join('');
@@ -174,6 +180,7 @@ window.ScriptViewer = (() => {
 
             const card = document.createElement('article');
             card.className = 'character-card voice-profile-card';
+            card.dataset.voiceId = voice.voice_id;
             card.style.setProperty('--char-color', colorVar);
             card.innerHTML = `
                 <div class="char-header voice-profile-header">
@@ -187,9 +194,7 @@ window.ScriptViewer = (() => {
                             · ${voice.source_type === 'uploaded' ? 'uploaded reference' : 'generated design'}
                         </div>
                     </div>
-                    <span class="voice-ready-badge ${voice.ready ? 'ready' : ''}">
-                        ${voice.ready ? 'Ready' : 'Preparing'}
-                    </span>
+                    ${badgeHtml}
                 </div>
                 <div class="voice-assigned-pills">
                     ${assigned.map(character => `<span>${escapeHtml(character.name)}</span>`).join('')}
@@ -430,6 +435,23 @@ window.ScriptViewer = (() => {
             showToast('Describe the voice in at least 12 characters', 'warning');
             return;
         }
+        const cardEl = els.charGrid.querySelector(`[data-voice-id="${CSS.escape(voiceId)}"]`);
+        if (cardEl) {
+            const badge = cardEl.querySelector('.voice-ready-badge');
+            if (badge) {
+                badge.className = 'voice-ready-badge preparing active-loading';
+                badge.innerHTML = '<span class="voice-spinner-dot"></span> Generating...';
+            }
+            const previewArea = cardEl.querySelector('.char-voice-preview');
+            if (previewArea) {
+                previewArea.innerHTML = `
+                    <div class="voice-preview-loading">
+                        <div class="voice-pulse-wave"><span></span><span></span><span></span><span></span></div>
+                        <span class="voice-loading-text">Synthesizing & validating new voice preview...</span>
+                    </div>`;
+            }
+        }
+
         const buttons = [...els.charGrid.querySelectorAll('.voice-regenerate')];
         buttons.forEach(button => { button.disabled = true; });
         showToast('Generating and validating a new voice preview…', 'info');
@@ -454,6 +476,8 @@ window.ScriptViewer = (() => {
         } catch (error) {
             showToast(error.message, 'error');
             buttons.forEach(button => { button.disabled = false; });
+            await fetchVoices(projectId);
+            renderCharacters();
         }
     }
 
@@ -468,6 +492,24 @@ window.ScriptViewer = (() => {
             showToast('Paste the exact words spoken in the sample', 'warning');
             return;
         }
+
+        const cardEl = els.charGrid.querySelector(`[data-voice-id="${CSS.escape(voiceId)}"]`);
+        if (cardEl) {
+            const badge = cardEl.querySelector('.voice-ready-badge');
+            if (badge) {
+                badge.className = 'voice-ready-badge preparing active-loading';
+                badge.innerHTML = '<span class="voice-spinner-dot"></span> Importing...';
+            }
+            const previewArea = cardEl.querySelector('.char-voice-preview');
+            if (previewArea) {
+                previewArea.innerHTML = `
+                    <div class="voice-preview-loading">
+                        <div class="voice-pulse-wave"><span></span><span></span><span></span><span></span></div>
+                        <span class="voice-loading-text">Validating and importing reference audio sample...</span>
+                    </div>`;
+            }
+        }
+
         const buttons = [...els.charGrid.querySelectorAll('.voice-upload-submit')];
         buttons.forEach(button => { button.disabled = true; });
         const body = new FormData();
@@ -490,6 +532,8 @@ window.ScriptViewer = (() => {
         } catch (error) {
             showToast(error.message, 'error');
             buttons.forEach(button => { button.disabled = false; });
+            await fetchVoices(projectId);
+            renderCharacters();
         }
     }
 

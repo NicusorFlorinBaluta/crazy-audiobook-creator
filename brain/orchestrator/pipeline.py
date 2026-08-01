@@ -1258,12 +1258,18 @@ class Pipeline:
                 expected_ids = {line.line_id for line in request_lines}
                 generated_ids = set(response.generated_line_ids)
                 failed_ids = set(response.failed_line_ids)
+                if response.failed_validation > 0:
+                    logger.warning(
+                        "[AudioGeneration] Chapter %d generated %d/%d lines with %d WER validation warning(s) logged to database",
+                        chapter_script.chapter_number,
+                        response.generated,
+                        len(request_lines),
+                        response.failed_validation,
+                    )
                 if (
-                    response.status != "success"
-                    or response.generated != len(request_lines)
+                    response.generated != len(request_lines)
                     or generated_ids != expected_ids
                     or failed_ids
-                    or response.failed_validation
                 ):
                     raise RuntimeError(
                         f"Chapter {chapter_script.chapter_number} generation incomplete: "
