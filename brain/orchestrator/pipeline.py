@@ -690,8 +690,9 @@ class Pipeline:
             raise ValueError(f"Project not found: {project_id}")
 
         # Enforce strict single-project execution: pause any other active project
-        for other_id, other_job in self.job_queue.list_jobs().items():
-            if other_id != project_id:
+        for other_job in self.job_queue.list_jobs():
+            other_id = other_job.get("project_id")
+            if other_id and other_id != project_id:
                 other_status = other_job.get("status")
                 other_stage = other_job.get("active_stage")
                 if other_job.get("running") or other_status in (
