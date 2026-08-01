@@ -263,6 +263,9 @@ class CharacterAnalyzer:
                         f"part {part_index}"
                     ) from e
 
+            # Consolidate short-name variants (e.g., 'dusk' into 'sixth_of_dusk')
+            accumulated_chars = self._consolidate_accumulated_characters(accumulated_chars)
+
             # Build final raw dict for parser
             final_raw = {
                 "book_title": book_title,
@@ -491,3 +494,58 @@ class CharacterAnalyzer:
             tone=raw.get("tone", ""),
             characters=characters,
         )
+
+    @staticmethod
+    def _consolidate_accumulated_characters(
+        accumulated_chars: dict[str, dict[str, Any]]
+    ) -> dict[str, dict[str, Any]]:
+        """Merge short title variants (e.g. 'dusk' into 'sixth_of_dusk') into canonical entries."""
+        keys = list(accumulated_chars.keys())
+        merged_into: dict[str, str] = {}
+
+        for i, cid1 in enumerate(keys):
+            if cid1 in merged_into:
+                continue
+            cinfo1 = accumulated_chars[cid1]
+
+            for j in range(i + 1, len(keys)):
+                cid2 = keys[j]
+                if cid2 in merged_into:
+                    continue
+                cinfo2 = accumulated_chars[cid2]
+
+                is_variant = False
+                target_id, variant_id, target_info, variant_info = None, None, None, None
+
+                if cid1.endswith(f"_{cid2}"):
+                    target_id, variant_id = cid1, cid2
+                    target_info, variant_info = cinfo1, cinfo2
+                    is_variant = True
+                elif cid2.endswith(f"_{cid1}"):
+                    target_id, variant_id = cid2, cid1
+                    target_info, variant_info = cinfo2, cinfo1
+                    is_variant = True
+
+                if is_variant and target_id and variant_id:
+                    logger.info(
+                        "[CharacterAnalyzer] Consolidating short variant '%s' (%s) into canonical key '%s' (%s)",
+                        variant_id,
+                        variant_info.get("name"),
+                        target_id,
+                        target_info.get("name"),
+                    )
+                    target_info["dialogue_count"] = (
+                        target_info.get("dialogue_count", 0)
+                        + variant_info.get("dialogue_count", 0)
+                    )
+                    target_info["mention_count"] = (
+                        target_info.get("mention_count", 0)
+                        + variant_info.get("mention_count", 0)
+                    )
+                    existing_aliases = set(target_info.get("aliases", []))
+                    existing_aliases.add(variant_info.get("name", variant_id))
+                    existing_aliases.add(variant_id)
+                    target_info["aliases"] = sorted(list(existing_aliases))
+                    merged_into[variant_id] = target_id
+
+        return {k: v for k, v in accumulated_chars.items() if k not in merged_into}
