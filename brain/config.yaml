@@ -7,7 +7,7 @@ ollama:
   # Use an app-owned port so the pipeline can enforce the discrete Vulkan GPU
   # even when the Ollama desktop service is also running on its default port.
   host: http://127.0.0.1:11435
-  model: qwen2.5:14b
+  model: qwen2.5:32b
   auto_start: true
   executable: C:\Users\nicus\AppData\Local\Programs\Ollama\ollama.exe
   models_dir: E:\.ollama\models
