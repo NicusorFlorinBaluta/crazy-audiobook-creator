@@ -584,3 +584,14 @@ one variable at a time.
 - **Tensor Caching:** Qwen3TTSEngine now computes and caches .pt tensors for speaker embeddings. Successive generations skip both audio loading and feature extraction inference entirely.
 - **UUID File Management:** Changed VoiceLibraryManager to atomically save uploaded and bootstrapped voices with a hex suffix (e.g., 
 arrator_955f3b7b.wav). Fully eliminated the [WinError 5] Access is denied crashes when Uvicorn held locks on actively served dashboard references.
+
+### Phase 7: E2E Pipeline Scale Test & Validation Checkpoint
+**Date:** August 2026
+**Test Corpus:** Sample Book V4 (8 Chapters, 11,874 words, 67,927 characters)
+
+**1. LLM Scripting (qwen2.5:32b with FlashAttention):**
+- **Pass 1 (Character Discovery):** Completed in 630.0s (10.5 minutes), extracting 21 unique character profiles and capping safely at 20.
+- **Pass 2 (Chapter Dialogue Generation):** Processed 8 chapters (split into 34 fragment chunks). Sustained peak streaming speed of **20.3 tokens/sec** throughout. Total LLM time was ~95 minutes. Zero malformed JSON or retry hallucinations encountered.
+
+**2. Voice Validation (Qwen VoiceDesign 1.7B + Whisper STT):**
+- **VAD Silence Pruning:** Confirmed working locally. When silero-vad is active in the main TTS environment, Whisper gracefully ignores pure silence, preventing 100% false-positive WER rejections. E2E pipeline now clears the voice bootstrap gate perfectly and stops at the oice_review manual casting gate as designed.
