@@ -29,6 +29,11 @@ ollama:
 voice_server:
   host: http://127.0.0.1:8100
   api_token: ''
+  # Only the socket peer is considered; X-Forwarded-For cannot grant access.
+  # Home Assistant/nginx and other devices on these LANs may use the API
+  # without an application token.
+  trusted_lan_cidrs:
+  - 192.168.50.0/24
   venv: E:\PyTorch env\my_venv
   auto_start: true
   startup_timeout_seconds: 120
@@ -74,8 +79,8 @@ script:
 # Local dashboard
 dashboard:
   port: 8000
-  # The CLI requires CRAZY_AUDIOBOOK_DASHBOARD_TOKEN before it will honor this
-  # LAN bind. Local Electron/start_app launches remain explicitly loopback-only.
+  # LAN peers must belong to trusted_lan_cidrs; callers outside those ranges
+  # require CRAZY_AUDIOBOOK_DASHBOARD_TOKEN.
   host: 0.0.0.0
   cors_origins:
   - http://127.0.0.1:8000

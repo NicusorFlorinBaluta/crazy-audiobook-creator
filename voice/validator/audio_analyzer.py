@@ -87,6 +87,9 @@ class AudioAnalyzer:
         rms = np.sqrt(np.mean(audio**2)) if len(audio) > 0 else 0
         rms_dbfs = 20 * np.log10(rms) if rms > 0 else -100.0
 
+        # Pitch median measurement
+        pitch_median = self._measure_pitch(audio, sample_rate)
+
         # Characters per second (CPS) check (detects trailing repetition or swallowed text)
         char_count = len(expected_text.strip())
         cps = char_count / duration if duration > 0 and char_count > 0 else 0.0
@@ -131,11 +134,44 @@ class AudioAnalyzer:
             "noise_floor_db": noise_floor_db,
             "has_long_silence": has_long_silence,
             "pacing_anomaly": pacing_anomaly,
+            "pitch_median": pitch_median,
             "cps": cps,
             "artifact_score": artifact_score,
             "duration_score": duration_score,
             "sample_rate": sample_rate,
         }
+
+    @staticmethod
+    def _measure_pitch(audio: np.ndarray, sample_rate: int) -> float:
+        """Measure median pitch (F0) using autocorrelation."""
+        if len(audio) == 0:
+            return 0.0
+            
+        frame_size = int(sample_rate * 0.05)  # 50ms frames
+        if len(audio) < frame_size:
+            return 0.0
+            
+        pitches = []
+        # Search range for 50Hz to 400Hz
+        min_lag = int(sample_rate / 400.0)
+        max_lag = int(sample_rate / 50.0)
+        
+        for i in range(0, len(audio) - frame_size, frame_size):
+            frame = audio[i:i + frame_size]
+            # Autocorrelation
+            result = np.correlate(frame, frame, mode='full')
+            result = result[len(result) // 2:]
+            
+            if max_lag < len(result):
+                peak_idx = min_lag + np.argmax(result[min_lag:max_lag])
+                if result[peak_idx] > 0.2 * result[0]:  # Threshold for voiced frame
+                    pitch = sample_rate / peak_idx
+                    pitches.append(pitch)
+                    
+        if not pitches:
+            return 0.0
+            
+        return float(np.median(pitches))
 
     @staticmethod
     def _measure_noise_floor(audio: np.ndarray, sample_rate: int) -> float:

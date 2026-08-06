@@ -113,8 +113,38 @@ class WhisperValidator:
 
         try:
             if getattr(self, "_backend", "faster_whisper") == "openai_whisper":
-                result = self._model.transcribe(audio_file, language="en")
-                return result.get("text", "").strip()
+                import tempfile
+                import soundfile as sf
+                import torch
+                from silero_vad import load_silero_vad, get_speech_timestamps, collect_chunks
+                
+                vad_model = load_silero_vad()
+                audio_np, sr = sf.read(audio_file, dtype="float32")
+                if audio_np.ndim > 1:
+                    audio_np = audio_np.mean(axis=1)
+                wav = torch.from_numpy(audio_np)  # VAD expects 1D
+                
+                if sr != 16000:
+                    import torchaudio
+                    wav = torchaudio.transforms.Resample(sr, 16000)(wav)
+                    sr = 16000
+                
+                speech_timestamps = get_speech_timestamps(wav, vad_model, return_seconds=False)
+                if not speech_timestamps:
+                    return ""
+                    
+                wav_speech = collect_chunks(speech_timestamps, wav)
+                
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                    tmp_path = f.name
+                
+                try:
+                    sf.write(tmp_path, wav_speech.numpy(), 16000)
+                    result = self._model.transcribe(tmp_path, language="en")
+                    return result.get("text", "").strip()
+                finally:
+                    import os
+                    os.unlink(tmp_path)
             else:
                 segments, info = self._model.transcribe(
                     audio_file,

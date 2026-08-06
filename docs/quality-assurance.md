@@ -12,7 +12,7 @@ For each attempt the validator records:
 - measured noise floor
 - excessive internal silence
 - Qwen speaker-encoder similarity to the selected reference voice
-- final `pass`, `flagged`, or `fail` status and notes
+- final `pass`, `accepted_with_warning`, `flagged`, or `fail` status and notes
 - text similarity, effective text error, attempt number, and the exact acceptance reason
 
 Reference audio and reference text are always paired. If a character reference lacks a trustworthy transcript, the validator does not combine it with the narrator transcript; synthesis falls back to supported speaker conditioning.
@@ -30,9 +30,22 @@ Hard failures include:
 
 Compact spelling similarity is not a general escape hatch for transcription failures. It is considered only when the expected line contains an explicitly approved character name or pronunciation-dictionary term. This accommodates predictable ASR spellings such as fantasy names without allowing unrelated words to pass.
 
-Less severe duration or noise anomalies may be flagged. Both failed and flagged attempts are retried up to `max_retries`. The best attempt is chosen by status first and quality score second.
+Pronunciation substitutions never replace authored script text. They are
+carried as a separate synthesis-only spoken form, included in generation
+fingerprints and manifests, while validation continues to compare audio with
+the original line plus the explicitly approved glossary. Phrase replacement is
+longest-first and performed in one pass so a shorter entry cannot rewrite a
+longer replacement.
 
-If the selected attempt is still not `pass`, its line ID appears in `failed_line_ids`, chapter status is failure, no valid generation fingerprint is committed, and mastering is blocked.
+When transcription, speaker identity, clipping, silence, and pacing hard checks
+pass, a marginal duration/noise/composite-score result is
+`accepted_with_warning`. It is not retried merely to satisfy a soft heuristic.
+Warnings remain visible and queryable. Hard failures and legacy unresolved
+`flagged` attempts are retried up to `max_retries`.
+
+Only `pass` and `accepted_with_warning` are accepted outcomes. Any other final
+status appears in `failed_line_ids`, leaves the chapter incomplete, and blocks
+mastering.
 
 ## Cache correctness
 
@@ -47,7 +60,13 @@ The cache is keyed by line identity but validated by dependencies. Editing one l
 
 ## Speaker consistency
 
-Before loading Whisper, the voice service uses Qwen’s speaker encoder to compare generated segments to their reference voices. This stage is run while the Qwen model is loaded. Qwen is then unloaded before Whisper validation to keep GPU lifecycle predictable.
+Before loading Whisper, the voice service uses Qwen's speaker encoder to
+compare generated segments to their reference voices. The production GPU passed
+short and 53-word co-residency benchmarks, so TTS and Whisper may remain loaded
+together inside one chapter's retry loop. Whisper is always released at the
+chapter request boundary; the next chapter's long initial TTS pass therefore
+runs without co-residency contention. Pipeline/service shutdown still unloads
+both models.
 
 The default similarity threshold is a starting point, not a universal calibration. Calibrate it against known-good reference/generated pairs from the actual model and hardware before raising it.
 

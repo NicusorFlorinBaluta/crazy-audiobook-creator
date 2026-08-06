@@ -10,8 +10,10 @@ Reads the full book text and produces a Character Registry with:
 from __future__ import annotations
 
 import logging
+import json
 import re
 from pathlib import Path
+from typing import Any
 
 from brain.director.ollama_client import OllamaClient
 from shared.constants import Gender
@@ -59,6 +61,11 @@ _SYSTEM_PROMPT = """You are an expert audiobook director and strict data extract
 - Do NOT use generic IDs like "character_1", "character_2", "char_a".
 - For unnamed speakers, use a descriptive ID: "child_female", "old_merchant",
   "guard_captain".
+- Reuse an Existing Characters ID when later text uses a title, nickname, or
+  shortened form for the same entity. Put every alternative name in `aliases`.
+- Never merge identities merely because one name contains another. Family
+  members, ranks, shared surnames, and similarly titled characters remain
+  distinct unless the supplied text explicitly establishes identity.
 
 ### Voice Description Guidelines
 
@@ -93,6 +100,7 @@ CRITICAL REMINDER: You MUST output ONLY valid JSON matching the Output Schema be
       "gender": "male|female",
       "age_range": "string",
       "personality_traits": ["trait1", "trait2"],
+      "aliases": ["explicit nickname or title"],
       "voice_description": "detailed voice description for TTS",
       "speaking_style": "how the narrator typically speaks"
     }},
@@ -158,6 +166,15 @@ class CharacterAnalyzer:
                 temperature=self.temperature,
                 system=system_prompt,
             )
+            raw_characters = raw_result.get("characters", {})
+            if isinstance(raw_characters, dict):
+                raw_characters = self._consolidate_accumulated_characters(
+                    raw_characters
+                )
+                raw_result["characters"] = self._adjudicate_name_candidates(
+                    raw_characters,
+                    book,
+                )
             registry = self._parse_registry(raw_result, book.metadata.title, book.metadata.author)
         else:
             # Iterative multi-pass chapter-by-chapter analysis for long books
@@ -180,7 +197,8 @@ class CharacterAnalyzer:
                 existing_summary = ""
                 if accumulated_chars:
                     existing_summary = "\nExisting Characters:\n" + "\n".join(
-                        f"- {cid}: {info.get('name', cid)} ({info.get('gender', 'other')}, {info.get('voice_description', '')[:50]})"
+                        f"- {cid}: {info.get('name', cid)}; aliases={info.get('aliases', [])} "
+                        f"({info.get('gender', 'other')}, {info.get('voice_description', '')[:50]})"
                         for cid, info in accumulated_chars.items()
                     )
 
@@ -263,8 +281,14 @@ class CharacterAnalyzer:
                         f"part {part_index}"
                     ) from e
 
-            # Consolidate short-name variants (e.g., 'dusk' into 'sixth_of_dusk')
+            # Consolidate only identities explicitly linked through aliases or
+            # exact display names. Name containment is candidate evidence for
+            # the LLM, never sufficient proof by itself.
             accumulated_chars = self._consolidate_accumulated_characters(accumulated_chars)
+            accumulated_chars = self._adjudicate_name_candidates(
+                accumulated_chars,
+                book,
+            )
 
             # Build final raw dict for parser
             final_raw = {
@@ -499,7 +523,11 @@ class CharacterAnalyzer:
     def _consolidate_accumulated_characters(
         accumulated_chars: dict[str, dict[str, Any]]
     ) -> dict[str, dict[str, Any]]:
-        """Merge short title variants (e.g. 'dusk' into 'sixth_of_dusk') into canonical entries."""
+        """Merge only explicit aliases and exact normalized display names.
+
+        Substring/suffix matching is intentionally forbidden: ``king`` and
+        ``red_king`` (or ``john`` and ``uncle_john``) may be different people.
+        """
         keys = list(accumulated_chars.keys())
         merged_into: dict[str, str] = {}
 
@@ -514,19 +542,44 @@ class CharacterAnalyzer:
                     continue
                 cinfo2 = accumulated_chars[cid2]
 
-                is_variant = False
-                target_id, variant_id, target_info, variant_info = None, None, None, None
+                aliases1 = {
+                    CharacterAnalyzer._normalize_id(str(value))
+                    for value in cinfo1.get("aliases", [])
+                    if str(value).strip()
+                }
+                aliases2 = {
+                    CharacterAnalyzer._normalize_id(str(value))
+                    for value in cinfo2.get("aliases", [])
+                    if str(value).strip()
+                }
+                name1 = CharacterAnalyzer._normalize_id(
+                    str(cinfo1.get("name", cid1))
+                )
+                name2 = CharacterAnalyzer._normalize_id(
+                    str(cinfo2.get("name", cid2))
+                )
+                explicitly_linked = (
+                    cid2 in aliases1
+                    or name2 in aliases1
+                    or cid1 in aliases2
+                    or name1 in aliases2
+                    or name1 == name2
+                )
+                target_id = variant_id = None
+                target_info = variant_info = None
+                if explicitly_linked:
+                    # Prefer the more descriptive canonical ID. Input order is
+                    # only a deterministic tie breaker.
+                    if (len(cid1.split("_")), len(cid1)) >= (
+                        len(cid2.split("_")), len(cid2)
+                    ):
+                        target_id, variant_id = cid1, cid2
+                        target_info, variant_info = cinfo1, cinfo2
+                    else:
+                        target_id, variant_id = cid2, cid1
+                        target_info, variant_info = cinfo2, cinfo1
 
-                if cid1.endswith(f"_{cid2}"):
-                    target_id, variant_id = cid1, cid2
-                    target_info, variant_info = cinfo1, cinfo2
-                    is_variant = True
-                elif cid2.endswith(f"_{cid1}"):
-                    target_id, variant_id = cid2, cid1
-                    target_info, variant_info = cinfo2, cinfo1
-                    is_variant = True
-
-                if is_variant and target_id and variant_id:
+                if target_id and variant_id and target_info and variant_info:
                     logger.info(
                         "[CharacterAnalyzer] Consolidating short variant '%s' (%s) into canonical key '%s' (%s)",
                         variant_id,
@@ -549,3 +602,213 @@ class CharacterAnalyzer:
                     merged_into[variant_id] = target_id
 
         return {k: v for k, v in accumulated_chars.items() if k not in merged_into}
+
+    def _adjudicate_name_candidates(
+        self,
+        characters: dict[str, dict[str, Any]],
+        book: ExtractedBook,
+    ) -> dict[str, dict[str, Any]]:
+        """Resolve possible title/short-name identities from textual evidence.
+
+        Name containment only proposes a pair. A merge requires both a positive
+        LLM identity decision and source support: either a verbatim cited excerpt
+        or a compact passage that introduces the long name and then continues
+        with the short name. This tolerates imperfect citation formatting without
+        turning name containment alone into merge evidence.
+        """
+        ids = sorted(characters)
+        candidate_pairs: list[tuple[str, str]] = []
+        for index, left in enumerate(ids):
+            if left == "narrator":
+                continue
+            left_parts = left.split("_")
+            for right in ids[index + 1:]:
+                if right == "narrator":
+                    continue
+                right_parts = right.split("_")
+                if (
+                    len(left_parts) < len(right_parts)
+                    and right_parts[-len(left_parts):] == left_parts
+                ) or (
+                    len(right_parts) < len(left_parts)
+                    and left_parts[-len(right_parts):] == right_parts
+                ):
+                    candidate_pairs.append((left, right))
+        if not candidate_pairs:
+            return characters
+
+        source = "\n".join(chapter.text for chapter in book.chapters)
+        payload: list[dict[str, Any]] = []
+        contexts: dict[tuple[str, str], str] = {}
+        for left, right in candidate_pairs:
+            terms = {
+                str(characters[left].get("name", left)).strip(),
+                str(characters[right].get("name", right)).strip(),
+                left.replace("_", " "),
+                right.replace("_", " "),
+            }
+            snippets: list[str] = []
+            for term in sorted(terms, key=len, reverse=True):
+                if len(term) < 3:
+                    continue
+                for match in re.finditer(re.escape(term), source, re.IGNORECASE):
+                    start = max(0, match.start() - 220)
+                    end = min(len(source), match.end() + 220)
+                    snippet = source[start:end].strip()
+                    if snippet and snippet not in snippets:
+                        snippets.append(snippet)
+                    if len(snippets) >= 8:
+                        break
+                if len(snippets) >= 8:
+                    break
+            context = "\n---\n".join(snippets)
+            if not context:
+                continue
+            contexts[(left, right)] = context
+            payload.append(
+                {
+                    "left_id": left,
+                    "left": characters[left],
+                    "right_id": right,
+                    "right": characters[right],
+                    "source_context": context,
+                }
+            )
+        if not payload:
+            return characters
+
+        prompt = (
+            "Determine whether each candidate pair is the same fictional "
+            "entity. Similar names, shared titles, family names, and suffixes "
+            "are not proof. Return JSON with a `decisions` array containing "
+            "left_id, right_id, same_character, and evidence. For a true "
+            "decision, evidence must be a verbatim source excerpt that "
+            "establishes both names refer to one entity.\n\n"
+            + json.dumps(payload, ensure_ascii=False)
+        )
+        try:
+            raw = self.ollama.generate_json(
+                prompt,
+                temperature=0.0,
+                system=(
+                    "You are a conservative entity-identity adjudicator. "
+                    "False merges are more harmful than duplicate entries."
+                ),
+            )
+        except Exception as exc:
+            logger.warning("Character identity adjudication failed: %s", exc)
+            return characters
+
+        valid_pairs = set(contexts)
+        decisions = raw.get("decisions", [])
+        if not isinstance(decisions, list):
+            logger.warning("Character identity adjudicator returned no decisions array")
+            return characters
+        for decision in decisions:
+            if not isinstance(decision, dict) or not decision.get("same_character"):
+                continue
+            pair = (
+                self._normalize_id(str(decision.get("left_id", ""))),
+                self._normalize_id(str(decision.get("right_id", ""))),
+            )
+            if pair not in valid_pairs and pair[::-1] in valid_pairs:
+                pair = pair[::-1]
+            if pair not in valid_pairs:
+                continue
+            evidence = " ".join(str(decision.get("evidence", "")).split())
+            normalized_context = " ".join(contexts[pair].split()).casefold()
+            cited_verbatim = (
+                len(evidence) >= 12
+                and evidence.casefold() in normalized_context
+            )
+            derived_evidence = self._find_short_name_continuation(
+                characters[pair[0]],
+                characters[pair[1]],
+                book,
+            )
+            if not cited_verbatim and not derived_evidence:
+                logger.warning(
+                    "Ignoring unsupported identity merge %s/%s",
+                    *pair,
+                )
+                continue
+            if not cited_verbatim:
+                logger.info(
+                    "Accepting identity merge %s/%s from verified short-name "
+                    "continuation: %s",
+                    *pair,
+                    derived_evidence,
+                )
+            left, right = pair
+            target, variant = max(
+                (left, right),
+                key=lambda value: (len(value.split("_")), len(value)),
+            ), min(
+                (left, right),
+                key=lambda value: (len(value.split("_")), len(value)),
+            )
+            aliases = list(characters[target].get("aliases", []))
+            aliases.extend(
+                [variant, str(characters[variant].get("name", variant))]
+            )
+            characters[target]["aliases"] = list(dict.fromkeys(aliases))
+
+        return self._consolidate_accumulated_characters(characters)
+
+    @classmethod
+    def _find_short_name_continuation(
+        cls,
+        left: dict[str, Any],
+        right: dict[str, Any],
+        book: ExtractedBook,
+    ) -> str | None:
+        """Return source evidence for a long-name to short-name continuation.
+
+        The two mentions must be distinct, in that order, and in one paragraph.
+        An optional article inside the long form handles titles such as
+        ``Sixth of the Dusk`` when the registry normalized it to
+        ``Sixth of Dusk``. This helper never decides identity by itself; callers
+        also require the conservative LLM adjudicator to return
+        ``same_character=true``.
+        """
+        names = [
+            str(left.get("name", "")).strip(),
+            str(right.get("name", "")).strip(),
+        ]
+        if not all(names):
+            return None
+        long_name, short_name = sorted(
+            names,
+            key=lambda value: (len(cls._normalize_id(value).split("_")), len(value)),
+            reverse=True,
+        )
+        long_tokens = re.findall(r"[\w']+", long_name, flags=re.UNICODE)
+        short_tokens = re.findall(r"[\w']+", short_name, flags=re.UNICODE)
+        if len(long_tokens) <= len(short_tokens) or not short_tokens:
+            return None
+
+        separator = r"\W+(?:the\W+)?"
+        long_pattern = re.compile(
+            r"\b" + separator.join(map(re.escape, long_tokens)) + r"\b",
+            re.IGNORECASE,
+        )
+        short_pattern = re.compile(
+            r"\b" + r"\W+".join(map(re.escape, short_tokens)) + r"\b",
+            re.IGNORECASE,
+        )
+        for chapter in book.chapters:
+            for paragraph in re.split(r"\n\s*\n", chapter.text):
+                if len(paragraph) > 1200:
+                    continue
+                for long_match in long_pattern.finditer(paragraph):
+                    for short_match in short_pattern.finditer(
+                        paragraph,
+                        long_match.end(),
+                    ):
+                        if short_match.start() - long_match.end() > 500:
+                            break
+                        evidence = " ".join(paragraph.split())
+                        if len(evidence) > 600:
+                            evidence = evidence[:597].rstrip() + "..."
+                        return evidence
+        return None

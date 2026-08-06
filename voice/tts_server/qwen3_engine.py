@@ -23,6 +23,12 @@ import soundfile as sf
 import yaml
 from voice.tts_server.audio_effects import AudioPostProcessor
 
+
+import numpy as np
+import soundfile as sf
+import yaml
+from voice.tts_server.audio_effects import AudioPostProcessor
+
 logger = logging.getLogger(__name__)
 
 
@@ -31,7 +37,7 @@ class Qwen3TTSEngine:
 
     def __init__(
         self,
-        model_name: str = "Qwen/Qwen3-TTS-1.7B",
+        model_name: str = "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
         device: str = "cuda",
         dtype: str = "float16",
         sample_rate: int = 24000,
@@ -483,6 +489,14 @@ class Qwen3TTSEngine:
 
     def speaker_embedding(self, audio_path: str | Path):
         """Extract one reusable Qwen speaker embedding from an audio file."""
+        import torch
+        pt_path = Path(audio_path).with_suffix(".pt")
+        if pt_path.exists():
+            try:
+                return torch.load(pt_path, map_location="cpu", weights_only=True)
+            except Exception as e:
+                logger.warning("Could not load cached embedding %s: %s", pt_path, e)
+                
         self._ensure_loaded()
         import librosa
 
@@ -496,10 +510,17 @@ class Qwen3TTSEngine:
                 orig_sr=sample_rate,
                 target_sr=target_rate,
             )
-        return self._model.model.extract_speaker_embedding(
+        emb = self._model.model.extract_speaker_embedding(
             audio=audio,
             sr=target_rate,
         ).flatten()
+        
+        try:
+            torch.save(emb.cpu(), pt_path)
+        except Exception as e:
+            logger.warning("Could not save cached embedding %s: %s", pt_path, e)
+            
+        return emb
 
     @staticmethod
     def embedding_similarity(left, right) -> float:

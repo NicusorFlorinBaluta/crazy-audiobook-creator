@@ -55,9 +55,9 @@ The intended layers are:
 
 1. Windows Firewall permits TCP 8000 only from Crazy-PC itself, the HA VM, and
    the reverse-proxy host.
-2. Non-loopback API and WebSocket requests require the dashboard API token.
-3. Nginx Proxy Manager injects that token into upstream HTTP and WebSocket
-   requests.
+2. The audiobook app trusts the actual HA/reverse-proxy TCP peer because it is
+   inside `dashboard.trusted_lan_cidrs`; forwarded headers do not grant trust.
+3. An application token is optional for this trusted-LAN route.
 4. The public `/audiobook/` proxy location must use the same external access
    policy already protecting the proxy, or a dedicated NPM Access List.
 
@@ -88,9 +88,9 @@ and the WebSocket connection.
 Add:
 
 - `GET /health` with a minimal JSON response;
-- support for `CRAZY_AUDIOBOOK_DASHBOARD_TOKEN`;
-- loopback access without a token so the desktop UI continues working;
-- fail-closed non-loopback API/WebSocket access if no token is configured;
+- optional support for `CRAZY_AUDIOBOOK_DASHBOARD_TOKEN` outside trusted LANs;
+- loopback and configured trusted-LAN access without a token;
+- fail-closed access from peers outside those CIDRs when no token is configured;
 - `X-API-Token` WebSocket authentication for reverse-proxy injection, while
   retaining the existing query-token compatibility.
 
@@ -100,7 +100,7 @@ Add a PowerShell launcher that:
 
 - locates the repository and configured Python environment;
 - reads the ignored local `.env` file;
-- requires `CRAZY_AUDIOBOOK_DASHBOARD_TOKEN`;
+- optionally reads `CRAZY_AUDIOBOOK_DASHBOARD_TOKEN`;
 - starts `python -m brain.dashboard.api.main` in the foreground;
 - does not open Electron or a browser.
 
@@ -111,11 +111,12 @@ step and is not run automatically.
 Recommended ignored `.env` entry:
 
 ```dotenv
+# Optional when every caller is inside dashboard.trusted_lan_cidrs
 CRAZY_AUDIOBOOK_DASHBOARD_TOKEN=<long-random-value>
 ```
 
-The tracked `brain/config.yaml` listens on `0.0.0.0`, while the CLI refuses a
-non-loopback bind unless the environment token is present.
+The tracked `brain/config.yaml` listens on `0.0.0.0`; Windows Firewall and
+`dashboard.trusted_lan_cidrs` constrain unauthenticated LAN access.
 
 ## Home Assistant Changes
 
@@ -128,7 +129,7 @@ Add placeholders to `secrets.yaml.example` and real values only to the ignored
 audiobook_health_url: "http://CRAZY_PC_IP:8000/health"
 audiobook_release_gpu_url: "http://CRAZY_PC_IP:8000/api/system/release-gpu"
 audiobook_external_url: "https://YOUR_EXISTING_HA_HOST/audiobook/"
-audiobook_api_token: "REPLACE_WITH_THE_SAME_LONG_RANDOM_TOKEN"
+audiobook_api_token: "OPTIONAL_FOR_TRUSTED_LAN"
 ```
 
 ### Entities
@@ -238,9 +239,8 @@ location.
 
 ## Rollout Order
 
-1. Generate one long random token.
-2. Put it in the audiobook `.env`, HA `secrets.yaml`, and the NPM upstream
-   header.
+1. Confirm the HA/proxy peer address belongs to `dashboard.trusted_lan_cidrs`.
+2. Optionally configure a token for defense in depth outside the trusted LAN.
 3. Register the Windows Scheduled Task.
 4. Configure the HASS.Agent launch button and verify its live entity ID.
 5. Add the Windows Firewall allow rules and verify direct access only from HA/
@@ -260,7 +260,8 @@ location.
 - prefixed iframe assets, API, SSE, downloads, and WebSocket work;
 - `/health` responds without loading a project;
 - loopback API works without a token;
-- non-loopback API fails closed without a token;
+- configured trusted-LAN API works without a token;
+- peers outside configured CIDRs fail closed without a token;
 - header-authenticated WebSocket succeeds;
 - `release-gpu` remains idempotent.
 

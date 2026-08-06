@@ -5,7 +5,10 @@ The application has two local FastAPI services:
 - Dashboard/Brain: `http://127.0.0.1:8000`
 - Voice: `http://127.0.0.1:8100`
 
-When a configured token is nonempty, send it in `X-API-Token`. WebSockets use `?token=<value>`. The Voice `/health` route remains unauthenticated for readiness checks.
+Loopback and `dashboard.trusted_lan_cidrs` peers require no application token.
+Other peers must send the configured `X-API-Token`; WebSockets may use
+`?token=<value>`. Forwarded headers never grant LAN trust. The Voice `/health`
+route remains unauthenticated for readiness checks.
 
 FastAPI’s generated OpenAPI schema at `/docs` is the definitive field-level reference for a running version.
 
@@ -28,7 +31,7 @@ Uploads must have an `.epub` suffix, remain under the configured compressed/expa
 | Method | Route | Purpose |
 |---|---|---|
 | `POST` | `/api/projects/{project_id}/start` | Start/resume the project |
-| `POST` | `/api/projects/{project_id}/stop` | Request cooperative cancellation |
+| `POST` | `/api/projects/{project_id}/stop` | Immediately interrupt work and release app-owned services |
 | `POST` | `/api/projects/{project_id}/reset` | Reset to extracting, scripting, bootstrapping, voice_review, generating, validating, mastering, or exporting |
 | `POST` | `/api/projects/{project_id}/voice-review/approve` | Approve speaking voice cast and continue audio generation |
 | `POST` | `/api/projects/{project_id}/request-deploy` | Park at the next chapter boundary |
@@ -37,10 +40,11 @@ Uploads must have an `.epub` suffix, remain under the configured compressed/expa
 | `GET` | `/api/schedule` | Get working hours plus whether a window is open now |
 | `GET` | `/api/voice/health` | Report actual on-demand Voice state without starting it |
 
-Only one project pipeline may run at once. `stop` registers the request,
-interrupts an active Ollama token stream, and requests Voice cancellation only
-for Voice stages. Status moves through `pausing` and becomes `paused` after
-model cleanup finishes.
+Only one project pipeline may run at once. `stop` closes an active Ollama
+stream, requests Voice cancellation, terminates app-owned model services, and
+waits briefly for the worker to release the global lease. Starting another
+project performs the same interruption first. If lease release cannot be
+confirmed, the new run is refused instead of running concurrently.
 
 `POST /api/system/release-gpu` pauses active work, waits briefly for workers to
 exit, and unloads app-managed Ollama and Voice models. The Electron wrapper
@@ -101,10 +105,18 @@ previews are read-only and available during any stage once the reference
 exists. Reassignment, redesign, and upload require the pipeline to be stopped
 or parked at a safe boundary. A change invalidates only dependent chapters.
 
+When narration exists, `narrator_choice` contains the ready state, preview URL,
+and selected ID for the male and female narrator candidates. Assign a candidate
+with the normal character voice endpoint using `character_id = narrator`.
+
 The upload route accepts multipart `file` and `transcript`. The transcript must
 exactly match the clean single-speaker recording. WAV, FLAC, MP3, M4A, AAC, and
 OGG are accepted; FFmpeg normalizes audio to mono 24 kHz PCM WAV after duration,
-silence, and clipping checks.
+silence, and clipping checks. Before the existing reference is replaced, the
+managed Voice validator compares Whisper's transcription with the supplied
+text and rejects material mismatches. The first upload check may therefore
+take a minute while the models start; services started only for the check are
+released afterward.
 
 New projects stop at `voice_review` once bootstrap succeeds. Approval accepts
 `{"continue_pipeline": true}`. This gate is recorded once, so later partial

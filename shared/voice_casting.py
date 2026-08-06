@@ -4,13 +4,10 @@ import hashlib
 import re
 from pathlib import Path
 from typing import Any, Iterable
-import numpy as np
-import soundfile as sf
-import scipy.signal as signal
 
-import hashlib
-import re
-from typing import Any, Iterable
+import numpy as np
+import scipy.signal as signal
+import soundfile as sf
 
 from shared.artifacts import fingerprint
 from shared.constants import Gender, VOICE_CAST_SCHEMA_VERSION
@@ -26,6 +23,14 @@ _CONTRAST_CLAUSES = (
     "Light nasal resonance, quick phrasing, and a curious animated cadence.",
     "Smooth dark resonance, relaxed articulation, and a reflective measured cadence.",
     "Clear open resonance, energetic phrasing, and a gently rising melodic cadence.",
+    "Low-set smoky resonance, sparse melody, and slow deliberate sentence endings.",
+    "Lean reedy resonance, exact consonants, and a brisk formal cadence.",
+    "Velvety mid-range resonance, flowing phrasing, and calm downward inflection.",
+    "Husky close-mic texture, restrained volume, and thoughtful broken phrasing.",
+    "Bell-like upper resonance, buoyant projection, and lively rhythmic phrasing.",
+    "Broad grounded resonance, relaxed tempo, and gently rounded vowels.",
+    "Taut focused resonance, clipped phrasing, and a level unsentimental cadence.",
+    "Airy open texture, light projection, and a smooth lyrical cadence.",
 )
 
 _AUDIBLE_TERMS = {
@@ -93,6 +98,46 @@ def compile_effective_voice_prompt(
         str(source_description or "").strip(" ."),
     )
     warnings: list[str] = []
+
+    # Text entered from an older dashboard can be a previously compiled
+    # prompt rather than the original short design description.  Strip our
+    # generated wrapper before compiling again; otherwise every reset repeats
+    # identity, speaking style, consistency boilerplate, and palette clauses.
+    compiled_markers = (
+        "Maintain this vocal identity consistently",
+        "Distinguishing direction:",
+    )
+    if any(marker.lower() in description.lower() for marker in compiled_markers):
+        description = re.sub(
+            r"^(?:A clearly (?:female|male) .*? speaker|"
+            r"An androgynous or non-gendered .*? speaker)\.\s*",
+            "",
+            description,
+            flags=re.IGNORECASE,
+        )
+        description = re.sub(
+            r"\s*Speaking style:\s*[^.]+\.",
+            "",
+            description,
+            flags=re.IGNORECASE,
+        )
+        description = re.sub(
+            r"\s*Maintain this vocal identity consistently and prioritize "
+            r"intelligible natural audiobook speech\.",
+            "",
+            description,
+            flags=re.IGNORECASE,
+        )
+        description = re.sub(
+            r"\s*Distinguishing direction:\s*[^.]+\.?",
+            "",
+            description,
+            flags=re.IGNORECASE,
+        ).strip(" .")
+        warnings.append(
+            "A previously compiled prompt was reduced to its source voice "
+            "description before recompilation."
+        )
 
     if gender_value == Gender.FEMALE.value:
         replacements = (
@@ -247,9 +292,21 @@ def build_voice_cast(
         )
 
     owner_to_speakers: dict[str, list[str]] = {}
+    owner_character_ids: dict[str, str] = {}
     for speaker_id in sorted(speaking_ids):
         character = registry.characters[speaker_id]
         owner_id = character.voice_id or speaker_id
+
+        # Narration is the one role where a project deliberately exposes an
+        # unassigned alternative at the review gate.  Preserve a previously
+        # selected narrator candidate even though it is not a registry entry.
+        if speaker_id == "narrator" and owner_id in {
+            "narrator_male",
+            "narrator_female",
+        }:
+            owner_character_ids[owner_id] = speaker_id
+            owner_to_speakers.setdefault(owner_id, []).append(speaker_id)
+            continue
         
         # Ensure owner_id points to a valid character in the registry
         if owner_id not in registry.characters:
@@ -265,15 +322,56 @@ def build_voice_cast(
             )
             owner_id = matched_owner
 
+        owner_character_ids[owner_id] = owner_id
         owner_to_speakers.setdefault(owner_id, []).append(speaker_id)
 
+    # A new project offers two concrete narrator references during voice
+    # review.  Only one is assigned, so downstream generation remains exactly
+    # one voice per script line.  Other characters still receive no unused
+    # profiles.
+    if "narrator" in speaking_ids:
+        narrator = registry.characters["narrator"]
+        selected_id = narrator.voice_id or "narrator"
+        selected_gender = (
+            Gender.MALE
+            if selected_id == "narrator_male"
+            else Gender.FEMALE
+            if selected_id == "narrator_female"
+            else narrator.gender
+        )
+        alternative_gender = (
+            Gender.MALE if selected_gender != Gender.MALE else Gender.FEMALE
+        )
+        alternative_id = f"narrator_{alternative_gender.value}"
+        owner_character_ids.setdefault(alternative_id, "narrator")
+        owner_to_speakers.setdefault(alternative_id, [])
+
     voices: dict[str, dict[str, Any]] = {}
-    previous_prompts: list[tuple[str, str]] = []
+    previous_prompts: list[tuple[str, str, str]] = []
     used_contrasts: set[str] = set()
-    for voice_id in sorted(owner_to_speakers):
-        owner = registry.characters[voice_id]
+    # Keep the ordinary speaking cast's palette stable when narrator choices
+    # are added or changed.  Alternatives are deliberately allocated last so
+    # introducing the extra preview never changes another character's design
+    # fingerprint or triggers unrelated regeneration.
+    voice_order = sorted(
+        owner_to_speakers,
+        key=lambda candidate: (
+            candidate in {"narrator_male", "narrator_female"},
+            candidate,
+        ),
+    )
+    for voice_id in voice_order:
+        owner_character_id = owner_character_ids.get(voice_id, voice_id)
+        owner = registry.characters[owner_character_id]
+        profile_gender = (
+            Gender.MALE
+            if voice_id == "narrator_male"
+            else Gender.FEMALE
+            if voice_id == "narrator_female"
+            else owner.gender
+        )
         prompt, warnings = compile_effective_voice_prompt(
-            gender=owner.gender,
+            gender=profile_gender,
             age_range=owner.age_range,
             source_description=owner.voice_description,
             speaking_style=owner.speaking_style,
@@ -281,17 +379,15 @@ def build_voice_cast(
         source_signature = _normalized_signature(owner.voice_description)
         similar_to = [
             previous_id
-            for previous_id, previous_prompt in previous_prompts
+            for previous_id, previous_prompt, previous_source in previous_prompts
             if (
                 source_signature
-                and source_signature == _normalized_signature(
-                    registry.characters[previous_id].voice_description
-                )
+                and source_signature == _normalized_signature(previous_source)
             )
             or (
                 _token_similarity(
                     owner.voice_description,
-                    registry.characters[previous_id].voice_description,
+                    previous_source,
                 )
                 >= _SOURCE_SIMILARITY_THRESHOLD
             )
@@ -300,21 +396,28 @@ def build_voice_cast(
                 >= _PROMPT_SIMILARITY_THRESHOLD
             )
         ]
+        # Every speaking profile receives a stable palette direction. Voice
+        # Design otherwise tends to collapse same-gender characters onto the
+        # shared reference sentence even when their prose descriptions differ.
+        contrast = _contrast_for(voice_id, used_contrasts)
+        prompt += f" Distinguishing direction: {contrast}"
         if similar_to:
-            contrast = _contrast_for(voice_id, used_contrasts)
-            prompt += f" Distinguishing direction: {contrast}"
             warnings.append(
                 "The initial profile was too similar to "
-                f"{', '.join(similar_to)}; deterministic contrast was added."
+                f"{', '.join(similar_to)}; its dedicated contrast direction "
+                "is required."
             )
 
         assigned = owner_to_speakers[voice_id]
+        display_name = owner.name
+        if owner_character_id == "narrator":
+            display_name = f"Narrator — {profile_gender.value.title()}"
         profile_payload = {
             "schema": VOICE_CAST_SCHEMA_VERSION,
             "voice_id": voice_id,
-            "owner_character_id": voice_id,
-            "name": owner.name,
-            "gender": owner.gender.value,
+            "owner_character_id": owner_character_id,
+            "name": display_name,
+            "gender": profile_gender.value,
             "age_range": owner.age_range,
             "source_description": owner.voice_description,
             "effective_prompt": prompt,
@@ -327,7 +430,7 @@ def build_voice_cast(
             {
                 "schema": VOICE_CAST_SCHEMA_VERSION,
                 "voice_id": voice_id,
-                "gender": owner.gender.value,
+                "gender": profile_gender.value,
                 "age_range": owner.age_range,
                 "effective_prompt": prompt,
                 "design_model": design_model,
@@ -335,7 +438,7 @@ def build_voice_cast(
             }
         )
         voices[voice_id] = profile_payload
-        previous_prompts.append((voice_id, prompt))
+        previous_prompts.append((voice_id, prompt, owner.voice_description))
 
     cast_payload: dict[str, Any] = {
         "schema": VOICE_CAST_SCHEMA_VERSION,

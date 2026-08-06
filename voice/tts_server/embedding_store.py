@@ -107,6 +107,17 @@ class EmbeddingStore:
                     PRIMARY KEY (ref_audio_hash, ref_text_hash, model_id)
                 )
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS validation_results (
+                    project_id TEXT NOT NULL,
+                    line_id TEXT NOT NULL,
+                    validation_fingerprint TEXT NOT NULL,
+                    output_hash TEXT NOT NULL,
+                    result_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (project_id, line_id)
+                )
+            """)
             columns = {
                 row[1]
                 for row in conn.execute(
@@ -388,7 +399,7 @@ class EmbeddingStore:
             cached_fingerprint == expected_fingerprint
             and cached_output_hash
             and cached_output_hash == current_output_hash
-            and validation_status == "pass"
+            and validation_status in {"pass", "accepted_with_warning"}
         )
 
     def save_generation_fingerprint(
@@ -449,6 +460,105 @@ class EmbeddingStore:
                 ),
             )
             conn.commit()
+
+    # ------------------------------------------------------------------
+    # Accepted validation cache (independent from synthesis identity)
+    # ------------------------------------------------------------------
+
+    def get_validation_result(
+        self,
+        *,
+        project_id: str,
+        line_id: str,
+        output_path: str | Path,
+        expected_text: str,
+        validation_context: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Return a cached accepted result when audio and validation match."""
+        output_hash = self.hash_file(output_path)
+        if not output_hash:
+            return None
+        fingerprint = self._validation_fingerprint(
+            expected_text=expected_text,
+            validation_context=validation_context,
+        )
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT result_json, output_hash, validation_fingerprint
+                FROM validation_results
+                WHERE project_id = ? AND line_id = ?
+                """,
+                (project_id, line_id),
+            ).fetchone()
+        if not row or row[1] != output_hash or row[2] != fingerprint:
+            return None
+        try:
+            result = json.loads(row[0])
+        except (TypeError, ValueError):
+            return None
+        if result.get("status") not in {"pass", "accepted_with_warning"}:
+            return None
+        return result
+
+    def save_validation_result(
+        self,
+        *,
+        project_id: str,
+        line_id: str,
+        output_path: str | Path,
+        expected_text: str,
+        validation_context: dict[str, Any],
+        result: dict[str, Any],
+    ) -> None:
+        """Persist an accepted validation result for an unchanged WAV."""
+        if result.get("status") not in {"pass", "accepted_with_warning"}:
+            return
+        output_hash = self.hash_file(output_path)
+        if not output_hash:
+            return
+        fingerprint = self._validation_fingerprint(
+            expected_text=expected_text,
+            validation_context=validation_context,
+        )
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO validation_results
+                    (project_id, line_id, validation_fingerprint, output_hash,
+                     result_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    project_id,
+                    line_id,
+                    fingerprint,
+                    output_hash,
+                    json.dumps(result, ensure_ascii=False, sort_keys=True),
+                    now,
+                ),
+            )
+            conn.commit()
+
+    def _validation_fingerprint(
+        self,
+        *,
+        expected_text: str,
+        validation_context: dict[str, Any],
+    ) -> str:
+        payload = {
+            "expected_text": expected_text,
+            "context": validation_context,
+        }
+        return self.hash_text(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
 
     def _generation_fingerprint(
         self,

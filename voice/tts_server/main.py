@@ -278,6 +278,9 @@ async def lifespan(app: FastAPI):
         keep_models_resident=val_cfg.get(
             "keep_tts_and_whisper_resident", False
         ),
+        risk_aware_first_attempt=val_cfg.get(
+            "risk_aware_first_attempt", False
+        ),
     )
 
     master_cfg = config.get("mastering", {})
@@ -294,6 +297,7 @@ async def lifespan(app: FastAPI):
         noise_gate_threshold=master_cfg.get("noise_gate_threshold", -50),
         noise_gate_attack_ms=master_cfg.get("noise_gate_attack_ms", 5),
         noise_gate_release_ms=master_cfg.get("noise_gate_release_ms", 50),
+        peak_ceiling_mode=master_cfg.get("peak_ceiling_mode", "global"),
     )
     exporter = M4BExporter()
 
@@ -525,6 +529,15 @@ def generate_chapter(request: GenerateChapterRequest) -> GenerateChapterResponse
     _safe_workspace_project(request.project_id)
     _enforce_workspace_quota()
     cancelled_projects.discard(request.project_id)
+    torch_module = None
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+            torch_module = torch
+    except Exception as exc:
+        logger.debug("Peak VRAM reset unavailable: %s", exc)
     try:
         with gpu_job():
             result = validator.process_chapter(
@@ -543,6 +556,14 @@ def generate_chapter(request: GenerateChapterRequest) -> GenerateChapterResponse
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     finally:
         cancelled_projects.discard(request.project_id)
+
+    if torch_module is not None:
+        try:
+            result.peak_vram_gb = (
+                torch_module.cuda.max_memory_allocated() / 1e9
+            )
+        except Exception as exc:
+            logger.debug("Peak VRAM measurement unavailable: %s", exc)
 
     elapsed = time.time() - t0
     logger.info(
@@ -648,6 +669,8 @@ def master_chapter(request: MasterChapterRequest) -> MasterChapterResponse:
         lufs=mastering_result["lufs"],
         peak_dbfs=mastering_result["peak_dbfs"],
         file_size_mb=output_path.stat().st_size / (1024 * 1024),
+        join_warnings=int(assembled.get("join_warnings", 0)),
+        join_diagnostics=assembled.get("join_diagnostics", []),
     )
 
 

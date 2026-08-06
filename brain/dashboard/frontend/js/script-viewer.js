@@ -8,7 +8,8 @@ window.ScriptViewer = (() => {
         characters: null,
         voices: null,
         script: null,
-        quality: null
+        quality: null,
+        pronunciations: null
     };
 
     const els = {
@@ -31,7 +32,8 @@ window.ScriptViewer = (() => {
             fetchCharacters(projectId),
             fetchVoices(projectId),
             fetchScript(projectId),
-            fetchQuality(projectId)
+            fetchQuality(projectId),
+            fetchPronunciations(projectId)
         ]);
         
         renderCharacters();
@@ -141,25 +143,64 @@ window.ScriptViewer = (() => {
         }
         renderVoiceReviewBanner(voiceState);
 
+        const groupedVoices = new Map();
+        voices.forEach(voice => {
+            const ownerId = voice.owner_character_id || voice.voice_id;
+            if (!groupedVoices.has(ownerId)) {
+                groupedVoices.set(ownerId, []);
+            }
+            groupedVoices.get(ownerId).push(voice);
+        });
+
         els.charGrid.innerHTML = '';
-        voices.forEach((voice, idx) => {
-            const colorVar = voice.voice_id.toLowerCase() === 'narrator'
+        let idx = 0;
+        groupedVoices.forEach((candidates, ownerId) => {
+            const mainVoice = candidates.find(c => c.assigned_characters.length > 0) || candidates[0];
+            const colorVar = mainVoice.voice_id.toLowerCase() === 'narrator'
                 ? 'var(--speaker-narrator)'
                 : `var(--speaker-${(idx % 10) + 1})`;
-            const assigned = (voice.assigned_characters || [])
+            idx++;
+
+            const assigned = (mainVoice.assigned_characters || [])
                 .map(characterId => speakerById.get(characterId))
                 .filter(Boolean);
-            const previewHtml = voice.ready
-                ? `<audio class="voice-preview-player" controls preload="none"
-                       src="${escapeHtml(voice.preview_url)}"></audio>`
-                : `<div class="voice-preview-loading">
-                     <div class="voice-pulse-wave"><span></span><span></span><span></span><span></span></div>
-                     <span class="voice-loading-text">Synthesizing voice audio preview...</span>
-                   </div>`;
-            const badgeHtml = voice.ready
+
+            let candidatesHtml = '';
+            if (candidates.length > 1) {
+                candidatesHtml = `
+                    <div class="voice-candidates">
+                        <strong>Available Candidates</strong>
+                        <div class="voice-candidates-list">
+                            ${candidates.map(candidate => `
+                                <div class="voice-candidate-option">
+                                    <label>
+                                        <input type="radio" name="candidate-${ownerId}" value="${escapeHtml(candidate.voice_id)}"
+                                            ${candidate.voice_id === mainVoice.voice_id ? 'checked' : ''}
+                                            ${voiceState.editable ? '' : 'disabled'}>
+                                        ${escapeHtml(candidate.name)}
+                                    </label>
+                                    ${candidate.ready 
+                                        ? `<audio class="voice-preview-player small" controls preload="none" src="${escapeHtml(candidate.preview_url)}"></audio>` 
+                                        : '<span>(Preparing)</span>'}
+                                </div>
+                            `).join('')}
+                        </div>
+                        <button class="btn btn-secondary apply-candidate" data-owner-id="${ownerId}" ${voiceState.editable ? '' : 'disabled'}>Apply Selected Candidate</button>
+                    </div>
+                `;
+            } else {
+                candidatesHtml = mainVoice.ready
+                    ? `<div class="char-voice-preview"><audio class="voice-preview-player" controls preload="none" src="${escapeHtml(mainVoice.preview_url)}"></audio></div>`
+                    : `<div class="voice-preview-loading">
+                         <div class="voice-pulse-wave"><span></span><span></span><span></span><span></span></div>
+                         <span class="voice-loading-text">Synthesizing voice audio preview...</span>
+                       </div>`;
+            }
+
+            const badgeHtml = mainVoice.ready
                 ? '<span class="voice-ready-badge ready">Ready</span>'
                 : '<span class="voice-ready-badge preparing active-loading"><span class="voice-spinner-dot"></span> Preparing</span>';
-            const warningHtml = (voice.warnings || []).map(warning => `
+            const warningHtml = (mainVoice.warnings || []).map(warning => `
                 <div class="voice-profile-warning">${escapeHtml(warning)}</div>
             `).join('');
             const assignmentRows = assigned.map(character => `
@@ -180,18 +221,18 @@ window.ScriptViewer = (() => {
 
             const card = document.createElement('article');
             card.className = 'character-card voice-profile-card';
-            card.dataset.voiceId = voice.voice_id;
+            card.dataset.voiceId = mainVoice.voice_id;
             card.style.setProperty('--char-color', colorVar);
             card.innerHTML = `
                 <div class="char-header voice-profile-header">
                     <div class="char-avatar" style="background: ${colorVar}">
-                        ${escapeHtml((voice.name || voice.voice_id).substring(0, 2).toUpperCase())}
+                        ${escapeHtml((mainVoice.name || mainVoice.voice_id).substring(0, 2).toUpperCase())}
                     </div>
                     <div>
-                        <div class="char-name">${escapeHtml(voice.name)}</div>
+                        <div class="char-name">${escapeHtml(mainVoice.name)}</div>
                         <div class="char-meta">
-                            ${escapeHtml(voice.gender || 'unknown')} · ${escapeHtml(voice.age_range || 'unknown')}
-                            · ${voice.source_type === 'uploaded' ? 'uploaded reference' : 'generated design'}
+                            ${escapeHtml(mainVoice.gender || 'unknown')} · ${escapeHtml(mainVoice.age_range || 'unknown')}
+                            · ${mainVoice.source_type === 'uploaded' ? 'uploaded reference' : 'generated design'}
                         </div>
                     </div>
                     ${badgeHtml}
@@ -201,10 +242,10 @@ window.ScriptViewer = (() => {
                 </div>
                 <div class="char-voice">
                     <strong>Design direction</strong>
-                    <p>${escapeHtml(voice.description || 'No design direction available.')}</p>
+                    <p>${escapeHtml(mainVoice.description || 'No design direction available.')}</p>
                 </div>
                 ${warningHtml}
-                <div class="char-voice-preview">${previewHtml}</div>
+                ${candidatesHtml}
                 <details class="voice-assignments">
                     <summary>Character assignments (${assigned.length})</summary>
                     <div class="voice-assignment-list">${assignmentRows}</div>
@@ -212,7 +253,7 @@ window.ScriptViewer = (() => {
                 <details class="voice-redesign">
                     <summary>Redesign with text</summary>
                     <textarea class="voice-description-input" rows="4"
-                              ${voiceState.editable ? '' : 'disabled'}>${escapeHtml(voice.source_description || voice.description || '')}</textarea>
+                              ${voiceState.editable ? '' : 'disabled'}>${escapeHtml(mainVoice.source_description || mainVoice.description || '')}</textarea>
                     <button class="btn btn-secondary voice-regenerate"
                             ${voiceState.editable ? '' : 'disabled'}>Generate new preview</button>
                     <small>The app enforces this profile's gender and age metadata and marks only dependent chapters stale.</small>
@@ -245,20 +286,55 @@ window.ScriptViewer = (() => {
             card.querySelector('.voice-regenerate')?.addEventListener(
                 'click',
                 () => regenerateVoice(
-                    voice.voice_id,
+                    mainVoice.voice_id,
                     card.querySelector('.voice-description-input').value
                 )
             );
             card.querySelector('.voice-upload-submit')?.addEventListener(
                 'click',
-                () => uploadVoice(
-                    voice.voice_id,
+                () => uploadVoiceSample(
+                    mainVoice.voice_id,
                     card.querySelector('.voice-upload-file').files[0],
                     card.querySelector('.voice-upload-transcript').value
                 )
             );
+
+            const applyBtn = card.querySelector('.apply-candidate');
+            if (applyBtn) {
+                applyBtn.addEventListener('click', async () => {
+                    const selected = card.querySelector(`input[name="candidate-${ownerId}"]:checked`).value;
+                    if (selected === mainVoice.voice_id) return;
+                    
+                    const btn = applyBtn;
+                    const prevText = btn.textContent;
+                    btn.textContent = 'Applying...';
+                    btn.disabled = true;
+                    try {
+                        const projectId = window.state?.currentProjectId;
+                        for (const character of assigned) {
+                            await fetch(`api/projects/${projectId}/voices/${character.character_id}/assign`, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ voice_id: selected })
+                            });
+                        }
+                    } catch (e) {
+                        console.error('Failed to apply candidate', e);
+                    }
+                });
+            }
+
             els.charGrid.appendChild(card);
         });
+    }
+
+    async function fetchPronunciations(projectId) {
+        try {
+            const res = await fetch(`api/projects/${projectId}/pronunciations`);
+            currentData.pronunciations = res.ok ? await res.json() : null;
+        } catch (e) {
+            currentData.pronunciations = null;
+        }
     }
 
     function renderVoiceReviewBanner(voiceState) {
@@ -270,11 +346,38 @@ window.ScriptViewer = (() => {
             return;
         }
         const allReady = (voiceState.voices || []).every(voice => voice.ready);
+        const narratorChoice = voiceState.narrator_choice;
+        const narratorOptionsHtml = narratorChoice?.options?.length ? `
+            <div class="narrator-choice">
+                <div class="narrator-choice-heading">
+                    <strong>Choose the narrator</strong>
+                    <span>Preview both references; only the selected voice narrates the book.</span>
+                </div>
+                <div class="narrator-choice-options">
+                    ${narratorChoice.options.map(option => `
+                        <label class="narrator-choice-option ${option.voice_id === narratorChoice.selected_voice_id ? 'selected' : ''}">
+                            <input type="radio" name="narrator-voice"
+                                   value="${escapeHtml(option.voice_id)}"
+                                   ${option.voice_id === narratorChoice.selected_voice_id ? 'checked' : ''}
+                                   ${voiceState.editable ? '' : 'disabled'}>
+                            <span class="narrator-choice-label">
+                                <b>${escapeHtml(option.gender === 'male' ? 'Male narrator' : 'Female narrator')}</b>
+                                <small>${option.voice_id === narratorChoice.selected_voice_id ? 'Selected' : 'Available'}</small>
+                            </span>
+                            ${option.ready
+                                ? `<audio controls preload="none" src="${escapeHtml(option.preview_url)}"></audio>`
+                                : '<span class="narrator-choice-pending">Preparing preview…</span>'}
+                        </label>
+                    `).join('')}
+                </div>
+            </div>
+        ` : '';
         els.voiceReviewBanner.classList.remove('hidden');
         els.voiceReviewBanner.innerHTML = `
-            <div>
+            <div class="voice-review-copy">
                 <strong>Voice-cast approval required</strong>
                 <p>This happens once for a new project, after book-wide scripting identifies the real speakers. Future chapter batches will not stop here again.</p>
+                ${narratorOptionsHtml}
             </div>
             <button class="btn btn-primary voice-approve"
                     ${voiceState.editable && allReady ? '' : 'disabled'}>
@@ -285,6 +388,13 @@ window.ScriptViewer = (() => {
             'click',
             approveVoiceCast
         );
+        els.voiceReviewBanner.querySelectorAll('input[name="narrator-voice"]').forEach(input => {
+            input.addEventListener('change', () => {
+                if (input.checked && input.value !== narratorChoice.selected_voice_id) {
+                    saveVoiceAssignment(narratorChoice.character_id, input.value);
+                }
+            });
+        });
     }
 
     function renderCharactersLegacy() {
@@ -505,7 +615,7 @@ window.ScriptViewer = (() => {
                 previewArea.innerHTML = `
                     <div class="voice-preview-loading">
                         <div class="voice-pulse-wave"><span></span><span></span><span></span><span></span></div>
-                        <span class="voice-loading-text">Validating and importing reference audio sample...</span>
+                        <span class="voice-loading-text">Checking transcript and audio quality; the first check may take a minute...</span>
                     </div>`;
             }
         }
@@ -644,21 +754,31 @@ window.ScriptViewer = (() => {
     // ============================================================================
 
     function renderQuality() {
-        if (!currentData.quality || Object.keys(currentData.quality).length === 0) {
+        const hasQuality = currentData.quality && Object.keys(currentData.quality).length > 0;
+        const hasPronunciations = currentData.pronunciations?.candidates?.length > 0;
+        if (!hasQuality && !hasPronunciations) {
             els.qualityOverview.innerHTML = '<div class="empty-state small"><p>Quality data will appear after audio generation and validation.</p></div>';
             return;
         }
 
-        const q = currentData.quality;
+        const q = currentData.quality || {};
         els.qualityOverview.innerHTML = '';
 
-        // Segments Total
-        addQualityStat('Total Segments', q.total_segments || 0, 'neutral');
+        if (hasQuality) {
+            // Segments Total
+            addQualityStat('Total Segments', q.total_segments || 0, 'neutral');
         
         // Pass Rate
-        const passRate = q.total_segments > 0 ? Math.round((q.passed_segments / q.total_segments) * 100) : 0;
+        const acceptedSegments = (q.passed_segments || 0) + (q.accepted_with_warning_segments || 0);
+        const passRate = q.total_segments > 0 ? Math.round((acceptedSegments / q.total_segments) * 100) : 0;
         const passStatus = passRate > 95 ? 'good' : (passRate > 85 ? 'warn' : 'bad');
         addQualityStat('First Pass Rate', `${passRate}%`, passStatus);
+
+        addQualityStat(
+            'Accepted Warnings',
+            q.accepted_with_warning_segments || 0,
+            (q.accepted_with_warning_segments || 0) > 0 ? 'warn' : 'good'
+        );
         
         // Retries
         addQualityStat('Retries Triggered', q.retries_triggered || 0, q.retries_triggered > 0 ? 'warn' : 'good');
@@ -700,6 +820,82 @@ window.ScriptViewer = (() => {
                 </div>
             `;
             els.qualityOverview.appendChild(details);
+        }
+        }
+
+        renderPronunciationInventory();
+    }
+
+    function renderPronunciationInventory() {
+        const inventory = currentData.pronunciations;
+        if (!inventory?.candidates?.length) return;
+        const unresolved = inventory.candidates.filter(item => item.status === 'review_required');
+        const verified = inventory.candidates.filter(item => item.status === 'verified');
+        const section = document.createElement('section');
+        section.className = 'pronunciation-review';
+        section.innerHTML = `
+            <div class="pronunciation-heading">
+                <div>
+                    <strong>Book pronunciation lexicon</strong>
+                    <p>${unresolved.length} term${unresolved.length === 1 ? '' : 's'} need review. Nothing is inferred or applied automatically.</p>
+                </div>
+                <span>${verified.length} verified</span>
+            </div>
+            <div class="pronunciation-list">
+                ${unresolved.slice(0, 40).map(item => `
+                    <div class="pronunciation-row" data-term="${escapeHtml(item.term)}">
+                        <div class="pronunciation-term">
+                            <strong>${escapeHtml(item.term)}</strong>
+                            <small>${item.occurrences} occurrence${item.occurrences === 1 ? '' : 's'} · chapters ${(item.chapters || []).join(', ') || '—'}</small>
+                            <span title="${escapeHtml((item.contexts || []).join(' | '))}">${escapeHtml((item.contexts || [])[0] || '')}</span>
+                        </div>
+                        <input type="text" maxlength="240" placeholder="Spoken form, e.g. Pah-chee" aria-label="Spoken form for ${escapeHtml(item.term)}">
+                        <button type="button" class="btn btn-secondary pronunciation-save">Verify</button>
+                    </div>
+                `).join('')}
+                ${verified.map(item => `
+                    <div class="pronunciation-row verified">
+                        <div class="pronunciation-term">
+                            <strong>${escapeHtml(item.term)}</strong>
+                            <small>${item.occurrences} occurrence${item.occurrences === 1 ? '' : 's'} · ${escapeHtml(item.mapping_source || 'project')}</small>
+                        </div>
+                        <span class="pronunciation-arrow">→</span>
+                        <strong>${escapeHtml(item.spoken_text)}</strong>
+                    </div>
+                `).join('')}
+            </div>
+        `;
+        section.querySelectorAll('.pronunciation-save').forEach(button => {
+            button.addEventListener('click', () => {
+                const row = button.closest('.pronunciation-row');
+                approvePronunciation(row?.dataset.term || '', row?.querySelector('input')?.value || '', button);
+            });
+        });
+        els.qualityOverview.appendChild(section);
+    }
+
+    async function approvePronunciation(term, spokenText, button) {
+        const projectId = window.state?.currentProjectId;
+        const spoken = spokenText.trim();
+        if (!projectId || !term || !spoken) {
+            showToast('Enter the exact spoken form first', 'warning');
+            return;
+        }
+        button.disabled = true;
+        try {
+            const response = await fetch(`api/projects/${encodeURIComponent(projectId)}/pronunciations`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({term, spoken_text: spoken})
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(data.detail || 'Could not save pronunciation');
+            currentData.pronunciations = data.inventory;
+            showToast(`Pronunciation saved; ${data.affected_chapters.length} chapter${data.affected_chapters.length === 1 ? '' : 's'} marked for regeneration`, 'success');
+            renderQuality();
+        } catch (error) {
+            showToast(error.message, 'error');
+            button.disabled = false;
         }
     }
 

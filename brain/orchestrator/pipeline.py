@@ -55,6 +55,12 @@ from shared.models import (
     ProjectStatus,
 )
 from shared.voice_casting import build_voice_cast, speaking_character_ids
+from shared.pronunciation import (
+    apply_pronunciations,
+    build_pronunciation_inventory,
+    load_pronunciation_dictionary,
+)
+from shared.single_instance import SingleInstanceLock
 
 logger = logging.getLogger(__name__)
 
@@ -159,13 +165,9 @@ class Pipeline:
         self._voice_server_proc = None
 
     def stop(self, project_id: str) -> None:
-        """Signal the pipeline and interrupt an active Ollama stream."""
+        """Immediately interrupt work; completed checkpoints remain reusable."""
         self._stop_flags[project_id] = True
-        self.ollama.cancel_current()
-        try:
-            self.ollama.unload_model()
-        except Exception:
-            pass
+        self.ollama.cancel_current(force=True)
 
     def _check_stop(self, project_id: str) -> None:
         """Raise KeyboardInterrupt if a stop was requested."""
@@ -684,47 +686,22 @@ class Pipeline:
     # ------------------------------------------------------------------
 
     def run(self, project_id: str) -> ProjectStatus:
-        """Run the full pipeline for a project."""
+        """Run one globally serialized pipeline worker."""
+        run_lock = SingleInstanceLock("crazy-audiobook-pipeline.lock")
+        if not run_lock.acquire():
+            raise RuntimeError(
+                "Another audiobook pipeline worker still owns the GPU lease"
+            )
+        try:
+            return self._run_exclusive(project_id)
+        finally:
+            run_lock.release()
+
+    def _run_exclusive(self, project_id: str) -> ProjectStatus:
+        """Run the pipeline after the process-wide GPU lease is acquired."""
         project_dir = self.projects_dir / project_id
         if not project_dir.exists():
             raise ValueError(f"Project not found: {project_id}")
-
-        # Enforce strict single-project execution: pause any other active project
-        for other_job in self.job_queue.list_jobs():
-            other_id = other_job.get("project_id")
-            if other_id and other_id != project_id:
-                other_status = other_job.get("status")
-                other_stage = other_job.get("active_stage")
-                if other_job.get("running") or other_status in (
-                    PipelineStage.EXTRACTING.value,
-                    PipelineStage.SCRIPTING.value,
-                    PipelineStage.BOOTSTRAPPING.value,
-                    PipelineStage.GENERATING.value,
-                    PipelineStage.VALIDATING.value,
-                    PipelineStage.MASTERING.value,
-                ) or other_stage in (
-                    PipelineStage.EXTRACTING.value,
-                    PipelineStage.SCRIPTING.value,
-                    PipelineStage.BOOTSTRAPPING.value,
-                    PipelineStage.GENERATING.value,
-                    PipelineStage.VALIDATING.value,
-                    PipelineStage.MASTERING.value,
-                ):
-                    logger.info(
-                        "[Pipeline] Auto-pausing running project '%s' before starting '%s'",
-                        other_id,
-                        project_id,
-                    )
-                    self.stop(other_id)
-                    self.job_queue.update_job(
-                        other_id,
-                        {
-                            "running": False,
-                            "status": PipelineStage.PAUSED.value,
-                            "active_stage": PipelineStage.PAUSED.value,
-                            "pause_reason": f"Auto-paused because project '{project_id}' was started.",
-                        },
-                    )
 
         state = self.job_queue.get_job(project_id)
         if (
@@ -1089,6 +1066,10 @@ class Pipeline:
             project_dir / "book_script.json",
             book_script.model_dump_json(indent=2),
         )
+        atomic_write_json(
+            project_dir / "pronunciation_candidates.json",
+            build_pronunciation_inventory(project_dir),
+        )
 
         total_elapsed = time.time() - t0
         self.job_queue.update_job(project_id, {
@@ -1111,6 +1092,7 @@ class Pipeline:
         # actually used by a completed script, following any shared voice_id
         # assignment made by the analyzer.
         from shared.models import ScriptChapter
+        from shared.constants import Gender
 
         script_chapters: list[ScriptChapter] = []
         for script_path in self._script_files(project_dir / "script"):
@@ -1149,8 +1131,13 @@ class Pipeline:
         request = BootstrapVoicesRequest(
             project_id=project_id,
             characters={
-                voice_id: registry.characters[voice_id].model_copy(
+                voice_id: registry.characters[
+                    profile.get("owner_character_id", voice_id)
+                ].model_copy(
                     update={
+                        "id": voice_id,
+                        "name": profile.get("name") or voice_id,
+                        "gender": Gender(profile["gender"]),
                         "voice_description": profile["effective_prompt"]
                     }
                 )
@@ -1168,6 +1155,7 @@ class Pipeline:
                 profile = cast["voices"].get(voice_id)
                 if not profile:
                     continue
+
                 profile["quality"] = {
                     "transcription_wer": result.transcription_wer,
                     "acoustic_metrics": result.acoustic_metrics,
@@ -1180,6 +1168,35 @@ class Pipeline:
                     if warning not in existing_warnings:
                         existing_warnings.append(warning)
                 profile["warnings"] = existing_warnings
+
+                # Phase 3.2: Inject alternative candidates into the voice cast
+                for cand in result.candidates:
+                    if cand.id == voice_id or cand.id in cast["voices"]:
+                        continue
+                    import copy
+                    cand_profile = copy.deepcopy(profile)
+                    cand_profile["voice_id"] = cand.id
+                    cand_profile["design_fingerprint"] = ""
+                    cand_profile["assigned_characters"] = []
+                    cand_profile["ready"] = True
+                    cand_profile["quality"] = {
+                        "transcription_wer": cand.transcription_wer,
+                        "acoustic_metrics": cand.acoustic_metrics,
+                    }
+                    cand_profile["warnings"] = list(cand.warnings)
+                    # For UI grouping, the alternative retains the original owner's ID
+                    cand_profile["owner_character_id"] = profile.get("owner_character_id", voice_id)
+                    cast["voices"][cand.id] = cand_profile
+
+            cast["quality"] = {
+                "cast_pair_diagnostics": [
+                    item.model_dump() for item in response.cast_diagnostics
+                ],
+                "similar_pairs": sum(
+                    item.status == "similar"
+                    for item in response.cast_diagnostics
+                ),
+            }
             atomic_write_json(project_dir / "voice_cast.json", cast)
             current_state = self.job_queue.get_job(project_id)
             review_status = current_state.get(
@@ -1274,6 +1291,31 @@ class Pipeline:
                 )
 
                 response = self.voice_client.generate_chapter(request)
+                logger.info(
+                    "[AudioGenerationMetrics] chapter=%d cache_hits=%d "
+                    "cache_misses=%d timings=%s",
+                    chapter_script.chapter_number,
+                    response.validation_cache_hits,
+                    response.validation_cache_misses,
+                    json.dumps(response.timings_seconds, sort_keys=True),
+                )
+                self._append_performance_metric(
+                    project_dir,
+                    {
+                        "event": "chapter_generation",
+                        "chapter_number": chapter_script.chapter_number,
+                        "segments": len(request_lines),
+                        "validation_cache_hits": response.validation_cache_hits,
+                        "validation_cache_misses": response.validation_cache_misses,
+                        "retries": response.retried,
+                        "accepted_with_warning": response.accepted_with_warning,
+                        "failed_validation": response.failed_validation,
+                        "audio_duration_seconds": response.total_duration_seconds,
+                        "peak_vram_gb": response.peak_vram_gb,
+                        "risk_adjusted_line_ids": response.risk_adjusted_line_ids,
+                        "timings_seconds": response.timings_seconds,
+                    },
+                )
                 self.job_queue.clear_quality_logs(
                     project_id,
                     chapter_script.chapter_number,
@@ -1340,6 +1382,7 @@ class Pipeline:
                     "current_chapter": chapter_script.chapter_number,
                     "lines_generated": response.generated,
                     "lines_failed": response.failed_validation,
+                    "lines_accepted_with_warning": response.accepted_with_warning,
                     "average_wer": project_quality.get(
                         "average_wer", quality_summary.get("average_wer", 0.0)
                     ),
@@ -1423,7 +1466,9 @@ class Pipeline:
                     announce_chapter=True,
                 )
 
+                mastering_started = time.perf_counter()
                 response = self.voice_client.master_chapter(request)
+                mastering_seconds = time.perf_counter() - mastering_started
                 if (
                     response.status != "success"
                     or not self._valid_audio(Path(response.output_file))
@@ -1450,6 +1495,12 @@ class Pipeline:
                         ),
                         "output_file": response.output_file,
                         "output_hash": hash_file(response.output_file),
+                        "mastering_quality": {
+                            "lufs": response.lufs,
+                            "peak_dbfs": response.peak_dbfs,
+                            "join_warnings": response.join_warnings,
+                            "join_diagnostics": response.join_diagnostics,
+                        },
                     },
                 )
                 mastered_chapters = sorted(
@@ -1458,6 +1509,18 @@ class Pipeline:
                 self.job_queue.update_job(project_id, {
                     "mastered_chapters": mastered_chapters,
                 })
+                self._append_performance_metric(
+                    project_dir,
+                    {
+                        "event": "chapter_mastering",
+                        "chapter_number": chapter_script.chapter_number,
+                        "wall_seconds": round(mastering_seconds, 6),
+                        "audio_duration_seconds": response.duration_seconds,
+                        "lufs": response.lufs,
+                        "peak_dbfs": response.peak_dbfs,
+                        "join_warnings": response.join_warnings,
+                    },
+                )
 
                 logger.info("Chapter %d mastered: %.1f seconds, %.1f LUFS", chapter_script.chapter_number, response.duration_seconds, response.lufs)
             except Exception as e:
@@ -1513,10 +1576,20 @@ class Pipeline:
                     f"Full export refused: chapter {ch.chapter_number} is not mastered"
                 )
 
+            mastering_quality: dict[str, Any] = {}
+            chapter_master_manifest = master_manifest_path(
+                project_dir, ch.chapter_number
+            )
+            if chapter_master_manifest.is_file():
+                mastering_quality = json.loads(
+                    chapter_master_manifest.read_text(encoding="utf-8")
+                ).get("mastering_quality", {})
             chapters.append(ExportChapterInfo(
                 number=ch.chapter_number,
                 title=ch.chapter_title,
                 file=f"chapters/chapter_{ch.chapter_number:03d}.wav",
+                lufs=mastering_quality.get("lufs"),
+                peak_dbfs=mastering_quality.get("peak_dbfs"),
             ))
 
         if not chapters:
@@ -1549,7 +1622,9 @@ class Pipeline:
             output_name=output_name,
         )
 
+        export_started = time.perf_counter()
         response = self.voice_client.export_m4b(request)
+        export_seconds = time.perf_counter() - export_started
 
         import shutil
         suffix = (
@@ -1574,6 +1649,29 @@ class Pipeline:
             response.total_duration,
             f"{response.total_chapters} chapters",
             response.file_size_mb,
+        )
+        self._append_performance_metric(
+            project_dir,
+            {
+                "event": "m4b_export",
+                "partial": partial,
+                "chapters": included_numbers,
+                "wall_seconds": round(export_seconds, 6),
+                "total_duration": response.total_duration,
+                "file_size_mb": response.file_size_mb,
+                "book_loudness": response.book_loudness,
+            },
+        )
+        atomic_write_json(
+            project_dir / (
+                f"export_quality{suffix}.json"
+            ),
+            {
+                "partial": partial,
+                "chapters": included_numbers,
+                "book_loudness": response.book_loudness,
+                "output_file": str(local_m4b),
+            },
         )
 
     # ------------------------------------------------------------------
@@ -1648,25 +1746,7 @@ class Pipeline:
         from shared.models import VoiceFXSettings
 
         lines = [line.model_copy(deep=True) for line in chapter.lines]
-        pronunciation_dict: dict[str, str] = {}
-        for dictionary_path in (
-            Path("brain/pronunciation_dict.json"),
-            project_dir / "pronunciation_dict.json",
-        ):
-            if not dictionary_path.exists():
-                continue
-            try:
-                pronunciation_dict.update(
-                    json.loads(dictionary_path.read_text(encoding="utf-8"))
-                )
-            except Exception as exc:
-                raise ValueError(
-                    f"Invalid pronunciation dictionary: {dictionary_path}"
-                ) from exc
-        replacements = [
-            (re.compile(rf"\b{re.escape(word)}\b", re.IGNORECASE), replacement)
-            for word, replacement in pronunciation_dict.items()
-        ]
+        pronunciation_dict, _ = load_pronunciation_dictionary(project_dir)
 
         characters: dict[str, Any] = {}
         chars_file = project_dir / "characters.json"
@@ -1676,8 +1756,10 @@ class Pipeline:
             )
 
         for line in lines:
-            for pattern, replacement in replacements:
-                line.text = pattern.sub(replacement, line.text)
+            spoken_text = apply_pronunciations(line.text, pronunciation_dict)
+            line.spoken_text = (
+                spoken_text if spoken_text != line.text else None
+            )
             char_info = characters.get(line.speaker, {})
             line.voice_id = char_info.get("voice_id") or line.speaker
             if char_info.get("voice_fx"):
@@ -1697,16 +1779,73 @@ class Pipeline:
                 terms.add(character_id.replace("_", " "))
                 if isinstance(info, dict) and info.get("name"):
                     terms.add(str(info["name"]))
-        for dictionary_path in (
-            Path("brain/pronunciation_dict.json"),
-            project_dir / "pronunciation_dict.json",
-        ):
-            if not dictionary_path.exists():
-                continue
-            values = json.loads(dictionary_path.read_text(encoding="utf-8"))
-            terms.update(str(key) for key in values)
-            terms.update(str(value) for value in values.values())
+        values, _ = load_pronunciation_dictionary(project_dir)
+        terms.update(str(key) for key in values)
+        terms.update(str(value) for value in values.values())
+
+        # Casting intentionally excludes non-speaking entities, but those
+        # entities still need pronunciation-aware validation. Repeated
+        # capitalized tokens in the completed book script provide a generic,
+        # book-local glossary for places, peoples, creatures, and other proper
+        # names without asking the reader to curate the source book.
+        script_path = project_dir / "book_script.json"
+        if script_path.exists():
+            script_payload = json.loads(script_path.read_text(encoding="utf-8"))
+            candidate_counts: dict[str, int] = {}
+
+            def collect_text(node: Any) -> None:
+                if isinstance(node, dict):
+                    text = node.get("text")
+                    if isinstance(text, str):
+                        for candidate in re.findall(
+                            r"\b[A-Z][A-Za-z'’-]{3,}\b",
+                            text,
+                        ):
+                            candidate_counts[candidate] = (
+                                candidate_counts.get(candidate, 0) + 1
+                            )
+                    for value in node.values():
+                        collect_text(value)
+                elif isinstance(node, list):
+                    for value in node:
+                        collect_text(value)
+
+            collect_text(script_payload.get("chapters", []))
+            sentence_words = {
+                "After", "Again", "Because", "Before", "Could", "Every",
+                "Finally", "First", "From", "Here", "However", "Instead",
+                "Perhaps", "Something", "That", "Their", "Then", "There",
+                "These", "They", "This", "Those", "Though", "Through",
+                "Until", "What", "Whatever", "When", "Where", "Whether",
+                "Which", "While", "With", "Without", "Would",
+            }
+            terms.update(
+                candidate
+                for candidate, count in candidate_counts.items()
+                if count >= 2 and candidate not in sentence_words
+            )
         return sorted(term for term in terms if term.strip())
+
+    @staticmethod
+    def _append_performance_metric(
+        project_dir: Path,
+        payload: dict[str, Any],
+    ) -> None:
+        """Append one durable, failure-isolated performance measurement."""
+        try:
+            metric = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                **payload,
+            }
+            metrics_path = project_dir / "performance_metrics.jsonl"
+            with metrics_path.open("a", encoding="utf-8") as handle:
+                handle.write(
+                    json.dumps(metric, ensure_ascii=False, sort_keys=True)
+                    + "\n"
+                )
+                handle.flush()
+        except Exception as exc:
+            logger.warning("Could not persist performance metric: %s", exc)
 
     def _reconcile_artifacts(
         self,

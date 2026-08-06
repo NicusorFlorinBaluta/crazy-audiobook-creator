@@ -39,16 +39,35 @@ class OllamaClient:
         self.max_retries = max(1, max_retries)
         self.max_retry_seconds = max(0, max_retry_seconds)
         self.context_window = context_window
-        self._client = httpx.Client(timeout=httpx.Timeout(timeout, connect=10.0))
+        self._client_lock = threading.Lock()
+        self._client = self._new_client()
         self._cancel_event = threading.Event()
+
+    def _new_client(self) -> httpx.Client:
+        return httpx.Client(
+            timeout=httpx.Timeout(self.timeout, connect=10.0, read=self.timeout)
+        )
+
+    def _ensure_client(self) -> httpx.Client:
+        with self._client_lock:
+            if getattr(self._client, "is_closed", False):
+                self._client = self._new_client()
+            return self._client
 
     def begin_run(self) -> None:
         """Clear a previous cooperative cancellation before a new pipeline run."""
+        self._ensure_client()
         self._cancel_event.clear()
 
-    def cancel_current(self) -> None:
-        """Interrupt the active streaming request at its next response chunk."""
+    def cancel_current(self, *, force: bool = False) -> None:
+        """Interrupt an active stream, optionally closing its socket now."""
         self._cancel_event.set()
+        if force:
+            with self._client_lock:
+                try:
+                    self._client.close()
+                except Exception:
+                    pass
         logger.info("[Ollama] Cancellation requested")
 
     def _raise_if_cancelled(self) -> None:
@@ -138,11 +157,18 @@ class OllamaClient:
                 token_count = 0
                 last_log_tokens = 0
 
-                with self._client.stream(
+                client = self._ensure_client()
+                with client.stream(
                     "POST",
                     f"{self.host}/api/chat",
                     json=payload,
-                    timeout=httpx.Timeout(self.timeout, connect=60.0, read=None),
+                    # ``timeout`` is an inactivity watchdog, not a total
+                    # generation limit. Each received chunk resets it.
+                    timeout=httpx.Timeout(
+                        self.timeout,
+                        connect=60.0,
+                        read=self.timeout,
+                    ),
                 ) as response:
                     if response.status_code == 404:
                         # Model not found on Ollama server — auto-fallback to available model
@@ -286,21 +312,24 @@ class OllamaClient:
 
         return self._extract_json(raw)
 
-    def unload_model(self) -> bool:
+    def unload_model(self, model: str | None = None) -> bool:
         """Best-effort release of the model from Ollama GPU memory."""
+        target_model = model or self.model
         try:
-            response = self._client.post(
+            # Use a short-lived client because immediate cancellation may have
+            # deliberately closed the streaming client.
+            response = httpx.post(
                 f"{self.host}/api/generate",
-                json={"model": self.model, "keep_alive": 0},
+                json={"model": target_model, "keep_alive": 0},
                 timeout=httpx.Timeout(30.0, connect=5.0),
             )
             response.raise_for_status()
-            logger.info("[Ollama] Unloaded model '%s'", self.model)
+            logger.info("[Ollama] Unloaded model '%s'", target_model)
             return True
         except Exception as exc:
             logger.warning(
                 "[Ollama] Could not unload model '%s': %s",
-                self.model,
+                target_model,
                 exc,
             )
             return False
@@ -374,7 +403,7 @@ class OllamaClient:
     def check_health(self, *, quiet: bool = False) -> bool:
         """Check if Ollama is running and the model is available."""
         try:
-            response = self._client.get(f"{self.host}/api/tags")
+            response = self._ensure_client().get(f"{self.host}/api/tags")
             response.raise_for_status()
             data = response.json()
             models = [m.get("name", "") for m in data.get("models", [])]
@@ -401,7 +430,9 @@ class OllamaClient:
     def _auto_resolve_model(self) -> str | None:
         """Find an installed model on the local Ollama instance if requested model 404s."""
         try:
-            response = self._client.get(f"{self.host}/api/tags", timeout=5.0)
+            response = self._ensure_client().get(
+                f"{self.host}/api/tags", timeout=5.0
+            )
             if response.status_code == 200:
                 data = response.json()
                 models = [m.get("name", "") for m in data.get("models", []) if m.get("name")]
@@ -412,26 +443,9 @@ class OllamaClient:
             logger.warning("[Ollama] Failed to auto-resolve installed models: %s", e)
         return None
 
-    def unload_model(self, model: str | None = None) -> bool:
-        """Explicitly unload the model from GPU VRAM memory."""
-        target_model = model or self.model
-        try:
-            res = self._client.post(
-                f"{self.host}/api/generate",
-                json={"model": target_model, "keep_alive": 0},
-                timeout=5.0,
-            )
-            if res.status_code == 200:
-                logger.info("[Ollama] Unloaded model '%s' from GPU VRAM", target_model)
-                return True
-        except Exception as e:
-            logger.warning("[Ollama] Failed to unload model '%s': %s", target_model, e)
-        return False
-
     def close(self) -> None:
         """Close the HTTP client."""
-        self.unload_model()
-        self._client.close()
+        self.cancel_current(force=True)
 
     def __enter__(self) -> OllamaClient:
         return self

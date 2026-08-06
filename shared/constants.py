@@ -32,6 +32,7 @@ class ValidationStatus(StrEnum):
     """Result of a quality validation check."""
 
     PASS = "pass"
+    ACCEPTED_WITH_WARNING = "accepted_with_warning"
     FAIL = "fail"
     FLAGGED = "flagged"
 

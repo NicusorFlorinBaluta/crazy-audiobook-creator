@@ -7,12 +7,30 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$projectRoot = Split-Path -Parent $PSScriptRoot
+$environmentFile = Join-Path $projectRoot ".env"
+$dashboardHeaders = @{}
+
+if (Test-Path -LiteralPath $environmentFile) {
+    foreach ($line in Get-Content -LiteralPath $environmentFile) {
+        $trimmed = $line.Trim()
+        if (-not $trimmed -or $trimmed.StartsWith("#")) {
+            continue
+        }
+        $parts = $trimmed -split "=", 2
+        if ($parts.Count -eq 2 -and $parts[0].Trim() -eq "CRAZY_AUDIOBOOK_DASHBOARD_TOKEN") {
+            $dashboardHeaders["X-API-Token"] = $parts[1].Trim()
+            break
+        }
+    }
+}
 
 function Test-DashboardOnline {
     try {
         Invoke-RestMethod `
             -Uri "$BaseUrl/api/projects" `
             -Method Get `
+            -Headers $dashboardHeaders `
             -TimeoutSec 2 | Out-Null
         return $true
     }
@@ -31,6 +49,7 @@ if ($listener) {
         $response = Invoke-RestMethod `
             -Uri "$BaseUrl/api/system/shutdown" `
             -Method Post `
+            -Headers $dashboardHeaders `
             -ContentType "application/json" `
             -Body "{}" `
             -TimeoutSec 10

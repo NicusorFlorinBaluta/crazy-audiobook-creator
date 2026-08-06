@@ -87,6 +87,14 @@ class JobQueue:
 
     def create_job(self, project_id: str, state: dict[str, Any]) -> None:
         """Create a new job entry."""
+        state = dict(state)
+        # All jobs created after the casting-review feature was introduced are
+        # fail-closed. Legacy rows already in SQLite remain untouched.
+        state.setdefault("voice_review_policy", "required_once")
+        state.setdefault("voice_review_status", "pending")
+        state.setdefault("voice_review_approved", False)
+        state.setdefault("voice_review_approved_at", None)
+        state.setdefault("voice_review_approved_revision", None)
         now = datetime.now(timezone.utc).isoformat()
         with self._connect() as conn:
             conn.execute(
@@ -256,6 +264,7 @@ class JobQueue:
                 SELECT
                     COUNT(*) as total,
                     SUM(CASE WHEN status = 'pass' THEN 1 ELSE 0 END) as passed,
+                    SUM(CASE WHEN status = 'accepted_with_warning' THEN 1 ELSE 0 END) as accepted_with_warning,
                     SUM(CASE WHEN status = 'fail' THEN 1 ELSE 0 END) as failed,
                     SUM(CASE WHEN status = 'flagged' THEN 1 ELSE 0 END) as flagged,
                     AVG(wer) as avg_wer,
@@ -279,12 +288,13 @@ class JobQueue:
         return {
             "total_segments": row[0],
             "passed": row[1],
-            "failed": row[2],
-            "flagged": row[3],
-            "average_wer": row[4] or 0.0,
-            "worst_wer": row[5] or 0.0,
-            "average_quality_score": row[6] or 0.0,
-            "total_retries": row[7] or 0,
+            "accepted_with_warning": row[2] or 0,
+            "failed": row[3],
+            "flagged": row[4],
+            "average_wer": row[5] or 0.0,
+            "worst_wer": row[6] or 0.0,
+            "average_quality_score": row[7] or 0.0,
+            "total_retries": row[8] or 0,
         }
 
     def get_project_quality_summary(self, project_id: str) -> dict[str, Any]:
@@ -301,6 +311,7 @@ class JobQueue:
                 SELECT
                     COUNT(*) AS total,
                     SUM(CASE WHEN q.status = 'pass' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN q.status = 'accepted_with_warning' THEN 1 ELSE 0 END),
                     SUM(CASE WHEN q.status = 'fail' THEN 1 ELSE 0 END),
                     SUM(CASE WHEN q.status = 'flagged' THEN 1 ELSE 0 END),
                     AVG(q.wer),
@@ -320,9 +331,10 @@ class JobQueue:
         return {
             "total_segments": row[0] or 0,
             "passed": row[1] or 0,
-            "failed": row[2] or 0,
-            "flagged": row[3] or 0,
-            "average_wer": row[4] or 0.0,
-            "worst_wer": row[5] or 0.0,
-            "total_retries": row[6] or 0,
+            "accepted_with_warning": row[2] or 0,
+            "failed": row[3] or 0,
+            "flagged": row[4] or 0,
+            "average_wer": row[5] or 0.0,
+            "worst_wer": row[6] or 0.0,
+            "total_retries": row[7] or 0,
         }

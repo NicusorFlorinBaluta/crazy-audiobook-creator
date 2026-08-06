@@ -100,7 +100,10 @@ server:
   workers: 1
 ```
 
-Keep both services on loopback unless remote access is intentionally engineered. For non-loopback binding, configure matching Voice tokens, a Dashboard token, and explicit CORS origins. The bundled browser UI is intended for local loopback use.
+Keep Ollama and Voice on loopback. If the dashboard binds to the LAN, restrict
+Windows Firewall and `dashboard.trusted_lan_cidrs` to the intended subnet and
+configure explicit CORS origins. A dashboard token remains available for peers
+outside the trusted LAN.
 
 ## 5. Run tests
 
@@ -122,6 +125,18 @@ Start the dashboard directly:
 Open `http://127.0.0.1:8000`. With `voice_server.auto_start: true`, the pipeline launches the voice service in the configured environment when needed.
 
 Alternatively run `start_app.pyw` to launch the dashboard silently and open the browser. It reuses an existing dashboard on port 8000 and does not kill unrelated processes. Closing that browser tab does not stop the background dashboard; use Pause first when you want GPU work to stop.
+
+After installing the `Crazy Audiobook Dashboard` scheduled task, reload code on
+port 8000 with the controlled restart helper:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\restart_dashboard.ps1
+```
+
+The helper reads `CRAZY_AUDIOBOOK_DASHBOARD_TOKEN` from the repository `.env`,
+requests application cleanup through `/api/system/shutdown`, waits for port 8000
+to close, starts the registered task, and waits for dashboard health. It does not
+need to expose the token on the command line.
 
 For the Electron wrapper:
 

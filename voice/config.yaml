@@ -31,7 +31,12 @@ tts:
 # --- Quality Validation ---
 validation:
   enabled: true
-  keep_tts_and_whisper_resident: true  # Verified on RX 7900 XTX (18.1 GiB free VRAM, 0.6s Whisper latency)
+  # Keep both models only within one chapter's retry loop. Whisper is released
+  # at the chapter boundary, so the next long TTS pass runs without contention.
+  keep_tts_and_whisper_resident: true
+  # Listening-approved clarity policy for very short emphatic lines. Longer
+  # dialogue, repetitions, names, and ordinary narration remain unchanged.
+  risk_aware_first_attempt: true
   whisper_model: "small"           # "tiny" | "base" | "small" | "medium" | "large-v3"
   whisper_device: "cuda"            # "auto" | "cuda" | "cpu"
 
@@ -58,6 +63,7 @@ validation:
 mastering:
   target_lufs: -19                   # Internal playback target (LUFS)
   peak_limit_dbfs: -1.0
+  peak_ceiling_mode: "soft_limiter"  # Listening-approved; preserves most samples while controlling true peaks
   crossfade_ms: 30
   fade_curve: "cosine"               # "linear" | "cosine" | "exponential"
 

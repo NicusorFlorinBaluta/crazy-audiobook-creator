@@ -43,7 +43,8 @@ or deleting script lines.
 
 ## Bootstrap and one-time review
 
-For each unique voice actually assigned to a speaker:
+For each unique voice actually assigned to a speaker (plus the two explicit
+male/female narrator candidates shown at first-project review):
 
 1. Build `voice_cast.json` from completed scripts.
 2. Compile and lint the design direction.
@@ -61,6 +62,13 @@ reused. Existing projects created before the approval feature are
 grandfathered. Newly created projects wait once; later partial chapter batches
 do not prompt again.
 
+The narrator is a deliberate exception to the no-unused-profiles rule. Because
+the narrator speaks extensively and the choice materially changes the whole
+book, bootstrap prepares one male and one female narrator reference. The review
+banner plays both and stores the selected profile on the narrator character.
+Only that selection is used by line generation; changing it later invalidates
+only chapters that contain narration.
+
 ## Generated and uploaded references
 
 Each project has `voice_library/<project-id>/voices.json` plus its reference
@@ -77,7 +85,11 @@ or OGG sample.
 Uploads are converted to mono 24 kHz PCM WAV. They must contain one clean,
 non-silent, non-clipped speaker and be 3–30 seconds long. The user supplies the
 exact transcript so Qwen Base can use higher-quality full ICL cloning instead
-of x-vector-only mode.
+of x-vector-only mode. Whisper verifies that transcript before the existing
+reference is replaced. A material mismatch fails closed and reports what ASR
+heard; harmless spacing/orthographic equivalence uses the same normalization as
+chapter validation. This one-time check can take longer on a cold model start,
+and managed model services are released when it finishes.
 
 ## Dependency invalidation
 
@@ -118,6 +130,17 @@ Avoid named actors, appearance or biography without an audible consequence,
 contradictory traits, extreme effects that harm intelligibility, and
 instructions about what words to speak.
 
+Accent is optional and should be light, story-appropriate, and consistent. It
+is a secondary contrast dimension after register, vocal weight, resonance,
+texture, articulation, and cadence. Heavy or arbitrary accent instructions can
+reduce pronunciation accuracy, drift between samples, and become caricatured.
+
+The official Qwen VoiceDesign family currently tops out at the 1.7B checkpoint
+used here. Larger expressive TTS systems are not drop-in replacements for the
+current VoiceDesign-reference plus Base-cloning workflow. They require a
+separate benchmark for identity consistency, long-form stability, validation,
+VRAM use, and resumability before becoming a production backend.
+
 ## Operational notes
 
 - Voice bootstrap is expensive, so it runs after book-wide scripting and is
@@ -125,5 +148,5 @@ instructions about what words to speak.
 - Qwen VoiceDesign and Qwen Base are not kept in GPU memory together.
 - The VoiceDesign helper binds only to `127.0.0.1:8101` and exists only during
   bootstrap.
-- The narrator is a normal registered reference and also speaks chapter-title
-  announcements.
+- The selected narrator candidate is a normal registered reference and also
+  speaks chapter-title announcements.

@@ -180,6 +180,13 @@ class VoiceApprovalRequest(BaseModel):
     continue_pipeline: bool = True
 
 
+def _validation_reset_targets(state) -> list[int]:
+    """Return the current audio selection for a validation-only rerun."""
+    selection = state.get("generation_chapter_selection")
+    if selection is None:
+        selection = state.get("scripted_chapters") or []
+    return sorted({int(chapter) for chapter in selection if int(chapter) > 0})
+
 def _project_dir(project_id: str) -> Path:
     root = Path("brain/projects").resolve()
     candidate = (root / project_id).resolve()
@@ -337,6 +344,61 @@ def _inspect_pcm_voice(path: Path) -> dict[str, float | int]:
         "rms": rms,
     }
 
+
+async def _interrupt_pipeline_worker(
+    project_id: str,
+    *,
+    reason: str,
+    wait_seconds: float = 20.0,
+) -> None:
+    if not pipeline or not job_queue:
+        return
+    try:
+        state = job_queue.get_job(project_id)
+    except KeyError:
+        return
+    job_queue.update_job(
+        project_id,
+        {
+            "status": PipelineStage.PAUSED.value,
+            "pause_reason": reason,
+            "running": False,
+        },
+    )
+    pipeline.stop(project_id)
+    
+    task = running_tasks.get(project_id)
+    if task and not task.done():
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=wait_seconds)
+        except Exception:
+            pass
+
+def _voice_review_approval_update(approved_at: str, cast_revision: str) -> dict:
+    return {
+        "voice_review_status": "approved",
+        "voice_review_approved_at": approved_at,
+        "voice_review_approved_revision": cast_revision,
+        "voice_review_approved": True,
+        "pause_reason": None
+    }
+
+def _uploaded_transcript_error(result, threshold: float = 0.20) -> str | None:
+    """Return a safe user-facing mismatch error, or None when ASR agrees."""
+    import re
+    effective_error = float(
+        result.effective_text_error
+        if getattr(result, "effective_text_error", None) is not None
+        else result.wer
+    )
+    if effective_error <= threshold:
+        return None
+    heard = re.sub(r"\s+", " ", result.transcribed_text).strip()
+    return (
+        "Uploaded transcript does not match the recording "
+        f"(effective error {effective_error:.1%}). "
+        f"Whisper heard: {heard[:240] or '[no speech]'}"
+    )
 
 def _ensure_voice_editable(project_id: str) -> dict[str, Any]:
     if not job_queue:
@@ -1067,7 +1129,7 @@ async def stop_pipeline(project_id: str):
     job_queue.update_job(
         project_id,
         {
-            "status": PipelineStage.PAUSING.value,
+            "status": PipelineStage.PAUSED.value,
             "active_stage": state.get("active_stage") or state.get("status"),
             "pause_reason": "user requested stop",
             "running": True,
@@ -1821,6 +1883,7 @@ async def get_project_voices(project_id: str):
                     for character_id in profile.get("assigned_characters", [])
                     if character_id in speaking_ids
                 ),
+                "owner_character_id": profile.get("owner_character_id") or voice_id,
             }
         )
 
@@ -1882,11 +1945,18 @@ async def get_project_voices(project_id: str):
 @app.get("/api/projects/{project_id}/voices/{voice_id}/preview")
 async def preview_project_voice(project_id: str, voice_id: str):
     """Stream an existing voice-reference WAV for dashboard preview."""
-    _, registry = _load_character_registry(project_id)
-    if voice_id not in {
-        str(info.get("voice_id") or character_id)
-        for character_id, info in registry["characters"].items()
-    }:
+    cast = _load_or_build_voice_cast(project_id)
+    voice_dir = _voice_project_dir(project_id)
+    voice_registry_path = voice_dir / "voices.json"
+    try:
+        registered = (
+            json.loads(voice_registry_path.read_text(encoding="utf-8")).get("voices", {})
+            if voice_registry_path.exists() else {}
+        )
+    except (OSError, json.JSONDecodeError):
+        registered = {}
+
+    if voice_id not in cast.get("voices", {}) and voice_id not in registered:
         raise HTTPException(status_code=404, detail="Voice not found")
     voice_path = (_voice_project_dir(project_id) / f"{voice_id}.wav").resolve()
     if not voice_path.is_relative_to(_voice_project_dir(project_id)):
@@ -2112,7 +2182,8 @@ async def upload_project_voice(
             status_code=404,
             detail="Only voices used by speaking characters can be replaced",
         )
-    owner = registry["characters"].get(voice_id)
+    owner_id = cast["voices"][voice_id].get("owner_character_id", voice_id)
+    owner = registry["characters"].get(owner_id)
     if not owner:
         raise HTTPException(status_code=500, detail="Voice owner is invalid")
 
@@ -2173,9 +2244,61 @@ async def upload_project_voice(
             )
         audio_info = _inspect_pcm_voice(canonical_path)
 
-        target_path = voice_dir / f"{voice_id}.wav"
-        if target_path.exists():
-            os.replace(target_path, backup_path)
+        # Phase 3.3: Validate uploaded reference sample transcription
+        import tempfile
+        import sys
+        import json
+        val_script = """
+import sys, json
+from voice.validator.whisper_validator import WhisperValidator
+try:
+    val = WhisperValidator(model_name="large-v3", device="auto")
+    transcribed = val.transcribe(sys.argv[1])
+    wer = val.calculate_wer(sys.argv[2], transcribed)
+    print(json.dumps({"wer": float(wer), "transcribed_text": transcribed}))
+except Exception as e:
+    print(json.dumps({"error": str(e)}))
+"""
+        with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False, encoding="utf-8") as f:
+            f.write(val_script)
+            script_path = f.name
+        
+        try:
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(Path(__file__).resolve().parent.parent.parent.parent)
+            proc = subprocess.run(
+                [sys.executable, script_path, str(canonical_path), transcript],
+                capture_output=True,
+                text=True,
+                timeout=180,
+                env=env,
+            )
+            if proc.returncode != 0:
+                logger.error("Whisper validation script failed: %s", proc.stderr)
+                raise ValueError(f"Whisper validation failed: {proc.stderr[-200:]}")
+                
+            try:
+                val_res = json.loads(proc.stdout)
+                if "error" in val_res:
+                    raise ValueError(f"Whisper validation script error: {val_res['error']}")
+                else:
+                    class DummyResult:
+                        wer = val_res["wer"]
+                        transcribed_text = val_res["transcribed_text"]
+                        effective_text_error = val_res["wer"]
+                    
+                    mismatch_err = _uploaded_transcript_error(DummyResult())
+                    if mismatch_err:
+                        raise ValueError(mismatch_err)
+            except json.JSONDecodeError:
+                logger.error("Could not decode validator output: %s", proc.stdout)
+                raise ValueError("Whisper validator returned invalid format.")
+        finally:
+            Path(script_path).unlink(missing_ok=True)
+
+        target_path = voice_dir / f"{voice_id}_{uuid.uuid4().hex[:8]}.wav"
+        
+        # We do not overwrite the exact same filename to prevent WinError 5 locking.
         os.replace(canonical_path, target_path)
         try:
             profile = cast["voices"][voice_id]

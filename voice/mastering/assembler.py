@@ -59,6 +59,7 @@ class AudioAssembler:
         logger.info("Assembling %d segments (announcement=%s)...", len(segments), announcement_audio is not None)
 
         parts: list[np.ndarray] = []
+        join_diagnostics: list[dict[str, Any]] = []
 
         # Chapter start silence (1.0s standard audiobook start)
         parts.append(self._silence(self.chapter_start_silence_ms))
@@ -74,6 +75,8 @@ class AudioAssembler:
 
         previous_pause_after = 0
         previous_was_audio = False
+        previous_audio: np.ndarray | None = None
+        previous_line_id = ""
         for i, segment in enumerate(segments):
             # One timing owner: adjacent pause directives are combined with
             # max(), never added together. Chapter edges are owned here.
@@ -107,6 +110,16 @@ class AudioAssembler:
 
             audio = audio.astype(np.float32)
 
+            if previous_audio is not None:
+                diagnostic = self._join_diagnostic(
+                    previous_line_id=previous_line_id,
+                    current_line_id=str(getattr(segment, "line_id", i)),
+                    previous=previous_audio,
+                    current=audio,
+                    gap_ms=gap_before,
+                )
+                join_diagnostics.append(diagnostic)
+
             # Cross-fade with previous segment
             if (
                 self.crossfade_ms > 0
@@ -119,6 +132,8 @@ class AudioAssembler:
             parts.append(audio)
             previous_was_audio = True
             previous_pause_after = getattr(segment, "pause_after_ms", 500)
+            previous_audio = audio.copy()
+            previous_line_id = str(getattr(segment, "line_id", i))
 
         # The final script pause and chapter outro are alternatives, not
         # cumulative delays.
@@ -135,6 +150,51 @@ class AudioAssembler:
         return {
             "audio": assembled,
             "sample_rate": self.sample_rate,
+            "join_diagnostics": join_diagnostics,
+            "join_warnings": sum(
+                item["status"] == "warning" for item in join_diagnostics
+            ),
+        }
+
+    @staticmethod
+    def _join_diagnostic(
+        *,
+        previous_line_id: str,
+        current_line_id: str,
+        previous: np.ndarray,
+        current: np.ndarray,
+        gap_ms: int,
+    ) -> dict[str, Any]:
+        """Measure one boundary without changing or rejecting the audio."""
+        def rms_dbfs(audio: np.ndarray) -> float:
+            if audio.size == 0:
+                return -100.0
+            rms = float(np.sqrt(np.mean(np.square(audio.astype(np.float64)))))
+            return float(20 * np.log10(rms)) if rms > 0 else -100.0
+
+        previous_rms = rms_dbfs(previous)
+        current_rms = rms_dbfs(current)
+        loudness_delta = abs(previous_rms - current_rms)
+        boundary_jump = (
+            abs(float(current[0]) - float(previous[-1]))
+            if previous.size and current.size and gap_ms == 0
+            else 0.0
+        )
+        reasons: list[str] = []
+        if loudness_delta > 8.0:
+            reasons.append("segment_loudness_delta")
+        if gap_ms == 0 and boundary_jump > 0.15:
+            reasons.append("abrupt_zero_gap_boundary")
+        return {
+            "previous_line_id": previous_line_id,
+            "current_line_id": current_line_id,
+            "gap_ms": int(gap_ms),
+            "previous_rms_dbfs": previous_rms,
+            "current_rms_dbfs": current_rms,
+            "loudness_delta_db": loudness_delta,
+            "zero_gap_sample_jump": boundary_jump,
+            "status": "warning" if reasons else "clean",
+            "reasons": reasons,
         }
 
     def _silence(self, ms: int) -> np.ndarray:

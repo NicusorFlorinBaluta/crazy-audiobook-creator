@@ -11,9 +11,9 @@ Crazy Audiobook Creator turns an EPUB into a multi-speaker, chaptered M4B on one
 - Speaking-only casting with checked descriptions, previews, text redesign, and recorded-reference upload
 - Chapter-selectable, resumable audio generation
 - Per-line fingerprint cache that invalidates when text, voice, pronunciation, emotion, speed, or generation settings change
-- Fail-closed validation for transcription accuracy, clipping, silence, pacing, and speaker similarity
+- Fail-closed hard validation plus visible non-blocking soft audio warnings
 - Narrated chapter-title announcements, chapter WAV mastering, and full or partial M4B export
-- Cooperative pause/cancel, scheduled chapter-boundary parking, and serialized GPU work
+- Immediate lossy pause/cancel, scheduled chapter-boundary parking, and a global GPU lease
 - Local dashboard with scalable chapter search/filtering, explicit current-work progress, editable working hours, script, character, quality, and log views
 
 ## Partial-book workflow
@@ -74,8 +74,10 @@ cd ..
 - Qwen3-TTS Base voice cloning does not expose a natural-language per-utterance instruction parameter. The project therefore applies requested speed plus restrained pitch/tone post-processing for emotion cues; it does not claim native clone-mode emotion control.
 - Mastered output targets internal listening quality. It is not an ACX submission validator or an ACX MP3 export pipeline.
 - External metadata lookup is opt-in and contacts Google Books only when requested or explicitly enabled.
-- Both HTTP services bind to loopback by default. Non-loopback binding is refused unless an API token is configured.
-- **Pause** interrupts active Ollama streaming and releases GPU models. Closing
+- Ollama and Voice bind to loopback. The dashboard may bind to the LAN;
+  loopback and `dashboard.trusted_lan_cidrs` are allowed without a token.
+- **Pause** immediately interrupts active work and releases app-owned GPU models;
+  the current in-flight request may be lost. Closing
   the Electron app performs the same cleanup. Closing a browser tab opened by
   `start_app.pyw` only closes the UI; the background dashboard intentionally
   keeps running for scheduled/unattended work.
@@ -89,6 +91,7 @@ cd ..
 - [Quality assurance](docs/quality-assurance.md)
 - [Voice design](docs/voice-design.md)
 - [Prompt and source-fidelity rules](docs/prompts.md)
+- [Production-readiness changes and next E2E gates](docs/production-readiness-2026-08-02.md)
 
 `implementation_plan*.md` and `chat-history.md` are historical records, not current specifications.
 

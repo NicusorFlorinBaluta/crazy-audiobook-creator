@@ -164,8 +164,7 @@ def build_segment_manifest(
     entries = []
     for order, line in enumerate(chapter.lines):
         voice_id = line.voice_id or line.speaker
-        entries.append(
-            {
+        entry = {
                 "order": order,
                 "line_id": line.line_id,
                 "speaker": line.speaker,
@@ -180,12 +179,20 @@ def build_segment_manifest(
                 "pause_before_ms": line.pause_before_ms,
                 "pause_after_ms": line.pause_after_ms,
             }
-        )
+        if line.spoken_text:
+            entry["spoken_text_hash"] = sha256_text(line.spoken_text)
+        entries.append(entry)
+    chapter_payload = chapter.model_dump(mode="json")
+    for line_payload in chapter_payload.get("lines", []):
+        if line_payload.get("spoken_text") is None:
+            line_payload.pop("spoken_text", None)
     payload = {
         "schema": GENERATION_SCHEMA_VERSION,
         "project_id": project_id,
         "chapter_number": chapter.chapter_number,
-        "script_hash": fingerprint(chapter.model_dump(mode="json")),
+        # Omitting null spoken_text keeps pre-lexicon manifests stable. A real
+        # synthesis override participates in the dependency hash.
+        "script_hash": fingerprint(chapter_payload),
         "generation_config": config,
         "segments": entries,
     }

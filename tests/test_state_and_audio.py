@@ -5,6 +5,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import soundfile as sf
@@ -22,6 +23,7 @@ from shared.artifacts import (
 from shared.models import (
     MasterChapterRequest,
     MasterSegmentInfo,
+    ExportChapterInfo,
     ScriptChapter,
     ScriptLine,
 )
@@ -32,9 +34,41 @@ from voice.tts_server.voice_designer import VoiceDesigner
 from voice.tts_server.voice_library import VoiceLibraryManager
 from shared.constants import Gender
 from shared.models import Character
+from shared.single_instance import SingleInstanceLock
+
+
+class SingleInstanceTests(unittest.TestCase):
+    def test_pipeline_lock_rejects_a_second_owner_without_erasing_pid(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            os.environ, {"TEMP": directory}
+        ):
+            first = SingleInstanceLock("pipeline-test.lock")
+            second = SingleInstanceLock("pipeline-test.lock")
+            try:
+                self.assertTrue(first.acquire())
+                expected_pid = str(os.getpid())
+                self.assertFalse(second.acquire())
+                # Windows denies a second open while byte zero is locked, so
+                # inspect the owner metadata through the lock owner's handle.
+                first.handle.seek(0)
+                self.assertEqual(first.handle.read(), expected_pid)
+                first.release()
+                self.assertTrue(second.acquire())
+            finally:
+                first.release()
+                second.release()
 
 
 class JobQueueTests(unittest.TestCase):
+    def test_new_jobs_require_one_time_voice_review_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            queue = JobQueue(str(Path(directory) / "state.db"))
+            queue.create_job("book", {"status": "created"})
+            state = queue.get_job("book")
+            self.assertEqual(state["voice_review_policy"], "required_once")
+            self.assertEqual(state["voice_review_status"], "pending")
+            self.assertFalse(state["voice_review_approved"])
+
     def test_delete_missing_job_raises(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             queue = JobQueue(str(Path(directory) / "state.db"))
@@ -78,7 +112,54 @@ class VoiceDiagnosticTests(unittest.TestCase):
             )
 
             self.assertGreater(metrics["median_f0_hz"], 240)
+            self.assertGreater(metrics["f0_range_hz"], 0)
+            self.assertGreater(metrics["spectral_centroid_hz"], 0)
+            self.assertIn("silence_ratio", metrics)
+            self.assertIn("clipping_fraction", metrics)
             self.assertTrue(any("unusually high" in item for item in warnings))
+
+    def test_cast_pair_diagnostic_does_not_trust_requested_gender(self) -> None:
+        diagnostic = VoiceDesigner._cast_pair_diagnostic(
+            "male_requested",
+            "female_requested",
+            0.985,
+            {
+                "median_f0_hz": 175.0,
+                "f0_range_hz": 55.0,
+                "spectral_centroid_hz": 1450.0,
+            },
+            {
+                "median_f0_hz": 180.0,
+                "f0_range_hz": 58.0,
+                "spectral_centroid_hz": 1500.0,
+            },
+            0.97,
+        )
+
+        self.assertEqual(diagnostic.status, "similar")
+        self.assertFalse(diagnostic.warning_suppressed)
+
+    def test_cast_pair_diagnostic_records_objective_contrast(self) -> None:
+        diagnostic = VoiceDesigner._cast_pair_diagnostic(
+            "left",
+            "right",
+            0.985,
+            {
+                "median_f0_hz": 110.0,
+                "f0_range_hz": 45.0,
+                "spectral_centroid_hz": 1050.0,
+            },
+            {
+                "median_f0_hz": 230.0,
+                "f0_range_hz": 100.0,
+                "spectral_centroid_hz": 1900.0,
+            },
+            0.97,
+        )
+
+        self.assertEqual(diagnostic.status, "distinct")
+        self.assertTrue(diagnostic.warning_suppressed)
+        self.assertGreater(diagnostic.pitch_delta_hz, 40.0)
 
 
 class ArtifactStateTests(unittest.TestCase):
@@ -181,6 +262,34 @@ class ArtifactStateTests(unittest.TestCase):
                 os.chdir(old_cwd)
 
 
+class BookLoudnessTests(unittest.TestCase):
+    def test_consistent_chapters_pass_report_only_gate(self) -> None:
+        report = M4BExporter._book_loudness_report(
+            [
+                ExportChapterInfo(number=1, title="One", file="one.wav", lufs=-19.2, peak_dbfs=-1.2),
+                ExportChapterInfo(number=2, title="Two", file="two.wav", lufs=-18.8, peak_dbfs=-1.0),
+                ExportChapterInfo(number=3, title="Three", file="three.wav", lufs=-19.0, peak_dbfs=-1.1),
+            ]
+        )
+
+        self.assertEqual(report["status"], "consistent")
+        self.assertAlmostEqual(report["spread_lu"], 0.4)
+        self.assertEqual(report["outlier_chapters"], [])
+
+    def test_loudness_spread_reports_outlier_without_rejecting_export(self) -> None:
+        report = M4BExporter._book_loudness_report(
+            [
+                ExportChapterInfo(number=1, title="One", file="one.wav", lufs=-19.0),
+                ExportChapterInfo(number=2, title="Two", file="two.wav", lufs=-21.0),
+                ExportChapterInfo(number=3, title="Three", file="three.wav", lufs=-19.1),
+            ]
+        )
+
+        self.assertEqual(report["status"], "warning")
+        self.assertGreater(report["spread_lu"], 1.0)
+        self.assertEqual(report["outlier_chapters"], [2])
+
+
 class AssemblerTests(unittest.TestCase):
     def test_missing_segment_is_fatal(self) -> None:
         assembler = AudioAssembler()
@@ -195,6 +304,51 @@ class AssemblerTests(unittest.TestCase):
                     ],
                     Path(directory),
                 )
+
+    def test_join_diagnostics_flag_large_segment_loudness_change(self) -> None:
+        assembler = AudioAssembler(crossfade_ms=0)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sf.write(root / "quiet.wav", np.full(2400, 0.02, dtype=np.float32), 24000)
+            sf.write(root / "loud.wav", np.full(2400, 0.4, dtype=np.float32), 24000)
+            result = assembler.assemble_chapter(
+                [
+                    MasterSegmentInfo(
+                        line_id="quiet",
+                        file="quiet.wav",
+                        pause_after_ms=300,
+                    ),
+                    MasterSegmentInfo(line_id="loud", file="loud.wav"),
+                ],
+                root,
+            )
+
+        self.assertEqual(result["join_warnings"], 1)
+        self.assertEqual(
+            result["join_diagnostics"][0]["reasons"],
+            ["segment_loudness_delta"],
+        )
+
+    def test_join_diagnostics_keep_similar_segments_clean(self) -> None:
+        assembler = AudioAssembler(crossfade_ms=0)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sf.write(root / "one.wav", np.full(2400, 0.08, dtype=np.float32), 24000)
+            sf.write(root / "two.wav", np.full(2400, 0.09, dtype=np.float32), 24000)
+            result = assembler.assemble_chapter(
+                [
+                    MasterSegmentInfo(
+                        line_id="one",
+                        file="one.wav",
+                        pause_after_ms=250,
+                    ),
+                    MasterSegmentInfo(line_id="two", file="two.wav"),
+                ],
+                root,
+            )
+
+        self.assertEqual(result["join_warnings"], 0)
+        self.assertEqual(result["join_diagnostics"][0]["status"], "clean")
 
 
 class AudioAnalyzerTests(unittest.TestCase):
@@ -226,6 +380,27 @@ class AudioAnalyzerTests(unittest.TestCase):
                 1.0,
             ),
         )
+
+
+class LoudnessNormalizerTests(unittest.TestCase):
+    def test_soft_limiter_preserves_samples_below_knee(self) -> None:
+        from voice.mastering.normalizer import LoudnessNormalizer
+
+        audio = np.array([-0.3, -0.1, 0.0, 0.1, 0.3], dtype=np.float64)
+        limited = LoudnessNormalizer._apply_soft_limiter(audio, 0.8)
+
+        np.testing.assert_allclose(limited, audio)
+
+    def test_soft_limiter_reduces_peaks_without_global_attenuation(self) -> None:
+        from voice.mastering.normalizer import LoudnessNormalizer
+
+        audio = np.array([0.1, 0.4, 0.75, 1.2], dtype=np.float64)
+        limited = LoudnessNormalizer._apply_soft_limiter(audio, 0.8)
+
+        self.assertEqual(limited[0], audio[0])
+        self.assertEqual(limited[1], audio[1])
+        self.assertLess(limited[-1], 0.8)
+        self.assertGreater(limited[-1], limited[-2])
 
 
 class FingerprintTests(unittest.TestCase):
@@ -276,6 +451,61 @@ class FingerprintTests(unittest.TestCase):
                     fx_dict=None,
                     output_path=audio,
                     generation_context=changed,
+                )
+            )
+
+    def test_validation_cache_is_independent_and_hash_checked(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = EmbeddingStore(root / "cache.db")
+            audio = root / "line.wav"
+            sf.write(audio, np.ones(2400, dtype=np.float32) * 0.01, 24000)
+            context = {"validation_schema": "3", "whisper_model": "medium"}
+            result = {"line_id": "line", "status": "pass", "wer": 0.0}
+            store.save_validation_result(
+                project_id="book",
+                line_id="line",
+                output_path=audio,
+                expected_text="Text",
+                validation_context=context,
+                result=result,
+            )
+            self.assertEqual(
+                store.get_validation_result(
+                    project_id="book",
+                    line_id="line",
+                    output_path=audio,
+                    expected_text="Text",
+                    validation_context=context,
+                ),
+                result,
+            )
+            self.assertIsNone(
+                store.get_validation_result(
+                    project_id="book",
+                    line_id="line",
+                    output_path=audio,
+                    expected_text="Changed",
+                    validation_context=context,
+                )
+            )
+            self.assertIsNone(
+                store.get_validation_result(
+                    project_id="book",
+                    line_id="line",
+                    output_path=audio,
+                    expected_text="Text",
+                    validation_context=dict(context, validation_schema="4"),
+                )
+            )
+            sf.write(audio, np.ones(4800, dtype=np.float32) * 0.02, 24000)
+            self.assertIsNone(
+                store.get_validation_result(
+                    project_id="book",
+                    line_id="line",
+                    output_path=audio,
+                    expected_text="Text",
+                    validation_context=context,
                 )
             )
 

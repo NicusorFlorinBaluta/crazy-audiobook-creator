@@ -33,6 +33,7 @@ class LoudnessNormalizer:
         noise_gate_threshold: float = -50.0,
         noise_gate_attack_ms: float = 5.0,
         noise_gate_release_ms: float = 50.0,
+        peak_ceiling_mode: str = "global",
     ):
         self.target_lufs = target_lufs
         self.peak_limit_dbfs = peak_limit_dbfs
@@ -42,6 +43,9 @@ class LoudnessNormalizer:
         self.noise_gate_threshold = noise_gate_threshold
         self.noise_gate_attack_ms = noise_gate_attack_ms
         self.noise_gate_release_ms = noise_gate_release_ms
+        if peak_ceiling_mode not in {"global", "soft_limiter"}:
+            raise ValueError("peak_ceiling_mode must be 'global' or 'soft_limiter'")
+        self.peak_ceiling_mode = peak_ceiling_mode
 
     def normalize(
         self,
@@ -93,7 +97,14 @@ class LoudnessNormalizer:
 
         # Step 4: Transparent peak ceiling. Final loudness is measured again
         # because peak-constrained material may finish below the LUFS target.
+        pre_ceiling_audio = audio
         audio = self._apply_peak_ceiling(audio)
+        peak_limit = 10 ** (self.peak_limit_dbfs / 20)
+        knee = peak_limit * 0.80
+        limited_sample_fraction = (
+            float(np.mean(np.abs(pre_ceiling_audio) > knee))
+            if pre_ceiling_audio.size else 0.0
+        )
 
         # Final measurements
         final_lufs = self._measure_lufs(audio, sample_rate)
@@ -130,6 +141,8 @@ class LoudnessNormalizer:
             "lufs": final_lufs,
             "peak_dbfs": peak_dbfs,
             "sample_rate": sample_rate,
+            "peak_ceiling_mode": self.peak_ceiling_mode,
+            "limited_sample_fraction": limited_sample_fraction,
         }
 
     def _measure_lufs(self, audio: np.ndarray, sample_rate: int) -> float:
@@ -159,8 +172,10 @@ class LoudnessNormalizer:
             return -70.0
 
     def _apply_peak_ceiling(self, audio: np.ndarray) -> np.ndarray:
-        """Apply global attenuation against an oversampled peak ceiling."""
+        """Apply the configured transparent peak ceiling."""
         peak_limit = 10 ** (self.peak_limit_dbfs / 20)
+        if self.peak_ceiling_mode == "soft_limiter":
+            audio = self._apply_soft_limiter(audio, peak_limit)
         peak = self._measure_true_peak(audio)
 
         if peak > peak_limit:
@@ -169,6 +184,27 @@ class LoudnessNormalizer:
             logger.debug("Peak ceiling applied: %.2f -> %.2f", peak, peak_limit)
 
         return audio
+
+    @staticmethod
+    def _apply_soft_limiter(
+        audio: np.ndarray,
+        peak_limit: float,
+        knee_ratio: float = 0.80,
+    ) -> np.ndarray:
+        """Limit only peak samples with a continuous, unity-slope soft knee."""
+        if audio.size == 0:
+            return audio
+        knee = peak_limit * knee_ratio
+        headroom = max(peak_limit - knee, 1e-9)
+        magnitude = np.abs(audio)
+        limited = audio.copy()
+        above = magnitude > knee
+        if np.any(above):
+            compressed = knee + headroom * (
+                1.0 - np.exp(-(magnitude[above] - knee) / headroom)
+            )
+            limited[above] = np.sign(audio[above]) * compressed
+        return limited
 
     def _apply_noise_gate(self, audio: np.ndarray, sample_rate: int) -> np.ndarray:
         """Apply a noise gate to clean up silence portions (vectorized)."""

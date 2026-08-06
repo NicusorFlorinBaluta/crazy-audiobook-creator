@@ -68,7 +68,14 @@ _SYSTEM_PROMPT = """You are a STRICT AUDIOBOOK SCRIPT METADATA ANNOTATOR. Your O
   personification. If a named place/object is mentioned near dialogue, assign
   it as speaker only when the text explicitly establishes that it literally
   speaks.
-- If you cannot determine the speaker with high confidence, use "narrator".
+- Resolve ambiguous dialogue from surrounding turns, dialogue tags, aliases,
+  and previous-chapter context. Use "narrator" for a quote only when no
+  character actually speaks it (for example, a sign or document). Never
+  select a character from gender alone or merely because they are nearby.
+
+#### Scene-Level Prosody Plan
+First, analyze the text and group it into logical scenes. Generate a constrained scene state for each.
+Line controls (emotion, speed) MUST derive from the active scene state with bounded changes. Do not make abrupt jumps in speed or emotion without a new scene or explicit narrative transition.
 
 #### Emotion Mapping & Inflection Taxonomy
 Provide a rich, specific emotion directive matching TTS performance capabilities:
@@ -93,9 +100,19 @@ CRITICAL REMINDER: You MUST output ONLY valid JSON matching the Output Schema be
   "chapter_number": {chapter_number},
   "chapter_title": "{chapter_title}",
   "chapter_summary": "1-2 sentence summary for continuity with next chapter",
+  "scenes": [
+    {{
+      "mood": "overall scene mood (e.g., tense, melancholic)",
+      "tension": "tension level (high, building, low)",
+      "narrator_pace": 1.0,
+      "character_state": "general state of characters in the scene",
+      "transition_intent": "how this scene transitions to the next"
+    }}
+  ],
   "lines": [
     {{
       "id": 0,
+      "scene_index": 0,
       "speaker": "character_id",
       "speaker_confidence": 0.95,
       "speaker_evidence": "short dialogue tag or context cue; empty for narration",
@@ -170,7 +187,11 @@ class ScriptGenerator:
             # affect audio manifests—not speaker/emotion metadata.
             registry=self._format_registry(registry),
             model_name=getattr(self.ollama, "model", "unknown"),
-            prompt_text=_SYSTEM_PROMPT + _USER_PROMPT,
+            prompt_text=(
+                _SYSTEM_PROMPT
+                + _USER_PROMPT
+                + "\nGROUPING_POLICY=prosody-compatible-v2"
+            ),
             chunk_size_words=self.chunk_size_words,
             group_utterances=self.group_utterances,
             utterance_target_chars=self.utterance_target_chars,
@@ -419,7 +440,7 @@ class ScriptGenerator:
         raw = None
         last_error: Exception | None = None
         allowed_speakers = set(registry.characters)
-        for attempt in range(1, 3):
+        for attempt in range(1, 4):
             try:
                 request_prompt = prompt
                 if last_error is not None:
@@ -427,9 +448,12 @@ class ScriptGenerator:
                         "\n\nCORRECTION REQUIRED: Your previous metadata was "
                         f"invalid: {last_error}. For dialogue, use only one of "
                         f"these exact speaker IDs: "
-                        f"{', '.join(sorted(allowed_speakers))}. If the speaker "
-                        "cannot be identified with high confidence, use "
-                        "'narrator'. Do not invent generic speaker labels."
+                        f"{', '.join(sorted(allowed_speakers))}. Re-evaluate "
+                        "the complete local conversation and provide short, "
+                        "source-grounded speaker_evidence. Never choose from "
+                        "gender or proximity alone. Use 'narrator' only for "
+                        "quoted material that no character actually speaks. "
+                        "Do not invent generic speaker labels."
                     )
                 candidate = self.ollama.generate_json(
                     request_prompt,
@@ -456,7 +480,8 @@ class ScriptGenerator:
                 )
         if raw is None:
             logger.warning(
-                "LLM metadata annotation failed for chapter %d after retries. Using smart rule-based fallback metadata.",
+                "LLM metadata annotation failed for chapter %d after retries. "
+                "Using conservative exact-evidence fallback metadata.",
                 chapter_number,
             )
             fallback_lines = []
@@ -508,6 +533,7 @@ class ScriptGenerator:
         """Process complete source fragments in non-overlapping batches."""
         fragments = self._split_into_fragment_spans(chapter.text)
         all_lines: list[ScriptLine] = []
+        all_scenes = []
         summaries: list[str] = []
         chunks = self._chunk_fragments(fragments)
 
@@ -533,6 +559,7 @@ class ScriptGenerator:
                 id_offset=offset,
             )
             all_lines.extend(chunk_script.lines)
+            if hasattr(chunk_script, 'scenes'): all_scenes.extend(chunk_script.scenes)
             if chunk_script.chapter_summary:
                 summaries.append(chunk_script.chapter_summary)
             offset += len(chunk)
@@ -541,6 +568,7 @@ class ScriptGenerator:
             chapter_number=chapter.number,
             chapter_title=chapter.title,
             chapter_summary=" ".join(summaries)[-2000:],
+            scenes=all_scenes,
             lines=all_lines,
         )
 
@@ -572,7 +600,7 @@ class ScriptGenerator:
         script: ScriptChapter,
         registry: CharacterRegistry,
     ) -> None:
-        """Dynamically register any newly discovered speaking characters into the registry."""
+        """Resolve exact aliases and reject invented Pass 2 speakers."""
         known_ids = set(registry.characters.keys())
         for line in script.lines:
             spk = line.speaker.lower().replace(" ", "_").strip("_")
@@ -595,22 +623,9 @@ class ScriptGenerator:
                 continue
 
             if spk not in known_ids:
-                name_display = spk.replace("_", " ").title()
-                registry.characters[spk] = Character(
-                    id=spk,
-                    name=name_display,
-                    gender=Gender.OTHER,
-                    age_range="unknown",
-                    personality_traits=["discovered in scripting"],
-                    voice_description=f"Character: {name_display}",
-                    speaking_style="standard",
-                    discovered_in_pass2=True,
-                )
-                known_ids.add(spk)
-                logger.info(
-                    "[ScriptGenerator] Dynamically registered newly discovered character '%s' in Chapter %d",
-                    spk,
-                    script.chapter_number,
+                raise ValueError(
+                    f"Chapter {script.chapter_number} contains unknown speaker "
+                    f"'{spk}'; Pass 2 may not create cast members"
                 )
 
     @staticmethod
@@ -618,9 +633,10 @@ class ScriptGenerator:
         """Format character registry as a readable string for the LLM prompt."""
         lines: list[str] = []
         for char_id, char in registry.characters.items():
+            aliases = ", ".join(char.aliases) if char.aliases else "none"
             lines.append(
                 f"- **{char.name}** (id: `{char_id}`, {char.gender}, {char.age_range}): "
-                f"{char.speaking_style}"
+                f"aliases={aliases}; {char.speaking_style}"
             )
         return "\n".join(lines)
 
@@ -748,6 +764,10 @@ class ScriptGenerator:
                     f"Fragment {id_offset + i} uses unknown speaker '{speaker}'"
                 )
             confidence = metadata_map.get(i, {}).get("speaker_confidence")
+            if confidence is None:
+                raise ValueError(
+                    f"Fragment {id_offset + i} has no speaker confidence"
+                )
             if confidence is not None:
                 try:
                     parsed_confidence = float(confidence)
@@ -755,14 +775,11 @@ class ScriptGenerator:
                     raise ValueError(
                         f"Fragment {id_offset + i} has invalid speaker confidence"
                     ) from exc
-                if (
-                    parsed_confidence < confidence_threshold
-                    and speaker != "narrator"
-                ):
+                if parsed_confidence < confidence_threshold:
                     raise ValueError(
                         f"Fragment {id_offset + i} assigns '{speaker}' with "
-                        f"low confidence ({parsed_confidence:.2f}); use narrator "
-                        "when attribution is uncertain"
+                        f"low confidence ({parsed_confidence:.2f}); re-evaluate "
+                        "the dialogue using source evidence"
                     )
 
     @staticmethod
@@ -796,25 +813,9 @@ class ScriptGenerator:
             if spk != "narrator" and re.search(r"\b" + re.escape(spk) + r"\b", combined):
                 return spk
 
-        # 2. Pronoun / gender descriptor match
-        if re.search(r"\b(she|her|woman|lady|girl)\b", combined):
-            female_spks = [s for s in allowed_speakers if s != "narrator"]
-            if female_spks:
-                return female_spks[0]
-        if re.search(r"\b(he|his|him|man|guy|boy)\b", combined):
-            male_spks = [s for s in allowed_speakers if s != "narrator"]
-            if male_spks:
-                return male_spks[0]
-
-        # 3. Adjacent dialogue speaker in nearby window (-3..+3)
-        for delta in (-1, 1, -2, 2, -3, 3):
-            idx = frag_idx + delta
-            if 0 <= idx < len(fragments):
-                spk = ScriptGenerator._normalize_speaker_id(
-                    metadata_map.get(idx, {}).get("speaker", "narrator")
-                )
-                if spk in allowed_speakers and spk != "narrator":
-                    return spk
+        # Pronouns, gender and turn proximity are not identity evidence. The
+        # conservative automatic fallback is narrator, not an arbitrary cast
+        # member selected from an unordered set.
         return "narrator"
 
     @staticmethod
@@ -849,13 +850,33 @@ class ScriptGenerator:
         for i, fragment in enumerate(fragments):
             meta = metadata_map.get(i, {})
             
-            # Safely parse speed which might come back as a string like "normal"
             try:
-                speed = max(0.5, min(2.0, float(meta.get("speed", 1.0))))
+                scene_idx = int(meta.get("scene_index", 0))
             except (ValueError, TypeError):
-                speed = 1.0
-
+                scene_idx = 0
+            
+            scenes = raw.get("scenes", [])
+            base_pace = 1.0
+            if scenes and 0 <= scene_idx < len(scenes):
+                try:
+                    scene_pace = scenes[scene_idx].get("narrator_pace")
+                    if scene_pace is not None:
+                        base_pace = float(scene_pace)
+                except (ValueError, TypeError):
+                    pass
+            
             is_dialogue = ScriptGenerator._is_dialogue_fragment(fragment.text)
+            
+            # Apply bounds to speed based on the scene pace
+            try:
+                raw_speed = float(meta.get("speed", base_pace))
+            except (ValueError, TypeError):
+                raw_speed = base_pace
+                
+            # Allow a tighter bound for narrator, looser for expressive dialogue
+            bound_offset = 0.25 if is_dialogue else 0.15
+            speed = max(base_pace - bound_offset, min(base_pace + bound_offset, raw_speed))
+            speed = max(0.5, min(2.0, speed))  # Absolute bounds
             speaker = ScriptGenerator._normalize_speaker_id(
                 meta.get("speaker", "narrator")
             )
@@ -872,11 +893,7 @@ class ScriptGenerator:
                             speaker = cid
                             break
 
-                if speaker == "narrator":
-                    speaker = ScriptGenerator._resolve_dialogue_speaker(
-                        i, fragments, metadata_map, allowed_speakers
-                    )
-                elif speaker not in allowed_speakers:
+                if speaker not in allowed_speakers:
                     logger.warning(
                         "[ScriptGenerator] Unknown speaker '%s' for fragment %d — mapping to narrator",
                         speaker,
@@ -935,6 +952,7 @@ class ScriptGenerator:
             chapter_number=fallback_number,
             chapter_title=fallback_title,
             chapter_summary=raw.get("chapter_summary", ""),
+            scenes=raw.get("scenes", []),
             lines=lines,
         )
 
@@ -961,6 +979,19 @@ class ScriptGenerator:
             "urgent",
             "angry",
         )
+
+        def prosody_family(emotion: str) -> str:
+            mood = (emotion or "neutral").casefold()
+            families = (
+                ("whispered", ("whisper", "hushed", "secret", "breathless")),
+                ("urgent", ("shout", "scream", "panic", "urgent", "angry", "terrified")),
+                ("somber", ("somber", "sad", "weary", "grief", "mourn", "reflective")),
+                ("bright", ("joy", "happy", "excited", "playful", "warm")),
+            )
+            for family, terms in families:
+                if any(term in mood for term in terms):
+                    return family
+            return "neutral"
 
         def limits(lines: list[ScriptLine]) -> tuple[int, int]:
             if any(
@@ -1063,16 +1094,28 @@ class ScriptGenerator:
                 line.voice_fx.model_dump() if line.voice_fx else None
             )
             target_chars, max_words = limits([*bucket, line])
-            same_speaker_or_tag_merge = (
+            same_speaker = (
                 line.speaker == previous.speaker
                 and (line.voice_id or line.speaker) == (previous.voice_id or previous.speaker)
-            ) or (
+            )
+            dialogue_tag_merge = (
                 previous.speaker != "narrator"
                 and line.speaker == "narrator"
                 and ScriptGenerator._is_pure_dialogue_tag(line.text)
             )
+            speed_span = max(item.speed for item in [*bucket, line]) - min(
+                item.speed for item in [*bucket, line]
+            )
+            prosody_families = {
+                prosody_family(item.emotion) for item in [*bucket, line]
+            }
+            compatible_prosody = (
+                dialogue_tag_merge
+                or (len(prosody_families) == 1 and speed_span <= 0.12)
+            )
             can_merge = (
-                same_speaker_or_tag_merge
+                (same_speaker or dialogue_tag_merge)
+                and compatible_prosody
                 and same_fx
                 and "\n\n" not in between
                 and candidate_chars <= target_chars

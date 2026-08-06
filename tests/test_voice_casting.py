@@ -4,6 +4,7 @@ import math
 import tempfile
 import wave
 from pathlib import Path
+from types import SimpleNamespace
 
 from shared.constants import Gender
 from shared.models import Character, CharacterRegistry, ScriptChapter, ScriptLine
@@ -44,6 +45,32 @@ class VoiceCastingTests(unittest.TestCase):
         self.assertNotIn("baritone", prompt.lower())
         self.assertIn("contralto", prompt.lower())
         self.assertTrue(warnings)
+
+    def test_compiling_an_effective_prompt_does_not_duplicate_wrappers(self) -> None:
+        source = "high-pitched and slightly nasal with youthful curiosity"
+        first, _ = compile_effective_voice_prompt(
+            gender=Gender.FEMALE,
+            age_range="child",
+            source_description=source,
+            speaking_style="quick and inquisitive",
+        )
+        compiled = (
+            first
+            + " Distinguishing direction: Smooth dark resonance and relaxed articulation."
+        )
+
+        second, warnings = compile_effective_voice_prompt(
+            gender=Gender.FEMALE,
+            age_range="child",
+            source_description=compiled,
+            speaking_style="quick and inquisitive",
+        )
+
+        self.assertEqual(second.count("A clearly female child speaker."), 1)
+        self.assertEqual(second.count("Speaking style:"), 1)
+        self.assertEqual(second.count("Maintain this vocal identity"), 1)
+        self.assertNotIn("Distinguishing direction:", second)
+        self.assertTrue(any("previously compiled" in item for item in warnings))
 
     def test_cast_excludes_non_speaking_registry_entries(self) -> None:
         registry = CharacterRegistry(
@@ -94,8 +121,54 @@ class VoiceCastingTests(unittest.TestCase):
         )
 
         self.assertEqual(speaking, {"narrator", "speaker"})
-        self.assertEqual(set(cast["voices"]), {"narrator", "speaker"})
+        self.assertEqual(
+            set(cast["voices"]),
+            {"narrator", "narrator_male", "speaker"},
+        )
+        self.assertEqual(
+            cast["voices"]["narrator"]["assigned_characters"],
+            ["narrator"],
+        )
+        self.assertEqual(
+            cast["voices"]["narrator_male"]["assigned_characters"],
+            [],
+        )
+        self.assertEqual(cast["voices"]["narrator"]["gender"], "female")
+        self.assertEqual(cast["voices"]["narrator_male"]["gender"], "male")
         self.assertEqual(cast["non_speaking_characters"], ["island"])
+
+    def test_selected_narrator_alternative_survives_cast_rebuild(self) -> None:
+        narrator = _character(
+            "narrator",
+            gender=Gender.FEMALE,
+            description="warm clear alto with measured pacing",
+            voice_id="narrator_male",
+        )
+        registry = CharacterRegistry(
+            book_title="Test",
+            book_author="Author",
+            characters={"narrator": narrator},
+        )
+
+        cast = build_voice_cast(
+            project_id="test",
+            registry=registry,
+            speaking_ids={"narrator"},
+            design_model="test-model",
+        )
+
+        self.assertEqual(
+            set(cast["voices"]),
+            {"narrator_female", "narrator_male"},
+        )
+        self.assertEqual(
+            cast["voices"]["narrator_male"]["assigned_characters"],
+            ["narrator"],
+        )
+        self.assertEqual(
+            cast["voices"]["narrator_female"]["assigned_characters"],
+            [],
+        )
 
     def test_duplicate_profiles_receive_deterministic_contrast(self) -> None:
         description = "deep baritone, measured and deliberate with warmth"
@@ -128,6 +201,10 @@ class VoiceCastingTests(unittest.TestCase):
         self.assertNotEqual(
             first["effective_prompt"],
             second["effective_prompt"],
+        )
+        self.assertIn(
+            "Distinguishing direction:",
+            first["effective_prompt"],
         )
         self.assertIn(
             "Distinguishing direction:",
@@ -170,7 +247,7 @@ class VoiceCastingTests(unittest.TestCase):
             design_model="test-model",
         )
 
-        self.assertNotIn(
+        self.assertIn(
             "Distinguishing direction:",
             cast["voices"]["starling"]["effective_prompt"],
         )
@@ -179,6 +256,31 @@ class VoiceCastingTests(unittest.TestCase):
             cast["voices"]["tuka"]["effective_prompt"],
         )
         self.assertTrue(cast["voices"]["tuka"]["warnings"])
+
+    def test_every_cast_profile_receives_a_unique_palette_direction(self) -> None:
+        registry = CharacterRegistry(
+            book_title="Test",
+            book_author="Author",
+            characters={
+                f"speaker_{index}": _character(
+                    f"speaker_{index}",
+                    gender=Gender.FEMALE,
+                    description="clear female voice with measured pacing",
+                )
+                for index in range(12)
+            },
+        )
+        cast = build_voice_cast(
+            project_id="test",
+            registry=registry,
+            speaking_ids=set(registry.characters),
+            design_model="test-model",
+        )
+        directions = {
+            profile["effective_prompt"].split("Distinguishing direction: ", 1)[1]
+            for profile in cast["voices"].values()
+        }
+        self.assertEqual(len(directions), 12)
 
     def test_shared_voice_uses_only_speaking_assignments(self) -> None:
         registry = CharacterRegistry(
@@ -255,6 +357,33 @@ class VoiceUploadValidationTests(unittest.TestCase):
             self._write_wave(path, seconds=3.2, amplitude=0)
             with self.assertRaisesRegex(ValueError, "silent"):
                 _inspect_pcm_voice(path)
+
+    def test_uploaded_transcript_mismatch_fails_closed(self) -> None:
+        from brain.dashboard.api.main import _uploaded_transcript_error
+
+        error = _uploaded_transcript_error(
+            SimpleNamespace(
+                effective_text_error=0.45,
+                wer=0.45,
+                transcribed_text="  different   words  ",
+            )
+        )
+
+        self.assertIn("does not match", error)
+        self.assertIn("different words", error)
+
+    def test_uploaded_transcript_orthographic_equivalence_is_accepted(self) -> None:
+        from brain.dashboard.api.main import _uploaded_transcript_error
+
+        error = _uploaded_transcript_error(
+            SimpleNamespace(
+                effective_text_error=0.0,
+                wer=0.5,
+                transcribed_text="lets go lets go lets go",
+            )
+        )
+
+        self.assertIsNone(error)
 
 
 if __name__ == "__main__":

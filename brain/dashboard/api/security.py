@@ -9,6 +9,13 @@ from typing import Any
 
 
 TOKEN_ENV_VAR = "CRAZY_AUDIOBOOK_DASHBOARD_TOKEN"
+DEFAULT_TRUSTED_LAN_CIDRS = (
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "fc00::/7",
+    "fe80::/10",
+)
 
 
 def configured_dashboard_token(dashboard_config: dict[str, Any]) -> str:
@@ -33,14 +40,22 @@ def is_loopback_client(host: str | None) -> bool:
     return bool(mapped and mapped.is_loopback)
 
 
-def is_private_client(host: str | None) -> bool:
-    """Return whether a request originated on a private local network (LAN)."""
+def is_private_client(
+    host: str | None,
+    trusted_cidrs: tuple[str, ...] | list[str] = DEFAULT_TRUSTED_LAN_CIDRS,
+) -> bool:
+    """Return whether the TCP peer belongs to an explicitly trusted LAN.
+
+    ``ipaddress.is_private`` also classifies documentation and other reserved
+    ranges as private on some Python versions. Explicit CIDRs avoid accidentally
+    authorizing those addresses and make the LAN trust boundary auditable.
+    """
     if not host:
         return False
     normalized = host.split("%", 1)[0]
     try:
         address = ipaddress.ip_address(normalized)
-        return address.is_private
+        return any(address in ipaddress.ip_network(cidr) for cidr in trusted_cidrs)
     except ValueError:
         return False
 
@@ -51,13 +66,20 @@ def dashboard_request_authorized(
     configured_token: str,
     presented_token: str | None,
     is_forwarded: bool = False,
+    trusted_lan_cidrs: tuple[str, ...] | list[str] = DEFAULT_TRUSTED_LAN_CIDRS,
 ) -> bool:
-    """Allow direct loopback & private LAN requests when no token configured, otherwise require token."""
+    """Authorize local/LAN peers without a token and public peers by token.
+
+    Authentication is based on the actual TCP peer. Forwarding headers are not
+    trusted here, so a public client cannot spoof an RFC1918 address.
+    """
+    if is_loopback_client(client_host) or is_private_client(
+        client_host, trusted_lan_cidrs
+    ):
+        return True
     if configured_token:
         return bool(
             presented_token
             and secrets.compare_digest(configured_token, presented_token)
         )
-    if is_loopback_client(client_host) or is_private_client(client_host):
-        return True
     return False

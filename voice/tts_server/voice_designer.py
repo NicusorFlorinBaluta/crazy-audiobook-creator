@@ -21,8 +21,10 @@ from voice.tts_server.voice_library import VoiceLibraryManager
 from shared.constants import Gender, VOICE_DESIGN_TEST_SENTENCES
 from shared.models import (
     BootstrapVoiceResult,
+    VoiceCandidate,
     BootstrapVoicesRequest,
     BootstrapVoicesResponse,
+    CastPairDiagnostic,
     Character,
 )
 
@@ -156,94 +158,75 @@ class VoiceDesigner:
                 )
 
             for char_id, character in request.characters.items():
-                # Check if voice already exists and skip if not forcing regeneration
-                if not request.force_regenerate and self.library.voice_exists(
-                    project_id, char_id
-                ):
-                    existing = self.library.get_voice_info(project_id, char_id)
-                    expected_fingerprint = request.design_fingerprints.get(
-                        char_id, ""
-                    )
-                    fingerprint_matches = (
-                        not expected_fingerprint
-                        or existing
-                        and existing.get("design_fingerprint")
-                        == expected_fingerprint
-                    )
-                    if existing and fingerprint_matches:
-                        logger.info("Voice for '%s' already exists, skipping", char_id)
-                        voices_generated[char_id] = BootstrapVoiceResult(
-                            file=existing.get("file", ""),
-                            duration_seconds=existing.get("duration_seconds", 0.0),
-                            sample_rate=existing.get("sample_rate", 24000),
-                        )
-                        continue
-                    if existing and not fingerprint_matches:
-                        logger.info(
-                            "Voice design fingerprint changed for '%s'; "
-                            "regenerating reference",
-                            char_id,
-                        )
+                importance = getattr(character, "importance", "minor")
+                num_candidates = 3 if char_id == "narrator" or importance == "major" else 1
 
-                # Generate voice reference clip
-                result = self._generate_voice(
-                    project_id,
-                    char_id,
-                    character,
-                    design_fingerprint=request.design_fingerprints.get(
-                        char_id, ""
-                    ),
-                )
-                for redesign_attempt in range(
-                    1, self.acoustic_regeneration_attempts + 1
-                ):
-                    _, early_warnings = self._acoustic_diagnostics(
-                        Path(result.file),
-                        character,
-                    )
-                    if not any(
-                        "requested adult" in warning
-                        for warning in early_warnings
+                candidates = []
+                for cand_idx in range(1, num_candidates + 1):
+                    cand_id = f"{char_id}_cand{cand_idx}" if num_candidates > 1 else char_id
+                    
+                    if not request.force_regenerate and self.library.voice_exists(
+                        project_id, cand_id
                     ):
-                        break
-                    gender_key = (
-                        character.gender.value
-                        if isinstance(character.gender, Gender)
-                        else str(character.gender)
-                    ).lower()
-                    correction = (
-                        " Make the perceived vocal register unmistakably "
-                        f"{gender_key} and consistent with the stated age; "
-                        "preserve natural speech and do not caricature it."
-                    )
-                    logger.warning(
-                        "Automatically redesigning '%s' after acoustic "
-                        "register mismatch (attempt %d/%d)",
-                        char_id,
-                        redesign_attempt,
-                        self.acoustic_regeneration_attempts,
-                    )
-                    self.library.delete_voice(project_id, char_id)
-                    corrected_character = character.model_copy(
-                        update={
-                            "voice_description": (
-                                character.voice_description + correction
-                            )
-                        }
-                    )
+                        existing = self.library.get_voice_info(project_id, cand_id)
+                        expected_fingerprint = request.design_fingerprints.get(char_id, "")
+                        fingerprint_matches = (
+                            not expected_fingerprint
+                            or existing
+                            and existing.get("design_fingerprint") == expected_fingerprint
+                        )
+                        if existing and fingerprint_matches:
+                            candidates.append(VoiceCandidate(
+                                id=cand_id,
+                                file=existing.get("file", ""),
+                                duration_seconds=existing.get("duration_seconds", 0.0),
+                                sample_rate=existing.get("sample_rate", 24000),
+                            ))
+                            continue
+
                     result = self._generate_voice(
                         project_id,
-                        char_id,
-                        corrected_character,
-                        design_fingerprint=request.design_fingerprints.get(
-                            char_id, ""
-                        ),
+                        cand_id,
+                        character,
+                        design_fingerprint=request.design_fingerprints.get(char_id, ""),
                     )
-                    result.warnings.append(
-                        "Automatically redesigned once after an acoustic "
-                        "register mismatch."
-                    )
-                voices_generated[char_id] = result
+                    
+                    for redesign_attempt in range(1, self.acoustic_regeneration_attempts + 1):
+                        _, early_warnings = self._acoustic_diagnostics(Path(result.file), character)
+                        if not any("requested adult" in warning for warning in early_warnings):
+                            break
+                        gender_key = (
+                            character.gender.value if isinstance(character.gender, Gender) else str(character.gender)
+                        ).lower()
+                        correction = (
+                            " Make the perceived vocal register unmistakably "
+                            f"{gender_key} and consistent with the stated age; "
+                            "preserve natural speech and do not caricature it."
+                        )
+                        self.library.delete_voice(project_id, cand_id)
+                        corrected_character = character.model_copy(
+                            update={"voice_description": character.voice_description + correction}
+                        )
+                        result = self._generate_voice(
+                            project_id,
+                            cand_id,
+                            corrected_character,
+                            design_fingerprint=request.design_fingerprints.get(char_id, ""),
+                        )
+                        result.warnings.append("Automatically redesigned once after an acoustic register mismatch.")
+                    
+                    candidates.append(result)
+
+                voices_generated[char_id] = BootstrapVoiceResult(
+                    id=char_id,
+                    file=candidates[0].file,
+                    duration_seconds=candidates[0].duration_seconds,
+                    sample_rate=candidates[0].sample_rate,
+                    transcription_wer=candidates[0].transcription_wer,
+                    acoustic_metrics=candidates[0].acoustic_metrics,
+                    warnings=candidates[0].warnings,
+                    candidates=candidates,
+                )
         
         finally:
             logger.info("Shutting down Qwen VoiceDesign Microservice...")
@@ -296,12 +279,12 @@ class VoiceDesigner:
         embeddings: dict[str, Any] = {}
         for char_id, result in voices_generated.items():
             character = request.characters[char_id]
-            metrics, warnings = self._acoustic_diagnostics(
-                Path(result.file),
-                character,
-            )
-            result.acoustic_metrics = metrics
-            result.warnings.extend(warnings)
+            for cand in result.candidates:
+                metrics, warnings = self._acoustic_diagnostics(
+                    Path(cand.file), character
+                )
+                cand.acoustic_metrics = metrics
+                cand.warnings.extend(warnings)
             try:
                 embeddings[char_id] = self.engine.speaker_embedding(result.file)
             except Exception as exc:
@@ -314,6 +297,7 @@ class VoiceDesigner:
                     "Acoustic distinctness could not be checked."
                 )
 
+        cast_diagnostics: list[CastPairDiagnostic] = []
         voice_ids = list(embeddings)
         for index, left_id in enumerate(voice_ids):
             for right_id in voice_ids[index + 1:]:
@@ -321,35 +305,18 @@ class VoiceDesigner:
                     embeddings[left_id],
                     embeddings[right_id],
                 )
-                if similarity >= self.similarity_warning_threshold:
-                    left_v = voices_generated[left_id]
-                    right_v = voices_generated[right_id]
-
-                    # Suppress false positives across different genders or large pitch deltas (>= 40 Hz)
-                    left_g = str(getattr(left_v, "gender", "") or "").lower()
-                    right_g = str(getattr(right_v, "gender", "") or "").lower()
-                    
-                    left_metrics = getattr(getattr(left_v, "quality", None), "acoustic_metrics", None)
-                    right_metrics = getattr(getattr(right_v, "quality", None), "acoustic_metrics", None)
-                    left_f0 = float(getattr(left_metrics, "median_f0_hz", 0.0) or 0.0) if left_metrics else 0.0
-                    right_f0 = float(getattr(right_metrics, "median_f0_hz", 0.0) or 0.0) if right_metrics else 0.0
-
-                    genders_differ = bool(left_g and right_g and left_g != right_g and left_g != "other" and right_g != "other")
-                    pitch_differs = bool(left_f0 > 0 and right_f0 > 0 and abs(left_f0 - right_f0) >= 40.0)
-
-                    if genders_differ or pitch_differs:
-                        logger.info(
-                            "Suppressing acoustic similarity warning for '%s' and '%s' (similarity: %.3f, gender: %s vs %s, pitch: %.1f Hz vs %.1f Hz)",
-                            left_id,
-                            right_id,
-                            similarity,
-                            left_g,
-                            right_g,
-                            left_f0,
-                            right_f0,
-                        )
-                        continue
-
+                left_v = voices_generated[left_id]
+                right_v = voices_generated[right_id]
+                diagnostic = self._cast_pair_diagnostic(
+                    left_id,
+                    right_id,
+                    similarity,
+                    left_v.acoustic_metrics or {},
+                    right_v.acoustic_metrics or {},
+                    self.similarity_warning_threshold,
+                )
+                cast_diagnostics.append(diagnostic)
+                if diagnostic.status == "similar":
                     warning = (
                         f"Sounds very similar to {right_id} "
                         f"(speaker similarity {similarity:.3f})."
@@ -366,10 +333,94 @@ class VoiceDesigner:
                         similarity,
                     )
 
+                    # Phase 3.2: Generate a distinct fallback candidate for minor speakers that fail distinctness
+                    for fallback_id in (left_id, right_id):
+                        if len(voices_generated[fallback_id].candidates) == 1:
+                            logger.info("Generating distinctness fallback candidate for '%s'", fallback_id)
+                            try:
+                                char_for_fallback = request.characters[fallback_id]
+                                fallback_cand_id = f"{fallback_id}_cand2"
+                                fallback_cand = self._generate_voice(
+                                    project_id,
+                                    fallback_cand_id,
+                                    char_for_fallback,
+                                    design_fingerprint="",
+                                )
+                                # Ensure we have metrics for the fallback too
+                                f_metrics, f_warnings = self._acoustic_diagnostics(Path(fallback_cand.file), char_for_fallback)
+                                fallback_cand.acoustic_metrics = f_metrics
+                                fallback_cand.warnings.extend(f_warnings)
+                                voices_generated[fallback_id].candidates.append(fallback_cand)
+                            except Exception as exc:
+                                logger.warning("Failed to generate distinctness fallback for '%s': %s", fallback_id, exc)
+
         return BootstrapVoicesResponse(
             status="success",
             project_id=project_id,
             voices_generated=voices_generated,
+            cast_diagnostics=cast_diagnostics,
+        )
+
+    @staticmethod
+    def _cast_pair_diagnostic(
+        left_id: str,
+        right_id: str,
+        speaker_similarity: float,
+        left_metrics: dict[str, float],
+        right_metrics: dict[str, float],
+        warning_threshold: float,
+    ) -> CastPairDiagnostic:
+        """Combine identity, pitch, and spectral evidence without hard-failing."""
+        left_f0 = float(left_metrics.get("median_f0_hz", 0.0) or 0.0)
+        right_f0 = float(right_metrics.get("median_f0_hz", 0.0) or 0.0)
+        pitch_delta = abs(left_f0 - right_f0) if left_f0 and right_f0 else 0.0
+        left_range = float(left_metrics.get("f0_range_hz", 0.0) or 0.0)
+        right_range = float(right_metrics.get("f0_range_hz", 0.0) or 0.0)
+        range_delta = abs(left_range - right_range)
+        left_centroid = float(
+            left_metrics.get("spectral_centroid_hz", 0.0) or 0.0
+        )
+        right_centroid = float(
+            right_metrics.get("spectral_centroid_hz", 0.0) or 0.0
+        )
+        centroid_delta = abs(left_centroid - right_centroid)
+
+        pitch_similarity = 1.0 - min(pitch_delta / 180.0, 1.0)
+        range_similarity = 1.0 - min(range_delta / 160.0, 1.0)
+        spectral_similarity = 1.0 - min(centroid_delta / 2500.0, 1.0)
+        composite = (
+            0.75 * float(speaker_similarity)
+            + 0.15 * pitch_similarity
+            + 0.05 * range_similarity
+            + 0.05 * spectral_similarity
+        )
+        composite = max(-1.0, min(1.0, composite))
+
+        objectively_contrasted = (
+            pitch_delta >= 40.0 and centroid_delta >= 350.0
+        )
+        similar = (
+            speaker_similarity >= warning_threshold
+            and not objectively_contrasted
+        )
+        return CastPairDiagnostic(
+            left_voice_id=left_id,
+            right_voice_id=right_id,
+            speaker_similarity=float(speaker_similarity),
+            composite_similarity=composite,
+            pitch_delta_hz=pitch_delta,
+            pitch_range_delta_hz=range_delta,
+            spectral_centroid_delta_hz=centroid_delta,
+            status="similar" if similar else "distinct",
+            warning_suppressed=bool(
+                speaker_similarity >= warning_threshold and objectively_contrasted
+            ),
+            suppression_reason=(
+                "speaker embedding is similar, but both pitch and spectral "
+                "centroid are materially separated"
+                if speaker_similarity >= warning_threshold and objectively_contrasted
+                else None
+            ),
         )
 
     @staticmethod
@@ -387,7 +438,16 @@ class VoiceDesigner:
             audio = audio.mean(axis=1)
         peak = float(np.max(np.abs(audio))) if audio.size else 0.0
         rms = float(np.sqrt(np.mean(np.square(audio)))) if audio.size else 0.0
+        dc_offset = float(abs(np.mean(audio))) if audio.size else 0.0
         duration = float(len(audio) / sample_rate) if sample_rate else 0.0
+        clipping_fraction = (
+            float(np.mean(np.abs(audio) >= 0.999)) if audio.size else 0.0
+        )
+        silence_threshold = max(0.002, rms * 0.10)
+        silence_ratio = (
+            float(np.mean(np.abs(audio) < silence_threshold))
+            if audio.size else 1.0
+        )
         warnings: list[str] = []
         voiced_f0: Any = np.array([], dtype=np.float32)
         if audio.size >= 2048:
@@ -404,6 +464,24 @@ class VoiceDesigner:
         median_f0 = (
             float(np.median(voiced_f0)) if voiced_f0.size else 0.0
         )
+        f0_p10 = float(np.percentile(voiced_f0, 10)) if voiced_f0.size else 0.0
+        f0_p90 = float(np.percentile(voiced_f0, 90)) if voiced_f0.size else 0.0
+        spectral_centroid = 0.0
+        spectral_flatness = 0.0
+        if audio.size >= 2048:
+            try:
+                spectral_centroid = float(
+                    np.median(
+                        librosa.feature.spectral_centroid(
+                            y=audio, sr=sample_rate
+                        )
+                    )
+                )
+                spectral_flatness = float(
+                    np.median(librosa.feature.spectral_flatness(y=audio))
+                )
+            except Exception as exc:
+                logger.debug("Spectral diagnostic failed for %s: %s", audio_path, exc)
         gender = (
             character.gender.value
             if isinstance(character.gender, Gender)
@@ -423,11 +501,25 @@ class VoiceDesigner:
             warnings.append("Reference preview reaches digital full scale; check clipping.")
         if rms < 0.005:
             warnings.append("Reference preview is unusually quiet.")
+        if clipping_fraction > 0.001:
+            warnings.append("Reference preview contains excessive clipped samples.")
+        if dc_offset > 0.02:
+            warnings.append("Reference preview has an unusual DC offset.")
+        if silence_ratio > 0.60:
+            warnings.append("Reference preview contains unusually much silence.")
         return {
             "duration_seconds": duration,
             "peak_amplitude": peak,
             "rms_amplitude": rms,
+            "dc_offset": dc_offset,
+            "clipping_fraction": clipping_fraction,
+            "silence_ratio": silence_ratio,
             "median_f0_hz": median_f0,
+            "f0_p10_hz": f0_p10,
+            "f0_p90_hz": f0_p90,
+            "f0_range_hz": max(0.0, f0_p90 - f0_p10),
+            "spectral_centroid_hz": spectral_centroid,
+            "spectral_flatness": spectral_flatness,
         }, warnings
 
     def regenerate_voice(
@@ -435,7 +527,7 @@ class VoiceDesigner:
         project_id: str,
         character_id: str,
         character: Character,
-    ) -> BootstrapVoiceResult:
+    ) -> VoiceCandidate:
         """Force-regenerate a single character's voice."""
         logger.info("Regenerating voice for '%s' in project '%s'", character_id, project_id)
         response = self.bootstrap_voices(
@@ -453,7 +545,7 @@ class VoiceDesigner:
         char_id: str,
         character: Character,
         design_fingerprint: str = "",
-    ) -> BootstrapVoiceResult:
+    ) -> VoiceCandidate:
         """Generate a single voice reference clip."""
         # Select test sentence based on gender
         gender_key = character.gender.value if isinstance(character.gender, Gender) else str(character.gender)
@@ -462,8 +554,9 @@ class VoiceDesigner:
             self.voice_design_test_sentences["other"],
         )
 
-        # Generate a designed reference voice with Qwen3-TTS VoiceDesign.
-        output_path = self.library.get_voice_path(project_id, char_id)
+        import uuid
+        base_path = self.library.get_voice_path(project_id, char_id)
+        output_path = base_path.with_name(f"{base_path.stem}_{uuid.uuid4().hex[:8]}{base_path.suffix}")
 
         logger.info(
             "Generating voice for '%s' (%s): %s",
@@ -511,7 +604,8 @@ class VoiceDesigner:
             source_type="generated",
         )
 
-        return BootstrapVoiceResult(
+        return VoiceCandidate(
+            id=char_id,
             file=str(output_path),
             duration_seconds=duration_seconds,
             sample_rate=sr,

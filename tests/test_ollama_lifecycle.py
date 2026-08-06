@@ -120,15 +120,18 @@ class OllamaLifecycleTests(unittest.TestCase):
 
         class FakeOllama:
             cancelled = False
+            forced = False
 
-            def cancel_current(self):
+            def cancel_current(self, *, force=False):
                 self.cancelled = True
+                self.forced = force
 
         pipeline.ollama = FakeOllama()
         pipeline.stop("book")
 
         self.assertTrue(pipeline._stop_flags["book"])
         self.assertTrue(pipeline.ollama.cancelled)
+        self.assertTrue(pipeline.ollama.forced)
 
     def test_managed_ollama_receives_discrete_vulkan_selection(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +11,7 @@ import soundfile as sf
 from shared.constants import ValidationStatus
 from shared.models import ScriptLine
 from voice.validator.validation_loop import ValidationLoop
+from voice.tts_server.embedding_store import EmbeddingStore
 
 
 class FakeEngine:
@@ -21,11 +23,16 @@ class FakeEngine:
         self.fail_text = fail_text
         self.is_loaded = True
         self.calls: list[str] = []
+        self.similarity_calls = 0
+        self.load_calls = 0
+        self.unload_calls = 0
 
     def load(self) -> None:
+        self.load_calls = getattr(self, "load_calls", 0) + 1
         self.is_loaded = True
 
     def unload(self) -> None:
+        self.unload_calls = getattr(self, "unload_calls", 0) + 1
         self.is_loaded = False
 
     def generate_speech(self, *, text: str, output_path: Path, **kwargs):
@@ -37,16 +44,23 @@ class FakeEngine:
         return audio
 
     def speaker_similarity(self, generated_audio_path, reference_audio_path) -> float:
+        self.similarity_calls += 1
         return 0.95
 
 
 class FakeWhisper:
     is_loaded = False
 
+    def __init__(self) -> None:
+        self.load_calls = 0
+        self.unload_calls = 0
+
     def load(self) -> None:
+        self.load_calls = getattr(self, "load_calls", 0) + 1
         self.is_loaded = True
 
     def unload(self) -> None:
+        self.unload_calls = getattr(self, "unload_calls", 0) + 1
         self.is_loaded = False
 
     def transcribe(self, audio_file: str) -> str:
@@ -152,6 +166,82 @@ class ValidationLoopTests(unittest.TestCase):
         self.assertEqual(emotion3, "neutral clear articulation")
         self.assertEqual(speed3, 1.0)
         self.assertIsNone(fx3)
+
+    def test_risk_aware_first_attempt_is_disabled_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            loop, _ = self.make_loop(Path(directory))
+            line = ScriptLine(
+                line_id="ch01_0000",
+                speaker="starling",
+                text="UNCLE!",
+                emotion="panicked shout",
+                speed=1.25,
+            )
+            text, emotion, speed, _, reason = loop._initial_delivery(line, set())
+
+        self.assertEqual(text, "UNCLE!")
+        self.assertEqual(emotion, "panicked shout")
+        self.assertEqual(speed, 1.25)
+        self.assertIsNone(reason)
+
+    def test_spoken_text_is_used_for_synthesis_without_changing_source(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            loop, _ = self.make_loop(Path(directory))
+            line = ScriptLine(
+                line_id="ch01_0000",
+                speaker="narrator",
+                text="Patji arrived.",
+                spoken_text="Pah-chee arrived.",
+            )
+
+            text, emotion, speed, fx, reason = loop._initial_delivery(line, set())
+
+        self.assertEqual(text, "Pah-chee arrived.")
+        self.assertEqual(line.text, "Patji arrived.")
+        self.assertEqual(emotion, line.emotion)
+        self.assertEqual(speed, line.speed)
+        self.assertEqual(fx, line.voice_fx)
+        self.assertIsNone(reason)
+
+    def test_risk_aware_short_shout_prefers_clear_emphatic_delivery(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            loop, _ = self.make_loop(Path(directory))
+            loop.risk_aware_first_attempt = True
+            line = ScriptLine(
+                line_id="ch01_0000",
+                speaker="starling",
+                text="UNCLE!",
+                emotion="panicked shout",
+                speed=1.25,
+            )
+            text, emotion, speed, fx, reason = loop._initial_delivery(line, set())
+
+        self.assertEqual(text, "uncle!")
+        self.assertEqual(emotion, "clear emphatic delivery")
+        self.assertEqual(speed, 1.0)
+        self.assertIsNone(fx)
+        self.assertEqual(reason, "short_expressive")
+
+    def test_risk_aware_policy_does_not_modify_dense_glossary_line(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            loop, _ = self.make_loop(Path(directory))
+            loop.risk_aware_first_attempt = True
+            line = ScriptLine(
+                line_id="ch03_0120",
+                speaker="narrator",
+                text="Patji. King of the Pantheon. God of the Eelakin.",
+                emotion="solemn",
+                speed=1.0,
+            )
+            text, emotion, speed, _, reason = loop._initial_delivery(
+                line,
+                {"Patji", "Eelakin"},
+            )
+
+        self.assertEqual(text, line.text)
+        self.assertEqual(emotion, "solemn")
+        self.assertEqual(speed, 1.0)
+        self.assertIsNone(reason)
 
     def test_final_retry_uses_plain_normalized_synthesis_text(self) -> None:
         class PlainTextWhisper(FakeWhisper):
@@ -368,6 +458,81 @@ class ValidationLoopTests(unittest.TestCase):
 
         self.assertEqual(result.status, ValidationStatus.FAIL)
 
+    def test_multiple_phonetic_glossary_spellings_preserve_sentence(self) -> None:
+        class FictionalNamesWhisper(FakeWhisper):
+            def transcribe(self, audio_file: str) -> str:
+                return "Pachi King of the Pantheon, God of the Ilekin."
+
+            def calculate_wer(self, reference: str, hypothesis: str) -> float:
+                return 2 / 9
+
+            def calculate_text_similarity(
+                self,
+                reference: str,
+                hypothesis: str,
+            ) -> float:
+                return 0.84
+
+            @staticmethod
+            def _normalize_text(text: str) -> str:
+                return re.sub(r"[^a-z\s]", "", text.lower())
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            loop, _ = self.make_loop(root)
+            loop.whisper = FictionalNamesWhisper()
+            audio = root / "line.wav"
+            sf.write(audio, np.ones(2400, dtype=np.float32) * 0.01, 24000)
+            result = loop._validate_segment(
+                str(audio),
+                "Patji. King of the Pantheon. God of the Eelakin.",
+                "ch03_0120",
+                1.0,
+                validation_terms={"Patji", "Eelakin"},
+            )
+
+        self.assertEqual(result.status, ValidationStatus.PASS)
+        self.assertEqual(result.effective_text_error, 0.0)
+        self.assertEqual(
+            result.acceptance_reason,
+            "approved_glossary_spelling_variant",
+        )
+
+    def test_glossary_spelling_does_not_hide_ordinary_word_change(self) -> None:
+        class ChangedProseWhisper(FakeWhisper):
+            def transcribe(self, audio_file: str) -> str:
+                return "Pachi Queen of the Pantheon, Lord of the Ilekin."
+
+            def calculate_wer(self, reference: str, hypothesis: str) -> float:
+                return 4 / 9
+
+            def calculate_text_similarity(
+                self,
+                reference: str,
+                hypothesis: str,
+            ) -> float:
+                return 0.80
+
+            @staticmethod
+            def _normalize_text(text: str) -> str:
+                return re.sub(r"[^a-z\s]", "", text.lower())
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            loop, _ = self.make_loop(root)
+            loop.whisper = ChangedProseWhisper()
+            audio = root / "line.wav"
+            sf.write(audio, np.ones(2400, dtype=np.float32) * 0.01, 24000)
+            result = loop._validate_segment(
+                str(audio),
+                "Patji. King of the Pantheon. God of the Eelakin.",
+                "ch03_0120",
+                1.0,
+                validation_terms={"Patji", "Eelakin"},
+            )
+
+        self.assertEqual(result.status, ValidationStatus.FAIL)
+
     def test_missing_generation_is_reported_as_failure(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -430,7 +595,82 @@ class ValidationLoopTests(unittest.TestCase):
             )
             self.assertEqual(engine.calls, ["hello"])
 
-    def test_flagged_segment_is_not_accepted_as_complete(self) -> None:
+    def test_accepted_validation_cache_skips_whisper_and_similarity(self) -> None:
+        class CountingWhisper(FakeWhisper):
+            model_name = "fake"
+
+            def __init__(self) -> None:
+                self.transcriptions = 0
+
+            def transcribe(self, audio_file: str) -> str:
+                self.transcriptions += 1
+                return "hello"
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reference = root / "reference.wav"
+            sf.write(reference, np.ones(2400, dtype=np.float32) * 0.01, 24000)
+            engine = FakeEngine()
+            whisper = CountingWhisper()
+            loop = ValidationLoop(
+                whisper=whisper,
+                analyzer=FakeAnalyzer(),
+                engine=engine,
+                library=FakeLibrary(reference),
+                embedding_store=EmbeddingStore(root / "cache.db"),
+            )
+            line = ScriptLine(
+                line_id="ch01_0000",
+                speaker="narrator",
+                text="hello",
+            )
+
+            first = loop.process_chapter(
+                project_id="book",
+                chapter_number=1,
+                lines=[line],
+                workspace=root,
+            )
+            synthesis_calls = list(engine.calls)
+            similarity_calls = engine.similarity_calls
+            second = loop.process_chapter(
+                project_id="book",
+                chapter_number=1,
+                lines=[line],
+                workspace=root,
+            )
+
+            self.assertEqual(first.validation_cache_hits, 0)
+            self.assertEqual(first.validation_cache_misses, 1)
+            self.assertEqual(second.validation_cache_hits, 1)
+            self.assertEqual(second.validation_cache_misses, 0)
+            self.assertEqual(engine.calls, synthesis_calls)
+            self.assertEqual(engine.similarity_calls, similarity_calls)
+            self.assertEqual(whisper.transcriptions, 1)
+            self.assertGreater(first.timings_seconds["total"], 0.0)
+            self.assertIn("whisper_transcription", first.timings_seconds)
+            self.assertIn("validation_cache_lookup", second.timings_seconds)
+            self.assertNotIn("whisper_transcription", second.timings_seconds)
+            measured = sum(
+                value
+                for key, value in first.timings_seconds.items()
+                if key != "total"
+            )
+            self.assertLessEqual(measured, first.timings_seconds["total"] * 1.1)
+
+            third = loop.process_chapter(
+                project_id="book",
+                chapter_number=1,
+                lines=[line],
+                workspace=root,
+                validation_terms={"hello"},
+            )
+            self.assertEqual(third.validation_cache_hits, 0)
+            self.assertEqual(third.validation_cache_misses, 1)
+            self.assertEqual(engine.calls, synthesis_calls)
+            self.assertEqual(whisper.transcriptions, 2)
+
+    def test_perfect_transcript_with_soft_duration_warning_is_accepted(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             loop, _ = self.make_loop(root)
@@ -447,8 +687,56 @@ class ValidationLoopTests(unittest.TestCase):
                 ],
                 workspace=root,
             )
-            self.assertEqual(response.status, "failed")
-            self.assertEqual(response.failed_line_ids, ["ch01_0000"])
+            self.assertEqual(response.status, "success")
+            self.assertEqual(response.failed_line_ids, [])
+            self.assertEqual(response.accepted_with_warning, 1)
+            final = response.quality_results[-1]
+            self.assertEqual(
+                final.status,
+                ValidationStatus.ACCEPTED_WITH_WARNING,
+            )
+            self.assertEqual(
+                final.acceptance_reason,
+                "accepted_soft_audio_warning",
+            )
+
+    def test_co_residency_is_released_at_chapter_boundary(self) -> None:
+        class WrongWhisper(FakeWhisper):
+            def transcribe(self, audio_file: str) -> str:
+                return "different"
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reference = root / "reference.wav"
+            sf.write(reference, np.ones(2400, dtype=np.float32) * 0.01, 24000)
+            engine = FakeEngine()
+            whisper = WrongWhisper()
+            loop = ValidationLoop(
+                whisper=whisper,
+                analyzer=FakeAnalyzer(),
+                engine=engine,
+                library=FakeLibrary(reference),
+                max_retries=2,
+                keep_models_resident=True,
+            )
+
+            loop.process_chapter(
+                project_id="book",
+                chapter_number=1,
+                lines=[
+                    ScriptLine(
+                        line_id="ch01_0000",
+                        speaker="narrator",
+                        text="hello",
+                    )
+                ],
+                workspace=root,
+            )
+
+        self.assertEqual(engine.unload_calls, 0)
+        self.assertEqual(whisper.unload_calls, 1)
+        self.assertFalse(whisper.is_loaded)
+        self.assertTrue(engine.is_loaded)
 
 
 if __name__ == "__main__":

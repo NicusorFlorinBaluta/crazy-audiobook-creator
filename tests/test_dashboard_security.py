@@ -6,6 +6,7 @@ from brain.dashboard.api.security import (
     configured_dashboard_token,
     dashboard_request_authorized,
     is_loopback_client,
+    is_private_client,
 )
 
 
@@ -42,6 +43,19 @@ class DashboardSecurityTests(unittest.TestCase):
                 presented_token="wrong",
             )
         )
+
+    def test_private_lan_requests_do_not_need_a_token(self):
+        self.assertTrue(is_private_client("192.168.50.194"))
+        self.assertTrue(
+            dashboard_request_authorized(
+                client_host="192.168.50.194",
+                configured_token="",
+                presented_token=None,
+            )
+        )
+
+    def test_reserved_documentation_range_is_not_trusted_lan(self):
+        self.assertFalse(is_private_client("192.0.2.10"))
 
     def test_loopback_dashboard_requests_do_not_need_the_remote_token(self):
         self.assertTrue(

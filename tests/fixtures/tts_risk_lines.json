@@ -1,0 +1,44 @@
+[
+  {
+    "id": "short_shout",
+    "text": "UNCLE!",
+    "emotion": "panicked shout",
+    "speed": 1.25,
+    "terms": []
+  },
+  {
+    "id": "concatenated_repetition",
+    "text": "Letsgoletsgoletsgo!",
+    "emotion": "urgent",
+    "speed": 1.2,
+    "terms": []
+  },
+  {
+    "id": "dense_fictional_names",
+    "text": "Patji. King of the Pantheon. God of the Eelakin.",
+    "emotion": "solemn",
+    "speed": 1.0,
+    "terms": ["Patji", "Eelakin"]
+  },
+  {
+    "id": "extreme_speed",
+    "text": "Move quietly and keep close to the wall.",
+    "emotion": "tense",
+    "speed": 1.3,
+    "terms": []
+  },
+  {
+    "id": "ordinary_narration_control",
+    "text": "The path curved gently beneath the old trees.",
+    "emotion": "neutral",
+    "speed": 1.0,
+    "terms": []
+  },
+  {
+    "id": "numbers_control",
+    "text": "The 21st marker stood 42 feet from the gate.",
+    "emotion": "neutral",
+    "speed": 1.0,
+    "terms": []
+  }
+]

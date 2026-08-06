@@ -59,11 +59,15 @@ Grouping merges only adjacent fragments with the same speaker, voice, and FX. It
 |---|---|
 | `host`, `port` | Dashboard bind address |
 | `cors_origins` | Exact browser origins allowed |
-| `api_token` | Required for non-loopback binding |
+| `api_token` | Optional token for peers outside trusted LANs |
+| `trusted_lan_cidrs` | TCP-peer CIDRs allowed without an application token |
 | `max_upload_size_mb` | Compressed upload limit |
 | `max_epub_expanded_mb` | Total expanded EPUB limit |
 
-The default dashboard is loopback-only. The bundled frontend assumes this local mode; remote exposure should be placed behind a proper authenticated reverse proxy.
+Loopback and configured trusted-LAN peers may use the dashboard without an
+application token. Authorization uses the socket peer, not `X-Forwarded-For`.
+Public remote access should still be placed behind authenticated Home Assistant
+or a reverse proxy and protected by firewall rules.
 
 ### `metadata`
 
@@ -114,6 +118,8 @@ The reference-voice test sentences in this file are informational; the canonical
 | `whisper_model`, `whisper_device` | Transcription backend settings |
 | `wer_threshold` | Maximum normalized word error rate |
 | `max_retries` | Additional attempts for fail/flag outcomes |
+| `keep_tts_and_whisper_resident` | Keep both models inside one chapter's retry loop; Whisper is still released at the chapter boundary |
+| `risk_aware_first_attempt` | Listening-approved clarity policy for very short emphatic lines; longer dialogue and ordinary narration remain unchanged |
 | `speaker_similarity_threshold` | Minimum Qwen speaker-encoder cosine similarity |
 | `clipping_threshold` | Maximum sample peak in dBFS |
 | `max_silence_seconds` | Longest permitted internal silence |
@@ -121,9 +127,37 @@ The reference-voice test sentences in this file are informational; the canonical
 
 Missing audio and missing line IDs always fail regardless of thresholds.
 
+### Pronunciation dictionaries
+
+`brain/pronunciation_dict.json` supplies optional application-wide mappings;
+`brain/projects/<project_id>/pronunciation_dict.json` supplies book-local
+overrides. Both files are JSON objects mapping authored spelling to a
+deterministic synthesis form, for example:
+
+```json
+{
+  "Patji": "Pah-chee",
+  "Eelakin": "Ee-lah-kin"
+}
+```
+
+Matching is case-insensitive, phrase-aware, longest-first, and non-recursive.
+The original script text remains unchanged and remains the validation target;
+the replacement is stored only as `spoken_text` on the generation request.
+Changing one mapping invalidates only segments containing that mapping. Empty,
+non-text, overlong, or control-character entries fail closed before generation.
+
 ### `mastering`
 
-`target_lufs` is the internal chapter loudness target. `peak_limit_dbfs` is enforced using an oversampled peak estimate. The noise gate is normally disabled for synthesized audio; if enabled, threshold, attack, and release control its envelope.
+`target_lufs` is the internal chapter loudness target. `peak_limit_dbfs` is
+enforced using an oversampled peak estimate. `peak_ceiling_mode` is either
+`global` (attenuating the whole chapter) or
+`soft_limiter` (only samples entering the upper 20% of peak headroom are
+compressed before the final true-peak guard). `soft_limiter` is the production
+default after the matched sample_book-1 listening A/B found it equally natural
+while reducing four-chapter loudness spread from 2.022 LU to 0.032 LU. The
+noise gate is normally disabled for synthesized audio; if enabled, threshold,
+attack, and release control its envelope.
 
 Only adjacent, pause-free segments are crossfaded. Output defaults to mono 44.1 kHz, 16-bit chapter WAVs.
 

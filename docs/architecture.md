@@ -21,14 +21,21 @@ Voice API :8100 ─── Qwen VoiceDesign bootstrap helper :8101
         └── mastering + FFmpeg M4B export
 ```
 
-All services bind to `127.0.0.1` by default. The dashboard serializes project runs, while the voice service also protects model lifecycle and GPU inference with a process-wide lock.
+Ollama and Voice bind to `127.0.0.1`. The checked-in dashboard binds to the
+workstation LAN and authorizes only its configured trusted LAN CIDRs (plus
+loopback) without an application token. The dashboard and pipeline both
+serialize GPU work; a global operating-system lease also rejects accidental
+scratch-runner concurrency.
 
 ## Processing stages
 
 1. **Created** (`created`): EPUB upload uploaded and project initialized.
 2. **Extraction** (`extracting`): EPUB text extracted, chapter structure built, cover art saved.
 3. **Scripting** (`scripting`): LLM Pass 1 character analysis & Pass 2 text-to-script annotation.
-   - **Smart Hybrid Dialogue Attribution**: Quoted text (`"..."`) is guaranteed character attribution. Dialogue tags (`"No," Frond said.`) are merged into character lines to prevent voice ping-pong while preserving 100% exact text coverage. Minor background speakers (`a little girl`, `the boy`) receive dedicated minor voice profiles (`child_female`, `child_male`, `minor_female`, `minor_male`).
+   - Dialogue attribution is model-driven and source-grounded. Unknown IDs and
+     low-confidence results trigger focused retries. Pass 2 cannot invent cast
+     members; its conservative final fallback is narrator rather than a
+     gender/proximity guess.
 4. **Bootstrapping** (`bootstrapping`): Speaking cast derived, voice design directions compiled, reference audio generated via Qwen VoiceDesign. Acoustic speaker embeddings (128-dim log-mel features) verify acoustic distinctness without prompt-text false positives.
 5. **Voice Review** (`voice_review`): Automated pause gate for user approval. Displays voice cards, preview players, and `[Approve voices & continue]` action banner.
 6. **Generating** (`generating`): Qwen3-TTS synthesizes chapter audio line by line with dynamic contextual pauses (250ms same speaker, 380ms narrator, 400ms quote-to-action, 450ms turn change, 900ms paragraph break).
@@ -62,7 +69,13 @@ This prevents overlap duplication, silent omissions, rewritten prose, and line-c
 
 ## Character and voice model
 
-The character analyzer retains every speaking entity. It assigns a unique voice to the most important speakers up to `script.max_unique_voices`. Less prominent speakers deterministically share a compatible major-character voice or the narrator; the character remains distinct in script and metadata through its `voice_id`.
+The character analyzer retains every speaking entity. Explicit aliases and
+exact display names may be consolidated directly. Name suffixes only create an
+identity-adjudication candidate: the model must return verbatim source evidence
+before two registry entries are merged. It assigns a unique voice to the most
+important speakers up to `script.max_unique_voices`. Less prominent speakers
+deterministically share a compatible major-character voice or the narrator;
+the character remains distinct in script and metadata through its `voice_id`.
 
 A character-analysis fingerprint includes the full extracted book, model, prompt, and voice cap. A change invalidates scripts and voice bootstrap. Voice reference hashes are included in generation fingerprints, so regenerated references invalidate dependent line audio.
 
@@ -90,7 +103,11 @@ Validation is fail-closed. A chapter response must contain exactly the expected 
 - speaker similarity below threshold
 - missing, empty, or unreadable audio
 
-Duration and noise anomalies may first be flagged, but both flagged and failed segments are retried. If no attempt passes, the chapter is not marked generated and mastering cannot proceed.
+Hard failures remain blocking. A segment whose transcript and hard acoustic
+checks pass but which has only a soft duration/noise/score anomaly is
+`accepted_with_warning`; it is cached and may proceed to mastering while the
+warning remains visible in the quality report. Legacy/unresolved `flagged`
+results remain unaccepted.
 
 ## Timing and mastering
 
@@ -104,11 +121,15 @@ The default `-19 LUFS` target is an internal playback choice, not a claim of ACX
 
 The SQLite job queue performs atomic read-modify-write transactions and closes connections after each operation.
 
-- User pause sets a transitional `pausing` state and requests cooperative cancellation.
+- User pause immediately closes an active Ollama stream, requests Voice
+  cancellation, and terminates app-owned model services. In-flight work may be
+  lost; completed checkpoints remain reusable.
 - Generation checks cancellation at safe segment boundaries.
 - Scheduled and deployment pauses park a live worker at chapter boundaries and preserve `active_stage`.
 - Models unload only after the active operation releases the model lock, or after true idle time.
-- A second project cannot start while another project owns the GPU pipeline.
+- Starting a second dashboard project first interrupts the current project and
+  waits for its worker to release the global GPU lease. If release cannot be
+  confirmed, the replacement run is refused rather than allowing concurrency.
 
 ## Storage
 
@@ -139,7 +160,12 @@ Project and download paths are resolved beneath their configured roots. EPUB upl
 
 ## Privacy and network boundary
 
-Book text is sent to the locally configured Ollama endpoint. Audio remains in local project/workspace storage. Google Books metadata lookup is off by default and only occurs after an explicit dashboard action or when `metadata.auto_fetch_external` is enabled.
+Book text is sent to the locally configured Ollama endpoint. Audio remains in
+local project/workspace storage. Dashboard API and WebSocket access is allowed
+without a token only when the actual TCP peer belongs to
+`dashboard.trusted_lan_cidrs` or loopback; forwarded headers never grant trust.
+Google Books metadata lookup is off by default and only occurs after an
+explicit dashboard action or when `metadata.auto_fetch_external` is enabled.
 
 ## Feature Maintenance & Impact Guidelines
 
@@ -161,4 +187,3 @@ When modifying or introducing new pipeline features, developers and AI agents MU
 
 5. **Verification Protocol**:
    - Always run unit test discovery (`python -m unittest discover -s tests -p "test_*.py"`) and verify project reset/progress flows after making backend schema or stage changes.
-

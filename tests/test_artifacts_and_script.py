@@ -47,7 +47,166 @@ class FakeCharacterOllama:
         }
 
 
+class FakeIdentityOllama:
+    model = "fake"
+
+    def __init__(self, evidence: str, same_character: bool = True) -> None:
+        self.evidence = evidence
+        self.same_character = same_character
+
+    def generate_json(self, *args, **kwargs):
+        return {
+            "decisions": [
+                {
+                    "left_id": "dusk",
+                    "right_id": "sixth_of_dusk",
+                    "same_character": self.same_character,
+                    "evidence": self.evidence,
+                }
+            ]
+        }
+
+
 class ScriptFidelityTests(unittest.TestCase):
+    def test_character_suffixes_are_not_merged_without_explicit_alias(self) -> None:
+        characters = {
+            "king": {"name": "King", "aliases": [], "dialogue_count": 1},
+            "red_king": {
+                "name": "Red King",
+                "aliases": [],
+                "dialogue_count": 2,
+            },
+        }
+        consolidated = CharacterAnalyzer._consolidate_accumulated_characters(
+            characters
+        )
+        self.assertEqual(set(consolidated), {"king", "red_king"})
+
+    def test_explicit_aliases_are_consolidated(self) -> None:
+        characters = {
+            "dusk": {"name": "Dusk", "aliases": [], "dialogue_count": 1},
+            "sixth_of_dusk": {
+                "name": "Sixth of Dusk",
+                "aliases": ["Dusk"],
+                "dialogue_count": 2,
+            },
+        }
+        consolidated = CharacterAnalyzer._consolidate_accumulated_characters(
+            characters
+        )
+        self.assertEqual(set(consolidated), {"sixth_of_dusk"})
+        self.assertEqual(consolidated["sixth_of_dusk"]["dialogue_count"], 3)
+
+    def test_name_candidate_requires_verbatim_book_evidence(self) -> None:
+        evidence = "Dusk was formally known as the Sixth of Dusk."
+        book = ExtractedBook(
+            metadata=BookMetadata(title="Book", author="Author", total_chapters=1),
+            chapters=[
+                ExtractedChapter(
+                    number=1,
+                    title="One",
+                    text=evidence,
+                    word_count=len(evidence.split()),
+                )
+            ],
+        )
+        characters = {
+            "dusk": {"name": "Dusk", "aliases": [], "dialogue_count": 1},
+            "sixth_of_dusk": {
+                "name": "Sixth of Dusk",
+                "aliases": [],
+                "dialogue_count": 2,
+            },
+        }
+        analyzer = CharacterAnalyzer(FakeIdentityOllama(evidence))
+        consolidated = analyzer._adjudicate_name_candidates(characters, book)
+        self.assertEqual(set(consolidated), {"sixth_of_dusk"})
+
+        unsupported = CharacterAnalyzer(
+            FakeIdentityOllama("The model invented this evidence.")
+        )._adjudicate_name_candidates(
+            {
+                "dusk": {"name": "Dusk", "aliases": [], "dialogue_count": 1},
+                "sixth_of_dusk": {
+                    "name": "Sixth of Dusk",
+                    "aliases": [],
+                    "dialogue_count": 2,
+                },
+            },
+            book,
+        )
+        self.assertEqual(set(unsupported), {"dusk", "sixth_of_dusk"})
+
+    def test_positive_adjudication_accepts_source_backed_short_name_continuation(self) -> None:
+        source = (
+            "Sixth of the Dusk crept up on a deathant. "
+            '"Its venom is deadly," Dusk whispered.'
+        )
+        book = ExtractedBook(
+            metadata=BookMetadata(title="Book", author="Author", total_chapters=1),
+            chapters=[
+                ExtractedChapter(
+                    number=1,
+                    title="One",
+                    text=source,
+                    word_count=len(source.split()),
+                )
+            ],
+        )
+        characters = {
+            "dusk": {"name": "Dusk", "aliases": [], "dialogue_count": 1},
+            "sixth_of_dusk": {
+                "name": "Sixth of Dusk",
+                "aliases": [],
+                "dialogue_count": 2,
+            },
+        }
+        consolidated = CharacterAnalyzer(
+            FakeIdentityOllama("Citation formatting was not verbatim.")
+        )._adjudicate_name_candidates(characters, book)
+        self.assertEqual(set(consolidated), {"sixth_of_dusk"})
+
+    def test_short_name_continuation_still_requires_positive_adjudication(self) -> None:
+        source = "The Red King entered. The King objected from across the room."
+        book = ExtractedBook(
+            metadata=BookMetadata(title="Book", author="Author", total_chapters=1),
+            chapters=[
+                ExtractedChapter(
+                    number=1,
+                    title="One",
+                    text=source,
+                    word_count=len(source.split()),
+                )
+            ],
+        )
+        characters = {
+            "king": {"name": "King", "aliases": [], "dialogue_count": 1},
+            "red_king": {
+                "name": "Red King",
+                "aliases": [],
+                "dialogue_count": 2,
+            },
+        }
+        consolidated = CharacterAnalyzer(
+            FakeIdentityOllama("", same_character=False)
+        )._adjudicate_name_candidates(characters, book)
+        self.assertEqual(set(consolidated), {"king", "red_king"})
+
+    def test_pronoun_does_not_select_arbitrary_speaker(self) -> None:
+        fragments = [
+            SourceFragment(text='"Hello."', start=0, end=8),
+            SourceFragment(text="She turned away.", start=9, end=25),
+        ]
+        self.assertEqual(
+            ScriptGenerator._resolve_dialogue_speaker(
+                0,
+                fragments,
+                {},
+                {"narrator", "alice", "beth"},
+            ),
+            "narrator",
+        )
+
     def test_fragment_spans_cover_multiple_dialogue_styles(self) -> None:
         source = (
             'He said, "Hello." She left.\n'
@@ -229,6 +388,35 @@ class ScriptFidelityTests(unittest.TestCase):
         )
         self.assertNotEqual(eager["dependency_hash"], sdpa["dependency_hash"])
 
+    def test_spoken_text_invalidates_manifest_but_preserves_source_hash(self) -> None:
+        original = ScriptChapter(
+            chapter_number=1,
+            chapter_title="One",
+            lines=[
+                ScriptLine(
+                    line_id="ch01_0000",
+                    speaker="narrator",
+                    text="Patji arrived.",
+                )
+            ],
+        )
+        pronounced = original.model_copy(deep=True)
+        pronounced.lines[0].spoken_text = "Pah-chee arrived."
+
+        original_manifest = build_segment_manifest("book", original)
+        pronounced_manifest = build_segment_manifest("book", pronounced)
+
+        self.assertNotEqual(
+            original_manifest["dependency_hash"],
+            pronounced_manifest["dependency_hash"],
+        )
+        self.assertEqual(
+            original_manifest["segments"][0]["text_hash"],
+            pronounced_manifest["segments"][0]["text_hash"],
+        )
+        self.assertNotIn("spoken_text_hash", original_manifest["segments"][0])
+        self.assertIn("spoken_text_hash", pronounced_manifest["segments"][0])
+
     def test_only_used_voice_reference_invalidates_segment_manifest(self) -> None:
         chapter = ScriptChapter(
             chapter_number=1,
@@ -372,6 +560,51 @@ class ScriptFidelityTests(unittest.TestCase):
         self.assertEqual(len(expressive.lines), 3)
         assert_script_covers_source(neutral, source)
         assert_script_covers_source(expressive, source)
+
+    def test_grouping_preserves_material_prosody_transitions(self) -> None:
+        first = "He considered the quiet horizon."
+        second = "Run now!"
+        source = f"{first} {second}"
+        chapter = ScriptChapter(
+            chapter_number=1,
+            chapter_title="Transition",
+            lines=[
+                ScriptLine(
+                    line_id="ch01_0000",
+                    speaker="narrator",
+                    text=first,
+                    emotion="calm reflective narration",
+                    speed=0.88,
+                    source_fragment_id=0,
+                    source_fragment_ids=[0],
+                    source_start=0,
+                    source_end=len(first),
+                ),
+                ScriptLine(
+                    line_id="ch01_0001",
+                    speaker="narrator",
+                    text=second,
+                    emotion="urgent panicked shout",
+                    speed=1.2,
+                    source_fragment_id=1,
+                    source_fragment_ids=[1],
+                    source_start=len(first) + 1,
+                    source_end=len(source),
+                ),
+            ],
+        )
+        generator = ScriptGenerator(
+            ollama=None,
+            narrator_target_chars=300,
+            narrator_max_words=60,
+        )
+
+        grouped = generator._group_adjacent_utterances(chapter, source)
+
+        self.assertEqual(len(grouped.lines), 2)
+        self.assertEqual(grouped.lines[0].emotion, "calm reflective narration")
+        self.assertEqual(grouped.lines[1].emotion, "urgent panicked shout")
+        assert_script_covers_source(grouped, source)
 
     def test_large_single_chapter_is_analyzed_in_multiple_units(self) -> None:
         ollama = FakeCharacterOllama()

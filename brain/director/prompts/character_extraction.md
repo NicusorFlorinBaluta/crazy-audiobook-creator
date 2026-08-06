@@ -10,9 +10,12 @@ You are an expert audiobook director preparing a novel for multi-voice narration
    - A named or personified place/object is not a speaking entity unless the
      text explicitly attributes spoken dialogue to it; descriptions,
      invocations, thoughts, and figurative personification do not count
+   - Animals that only make animal noises (e.g., squawking, barking, chirping) 
+     without human-intelligible spoken dialogue MUST NOT be included
 3. For each character, determine:
    - Their gender, approximate age, and key personality traits
    - A detailed voice description suitable for voice synthesis
+   - ACCURATELY count the number of spoken dialogue lines they have in this text
 4. Also create a narrator voice that fits the book's genre and tone
 5. Output ONLY valid JSON — no explanation, no markdown code fences
 
@@ -45,6 +48,7 @@ The narrator voice should suit {genre} storytelling — authoritative but warm, 
       "name": "Narrator",
       "gender": "male|female",
       "age_range": "string",
+      "importance": "major",
       "personality_traits": ["trait1", "trait2"],
       "voice_description": "detailed voice description for TTS",
       "speaking_style": "how the narrator typically speaks"
@@ -53,6 +57,7 @@ The narrator voice should suit {genre} storytelling — authoritative but warm, 
       "name": "Character Display Name",
       "gender": "male|female|other",
       "age_range": "string",
+      "importance": "major|minor",
       "personality_traits": ["trait1", "trait2"],
       "voice_description": "detailed voice description for TTS",
       "speaking_style": "how this character typically speaks",

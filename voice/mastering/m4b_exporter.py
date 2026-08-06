@@ -126,7 +126,49 @@ class M4BExporter:
             total_chapters=len(chapters),
             file_size_mb=file_size_mb,
             download_url=f"/download/{project_id}/output/{output_file.name}",
+            book_loudness=self._book_loudness_report(chapters),
         )
+
+    @staticmethod
+    def _book_loudness_report(
+        chapters: list[ExportChapterInfo],
+    ) -> dict[str, Any]:
+        """Summarize mastered chapter consistency without changing the audio."""
+        measured = [
+            (chapter.number, float(chapter.lufs), chapter.peak_dbfs)
+            for chapter in chapters
+            if chapter.lufs is not None
+        ]
+        if not measured:
+            return {
+                "status": "unavailable",
+                "measured_chapters": 0,
+                "spread_lu": None,
+                "outlier_chapters": [],
+            }
+        import statistics
+
+        loudness = [item[1] for item in measured]
+        median_lufs = float(statistics.median(loudness))
+        spread_lu = float(max(loudness) - min(loudness))
+        outliers = [
+            number
+            for number, value, _ in measured
+            if abs(value - median_lufs) > 0.75
+        ]
+        peaks = [
+            float(peak) for _, _, peak in measured if peak is not None
+        ]
+        return {
+            "status": "consistent" if spread_lu <= 1.0 else "warning",
+            "measured_chapters": len(measured),
+            "median_lufs": median_lufs,
+            "minimum_lufs": float(min(loudness)),
+            "maximum_lufs": float(max(loudness)),
+            "spread_lu": spread_lu,
+            "outlier_chapters": outliers,
+            "highest_peak_dbfs": max(peaks) if peaks else None,
+        }
 
     def _write_concat_file(
         self,

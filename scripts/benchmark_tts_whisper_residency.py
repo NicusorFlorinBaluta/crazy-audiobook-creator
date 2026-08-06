@@ -50,7 +50,9 @@ def _timed_generation(
     reference: Path,
     reference_text: str,
     output: Path,
-) -> float:
+) -> dict[str, float]:
+    import soundfile as sf
+
     started = time.perf_counter()
     engine.generate_speech(
         text=text,
@@ -59,7 +61,15 @@ def _timed_generation(
         emotion_instruction="neutral natural audiobook narration",
         output_path=output,
     )
-    return time.perf_counter() - started
+    wall_seconds = time.perf_counter() - started
+    audio_seconds = float(sf.info(str(output)).duration)
+    return {
+        "wall_seconds": wall_seconds,
+        "audio_seconds": audio_seconds,
+        "realtime_factor": (
+            wall_seconds / audio_seconds if audio_seconds > 0 else float("inf")
+        ),
+    }
 
 
 def main() -> int:
@@ -67,6 +77,8 @@ def main() -> int:
     parser.add_argument("--project", default="sample_book-3")
     parser.add_argument("--voice", default="narrator")
     parser.add_argument("--repeats", type=int, default=2)
+    parser.add_argument("--profile", choices=("short", "long"), default="short")
+    parser.add_argument("--output-json", type=Path)
     args = parser.parse_args()
 
     config = yaml.safe_load(Path("voice/config.yaml").read_text("utf-8")) or {}
@@ -84,6 +96,14 @@ def main() -> int:
     reference_text = voice.get("ref_text", "")
     text = (
         "The rain eased at last, and a quiet silver light crossed the valley."
+        if args.profile == "short"
+        else (
+            "The rain eased at last, and a quiet silver light crossed the valley, "
+            "revealing the old road as it curved between dark pines and weathered "
+            "stones. Far below, the river moved with a patient sound, while the "
+            "travellers gathered their cloaks and continued toward the distant "
+            "tower before the remaining daylight finally disappeared."
+        )
     )
     engine = Qwen3TTSEngine(
         model_name=tts_cfg.get("model", "Qwen/Qwen3-TTS-12Hz-1.7B-Base"),
@@ -102,6 +122,8 @@ def main() -> int:
     report: dict[str, object] = {
         "project": args.project,
         "voice": args.voice,
+        "profile": args.profile,
+        "text_words": len(text.split()),
         "repeats": max(1, args.repeats),
         "snapshots": [_gpu_snapshot("initial")],
     }
@@ -149,36 +171,56 @@ def main() -> int:
         final_snapshot = _gpu_snapshot("after_co_resident_work")
         report["snapshots"].append(final_snapshot)
 
-        tts_only_median = statistics.median(tts_only)
-        co_resident_median = statistics.median(co_resident)
+        tts_only_median = statistics.median(
+            item["wall_seconds"] for item in tts_only
+        )
+        co_resident_median = statistics.median(
+            item["wall_seconds"] for item in co_resident
+        )
+        tts_only_rtf = statistics.median(
+            item["realtime_factor"] for item in tts_only
+        )
+        co_resident_rtf = statistics.median(
+            item["realtime_factor"] for item in co_resident
+        )
         slowdown = (
-            (co_resident_median / tts_only_median) - 1.0
-            if tts_only_median > 0
+            (co_resident_rtf / tts_only_rtf) - 1.0
+            if tts_only_rtf > 0
             else 1.0
         )
         free_gib = float(final_snapshot.get("free_gib", 0.0))
         report.update(
             {
-                "tts_only_seconds": tts_only,
-                "co_resident_tts_seconds": co_resident,
+                "tts_only_runs": tts_only,
+                "co_resident_runs": co_resident,
                 "tts_only_median_seconds": tts_only_median,
                 "co_resident_median_seconds": co_resident_median,
-                "co_resident_slowdown_fraction": slowdown,
+                "tts_only_median_realtime_factor": tts_only_rtf,
+                "co_resident_median_realtime_factor": co_resident_rtf,
+                "co_resident_rtf_slowdown_fraction": slowdown,
                 "whisper_seconds": transcription_seconds,
                 "transcript": transcript,
+                "transcription_wer": whisper.calculate_wer(text, transcript),
                 # Conservative gate: leave enough room for long utterances,
                 # allocator fragmentation, and OS/display GPU use.
                 "recommend_keep_resident": (
-                    free_gib >= 4.0 and slowdown <= 0.15
+                    free_gib >= 4.0
+                    and slowdown <= 0.15
+                    and whisper.calculate_wer(text, transcript) <= 0.20
                 ),
                 "decision_rule": (
                     "At least 4 GiB free after work and no more than 15% "
-                    "median TTS slowdown; repeat with a long chapter before "
+                    "median TTS real-time-factor slowdown, with transcript "
+                    "WER at or below 20%; repeat with a long chapter before "
                     "changing the production default."
                 ),
             }
         )
-        print(json.dumps(report, indent=2))
+        rendered = json.dumps(report, indent=2)
+        if args.output_json:
+            args.output_json.parent.mkdir(parents=True, exist_ok=True)
+            args.output_json.write_text(rendered + "\n", encoding="utf-8")
+        print(rendered)
         return 0
     finally:
         whisper.unload()
