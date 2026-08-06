@@ -64,3 +64,5 @@ scratch/check_pipeline_state.py
 scratch/test_voice_upload.py
 scratch/run_e2e_test.py
 .gitignore
+
+scratch/
