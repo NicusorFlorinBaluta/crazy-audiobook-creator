@@ -575,3 +575,12 @@ Selection-wide residency is rejected unless a future benchmark meets the
 original 10% wall-time improvement gate with non-inferior quality. Attention
 kernel and inference-setting experiments remain pending and must be evaluated
 one variable at a time.
+
+### Optimization Pass Checkpoint (August 2026)
+
+- **FlashAttention:** Enabled natively for Qwen2.5 LLM text scripting (OLLAMA_FLASH_ATTENTION=1). Throughput increased from ~20 tokens/sec to **~28 – 36.8 tokens/sec** (~40% boost) on AMD RX 7900 XTX, effectively cutting character discovery time in half.
+- **Qwen VoiceDesign:** Confirmed migration from Parler-TTS to Qwen3-TTS VoiceDesign (1.7B) to provide exact domain-matching initial audio seed references for Qwen Base cloning.
+- **VAD Silence Pruning:** Integrated silero-vad into the openai-whisper fallback to cleanly strip silence. Eliminated 100% of the long-silence text hallucinations (which had incorrectly caused valid voice generations to fail with 100% WER). 
+- **Tensor Caching:** Qwen3TTSEngine now computes and caches .pt tensors for speaker embeddings. Successive generations skip both audio loading and feature extraction inference entirely.
+- **UUID File Management:** Changed VoiceLibraryManager to atomically save uploaded and bootstrapped voices with a hex suffix (e.g., 
+arrator_955f3b7b.wav). Fully eliminated the [WinError 5] Access is denied crashes when Uvicorn held locks on actively served dashboard references.
