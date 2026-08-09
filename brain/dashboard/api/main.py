@@ -1199,9 +1199,9 @@ async def reset_pipeline_stage(project_id: str, request: Request):
         import shutil
         
         update: dict[str, Any] = {
-            "status": stage.value if stage != PipelineStage.VOICE_REVIEW else "paused",
+            "status": "paused",
             "active_stage": stage.value,
-            "pause_reason": "voice_review" if stage == PipelineStage.VOICE_REVIEW else None,
+            "pause_reason": "voice_review" if stage == PipelineStage.VOICE_REVIEW else "pipeline reset",
             "error_message": None,
             "running": False,
         }

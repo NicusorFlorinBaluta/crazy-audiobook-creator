@@ -77,13 +77,24 @@ class VoiceDesigner:
     def _build_test_sentence(self, char_id: str, character: Character) -> str:
         gender_key = (
             character.gender.value
-            if isinstance(character.gender, Gender)
+            if hasattr(character.gender, "value")
             else str(character.gender)
-        )
-        return character.test_sentence or self.voice_design_test_sentences.get(
+        ).lower()
+        fallback = self.voice_design_test_sentences.get(
             gender_key,
-            self.voice_design_test_sentences["other"],
+            self.voice_design_test_sentences.get("neutral", self.voice_design_test_sentences.get("other", "This is a fallback test sentence to ensure adequate duration for voice design references.")),
         )
+        
+        if not character.test_sentence:
+            return fallback
+            
+        # Pad short sentences to ensure VoiceDesign has enough text to generate ~10s of audio
+        # Only do this for minor characters, to avoid making all major characters sound too similar.
+        importance = getattr(character, "importance", "minor")
+        if len(character.test_sentence.split()) < 12 and importance == "minor":
+            return f"{character.test_sentence.strip()} {fallback}"
+            
+        return character.test_sentence
 
     def bootstrap_voices(
         self,
@@ -544,7 +555,7 @@ class VoiceDesigner:
         )
         return response.voices_generated[character_id]
 
-    def _generate_voice_file(
+    def _generate_voice(
         self,
         project_id: str,
         char_id: str,
@@ -593,6 +604,7 @@ class VoiceDesigner:
         ref_text = test_sentence
 
         # Save to voice library registry
+        gender_key = character.gender.value if hasattr(character.gender, "value") else str(character.gender)
         self.library.register_voice(
             project_id=project_id,
             character_id=char_id,

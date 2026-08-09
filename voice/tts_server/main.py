@@ -28,7 +28,7 @@ from typing import Any
 import yaml
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 os.environ.setdefault("ROCM_SDK_TARGET_FAMILY", "custom")
 
@@ -404,6 +404,11 @@ def bootstrap_voices(request: BootstrapVoicesRequest) -> BootstrapVoicesResponse
         engine.unload()
         try:
             return designer.bootstrap_voices(request)
+        except Exception as e:
+            import traceback
+            with open("voice_crash.log", "a") as f:
+                f.write(f"Crash in bootstrap_voices: {e}\n{traceback.format_exc()}\n")
+            raise
         finally:
             if designer.validator and designer.validator.is_loaded:
                 designer.validator.unload()
@@ -501,6 +506,17 @@ def generate_line(request: GenerateLineRequest) -> GenerateLineResponse:
         output_path.name,
     )
 
+
+    duration = len(audio) / engine.sample_rate
+    elapsed = time.time() - t0
+    logger.info(
+        "[VoiceServer] Line %s completed: audio_duration=%.2fs, gen_time=%.2fs → %s",
+        request.line.line_id,
+        duration,
+        elapsed,
+        output_path.name,
+    )
+
     return GenerateLineResponse(
         status="success",
         line_id=request.line.line_id,
@@ -511,8 +527,8 @@ def generate_line(request: GenerateLineRequest) -> GenerateLineResponse:
 
 
 @app.post("/generate/chapter")
-def generate_chapter(request: GenerateChapterRequest) -> GenerateChapterResponse:
-    """Generate audio for an entire chapter with validation."""
+def generate_chapter(request: GenerateChapterRequest, fast_req: Request):
+    """Generate audio for an entire chapter with validation, streaming progress."""
     if not validator:
         raise HTTPException(status_code=503, detail="Server not initialized")
 
@@ -529,58 +545,81 @@ def generate_chapter(request: GenerateChapterRequest) -> GenerateChapterResponse
     _safe_workspace_project(request.project_id)
     _enforce_workspace_quota()
     cancelled_projects.discard(request.project_id)
-    torch_module = None
-    try:
-        import torch
 
-        if torch.cuda.is_available():
-            torch.cuda.reset_peak_memory_stats()
-            torch_module = torch
-    except Exception as exc:
-        logger.debug("Peak VRAM reset unavailable: %s", exc)
-    try:
-        with gpu_job():
-            result = validator.process_chapter(
-                project_id=request.project_id,
-                chapter_number=request.chapter_number,
-                lines=request.lines,
-                workspace=workspace,
-                validate=request.validation_enabled,
-                auto_retry=request.auto_retry,
-                max_retries=request.max_retries,
-                progress_callback=_progress_from_worker,
-                cancel_check=lambda: request.project_id in cancelled_projects,
-                validation_terms=set(request.validation_terms),
-            )
-    except GenerationCancelled as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    finally:
-        cancelled_projects.discard(request.project_id)
+    import queue
+    import json
+    q = queue.Queue()
 
-    if torch_module is not None:
+    def _stream_progress(msg: dict[str, Any]) -> None:
+        q.put({"type": "progress", "data": msg})
+        _progress_from_worker(msg)
+
+    def _worker():
+        torch_module = None
         try:
-            result.peak_vram_gb = (
-                torch_module.cuda.max_memory_allocated() / 1e9
-            )
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
+                torch_module = torch
         except Exception as exc:
-            logger.debug("Peak VRAM measurement unavailable: %s", exc)
+            logger.debug("Peak VRAM reset unavailable: %s", exc)
+            
+        try:
+            with gpu_job():
+                result = validator.process_chapter(
+                    project_id=request.project_id,
+                    chapter_number=request.chapter_number,
+                    lines=request.lines,
+                    workspace=workspace,
+                    validate=request.validation_enabled,
+                    auto_retry=request.auto_retry,
+                    max_retries=request.max_retries,
+                    progress_callback=_stream_progress,
+                    cancel_check=lambda: request.project_id in cancelled_projects,
+                    validation_terms=set(request.validation_terms),
+                )
+            if torch_module is not None:
+                try:
+                    result.peak_vram_gb = torch_module.cuda.max_memory_allocated() / 1e9
+                except Exception:
+                    pass
+            elapsed = time.time() - t0
+            logger.info(
+                "[VoiceServer] Chapter %d finished in %.2fs: %d/%d lines generated, %d failed",
+                request.chapter_number,
+                elapsed,
+                result.generated,
+                result.total_lines,
+                result.failed_validation,
+            )
+            q.put({"type": "result", "data": result.model_dump()})
+        except GenerationCancelled as exc:
+            q.put({"type": "error", "error": "cancelled", "detail": str(exc)})
+        except Exception as exc:
+            logger.error("Generation error: %s", exc)
+            q.put({"type": "error", "error": "exception", "detail": str(exc)})
+        finally:
+            cancelled_projects.discard(request.project_id)
 
-    elapsed = time.time() - t0
-    logger.info(
-        "[VoiceServer] Chapter %d finished in %.2fs: %d/%d lines generated, %d failed",
-        request.chapter_number,
-        elapsed,
-        result.generated,
-        result.total_lines,
-        result.failed_validation,
-    )
+    threading.Thread(target=_worker, daemon=True).start()
 
-    return result
+    async def event_generator():
+        while True:
+            if await fast_req.is_disconnected():
+                break
+            try:
+                msg = await asyncio.to_thread(q.get, True, 1.0)
+                yield json.dumps(msg) + "\n"
+                if msg.get("type") in ("result", "error"):
+                    break
+            except queue.Empty:
+                yield "\n" # keepalive
+
+    return StreamingResponse(event_generator(), media_type="application/x-ndjson")
 
 
 @app.post("/validate")
 def validate_segment(request: ValidateRequest) -> dict:
-    """Validate a single audio segment."""
     if not validator:
         raise HTTPException(status_code=503, detail="Server not initialized")
 

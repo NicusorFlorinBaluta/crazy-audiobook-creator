@@ -235,6 +235,7 @@ class ScriptGenerator:
         chapter: ExtractedChapter,
         registry: CharacterRegistry,
         previous_summary: str = "",
+        chunk_progress_callback: Callable[[int, int], None] | None = None,
     ) -> ScriptChapter:
         """Generate a full script for a single chapter.
 
@@ -245,6 +246,7 @@ class ScriptGenerator:
             chapter: The chapter text to process.
             registry: Character registry from Pass 1.
             previous_summary: Summary of the previous chapter for continuity.
+            chunk_progress_callback: Callback receiving (chunk_number, total_chunks)
 
         Returns:
             ScriptChapter with all lines annotated.
@@ -270,7 +272,7 @@ class ScriptGenerator:
                 id_offset=0,
             )
         else:
-            script = self._process_chunked(chapter, registry, previous_summary)
+            script = self._process_chunked(chapter, registry, previous_summary, chunk_progress_callback)
 
         if self.group_utterances:
             script = self._group_adjacent_utterances(script, chapter.text)
@@ -284,6 +286,7 @@ class ScriptGenerator:
         scripts_dir: Path | None = None,
         progress_callback: Callable[[ScriptChapter], None] = None,
         chapter_start_callback: Callable[[int], None] | None = None,
+        chunk_progress_callback: Callable[[int, int], None] | None = None,
     ) -> list[ScriptChapter]:
         """Generate scripts for all chapters sequentially with incremental saving."""
         scripts: list[ScriptChapter] = []
@@ -345,7 +348,7 @@ class ScriptGenerator:
 
             ch_t0 = _time.time()
             script = self.generate_chapter_script(
-                chapter, registry, previous_summary
+                chapter, registry, previous_summary, chunk_progress_callback
             )
             ch_elapsed = _time.time() - ch_t0
 
@@ -529,6 +532,7 @@ class ScriptGenerator:
         chapter: ExtractedChapter,
         registry: CharacterRegistry,
         previous_summary: str,
+        chunk_progress_callback: Callable[[int, int], None] | None = None,
     ) -> ScriptChapter:
         """Process complete source fragments in non-overlapping batches."""
         fragments = self._split_into_fragment_spans(chapter.text)
@@ -539,6 +543,8 @@ class ScriptGenerator:
 
         offset = 0
         for chunk_num, chunk in enumerate(chunks, 1):
+            if chunk_progress_callback:
+                chunk_progress_callback(chunk_num, len(chunks))
             context_summary = " ".join(summaries)[-2000:]
 
             logger.info(

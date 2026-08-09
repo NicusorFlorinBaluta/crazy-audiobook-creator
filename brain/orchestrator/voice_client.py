@@ -133,20 +133,58 @@ class VoiceClient:
         data = self._post("/generate/line", request.model_dump())
         return GenerateLineResponse(**data)
 
-    def generate_chapter(self, request: GenerateChapterRequest) -> GenerateChapterResponse:
-        """Generate audio for an entire chapter."""
+    def generate_chapter(
+        self, 
+        request: GenerateChapterRequest,
+        progress_callback=None
+    ) -> GenerateChapterResponse:
+        """Generate audio for an entire chapter via streaming SSE."""
+        import json
         logger.info(
             "Generating chapter %d (%d lines) for project '%s'",
             request.chapter_number,
             len(request.lines),
             request.project_id,
         )
-        data = self._post(
-            "/generate/chapter",
-            request.model_dump(by_alias=True),
-            timeout=7200,  # 2 hours max for a chapter
-        )
-        return GenerateChapterResponse(**data)
+        url = f"{self.host}/generate/chapter"
+        
+        last_error = None
+        for attempt in range(1, self.retries + 1):
+            try:
+                with httpx.Client(timeout=httpx.Timeout(7200.0, connect=10.0), headers=self._client.headers) as client:
+                    with client.stream("POST", url, json=request.model_dump(by_alias=True)) as response:
+                        response.raise_for_status()
+                        for line in response.iter_lines():
+                            if not line:
+                                continue
+                            try:
+                                data = json.loads(line)
+                            except json.JSONDecodeError:
+                                continue
+                            
+                            if data.get("type") == "progress":
+                                msg = data.get("data", {})
+                                # Do a granular logger.info here so the UI sees live progress
+                                line_id = msg.get("line_id", "unknown")
+                                logger.info("Generated segment %s", line_id)
+                                if progress_callback:
+                                    progress_callback(msg)
+                            elif data.get("type") == "result":
+                                return GenerateChapterResponse(**data.get("data", {}))
+                            elif data.get("type") == "error":
+                                raise RuntimeError(f"Voice Server generation error: {data.get('error')} - {data.get('detail')}")
+                raise RuntimeError("Stream ended without returning a result.")
+            except (httpx.TimeoutException, httpx.RequestError) as e:
+                last_error = e
+                logger.warning(
+                    "POST /generate/chapter stream failed (attempt %d/%d): %s",
+                    attempt,
+                    self.retries,
+                    e,
+                )
+                if attempt < self.retries:
+                    time.sleep(self.retry_delay)
+        raise last_error or RuntimeError("Failed to generate chapter after retries")
 
     # ------------------------------------------------------------------
     # Validation

@@ -1126,23 +1126,48 @@ class Pipeline:
                 "language": tts_config.get("language", "English"),
             },
         )
-        atomic_write_json(project_dir / "voice_cast.json", cast)
+        # Extract actual script lines for each character
+        character_script_lines = {}
+        for ch in script_chapters:
+            for line in ch.lines:
+                vid = line.voice_id or line.speaker
+                character_script_lines.setdefault(vid, []).append(line.text)
+
+        characters_for_request = {}
+        for voice_id, profile in cast["voices"].items():
+            owner_id = profile.get("owner_character_id", voice_id)
+            base_char = registry.characters[owner_id]
+            
+            # Combine real script lines until we reach > 15 words
+            real_lines = character_script_lines.get(voice_id, character_script_lines.get(owner_id, []))
+            combined_real = ""
+            for rline in real_lines:
+                combined_real += " " + rline
+                if len(combined_real.split()) >= 15:
+                    break
+            combined_real = combined_real.strip()
+            
+            ts = base_char.test_sentence or ""
+            # If the LLM sentence is too short, augment it with real lines
+            if len(ts.split()) < 15:
+                if len(combined_real.split()) >= 15:
+                    ts = combined_real
+                elif combined_real:
+                    ts = f"{ts} {combined_real}".strip()
+                    
+            characters_for_request[voice_id] = base_char.model_copy(
+                update={
+                    "id": voice_id,
+                    "name": profile.get("name") or voice_id,
+                    "gender": Gender(profile["gender"]),
+                    "voice_description": profile["effective_prompt"],
+                    "test_sentence": ts
+                }
+            )
 
         request = BootstrapVoicesRequest(
             project_id=project_id,
-            characters={
-                voice_id: registry.characters[
-                    profile.get("owner_character_id", voice_id)
-                ].model_copy(
-                    update={
-                        "id": voice_id,
-                        "name": profile.get("name") or voice_id,
-                        "gender": Gender(profile["gender"]),
-                        "voice_description": profile["effective_prompt"]
-                    }
-                )
-                for voice_id, profile in cast["voices"].items()
-            },
+            characters=characters_for_request,
             force_regenerate=False,
             design_fingerprints={
                 voice_id: profile["design_fingerprint"]
@@ -1294,7 +1319,14 @@ class Pipeline:
                     validation_terms=self._validation_terms(project_dir),
                 )
 
-                response = self.voice_client.generate_chapter(request)
+                def _on_generation_progress(msg: dict) -> None:
+                    # Update job queue so UI progress bar moves in real-time
+                    self.job_queue.update_job(project_id, {
+                        "lines_generated": msg.get("progress", 0),
+                        "total_lines": msg.get("total", len(request_lines))
+                    })
+
+                response = self.voice_client.generate_chapter(request, progress_callback=_on_generation_progress)
                 logger.info(
                     "[AudioGenerationMetrics] chapter=%d cache_hits=%d "
                     "cache_misses=%d timings=%s",
