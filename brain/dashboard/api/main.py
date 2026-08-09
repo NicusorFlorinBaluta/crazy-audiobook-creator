@@ -1857,11 +1857,12 @@ async def get_project_voices(project_id: str):
     for voice_id, profile in sorted(cast.get("voices", {}).items()):
         owner = characters.get(voice_id, {})
         info = registered.get(voice_id, {})
-        preview_path = voice_dir / f"{voice_id}.wav"
+        actual_file = info.get("file", f"{voice_id}.wav")
+        preview_path = voice_dir / actual_file
         voices.append(
             {
                 "voice_id": voice_id,
-                "name": owner.get("name") or info.get("name") or voice_id,
+                "name": profile.get("name") or owner.get("name") or info.get("name") or voice_id,
                 "gender": profile.get("gender") or owner.get("gender", "other"),
                 "age_range": profile.get("age_range")
                 or owner.get("age_range", "unknown"),
@@ -1874,7 +1875,7 @@ async def get_project_voices(project_id: str):
                 "ref_text": info.get("ref_text", ""),
                 "ready": preview_path.is_file(),
                 "preview_url": (
-                    f"api/projects/{project_id}/voices/{voice_id}/preview"
+                    f"api/projects/{project_id}/voices/{voice_id}/preview?v={int(preview_path.stat().st_mtime)}"
                     if preview_path.is_file()
                     else None
                 ),
@@ -1958,7 +1959,8 @@ async def preview_project_voice(project_id: str, voice_id: str):
 
     if voice_id not in cast.get("voices", {}) and voice_id not in registered:
         raise HTTPException(status_code=404, detail="Voice not found")
-    voice_path = (_voice_project_dir(project_id) / f"{voice_id}.wav").resolve()
+    actual_file = registered.get(voice_id, {}).get("file", f"{voice_id}.wav")
+    voice_path = (_voice_project_dir(project_id) / actual_file).resolve()
     if not voice_path.is_relative_to(_voice_project_dir(project_id)):
         raise HTTPException(status_code=400, detail="Invalid voice ID")
     if not voice_path.is_file():
@@ -2057,10 +2059,11 @@ async def regenerate_project_voice(
     cast = _load_or_build_voice_cast(project_id, registry_data)
     if voice_id not in cast.get("voices", {}):
         raise HTTPException(status_code=404, detail="Voice owner not found")
-    if voice_id not in registry.characters:
+    owner_id = cast["voices"][voice_id].get("owner_character_id", voice_id)
+    if owner_id not in registry.characters:
         raise HTTPException(status_code=500, detail="Voice owner registry is invalid")
-    owner = registry.characters[voice_id]
-    if (owner.voice_id or voice_id) != voice_id:
+    owner = registry.characters[owner_id]
+    if owner_id != "narrator" and (owner.voice_id or owner_id) != owner_id:
         raise HTTPException(
             status_code=422,
             detail="Redesign the owning voice rather than a shared assignment",
@@ -2215,7 +2218,10 @@ async def upload_project_voice(
                     raise ValueError("Voice upload exceeds the 25 MB limit")
                 handle.write(chunk)
 
-        result = subprocess.run(
+        # Run FFmpeg in a thread so the event loop stays responsive
+        # (prevents /health from timing out while converting audio).
+        result = await asyncio.to_thread(
+            subprocess.run,
             [
                 ffmpeg,
                 "-hide_banner",
@@ -2245,6 +2251,8 @@ async def upload_project_voice(
         audio_info = _inspect_pcm_voice(canonical_path)
 
         # Phase 3.3: Validate uploaded reference sample transcription
+        # Run Whisper validation in a thread so the server stays responsive
+        # during the 30-90 second model load + inference.
         import tempfile
         import sys
         import json
@@ -2266,7 +2274,8 @@ except Exception as e:
         try:
             env = os.environ.copy()
             env["PYTHONPATH"] = str(Path(__file__).resolve().parent.parent.parent.parent)
-            proc = subprocess.run(
+            proc = await asyncio.to_thread(
+                subprocess.run,
                 [sys.executable, script_path, str(canonical_path), transcript],
                 capture_output=True,
                 text=True,
@@ -2377,10 +2386,15 @@ async def approve_voice_cast(
         }
 
     voice_dir = _voice_project_dir(project_id)
+    try:
+        registered = json.loads((voice_dir / "voices.json").read_text(encoding="utf-8")).get("voices", {})
+    except (OSError, json.JSONDecodeError):
+        registered = {}
+
     missing = [
         voice_id
         for voice_id in cast.get("voices", {})
-        if not (voice_dir / f"{voice_id}.wav").is_file()
+        if not (voice_dir / registered.get(voice_id, {}).get("file", f"{voice_id}.wav")).is_file()
     ]
     if missing:
         raise HTTPException(

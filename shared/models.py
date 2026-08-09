@@ -111,6 +111,10 @@ class Character(BaseModel):
         default=None,
         description="Voice-library ID; minor characters may intentionally share a voice",
     )
+    test_sentence: str | None = Field(
+        default=None,
+        description="Character-specific quote for VoiceDesign generation",
+    )
 
 
 class CharacterRegistry(BaseModel):
@@ -414,7 +418,9 @@ class QualityResult(BaseModel):
     duration_ok: bool = True
     has_long_silence: bool = False
     pacing_anomaly: bool = False
+    monotone_warning: bool = False
     pitch_median: float = 0.0
+    pitch_cv: float = 0.0
     reference_pitch_median: float = 0.0
     text_similarity: float = Field(default=0.0, ge=0.0, le=1.0)
     effective_text_error: float = Field(default=1.0, ge=0.0, le=1.0)
@@ -432,6 +438,10 @@ class QualityResult(BaseModel):
         description="Composite quality score",
     )
     attempt: int = 1
+    warnings: list[str] = Field(
+        default_factory=list,
+        description="Soft diagnostic messages that do not block acceptance",
+    )
 
 
 class ChapterQualityReport(BaseModel):

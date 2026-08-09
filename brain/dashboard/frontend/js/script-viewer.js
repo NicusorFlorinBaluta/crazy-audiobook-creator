@@ -169,21 +169,20 @@ window.ScriptViewer = (() => {
             if (candidates.length > 1) {
                 candidatesHtml = `
                     <div class="voice-candidates">
-                        <strong>Available Candidates</strong>
-                        <div class="voice-candidates-list">
-                            ${candidates.map(candidate => `
-                                <div class="voice-candidate-option">
-                                    <label>
-                                        <input type="radio" name="candidate-${ownerId}" value="${escapeHtml(candidate.voice_id)}"
+                        <strong>Voice Comparison</strong>
+                        <div class="voice-comparison-player" style="margin: 10px 0; background: var(--bg-elevated); padding: 10px; border-radius: var(--radius-md);">
+                            <audio class="voice-preview-player" style="width: 100%; margin-bottom: 10px;" controls preload="none" src="${escapeHtml(mainVoice.preview_url)}"></audio>
+                            <div class="voice-candidates-toggles" style="display: flex; gap: 8px;">
+                                ${candidates.map((candidate, idx) => `
+                                    <label class="btn btn-sm ${candidate.voice_id === mainVoice.voice_id ? 'btn-primary' : 'btn-outline'}" style="flex: 1; text-align: center; cursor: pointer;">
+                                        <input type="radio" style="display:none;" name="candidate-${ownerId}" value="${escapeHtml(candidate.voice_id)}"
+                                            data-preview-url="${escapeHtml(candidate.preview_url || '')}"
                                             ${candidate.voice_id === mainVoice.voice_id ? 'checked' : ''}
                                             ${voiceState.editable ? '' : 'disabled'}>
-                                        ${escapeHtml(candidate.name)}
+                                        ${String.fromCharCode(65 + idx)} ${candidate.ready ? '' : '(prep)'}
                                     </label>
-                                    ${candidate.ready 
-                                        ? `<audio class="voice-preview-player small" controls preload="none" src="${escapeHtml(candidate.preview_url)}"></audio>` 
-                                        : '<span>(Preparing)</span>'}
-                                </div>
-                            `).join('')}
+                                `).join('')}
+                            </div>
                         </div>
                         <button class="btn btn-secondary apply-candidate" data-owner-id="${ownerId}" ${voiceState.editable ? '' : 'disabled'}>Apply Selected Candidate</button>
                     </div>
@@ -299,6 +298,35 @@ window.ScriptViewer = (() => {
                 )
             );
 
+            // Add A/B sync player logic
+            card.querySelectorAll('.voice-candidates-toggles input[type="radio"]').forEach(radio => {
+                radio.addEventListener('change', (e) => {
+                    const container = card.querySelector('.voice-comparison-player');
+                    if (!container) return;
+                    const player = container.querySelector('.voice-preview-player');
+                    const isPlaying = !player.paused;
+                    const currentTime = player.currentTime;
+                    
+                    // Update button UI styles
+                    container.querySelectorAll('.btn').forEach(btn => {
+                        btn.classList.remove('btn-primary');
+                        btn.classList.add('btn-outline');
+                    });
+                    e.target.closest('.btn').classList.remove('btn-outline');
+                    e.target.closest('.btn').classList.add('btn-primary');
+                    
+                    // Swap source and sync time
+                    const newSrc = e.target.dataset.previewUrl;
+                    if (newSrc && newSrc !== 'undefined') {
+                        player.src = newSrc;
+                        player.currentTime = currentTime;
+                        if (isPlaying) {
+                            player.play().catch(err => console.warn('Could not auto-resume:', err));
+                        }
+                    }
+                });
+            });
+
             const applyBtn = card.querySelector('.apply-candidate');
             if (applyBtn) {
                 applyBtn.addEventListener('click', async () => {
@@ -326,6 +354,90 @@ window.ScriptViewer = (() => {
 
             els.charGrid.appendChild(card);
         });
+    }
+
+    async function uploadVoiceSample(voiceId, file, transcript) {
+        const projectId = window.state?.currentProjectId;
+        if (!projectId) return;
+        if (!file) {
+            showToast('Please select an audio file', 'warning');
+            return;
+        }
+        if (!transcript || transcript.trim().length < 3) {
+            showToast('Please provide the exact transcript of the audio', 'warning');
+            return;
+        }
+        
+        const cardEl = els.charGrid.querySelector(`[data-voice-id="${CSS.escape(voiceId)}"]`);
+        if (cardEl) {
+            const badge = cardEl.querySelector('.voice-ready-badge');
+            if (badge) {
+                badge.className = 'voice-ready-badge preparing active-loading';
+                badge.innerHTML = '<span class="voice-spinner-dot"></span> Uploading...';
+            }
+            const previewArea = cardEl.querySelector('.char-voice-preview');
+            if (previewArea) {
+                previewArea.innerHTML = `
+                    <div class="voice-preview-loading">
+                        <div class="voice-pulse-wave"><span></span><span></span><span></span><span></span></div>
+                        <span class="voice-loading-text">Validating & importing uploaded sample...</span>
+                    </div>`;
+            }
+        }
+
+        const buttons = [...els.charGrid.querySelectorAll('.voice-upload-submit')];
+        buttons.forEach(button => { button.disabled = true; });
+        showToast('Uploading and validating reference voice...', 'info');
+        
+        try {
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('transcript', transcript.trim());
+
+            const response = await fetch(
+                `api/projects/${encodeURIComponent(projectId)}/voices/${encodeURIComponent(voiceId)}/upload`,
+                {
+                    method: 'POST',
+                    body: formData
+                }
+            );
+            
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(data.detail || 'Voice upload failed');
+            
+            const affected = data.affected_chapters || [];
+            showToast(
+                `Voice imported for ${voiceId}! ${affected.length ? affected.length + ' chapters marked stale.' : ''}`, 
+                'success'
+            );
+            await fetchVoices(projectId);
+            renderCharacters();
+        } catch (error) {
+            showToast(error.message, 'error');
+            if (cardEl) {
+                const badge = cardEl.querySelector('.voice-ready-badge');
+                if (badge) {
+                    badge.className = 'voice-ready-badge failed';
+                    badge.innerHTML = 'Upload failed';
+                }
+                // Show the error message directly in the card so it's not missed
+                const previewArea = cardEl.querySelector('.char-voice-preview');
+                if (previewArea) {
+                    previewArea.innerHTML = `
+                        <div class="voice-preview-loading" style="display: block; word-break: break-word; color: var(--danger, #f44); text-align: left; font-size: 0.85rem; padding: 0.75rem;">
+                            <strong style="display: block; margin-bottom: 4px;">❌ Upload failed:</strong>
+                            ${escapeHtml(error.message)}
+                        </div>`;
+                }
+            }
+            // Delay re-render so the user can read the error
+            setTimeout(async () => {
+                await fetchVoices(projectId);
+                renderCharacters();
+            }, 8000);
+        } finally {
+            buttons.forEach(button => { button.disabled = false; });
+        }
     }
 
     async function fetchPronunciations(projectId) {

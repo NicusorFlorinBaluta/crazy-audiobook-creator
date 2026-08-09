@@ -1176,6 +1176,10 @@ class Pipeline:
                     import copy
                     cand_profile = copy.deepcopy(profile)
                     cand_profile["voice_id"] = cand.id
+                    if "_cand" in cand.id:
+                        cand_profile["name"] = f"Candidate {cand.id.split('_cand')[-1]}"
+                    else:
+                        cand_profile["name"] = f"Alternative ({cand.id})"
                     cand_profile["design_fingerprint"] = ""
                     cand_profile["assigned_characters"] = []
                     cand_profile["ready"] = True
@@ -1736,6 +1740,68 @@ class Pipeline:
         except Exception:
             return False
 
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _update_stage(
+        self,
+        project_id: str,
+        stage: PipelineStage,
+        **extra: Any,
+    ) -> None:
+        """Update the pipeline stage in the job queue."""
+        is_done_stage = stage in (
+            PipelineStage.COMPLETE,
+            PipelineStage.SELECTION_COMPLETE,
+            PipelineStage.ERROR,
+            PipelineStage.PAUSED,
+            PipelineStage.VOICE_REVIEW,
+        )
+        is_running = not is_done_stage
+        preserve_active_stage = stage in (
+            PipelineStage.PAUSED,
+            PipelineStage.PAUSING,
+            PipelineStage.PAUSED_SCHEDULED,
+            PipelineStage.DEPLOY_PAUSED,
+            PipelineStage.ERROR,
+        )
+        if preserve_active_stage:
+            state = self.job_queue.get_job(project_id)
+            active_stage = state.get("active_stage") or state.get("status")
+        else:
+            active_stage = stage
+        update = {
+            "status": stage,
+            "active_stage": active_stage,
+            "running": is_running,
+            **extra,
+        }
+        self.job_queue.update_job(project_id, update)
+        logger.info("Pipeline stage: %s → %s (running=%s)", project_id, stage, is_running)
+
+    @staticmethod
+    def _make_project_id(title: str) -> str:
+        """Generate a URL-safe project ID from a book title."""
+        import re
+        project_id = title.lower().strip()
+        project_id = re.sub(r"[^\w\s-]", "", project_id)
+        project_id = re.sub(r"[-\s]+", "-", project_id)
+        project_id = project_id.strip("-_")
+        return project_id[:64] or "book"
+
+    @staticmethod
+    def _valid_audio(path: Path) -> bool:
+        if not path.is_file() or path.stat().st_size < 1000:
+            return False
+        try:
+            import soundfile as sf
+
+            info = sf.info(str(path))
+            return info.frames > 0 and info.samplerate > 0 and info.duration > 0
+        except Exception:
+            return False
+
     def _prepare_generation_lines(
         self,
         chapter: Any,
@@ -1755,13 +1821,21 @@ class Pipeline:
                 "characters", {}
             )
 
+        speaker_to_voice: dict[str, str] = {}
+        cast_file = project_dir / "voice_cast.json"
+        if cast_file.exists():
+            cast_data = json.loads(cast_file.read_text(encoding="utf-8"))
+            for voice_id, profile in cast_data.get("voices", {}).items():
+                for assigned_speaker in profile.get("assigned_characters", []):
+                    speaker_to_voice[assigned_speaker] = voice_id
+
         for line in lines:
             spoken_text = apply_pronunciations(line.text, pronunciation_dict)
             line.spoken_text = (
                 spoken_text if spoken_text != line.text else None
             )
             char_info = characters.get(line.speaker, {})
-            line.voice_id = char_info.get("voice_id") or line.speaker
+            line.voice_id = speaker_to_voice.get(line.speaker) or char_info.get("voice_id") or line.speaker
             if char_info.get("voice_fx"):
                 line.voice_fx = VoiceFXSettings(**char_info["voice_fx"])
         return lines

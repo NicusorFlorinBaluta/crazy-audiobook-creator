@@ -54,6 +54,9 @@ _SYSTEM_PROMPT = """You are an expert audiobook director and strict data extract
 - A named or personified place/object is not a speaking character unless the
   text explicitly attributes spoken dialogue to that entity. Thoughts,
   descriptions, invocations, and figurative personification are not dialogue.
+- Animal noises (e.g. chirping, barking, roaring, squawking) and mental 
+  impressions do NOT count as spoken dialogue. An animal is only a character 
+  if it speaks actual linguistic words in quotes.
 
 ### Character ID Guidelines
 - CRITICAL: Use the character's actual name as the character_id in snake_case.
@@ -69,20 +72,21 @@ _SYSTEM_PROMPT = """You are an expert audiobook director and strict data extract
 
 ### Voice Description Guidelines
 
-Voice descriptions must be specific and actionable. Include:
-- **Gender and age**: "young female, early 20s" or "elderly male, 70s"
-- **Pitch**: "high-pitched", "deep baritone", "medium tenor"
-- **Pace**: "fast-talking", "measured and deliberate", "slow and ponderous"
-- **Quality**: "gravelly", "silky smooth", "raspy", "clear and bell-like"
-- **Accent/Pronunciation**: "British RP", "no strong accent", "slight roughness"
-- **Emotional baseline**: "warm and kind", "cold and calculating", "nervous energy"
+Voice descriptions must strictly follow the official 12-dimension prompt framework for TTS VoiceDesign. Include the following keywords and dimensions explicitly:
+- **Gender & Age**: (e.g., "male speaker, 30s age")
+- **Pitch & Volume**: (e.g., "low pitch, moderate volume")
+- **Speed**: (e.g., "fast speed", "measured speed")
+- **Accent**: (e.g., "British English accent", "Standard American accent")
+- **Texture & Clarity**: (e.g., "clear texture, slightly hoarse texture", "high clarity")
+- **Fluency**: (e.g., "natural fluency")
+- **Emotion, Tone & Personality**: (e.g., "warm emotion, authoritative tone, measured personality")
 
 Do NOT use real person names. Use archetypes instead.
 Keep descriptions under 50 words each.
 
 ### Book Genre: {genre}
 
-The narrator voice should suit {genre} storytelling - authoritative but warm, with gravitas for dramatic moments and warmth for intimate scenes.
+The narrator voice should suit {genre} storytelling - e.g., authoritative tone, warm emotion, measured speed, high clarity.
 
 ---
 ## Output Schema
@@ -102,7 +106,8 @@ CRITICAL REMINDER: You MUST output ONLY valid JSON matching the Output Schema be
       "personality_traits": ["trait1", "trait2"],
       "aliases": ["explicit nickname or title"],
       "voice_description": "detailed voice description for TTS",
-      "speaking_style": "how the narrator typically speaks"
+      "speaking_style": "how the narrator typically speaks",
+      "test_sentence": "An INVENTED 15 to 25 word sentence showcasing the narrator's pacing and tone. DO NOT use fantasy names, places, or complex jargon."
     }},
     "character_name_in_snake_case": {{
       "name": "Character Display Name",
@@ -111,6 +116,7 @@ CRITICAL REMINDER: You MUST output ONLY valid JSON matching the Output Schema be
       "personality_traits": ["trait1", "trait2"],
       "voice_description": "detailed voice description for TTS",
       "speaking_style": "how this character typically speaks",
+      "test_sentence": "An INVENTED 15 to 25 word line of dialogue showcasing their personality. DO NOT use fantasy names, places, or complex jargon.",
       "dialogue_count": 0
     }}
   }}
@@ -439,6 +445,7 @@ class CharacterAnalyzer:
                 personality_traits=char_data.get("personality_traits", []),
                 voice_description=str(char_data.get("voice_description", "")),
                 speaking_style=str(char_data.get("speaking_style", "")),
+                test_sentence=char_data.get("test_sentence"),
                 dialogue_count=dialogue_count,
             )
             logger.info(
@@ -458,11 +465,12 @@ class CharacterAnalyzer:
                 age_range="40s",
                 personality_traits=["measured", "warm", "authoritative"],
                 voice_description=(
-                    "A warm, mature male baritone, early 40s, with a measured "
-                    "storytelling cadence. Rich and clear with natural gravitas. "
-                    "Thoughtful pauses between phrases."
+                    "male speaker, 40s age. low pitch, moderate volume, measured speed. "
+                    "Standard American accent. clear texture, high clarity, natural fluency. "
+                    "warm emotion, authoritative tone, thoughtful personality."
                 ),
                 speaking_style="Flowing descriptive prose, unhurried",
+                test_sentence="The forest was old, its roots deep in the forgotten history of the world.",
             )
             logger.warning("[CharacterAnalyzer] LLM didn't produce a narrator — using default")
 

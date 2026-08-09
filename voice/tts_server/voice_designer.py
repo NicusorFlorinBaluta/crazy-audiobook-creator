@@ -74,6 +74,17 @@ class VoiceDesigner:
             ),
         }
 
+    def _build_test_sentence(self, char_id: str, character: Character) -> str:
+        gender_key = (
+            character.gender.value
+            if isinstance(character.gender, Gender)
+            else str(character.gender)
+        )
+        return character.test_sentence or self.voice_design_test_sentences.get(
+            gender_key,
+            self.voice_design_test_sentences["other"],
+        )
+
     def bootstrap_voices(
         self,
         request: BootstrapVoicesRequest,
@@ -244,15 +255,8 @@ class VoiceDesigner:
             validation_failures: list[str] = []
             for char_id, result in voices_generated.items():
                 character = request.characters[char_id]
-                gender_key = (
-                    character.gender.value
-                    if isinstance(character.gender, Gender)
-                    else str(character.gender)
-                )
-                expected = self.voice_design_test_sentences.get(
-                    gender_key,
-                    self.voice_design_test_sentences["other"],
-                )
+                expected = self._build_test_sentence(char_id, character)
+
                 transcribed = self.validator.transcribe(result.file)
                 wer = self.validator.calculate_wer(expected, transcribed)
                 result.transcription_wer = float(wer)
@@ -262,6 +266,7 @@ class VoiceDesigner:
                     wer,
                     transcribed[:60],
                 )
+                
                 if wer > self.wer_threshold:
                     self.library.delete_voice(project_id, char_id)
                     validation_failures.append(
@@ -539,7 +544,7 @@ class VoiceDesigner:
         )
         return response.voices_generated[character_id]
 
-    def _generate_voice(
+    def _generate_voice_file(
         self,
         project_id: str,
         char_id: str,
@@ -547,12 +552,10 @@ class VoiceDesigner:
         design_fingerprint: str = "",
     ) -> VoiceCandidate:
         """Generate a single voice reference clip."""
-        # Select test sentence based on gender
-        gender_key = character.gender.value if isinstance(character.gender, Gender) else str(character.gender)
-        test_sentence = self.voice_design_test_sentences.get(
-            gender_key,
-            self.voice_design_test_sentences["other"],
-        )
+        if not self.engine.is_loaded:
+            self.engine.load()
+
+        test_sentence = self._build_test_sentence(char_id, character)
 
         import uuid
         base_path = self.library.get_voice_path(project_id, char_id)

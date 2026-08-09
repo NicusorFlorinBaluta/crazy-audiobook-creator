@@ -23,13 +23,78 @@ import soundfile as sf
 import yaml
 from voice.tts_server.audio_effects import AudioPostProcessor
 
-
-import numpy as np
-import soundfile as sf
-import yaml
-from voice.tts_server.audio_effects import AudioPostProcessor
-
 logger = logging.getLogger(__name__)
+
+# Increment when _MOOD_PROFILES keyword lists or deltas change so that cached
+# segments that relied on old post-FX settings are re-generated.
+MOOD_TIER_VERSION: str = "v2"
+
+# Six-tier emotion → post-processing profile table.
+# pitch_delta: semitones added/subtracted from any character-level base offset.
+# tone: overrides VoiceFXSettings.tone only when the existing value is "neutral".
+# speed_mult: multiplied with the script's per-line speed (compounds).
+_MOOD_PROFILES: list[dict] = [
+    {
+        "tier": "intense",
+        "keywords": (
+            "angry", "panic", "urgent", "excited", "shout", "furious",
+            "enraged", "terrified", "desperate", "demand",
+        ),
+        "pitch_delta": 0.40,
+        "tone": "bright",
+        "speed_mult": 1.04,
+    },
+    {
+        "tier": "soft",
+        "keywords": (
+            "somber", "sad", "weary", "hushed", "whisper", "gentle",
+            "tender", "comfort", "soothing", "quiet",
+        ),
+        "pitch_delta": -0.30,
+        "tone": "warm",
+        "speed_mult": 0.96,
+    },
+    {
+        "tier": "playful",
+        "keywords": (
+            "chuckle", "banter", "sarcastic", "teasing", "amused",
+            "playful", "wry", "ironic", "lighthearted",
+        ),
+        "pitch_delta": 0.20,
+        "tone": "bright",
+        "speed_mult": 1.02,
+    },
+    {
+        "tier": "tense",
+        "keywords": (
+            "suspenseful", "nervous", "wary", "cautious", "dread",
+            "anxious", "uneasy", "foreboding", "grim",
+        ),
+        "pitch_delta": 0.15,
+        "tone": "neutral",
+        "speed_mult": 0.98,
+    },
+    {
+        "tier": "authoritative",
+        "keywords": (
+            "commanding", "stern", "decisive", "firm", "warning",
+            "authoritative", "solemn", "grave", "resolute",
+        ),
+        "pitch_delta": -0.15,
+        "tone": "neutral",
+        "speed_mult": 0.97,
+    },
+    {
+        "tier": "reflective",
+        "keywords": (
+            "contemplative", "nostalgic", "thoughtful", "pensive",
+            "reflective", "melancholic", "wistful", "introspective",
+        ),
+        "pitch_delta": -0.10,
+        "tone": "warm",
+        "speed_mult": 0.95,
+    },
+]
 
 
 class Qwen3TTSEngine:
@@ -211,11 +276,19 @@ class Qwen3TTSEngine:
             else np.zeros(0, dtype=np.float32)
         )
 
-        effective_fx = self._effective_post_fx(
+        effective_fx, matched_tier = self._effective_post_fx(
             voice_fx,
             speed=speed,
             emotion=emotion_instruction,
         )
+        if matched_tier != "neutral":
+            logger.debug(
+                "Emotion post-FX: tier=%s pitch_delta=%.2f tone=%s speed=%.3f",
+                matched_tier,
+                effective_fx.pitch_semitones,
+                effective_fx.tone,
+                effective_fx.speed,
+            )
         if self.fx and not effective_fx.is_identity():
             audio = self.fx.apply(
                 audio,
@@ -405,7 +478,13 @@ class Qwen3TTSEngine:
         *,
         speed: float,
         emotion: str,
-    ) -> Any:
+    ) -> tuple[Any, str]:
+        """Compute effective post-FX settings and the matched mood tier name.
+
+        Returns:
+            (effective_fx, matched_tier) where matched_tier is one of the
+            _MOOD_PROFILES tier names, or "neutral" when no profile matches.
+        """
         from shared.models import VoiceFXSettings
 
         if voice_fx is None:
@@ -415,15 +494,20 @@ class Qwen3TTSEngine:
         fx.speed = max(0.5, min(2.0, float(fx.speed) * float(speed)))
 
         mood = (emotion or "").lower()
-        if any(word in mood for word in ("angry", "panic", "urgent", "excited", "shout")):
-            fx.pitch_semitones = max(-12.0, min(12.0, fx.pitch_semitones + 0.25))
-            if fx.tone == "neutral":
-                fx.tone = "bright"
-        elif any(word in mood for word in ("somber", "sad", "weary", "hushed", "whisper")):
-            fx.pitch_semitones = max(-12.0, min(12.0, fx.pitch_semitones - 0.2))
-            if fx.tone == "neutral":
-                fx.tone = "warm"
-        return fx
+        matched_tier = "neutral"
+        for profile in _MOOD_PROFILES:
+            if any(word in mood for word in profile["keywords"]):
+                delta = profile["pitch_delta"]
+                fx.pitch_semitones = max(-12.0, min(12.0, fx.pitch_semitones + delta))
+                # Only apply the default speed_mult if the script speed is the default 1.0
+                if speed == 1.0:
+                    fx.speed = max(0.5, min(2.0, fx.speed * profile["speed_mult"]))
+                if fx.tone == "neutral" and profile["tone"] != "neutral":
+                    fx.tone = profile["tone"]
+                matched_tier = profile["tier"]
+                break
+
+        return fx, matched_tier
 
     def _write_audio_atomic(self, output_path: Path, audio: np.ndarray) -> None:
         output_path.parent.mkdir(parents=True, exist_ok=True)

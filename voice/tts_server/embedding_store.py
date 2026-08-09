@@ -570,6 +570,7 @@ class EmbeddingStore:
         fx_dict: dict[str, Any] | None,
         generation_context: dict[str, Any] | None,
     ) -> str:
+        from voice.tts_server.qwen3_engine import MOOD_TIER_VERSION
         payload = {
             "text": text,
             "speaker": speaker,
@@ -577,6 +578,7 @@ class EmbeddingStore:
             "speed": round(float(speed), 6),
             "fx": fx_dict or {},
             "context": generation_context or {},
+            "mood_tier_version": MOOD_TIER_VERSION,
         }
         return self.hash_text(
             json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))

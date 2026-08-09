@@ -10,6 +10,30 @@ Keeping these roles separate matters: clone mode accepts reference audio and
 its transcript, but does not accept a free-form acting instruction for every
 utterance.
 
+## Per-character test sentences
+
+During character analysis the LLM is asked to invent a **unique, natural
+15–25 word sentence** for each character — a narrator-flavoured statement for
+the narrator and a line of in-character dialogue for everyone else. The
+sentence is stored on the `Character` model as `test_sentence`.
+
+At bootstrap time `VoiceDesigner._build_test_sentence` returns `test_sentence`
+if one is set; it falls back to the gender-keyed global sentences in
+`voice.config.yaml` (`tts.voice_design_test_sentences`) only when the field is
+absent. The sentence has two roles:
+
+- It is spoken by the VoiceDesign model to produce the reference clip, giving
+  the model a meaningful, character-specific utterance rather than an identical
+  line shared across the whole cast.
+- It becomes the `ref_text` stored in `voices.json` and passed back to the
+  Base model for Full-ICL cloning during chapter generation.
+
+**Why this matters**: identical reference sentences across characters produce
+acoustically similar speaker embeddings and make the cast distinctness check
+almost meaningless. Character-specific sentences give each voice a different
+phoneme distribution and intonation pattern, improving acoustic separation
+and the usefulness of the cast-pair diagnostic.
+
 ## Analysis registry versus speaking cast
 
 The book-wide analysis registry deliberately retains potentially relevant
@@ -75,6 +99,12 @@ Each project has `voice_library/<project-id>/voices.json` plus its reference
 WAVs. Registry entries include the path, exact spoken transcript (`ref_text`),
 description, duration, sample rate, identity metadata, source type
 (`generated` or `uploaded`), and design/content fingerprint.
+
+The `"file"` field in each registry entry is an **absolute path** to the actual
+WAV, whose filename includes a content hash (e.g. `narrator_male_7f8dfaa9.wav`).
+`VoiceLibraryManager.get_voice_path` consults the registry first; it only falls
+back to the legacy `<character_id>.wav` convention when no entry exists. Do not
+assume a voice file is named `<character_id>.wav`.
 
 The casting dashboard is organized by reusable voice profile. It shows only
 real speakers and explicitly reports how many non-speaking analysis entries
@@ -150,3 +180,9 @@ VRAM use, and resumability before becoming a production backend.
   bootstrap.
 - The selected narrator candidate is a normal registered reference and also
   speaks chapter-title announcements.
+- The narrator candidate selected at the voice review gate (e.g. `narrator_male`)
+  is recorded only in `voice_cast.json` under `assigned_characters`. It is **not**
+  written back to `characters.json`. During line generation, `_prepare_generation_lines`
+  therefore reads `voice_cast.json` as the authoritative speaker → voice mapping before
+  falling back to `characters.json`. Any code that resolves a voice for generation must
+  follow this same precedence.

@@ -140,7 +140,7 @@ class WhisperValidator:
                 
                 try:
                     sf.write(tmp_path, wav_speech.numpy(), 16000)
-                    result = self._model.transcribe(tmp_path, language="en")
+                    result = self._model.transcribe(tmp_path)
                     return result.get("text", "").strip()
                 finally:
                     import os
@@ -148,7 +148,6 @@ class WhisperValidator:
             else:
                 segments, info = self._model.transcribe(
                     audio_file,
-                    language="en",
                     beam_size=5,
                     vad_filter=True,
                 )

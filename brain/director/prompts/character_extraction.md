@@ -16,6 +16,7 @@ You are an expert audiobook director preparing a novel for multi-voice narration
    - Their gender, approximate age, and key personality traits
    - A detailed voice description suitable for voice synthesis
    - ACCURATELY count the number of spoken dialogue lines they have in this text
+   - Extract or invent a highly representative line of dialogue for their `test_sentence`. **CRITICAL: The sentence MUST be at least 15 words long.** For characters with very short lines, you must invent a longer sentence or combine multiple lines that perfectly captures their personality and tone.
 4. Also create a narrator voice that fits the book's genre and tone
 5. Output ONLY valid JSON — no explanation, no markdown code fences
 
@@ -51,7 +52,8 @@ The narrator voice should suit {genre} storytelling — authoritative but warm, 
       "importance": "major",
       "personality_traits": ["trait1", "trait2"],
       "voice_description": "detailed voice description for TTS",
-      "speaking_style": "how the narrator typically speaks"
+      "speaking_style": "how the narrator typically speaks",
+      "test_sentence": "A highly representative sentence showcasing the narrator's pacing, tone, and style."
     }},
     "character_id": {{
       "name": "Character Display Name",
@@ -61,6 +63,7 @@ The narrator voice should suit {genre} storytelling — authoritative but warm, 
       "personality_traits": ["trait1", "trait2"],
       "voice_description": "detailed voice description for TTS",
       "speaking_style": "how this character typically speaks",
+      "test_sentence": "A highly representative line of dialogue (extracted or invented) showcasing their personality and tone.",
       "dialogue_count": 0
     }}
   }}

@@ -60,6 +60,14 @@ _AUDIBLE_TERMS = {
     "tenor",
     "texture",
     "warm",
+    "speed",
+    "volume",
+    "accent",
+    "emotion",
+    "tone",
+    "personality",
+    "clarity",
+    "fluency",
 }
 
 _SOURCE_SIMILARITY_THRESHOLD = 0.50
@@ -140,44 +148,11 @@ def compile_effective_voice_prompt(
         )
 
     if gender_value == Gender.FEMALE.value:
-        replacements = (
-            (r"\bdeep baritone\b", "low contralto"),
-            (r"\bbaritone\b", "contralto"),
-            (r"\bdeep bass\b", "very low contralto"),
-            (r"\bbass\b", "low contralto"),
-            (r"\bmedium tenor\b", "medium alto"),
-            (r"\btenor\b", "alto"),
-        )
-        repaired = description
-        for pattern, replacement in replacements:
-            repaired = re.sub(pattern, replacement, repaired, flags=re.IGNORECASE)
-        if repaired != description:
-            warnings.append(
-                "The analyzed description used a male-coded register; it was "
-                "rewritten to match the female character metadata."
-            )
-        description = repaired
-        identity = f"A clearly female {age} speaker"
+        identity = f"female speaker, {age} age"
     elif gender_value == Gender.MALE.value:
-        replacements = (
-            (r"\bdeep contralto\b", "low baritone"),
-            (r"\bcontralto\b", "baritone"),
-            (r"\bsoprano\b", "high tenor"),
-            (r"\bmedium alto\b", "medium tenor"),
-            (r"\balto\b", "tenor"),
-        )
-        repaired = description
-        for pattern, replacement in replacements:
-            repaired = re.sub(pattern, replacement, repaired, flags=re.IGNORECASE)
-        if repaired != description:
-            warnings.append(
-                "The analyzed description used a female-coded register; it was "
-                "rewritten to match the male character metadata."
-            )
-        description = repaired
-        identity = f"A clearly male {age} speaker"
+        identity = f"male speaker, {age} age"
     else:
-        identity = f"An androgynous or non-gendered {age} speaker"
+        identity = f"androgynous speaker, {age} age"
 
     if not description:
         description = "clear mid-range pitch, natural resonance, and measured pacing"
@@ -230,6 +205,9 @@ def _token_similarity(left: str, right: str) -> float:
 _AUDIO_SIMILARITY_THRESHOLD = 0.88
 
 
+import functools
+
+@functools.lru_cache(maxsize=128)
 def extract_acoustic_embedding(audio_path: str | Path) -> np.ndarray | None:
     """Extract a normalized acoustic spectral feature vector from audio."""
     p = Path(audio_path)
@@ -298,14 +276,19 @@ def build_voice_cast(
         owner_id = character.voice_id or speaker_id
 
         # Narration is the one role where a project deliberately exposes an
-        # unassigned alternative at the review gate.  Preserve a previously
+        # unassigned alternative at the review gate. Preserve a previously
         # selected narrator candidate even though it is not a registry entry.
-        if speaker_id == "narrator" and owner_id in {
-            "narrator_male",
-            "narrator_female",
-        }:
-            owner_character_ids[owner_id] = speaker_id
-            owner_to_speakers.setdefault(owner_id, []).append(speaker_id)
+        if speaker_id == "narrator":
+            if owner_id not in {"narrator_male", "narrator_female"}:
+                owner_id = "narrator_male"
+                
+            owner_character_ids["narrator_male"] = "narrator"
+            owner_character_ids["narrator_female"] = "narrator"
+            
+            owner_to_speakers.setdefault("narrator_male", [])
+            owner_to_speakers.setdefault("narrator_female", [])
+            
+            owner_to_speakers[owner_id].append(speaker_id)
             continue
         
         # Ensure owner_id points to a valid character in the registry
@@ -325,26 +308,7 @@ def build_voice_cast(
         owner_character_ids[owner_id] = owner_id
         owner_to_speakers.setdefault(owner_id, []).append(speaker_id)
 
-    # A new project offers two concrete narrator references during voice
-    # review.  Only one is assigned, so downstream generation remains exactly
-    # one voice per script line.  Other characters still receive no unused
-    # profiles.
-    if "narrator" in speaking_ids:
-        narrator = registry.characters["narrator"]
-        selected_id = narrator.voice_id or "narrator"
-        selected_gender = (
-            Gender.MALE
-            if selected_id == "narrator_male"
-            else Gender.FEMALE
-            if selected_id == "narrator_female"
-            else narrator.gender
-        )
-        alternative_gender = (
-            Gender.MALE if selected_gender != Gender.MALE else Gender.FEMALE
-        )
-        alternative_id = f"narrator_{alternative_gender.value}"
-        owner_character_ids.setdefault(alternative_id, "narrator")
-        owner_to_speakers.setdefault(alternative_id, [])
+    # (The alternative narrator candidates are now set directly in the loop above)
 
     voices: dict[str, dict[str, Any]] = {}
     previous_prompts: list[tuple[str, str, str]] = []
@@ -421,6 +385,7 @@ def build_voice_cast(
             "age_range": owner.age_range,
             "source_description": owner.voice_description,
             "effective_prompt": prompt,
+            "test_sentence": owner.test_sentence,
             "warnings": warnings,
             "assigned_characters": assigned,
             "design_model": design_model,
@@ -433,6 +398,7 @@ def build_voice_cast(
                 "gender": profile_gender.value,
                 "age_range": owner.age_range,
                 "effective_prompt": prompt,
+                "test_sentence": owner.test_sentence,
                 "design_model": design_model,
                 "design_config": design_config or {},
             }

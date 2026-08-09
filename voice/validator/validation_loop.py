@@ -31,6 +31,7 @@ from shared.models import (
 from voice.tts_server.qwen3_engine import Qwen3TTSEngine
 from voice.tts_server.voice_library import VoiceLibraryManager
 from voice.validator.audio_analyzer import AudioAnalyzer
+from voice.validator.prosody_scorer import ProsodyScorer
 from voice.validator.whisper_validator import WhisperValidator
 
 logger = logging.getLogger(__name__)
@@ -58,6 +59,7 @@ class ValidationLoop:
     ):
         self.whisper = whisper
         self.analyzer = analyzer
+        self.prosody_scorer = ProsodyScorer()
         self.engine = engine
         self.library = library
         self.wer_threshold = wer_threshold
@@ -105,6 +107,7 @@ class ValidationLoop:
         retry_limit = max(1, max_retries or self.max_retries)
         validation_terms = validation_terms or set()
         risk_adjusted_line_ids: list[str] = []
+        reference_pitch_map: dict[str, float] = {}
 
         logger.info(
             "Processing chapter %d: %d lines for project '%s'",
@@ -119,6 +122,15 @@ class ValidationLoop:
             self._raise_if_cancelled(cancel_check)
             output_path = segments_dir / f"{line.line_id}.wav"
             voice_ref, ref_text = self._resolve_reference(project_id, line)
+            
+            # Cache reference pitch for validation
+            if line.line_id not in reference_pitch_map:
+                if not hasattr(self, "_ref_pitch_cache"):
+                    self._ref_pitch_cache = {}
+                if str(voice_ref) not in self._ref_pitch_cache:
+                    self._ref_pitch_cache[str(voice_ref)] = self.analyzer.analyze(str(voice_ref), "", 1.0).get("pitch_median", 0.0)
+                reference_pitch_map[line.line_id] = self._ref_pitch_cache[str(voice_ref)]
+
             (
                 synthesis_text,
                 synthesis_emotion,
@@ -313,6 +325,7 @@ class ValidationLoop:
                     require_speaker_similarity=True,
                     validation_terms=validation_terms,
                     timing_accumulator=timings,
+                    emotion_adjusted=self._is_emotion_adjusted(line.emotion),
                 )
                 quality_by_id[line.line_id] = result
 
@@ -439,6 +452,9 @@ class ValidationLoop:
                         require_speaker_similarity=True,
                         validation_terms=validation_terms,
                         timing_accumulator=timings,
+                        voice_ref_path=reference_context[line.line_id][0],
+                        reference_pitch_median=reference_pitch_map[line.line_id],
+                        emotion_adjusted=self._is_emotion_adjusted(retry_emotion),
                     )
                     quality_attempts.append(candidate_result)
                     current_result = quality_by_id[line.line_id]
@@ -728,7 +744,25 @@ class ValidationLoop:
         validation_terms: set[str] | None = None,
         timing_accumulator: dict[str, float] | None = None,
         voice_ref_path: Path | None = None,
+        reference_pitch_median: float = 0.0,
+        emotion_adjusted: bool = False,
     ) -> QualityResult:
+        # When emotion post-FX was applied (non-identity pitch/tone shift) the
+        # effective threshold is widened slightly to account for minor Whisper
+        # accuracy changes from pitch-shifted audio.  Hard checks are unchanged.
+        _EMOTION_WER_ALLOWANCE = 0.02  # 2 percentage points
+        effective_wer_threshold = (
+            self.wer_threshold + _EMOTION_WER_ALLOWANCE
+            if emotion_adjusted
+            else self.wer_threshold
+        )
+        if emotion_adjusted:
+            logger.debug(
+                "[Validator] %s emotion_adjusted=True effective_wer_threshold=%.2f",
+                line_id,
+                effective_wer_threshold,
+            )
+
         transcription_started = time.perf_counter()
         transcribed = self.whisper.transcribe(audio_file)
         if timing_accumulator is not None:
@@ -756,21 +790,13 @@ class ValidationLoop:
         compact_error_rate = 1.0 - text_similarity
         analysis_started = time.perf_counter()
         analysis = self.analyzer.analyze(audio_file, validation_text, speed)
+        prosody = self.prosody_scorer.analyze(audio_file, validation_text)
         if timing_accumulator is not None:
             timing_accumulator["audio_analysis"] = (
                 timing_accumulator.get("audio_analysis", 0.0)
                 + time.perf_counter()
                 - analysis_started
             )
-            
-        reference_pitch_median = 0.0
-        if voice_ref_path and voice_ref_path.exists():
-            if not hasattr(self, "_ref_pitch_cache"):
-                self._ref_pitch_cache = {}
-            if str(voice_ref_path) not in self._ref_pitch_cache:
-                ref_analysis = self.analyzer.analyze(str(voice_ref_path), "", 1.0)
-                self._ref_pitch_cache[str(voice_ref_path)] = ref_analysis.get("pitch_median", 0.0)
-            reference_pitch_median = self._ref_pitch_cache[str(voice_ref_path)]
             
         word_count = len(self.whisper._normalize_text(validation_text).split())
         normalized_expected = self.whisper._normalize_text(validation_text)
@@ -797,7 +823,7 @@ class ValidationLoop:
         glossary_phonetic_match = (
             eligible_glossary_match
             and glossary_adjusted_wer < wer
-            and glossary_adjusted_wer <= self.wer_threshold
+            and glossary_adjusted_wer <= effective_wer_threshold
         )
         effective_text_error = (
             0.0
@@ -820,7 +846,7 @@ class ValidationLoop:
         # already below that configured threshold.
         length_sensitive_wer_failure = (
             (word_count <= 2 and estimated_word_errors > 0.05)
-            or (word_count > 2 and wer > self.wer_threshold)
+            or (word_count > 2 and wer > effective_wer_threshold)
         ) and not (
             spelling_variant_match
             or glossary_phonetic_match
@@ -850,9 +876,12 @@ class ValidationLoop:
             not analysis["duration_ok"]
             or analysis["noise_floor_db"] > self.analyzer.noise_threshold
             or quality_score < QUALITY_SCORE_PASS_THRESHOLD
+            or prosody.get("monotone_warning")
         ):
             status = ValidationStatus.ACCEPTED_WITH_WARNING
             acceptance_reason = "accepted_soft_audio_warning"
+            if prosody.get("monotone_warning"):
+                acceptance_reason = "monotone_warning"
         else:
             status = ValidationStatus.PASS
             acceptance_reason = (
@@ -862,8 +891,12 @@ class ValidationLoop:
                     "approved_glossary_spelling_variant"
                     if (
                         spelling_variant_match or glossary_phonetic_match
-                    ) and wer > self.wer_threshold
-                    else "wer_and_audio_checks"
+                    ) and wer > effective_wer_threshold
+                    else (
+                        "wer_emotion_adjusted"
+                        if emotion_adjusted and wer > self.wer_threshold
+                        else "wer_and_audio_checks"
+                    )
                 )
             )
 
@@ -890,6 +923,8 @@ class ValidationLoop:
             duration_ok=analysis["duration_ok"],
             has_long_silence=analysis["has_long_silence"],
             pacing_anomaly=analysis["pacing_anomaly"],
+            monotone_warning=prosody.get("monotone_warning", False),
+            pitch_cv=prosody.get("pitch_cv", 0.0),
             pitch_median=analysis.get("pitch_median", 0.0),
             reference_pitch_median=reference_pitch_median,
             text_similarity=text_similarity,
@@ -1068,6 +1103,32 @@ class ValidationLoop:
             return token
 
         return re.sub(r"[^\W_]+", expand_repetition, text, flags=re.UNICODE)
+
+    @staticmethod
+    def _is_emotion_adjusted(emotion: str | None) -> bool:
+        """Return True if the emotion maps to a non-identity post-FX profile.
+        
+        Matches the keyword logic in qwen3_engine._effective_post_fx.
+        """
+        if not emotion:
+            return False
+        mood = emotion.lower()
+        # Profiles matching qwen3_engine._MOOD_PROFILES
+        adjusted_keywords = (
+            "angry", "panic", "urgent", "excited", "shout", "furious",
+            "enraged", "terrified", "desperate", "demand",
+            "somber", "sad", "weary", "hushed", "whisper", "gentle",
+            "tender", "comfort", "soothing", "quiet",
+            "chuckle", "banter", "sarcastic", "teasing", "amused",
+            "playful", "wry", "ironic", "lighthearted",
+            "suspenseful", "nervous", "wary", "cautious", "dread",
+            "anxious", "uneasy", "foreboding", "grim",
+            "commanding", "stern", "decisive", "firm", "warning",
+            "authoritative", "solemn", "grave", "resolute",
+            "contemplative", "nostalgic", "thoughtful", "pensive",
+            "reflective", "melancholic", "wistful", "introspective",
+        )
+        return any(word in mood for word in adjusted_keywords)
 
     @staticmethod
     def _valid_audio(path: Path) -> bool:

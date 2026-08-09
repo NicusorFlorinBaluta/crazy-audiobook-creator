@@ -58,9 +58,21 @@ class VoiceLibraryManager:
         return character_id
 
     def get_voice_path(self, project_id: str, character_id: str) -> Path:
-        """Get the file path for a character's voice reference clip."""
+        """Get the file path for a character's voice reference clip.
+
+        Checks the voices.json registry first so that hashed filenames
+        (e.g. narrator_male_7f8dfaa9.wav) are resolved correctly.  Falls
+        back to the legacy <character_id>.wav convention when the character
+        has no registry entry yet.
+        """
         project_dir = self._project_dir(project_id)
         project_dir.mkdir(parents=True, exist_ok=True)
+        info = self.get_voice_info(project_id, self._safe_character_id(character_id))
+        if info and info.get("file"):
+            registered = Path(info["file"])
+            if registered.is_absolute():
+                return registered
+            return project_dir / registered
         return project_dir / f"{self._safe_character_id(character_id)}.wav"
 
     def voice_exists(self, project_id: str, character_id: str) -> bool:

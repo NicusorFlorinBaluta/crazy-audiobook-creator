@@ -144,14 +144,45 @@ window.PipelineManager = (() => {
         }
     }
 
+    let _etaState = { startMs: 0, lastPct: 0, lastMsg: '' };
+
     function updateLiveProgress(data) {
-        if (!data) return;
-        
+        if (!data || !data.message) {
+            els.live.classList.remove('active');
+            els.live.innerHTML = '';
+            _etaState = { startMs: 0, lastPct: 0, lastMsg: '' };
+            return;
+        }
+
+        const now = Date.now();
+        if (data.message !== _etaState.lastMsg || data.percent < _etaState.lastPct) {
+            _etaState = { startMs: now, lastPct: data.percent || 0, lastMsg: data.message };
+        } else {
+            _etaState.lastPct = data.percent || 0;
+        }
+
+        let etaStr = '';
+        if (_etaState.startMs && data.percent > 0 && data.percent < 100) {
+            const elapsed = now - _etaState.startMs;
+            const msPerPercent = elapsed / data.percent;
+            const remainingPercent = 100 - data.percent;
+            const remainingMs = remainingPercent * msPerPercent;
+            
+            if (elapsed > 3000) { // Wait 3s before showing ETA
+                const remainingSec = Math.round(remainingMs / 1000);
+                if (remainingSec > 60) {
+                    etaStr = ` ~${Math.ceil(remainingSec / 60)} min remaining`;
+                } else {
+                    etaStr = ` ~${remainingSec} sec remaining`;
+                }
+            }
+        }
+
         els.live.classList.add('active');
         els.live.innerHTML = `
             <div class="live-dot"></div>
             <div class="live-progress">
-                <div>${escapeHtml(data.message || 'Processing...')}</div>
+                <div>${escapeHtml(data.message || 'Processing...')} <span class="eta" style="opacity:0.7;font-size:0.9em">${etaStr}</span></div>
                 <div class="progress-bar">
                     <div class="progress-fill" style="width: ${data.percent || 100}%"></div>
                 </div>
