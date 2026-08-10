@@ -9,7 +9,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="static/css/styles.css?v=20260803.1">
+    <link rel="stylesheet" href="static/css/styles.css?v=20260810.1">
     <script>
         if ('serviceWorker' in navigator) {
             navigator.serviceWorker.getRegistrations().then(function(registrations) {
@@ -104,14 +104,14 @@
                     <button class="btn btn-primary hidden" id="btn-resume-deploy">Resume Parked</button>
                     <select id="select-reset-stage" class="select" title="Select a stage to reset project state and restart pipeline execution">
                         <option value="" disabled selected hidden title="Choose a stage to reset project execution to">Reset to Stage...</option>
-                        <option value="extracting" title="Extracting: Re-extract text from EPUB file (clears all script, cast, and audio files)">Extracting (re-extract EPUB text)</option>
+                        <option value="extracting" title="Extracting: Rebuild from preserved source.epub; legacy projects without it are not modified">Extracting (re-extract preserved EPUB)</option>
                         <option value="scripting" title="Scripting: Re-run LLM script & character extraction (clears script JSONs and cast, keeps EPUB text)">Scripting (re-run LLM script & casting)</option>
                         <option value="bootstrapping" title="Bootstrapping: Re-generate voice design profiles and reference audio (keeps script intact)">Bootstrapping (re-design voice audio)</option>
                         <option value="voice_review" title="Voice Review: Re-open the Voice Review banner to change speaking voices or tweak cast without re-scripting">Voice Review (re-open voice cast approval)</option>
                         <option value="generating" title="Generating: Re-generate chapter audio segments (clears audio segments, keeps script and voice cast)">Generating (re-generate chapter audio)</option>
-                        <option value="validating" title="Validating: Re-run Whisper Speech-to-Text quality validation checks">Validating (re-validate Whisper WER)</option>
-                        <option value="mastering" title="Mastering: Re-run ffmpeg/sox chapter audio mastering (clears mastered audio and M4B)">Mastering (re-master chapter audio)</option>
-                        <option value="exporting" title="Exporting: Re-run M4B audiobook packaging over mastered chapter files">Exporting (re-package M4B audiobook)</option>
+                        <option value="validating" title="Validating: Preserve synthesized WAVs, invalidate validation cache, and rerun all acceptance checks">Validating (preserve audio, re-check quality)</option>
+                        <option value="mastering" title="Mastering: Preserve accepted segments, clear mastered audio and M4B, and re-master chapters">Mastering (re-master chapter audio)</option>
+                        <option value="exporting" title="Exporting: Preserve mastered chapters and remove only the M4B package">Exporting (re-package M4B audiobook)</option>
                     </select>
                     <button class="btn btn-warning hidden" id="btn-reset-stage">Reset</button>
                     <button class="btn btn-success hidden" id="btn-download-audiobook">
@@ -138,17 +138,19 @@
             <div class="pipeline-section" id="pipeline-section">
                 <h2>Pipeline Progress</h2>
                 <div class="pipeline-tracker" id="pipeline-tracker"></div>
-                <div class="pipeline-live" id="pipeline-live"></div>
-                <div class="work-status-panel" id="work-status-panel">
+                <div class="pipeline-live" id="pipeline-live" role="status" aria-live="polite"></div>
+                <div class="work-status-panel" id="work-status-panel" aria-live="polite">
                     <div class="work-status-main">
                         <span class="work-status-kicker">Current activity</span>
                         <strong id="work-status-title">Waiting to start</strong>
                         <span id="work-status-detail">No pipeline work is active.</span>
+                        <small id="work-status-freshness">No activity recorded yet.</small>
                     </div>
                     <div class="work-status-metrics">
                         <div><strong id="work-overall-percent">0%</strong><span id="work-overall-label">Current stage</span></div>
                         <div><strong id="work-chapter-position">—</strong><span id="work-chapter-label">Current chapter</span></div>
                         <div><strong id="work-line-position">—</strong><span id="work-line-label">Current utterance</span></div>
+                        <div><strong id="work-eta">—</strong><span id="work-eta-label">Estimated remaining</span></div>
                     </div>
                     <div class="work-overall-track"><span id="work-overall-fill"></span></div>
                 </div>
@@ -223,6 +225,24 @@
                             <button class="btn btn-primary btn-sm" id="btn-save-schedule">Save working hours</button>
                         </div>
                         <p class="schedule-help">The pipeline parks at a safe boundary and resumes automatically when a working window opens. Overnight windows are supported.</p>
+                    </div>
+                </details>
+
+                <details class="schedule-section operations-section" id="operations-section">
+                    <summary>
+                        <span><strong>Runtime &amp; storage</strong><small id="operations-summary">Open to inspect compatibility and disk use</small></span>
+                        <span class="schedule-state" id="operations-state">Not checked</span>
+                    </summary>
+                    <div class="schedule-body operations-body">
+                        <div class="operations-actions">
+                            <button class="btn btn-ghost btn-sm" id="btn-refresh-operations">Refresh</button>
+                            <button class="btn btn-ghost btn-sm" id="btn-download-support">Download support bundle</button>
+                        </div>
+                        <div class="operations-grid">
+                            <section><h4>Runtime preflight</h4><div id="preflight-details" class="operations-list">Not checked yet.</div></section>
+                            <section><h4>Project storage</h4><div id="storage-details" class="operations-list">Not checked yet.</div></section>
+                        </div>
+                        <div class="cleanup-preview" id="cleanup-preview"></div>
                     </div>
                 </details>
             </div>
@@ -330,101 +350,15 @@
         </div>
     </div>
 
-            </div>
-
-            <!-- Script Viewer Tab -->
-            <div class="tab-content" id="tab-script">
-                <div class="script-controls">
-                    <select id="script-chapter-select" class="select">
-                        <option value="">Select Chapter</option>
-                    </select>
-                    <div class="script-legend" id="script-legend"></div>
-                </div>
-                <div class="script-viewer" id="script-viewer">
-                    <div class="empty-state small">
-                        <p>Script will appear after generation completes</p>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Quality Report Tab -->
-            <div class="tab-content" id="tab-quality">
-                <div class="quality-overview" id="quality-overview">
-                    <div class="empty-state small">
-                        <p>Quality data will appear after audio generation</p>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Log Console Tab -->
-            <div class="tab-content" id="tab-logs">
-                <div class="log-console-toolbar">
-                    <span class="log-status log-status-disconnected" id="log-status">● Disconnected</span>
-                    <div class="log-toolbar-actions">
-                        <label class="log-toggle">
-                            <input type="checkbox" id="log-autoscroll" checked>
-                            Auto-scroll
-                        </label>
-                        <button class="btn btn-ghost btn-sm" id="log-clear">Clear</button>
-                        <button class="btn btn-ghost btn-sm" id="log-copy">Copy All</button>
-                    </div>
-                </div>
-                <div class="log-console" id="log-console" role="log" aria-live="polite">
-                    <div class="log-empty">No logs yet — start the pipeline or open this tab during a run</div>
-                </div>
-            </div>
-        </section>
-    </main>
-
-    <!-- ============================================ -->
-    <!-- Upload Modal                                 -->
-    <!-- ============================================ -->
-    <div class="modal-overlay hidden" id="upload-modal">
-        <div class="modal">
-            <div class="modal-header">
-                <h2>New Audiobook Project</h2>
-                <button class="modal-close" id="modal-close">&times;</button>
-            </div>
-            <div class="modal-body">
-                <div class="upload-zone" id="upload-zone">
-                    <div class="upload-icon">📤</div>
-                    <h3>Drop your EPUB file here</h3>
-                    <p>or click to browse</p>
-                    <input type="file" id="epub-file-input" accept=".epub" hidden>
-                </div>
-                <div class="upload-info hidden" id="upload-info">
-                    <div class="file-icon">📖</div>
-                    <div class="file-details">
-                        <span class="file-name" id="upload-file-name"></span>
-                        <span class="file-size" id="upload-file-size"></span>
-                    </div>
-                    <button class="btn btn-ghost" id="upload-remove">✕</button>
-                </div>
-                <div class="upload-progress hidden" id="upload-progress">
-                    <div class="progress-bar">
-                        <div class="progress-fill" id="upload-progress-fill"></div>
-                    </div>
-                    <span class="progress-text" id="upload-progress-text">Uploading...</span>
-                </div>
-            </div>
-            <div class="modal-footer">
-                <button class="btn btn-ghost" id="modal-cancel">Cancel</button>
-                <button class="btn btn-primary" id="modal-upload" disabled>
-                    Create Project
-                </button>
-            </div>
-        </div>
-    </div>
-
     <!-- ============================================ -->
     <!-- Toast notifications                          -->
     <!-- ============================================ -->
     <div class="toast-container" id="toast-container"></div>
 
     <!-- Scripts -->
-    <script src="static/js/app.js?v=20260803.1"></script>
-    <script src="static/js/pipeline.js?v=20260803.1"></script>
-    <script src="static/js/script-viewer.js?v=20260808.3"></script>
-    <script src="static/js/log-console.js?v=20260803.1"></script>
+    <script src="static/js/app.js?v=20260810.1"></script>
+    <script src="static/js/pipeline.js?v=20260810.1"></script>
+    <script src="static/js/script-viewer.js?v=20260810.1"></script>
+    <script src="static/js/log-console.js?v=20260810.1"></script>
 </body>
 </html>

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import brain.dashboard.api.main as dashboard
@@ -120,6 +123,168 @@ class DashboardLifecycleTests(unittest.IsolatedAsyncioTestCase):
             dashboard._validation_reset_targets(state),
             [1, 2, 3, 4],
         )
+
+    async def test_quality_report_keeps_accepted_warnings_out_of_failures(self) -> None:
+        class FakeQueue:
+            @staticmethod
+            def get_quality_report(project_id):
+                return [
+                    {
+                        "line_id": "pass",
+                        "chapter_number": 1,
+                        "attempt": 1,
+                        "status": "pass",
+                        "wer": 0.0,
+                        "quality_score": 1.0,
+                        "details": {},
+                    },
+                    {
+                        "line_id": "warning",
+                        "chapter_number": 1,
+                        "attempt": 1,
+                        "status": "accepted_with_warning",
+                        "wer": 0.0,
+                        "quality_score": 0.9,
+                        "details": {},
+                    },
+                    {
+                        "line_id": "fail",
+                        "chapter_number": 1,
+                        "attempt": 1,
+                        "status": "fail",
+                        "wer": 1.0,
+                        "quality_score": 0.4,
+                        "details": {},
+                    },
+                ]
+
+        with patch.object(dashboard, "job_queue", FakeQueue()):
+            report = await dashboard.get_quality_report("book")
+
+        self.assertEqual(report["passed_segments"], 1)
+        self.assertEqual(report["accepted_with_warning_segments"], 1)
+        self.assertEqual(report["failed_segments"], 1)
+
+    async def test_voice_download_uses_book_and_character_name(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            voice_dir = Path(directory)
+            sample = voice_dir / "narrator-abcd.wav"
+            sample.write_bytes(b"RIFF" + b"0" * 1200)
+            (voice_dir / "voices.json").write_text(
+                json.dumps({"voices": {"narrator": {
+                    "file": str(sample), "name": "The Narrator",
+                }}}),
+                encoding="utf-8",
+            )
+            with (
+                patch.object(dashboard, "_voice_project_dir", return_value=voice_dir),
+                patch.object(
+                    dashboard, "_require_job", return_value={"title": "A Book: One?"}
+                ),
+                patch.object(
+                    dashboard,
+                    "_load_or_build_voice_cast",
+                    return_value={"voices": {"narrator": {"name": "The Narrator"}}},
+                ),
+            ):
+                response = await dashboard.download_project_voice("book", "narrator")
+
+            disposition = response.headers["content-disposition"]
+            self.assertIn("attachment", disposition)
+            self.assertIn("A%20Book_%20One%20-", disposition)
+            self.assertIn("The%20Narrator", disposition)
+            self.assertEqual(Path(response.path), sample)
+
+    async def test_voice_download_rejects_registry_path_escape(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            voice_dir = root / "voice"
+            voice_dir.mkdir()
+            outside = root / "outside.wav"
+            outside.write_bytes(b"RIFF" + b"0" * 1200)
+            (voice_dir / "voices.json").write_text(
+                json.dumps({"voices": {"character": {"file": str(outside)}}}),
+                encoding="utf-8",
+            )
+            with patch.object(dashboard, "_voice_project_dir", return_value=voice_dir):
+                with self.assertRaisesRegex(Exception, "Invalid voice registry path"):
+                    dashboard._registered_voice_path("book", "character")
+
+    async def test_narrator_voice_regeneration_reaches_voice_client(self) -> None:
+        class FakeVoiceClient:
+            def __init__(self) -> None:
+                self.request = None
+
+            def bootstrap_voices(self, request):
+                self.request = request
+                return type(
+                    "BootstrapResponse",
+                    (),
+                    {"voices_generated": {"narrator_male": {"status": "ok"}}},
+                )()
+
+        class FakePipeline:
+            def __init__(self) -> None:
+                self._voice_server_proc = None
+                self.voice_client = FakeVoiceClient()
+
+            def _start_voice_server(self) -> None:
+                self._voice_server_proc = object()
+
+            def _stop_voice_server(self) -> None:
+                self._voice_server_proc = None
+
+        registry = {
+            "book_title": "Dialogue Only",
+            "book_author": "Test",
+            "characters": {
+                "narrator": {
+                    "id": "narrator",
+                    "name": "Narrator",
+                    "gender": "male",
+                    "age_range": "40s",
+                    "voice_description": "A clear and steady narrator voice",
+                }
+            },
+        }
+        cast = {
+            "schema": "1",
+            "voices": {
+                "narrator_male": {
+                    "voice_id": "narrator_male",
+                    "owner_character_id": "narrator",
+                    "name": "Narrator — Male",
+                    "gender": "male",
+                    "assigned_characters": ["narrator"],
+                }
+            },
+        }
+        fake_pipeline = FakePipeline()
+        with tempfile.TemporaryDirectory() as directory:
+            characters_path = Path(directory) / "characters.json"
+            with (
+                patch.object(dashboard, "pipeline", fake_pipeline),
+                patch.object(dashboard, "_ensure_voice_editable"),
+                patch.object(
+                    dashboard,
+                    "_load_character_registry",
+                    return_value=(characters_path, registry),
+                ),
+                patch.object(dashboard, "_load_or_build_voice_cast", return_value=cast),
+                patch.object(dashboard, "_save_voice_cast"),
+                patch.object(dashboard, "_chapters_for_speakers", return_value=[]),
+                patch.object(dashboard, "_mark_voice_chapters_stale"),
+            ):
+                result = await dashboard.regenerate_project_voice(
+                    "book",
+                    "narrator_male",
+                    dashboard.VoiceRegenerationRequest(
+                        voice_description="A warm, composed audiobook narrator voice"
+                    ),
+                )
+
+        self.assertEqual(result["status"], "success")
+        self.assertIn("narrator_male", fake_pipeline.voice_client.request.characters)
 
 
 if __name__ == "__main__":

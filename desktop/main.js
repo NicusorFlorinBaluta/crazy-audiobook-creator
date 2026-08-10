@@ -1,6 +1,6 @@
 const { app, BrowserWindow, Tray, Menu, ipcMain } = require('electron');
 const path = require('path');
-const { spawn, execFileSync, execSync } = require('child_process');
+const { spawn, execFileSync } = require('child_process');
 const http = require('http');
 const fs = require('fs');
 
@@ -9,15 +9,20 @@ let tray = null;
 let pythonProcesses = [];
 let isQuitting = false;
 let gpuReleaseRequested = false;
+let backendLogTail = '';
 
 // Project root directory
 const rootDir = path.resolve(__dirname, '..');
 
 // Find Python executable (prefer virtualenv)
 function getPythonExecutable() {
-  const venvPy = 'E:\\PYTORC~1\\my_venv\\Scripts\\python.exe';
-  if (fs.existsSync(venvPy)) {
-    return venvPy;
+  const candidates = [
+    process.env.CAC_PYTHON,
+    process.env.VIRTUAL_ENV && path.join(process.env.VIRTUAL_ENV, 'Scripts', 'python.exe'),
+    path.join(rootDir, 'venv', 'Scripts', 'python.exe')
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
   }
   return 'python';
 }
@@ -52,7 +57,7 @@ function stopPythonProcesses() {
     if (proc && proc.pid) {
       try {
         if (process.platform === 'win32') {
-          execSync(`taskkill /F /T /PID ${proc.pid}`, { stdio: 'ignore' });
+          execFileSync('taskkill.exe', ['/F', '/T', '/PID', String(proc.pid)], { stdio: 'ignore' });
         } else {
           proc.kill('SIGKILL');
         }
@@ -83,8 +88,15 @@ function startBackendServers() {
   const dashProc = spawn(pythonExe, ['-m', 'uvicorn', 'brain.dashboard.api.main:app', '--host', '127.0.0.1', '--port', '8000'], {
     cwd: rootDir,
     env: env,
-    stdio: 'ignore'
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true
   });
+  const rememberBackendOutput = chunk => {
+    backendLogTail = (backendLogTail + chunk.toString()).slice(-8000);
+  };
+  dashProc.stdout.on('data', rememberBackendOutput);
+  dashProc.stderr.on('data', rememberBackendOutput);
+  dashProc.on('error', err => rememberBackendOutput(`\n${err.stack || err.message}`));
   if (dashProc.pid) {
     pythonProcesses.push(dashProc);
     console.log(`[Electron] Launched Dashboard API (PID ${dashProc.pid})`);
@@ -116,8 +128,13 @@ function waitForServerAndLoad(url, window, maxAttempts = 30) {
         window.loadURL(url);
       } else if (attempts >= maxAttempts) {
         clearInterval(interval);
-        console.log('[Electron] Server wait timeout. Loading direct URL...');
-        window.loadURL(url);
+        console.log('[Electron] Server wait timeout. Showing diagnostics.');
+        const diagnostics = backendLogTail || 'The dashboard process produced no output.';
+        const html = `<!doctype html><meta charset="utf-8"><title>Dashboard startup failed</title>
+          <style>body{font:16px system-ui;background:#111827;color:#f3f4f6;padding:32px}pre{white-space:pre-wrap;background:#030712;padding:16px;border-radius:8px}</style>
+          <h1>Dashboard startup failed</h1><p>Check the configured Python environment and dependencies, then restart the app.</p>
+          <pre>${diagnostics.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}</pre>`;
+        window.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
       }
     });
   }, 1000);

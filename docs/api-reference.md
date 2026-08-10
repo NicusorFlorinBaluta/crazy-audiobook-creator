@@ -52,12 +52,12 @@ calls it before terminating the dashboard process.
 
 #### Reset to Stage (`POST /api/projects/{project_id}/reset`)
 Accepts `{"stage": "<stage_name>"}` where `<stage_name>` is one of 8 supported stages:
-- **`extracting`**: Clears `book.json`, scripts, voice cast, audio segments, and mastered files. Re-extracts text from EPUB.
+- **`extracting`**: Rebuilds `book.json` from the preserved project `source.epub`, then clears downstream scripts, cast, segments, and masters. Legacy projects without a preserved source return `409` without deleting `book.json`.
 - **`scripting`**: Clears script JSONs and character cast, keeping extracted EPUB text. Forces fresh LLM character analysis.
-- **`bootstrapping`**: Clears `voice_cast.json` and reference audio cache. Re-generates voice design profiles.
+- **`bootstrapping`**: Clears `voice_cast.json`, marks reference generation as forced, and regenerates voice profiles on resume.
 - **`voice_review`**: Resets `voice_review_status` to `"pending"` and sets `active_stage = voice_review`, re-opening the Voice Review banner in the UI.
 - **`generating`**: Clears generated segment WAV files and resets `mastered_chapters = []`. Keeps script and voice cast intact.
-- **`validating`**: Sets `active_stage = validating` to re-run Whisper quality checks.
+- **`validating`**: Preserves segment WAVs, changes the validation revision, removes segment/master manifests, and re-runs Whisper/speaker/audio checks without re-synthesizing unchanged lines.
 - **`mastering`**: Clears `mastered/` WAV files and `.m4b` export. Re-runs ffmpeg/sox chapter mastering.
 - **`exporting`**: Removes `.m4b` export file to re-run M4B packaging.
 
@@ -154,7 +154,7 @@ Bootstrap request:
   "project_id": "example",
   "characters": {
     "narrator": {
-      "character_id": "narrator",
+      "id": "narrator",
       "name": "Narrator",
       "gender": "other",
       "voice_description": "A clear, restrained storytelling voice"
@@ -182,11 +182,15 @@ Chapter generation accepts:
   "validate": true,
   "auto_retry": true,
   "max_retries": 3,
-  "validation_terms": ["Tuka"]
+  "validation_terms": ["Tuka"],
+  "language": "en",
+  "validation_revision": ""
 }
 ```
 
-The response includes `generated_line_ids`, `failed_line_ids`, and every `quality_results` attempt. `validation_terms` comes from character and pronunciation dictionaries and only scopes fuzzy fantasy-name matching. Success requires an exact one-to-one match with the request’s unique script line IDs. A partial/misaligned response is not a successful chapter.
+`POST /generate/chapter` returns `application/x-ndjson`. Each line is an object with `type = progress`, `result`, or `error`. Progress data includes `phase` (`synthesis` or `validation`), `line_id`, `completed`, `total`, `percent`, `cache_hit`, and `attempt`. A client disconnect cooperatively cancels the run; a second overlapping request for the same project returns `409`.
+
+The terminal result includes `generated_line_ids`, `failed_line_ids`, and every `quality_results` attempt. `validation_terms` comes from character and pronunciation dictionaries and only scopes fuzzy fantasy-name matching. Success requires an exact one-to-one match with the request’s unique script line IDs. A partial/misaligned response is not a successful chapter.
 
 ### Mastering and export
 
@@ -208,3 +212,21 @@ Mastering fails on any missing, empty, or unreadable expected segment. Export fa
 - `503`: service/model unavailable
 
 Clients should treat only an explicit success response with complete artifact IDs as completion; HTTP success plus a partial line set is not sufficient.
+
+## Diagnostics, performance, and review
+
+| Method | Route | Purpose |
+|---|---|---|
+| `GET` | `/api/system/preflight` | Read-only effective runtime/backend compatibility report; does not load models |
+| `GET` | `/api/projects/{id}/metrics` | Versioned, cache-aware performance summary (`?format=csv` downloads chapter rows) |
+| `GET` | `/api/projects/{id}/storage` | Storage categories plus an exact safe-cleanup preview and confirmation token |
+| `POST` | `/api/projects/{id}/storage/cleanup` | Remove only the unchanged set of previewed retry/temp files |
+| `GET` | `/api/projects/{id}/support-bundle` | Redacted configs, state, metrics, preflight, and bounded log tails; no audio |
+| `GET` | `/api/projects/{id}/quality/review` | Join-warning queue enriched with adjacent script/audio and saved disposition |
+| `POST` | `/api/projects/{id}/quality/review` | Save `unreviewed`, `acceptable`, `needs_remaster`, or `source_tts_issue` |
+| `GET` | `/api/projects/{id}/segments/{line_id}/audio` | Stream one segment for local quality review |
+| `GET` | `/api/projects/{id}/voices/{voice_id}/download` | Download a reusable reference WAV named with its book and character |
+
+Quality attempts include `selected`. This identifies the artifact that was
+actually retained; it is not necessarily the numerically latest attempt.
+Retry counts still describe every attempted retry.

@@ -16,6 +16,15 @@ DEFAULT_TRUSTED_LAN_CIDRS = (
     "fc00::/7",
     "fe80::/10",
 )
+SAFE_HTTP_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
+def is_cross_site_mutation(method: str, sec_fetch_site: str | None) -> bool:
+    """Detect modern-browser cross-site mutation attempts without blocking CLI/proxy clients."""
+    return (
+        method.upper() not in SAFE_HTTP_METHODS
+        and (sec_fetch_site or "").strip().lower() == "cross-site"
+    )
 
 
 def configured_dashboard_token(dashboard_config: dict[str, Any]) -> str:

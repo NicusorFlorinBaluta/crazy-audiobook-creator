@@ -107,7 +107,10 @@ window.PipelineManager = (() => {
                         } else if (stage === 'SCRIPTING') {
                             percentEl.innerHTML = '<span class="loading-dots">⏳</span>';
                         } else if (stage === 'BOOTSTRAPPING') {
-                            pct = data.bootstrapping_completed ? 100 : 25;
+                            pct = data.bootstrapping_completed ? 100 : null;
+                            if (!data.bootstrapping_completed) {
+                                percentEl.innerHTML = '<span class="loading-dots">⏳</span>';
+                            }
                         } else if (stage === 'VOICE_REVIEW') {
                             pct = 100;
                         } else if (stage === 'GENERATING' && batchTotal > 0) {
@@ -127,7 +130,8 @@ window.PipelineManager = (() => {
                                 .filter(chapter => selectedSet.has(chapter)).length;
                             pct = (masterCount / batchTotal) * 100;
                         } else if (stage === 'EXPORTING') {
-                            pct = 50; // coarse
+                            pct = null;
+                            percentEl.innerHTML = '<span class="loading-dots">⏳</span>';
                         }
                         
                         if (pct !== null) {
@@ -144,25 +148,32 @@ window.PipelineManager = (() => {
         }
     }
 
-    let _etaState = { startMs: 0, lastPct: 0, lastMsg: '' };
+    let _etaState = { startMs: 0, lastPct: 0, phaseKey: '' };
 
     function updateLiveProgress(data) {
         if (!data || !data.message) {
             els.live.classList.remove('active');
             els.live.innerHTML = '';
-            _etaState = { startMs: 0, lastPct: 0, lastMsg: '' };
+            _etaState = { startMs: 0, lastPct: 0, phaseKey: '' };
             return;
         }
 
         const now = Date.now();
-        if (data.message !== _etaState.lastMsg || data.percent < _etaState.lastPct) {
-            _etaState = { startMs: now, lastPct: data.percent || 0, lastMsg: data.message };
+        const percent = Number.isFinite(data.percent) ? data.percent : 0;
+        const phaseKey = data.phase || data.stage || 'work';
+        if (phaseKey !== _etaState.phaseKey || percent < _etaState.lastPct) {
+            _etaState = { startMs: now, lastPct: percent, phaseKey };
         } else {
-            _etaState.lastPct = data.percent || 0;
+            _etaState.lastPct = percent;
         }
 
         let etaStr = '';
-        if (_etaState.startMs && data.percent > 0 && data.percent < 100) {
+        if (Number.isFinite(data.eta_seconds)) {
+            const remainingSec = Math.max(0, Math.round(data.eta_seconds));
+            etaStr = remainingSec > 60
+                ? ` ~${Math.ceil(remainingSec / 60)} min remaining`
+                : ` ~${remainingSec} sec remaining`;
+        } else if (_etaState.startMs && data.percent > 0 && data.percent < 100) {
             const elapsed = now - _etaState.startMs;
             const msPerPercent = elapsed / data.percent;
             const remainingPercent = 100 - data.percent;
@@ -184,10 +195,10 @@ window.PipelineManager = (() => {
             <div class="live-progress">
                 <div>${escapeHtml(data.message || 'Processing...')} <span class="eta" style="opacity:0.7;font-size:0.9em">${etaStr}</span></div>
                 <div class="progress-bar">
-                    <div class="progress-fill" style="width: ${data.percent || 100}%"></div>
+                    <div class="progress-fill" style="width: ${percent}%"></div>
                 </div>
             </div>
-            <div>${data.percent ? data.percent.toFixed(1) + '%' : ''}</div>
+            <div>${Number.isFinite(data.percent) ? data.percent.toFixed(1) + '%' : ''}</div>
         `;
     }
 

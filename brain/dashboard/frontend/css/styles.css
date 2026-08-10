@@ -7,6 +7,18 @@
 /* Design Tokens                                                 */
 /* ------------------------------------------------------------ */
 
+.visually-hidden {
+    position: absolute !important;
+    width: 1px !important;
+    height: 1px !important;
+    padding: 0 !important;
+    margin: -1px !important;
+    overflow: hidden !important;
+    clip: rect(0, 0, 0, 0) !important;
+    white-space: nowrap !important;
+    border: 0 !important;
+}
+
 :root {
     /* Core palette */
     --bg-deep:        hsl(225, 25%, 6%);
@@ -748,6 +760,7 @@ body {
     text-transform: uppercase;
 }
 .work-status-main strong { font-size: 1.05rem; color: var(--text-primary); }
+.work-status-main small { color: var(--text-muted); font-size: .7rem; }
 .work-status-main > span:last-child {
     color: var(--text-secondary);
     font-size: .82rem;
@@ -757,7 +770,7 @@ body {
 }
 .work-status-metrics {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
     gap: 10px;
 }
 .work-status-metrics div {
@@ -1010,6 +1023,16 @@ audio:hover {
 .schedule-state.open { color: #34d399; background: rgba(16,185,129,.13); }
 .schedule-state.closed { color: #fbbf24; background: rgba(245,158,11,.13); }
 .schedule-body { padding: 0 20px 18px; border-top: 1px solid var(--glass-border); }
+.operations-body { padding-top: 15px; }
+.operations-actions { display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 12px; }
+.operations-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.operations-grid section { padding: 13px; border: 1px solid var(--glass-border); border-radius: 9px; background: rgba(255,255,255,.025); }
+.operations-grid h4 { margin: 0 0 9px; font-size: .78rem; }
+.operations-list { display: flex; flex-direction: column; gap: 6px; color: var(--text-secondary); font-size: .72rem; }
+.operations-row { display: flex; justify-content: space-between; gap: 12px; }
+.operations-row strong { color: var(--text-primary); font-weight: 650; text-align: right; }
+.cleanup-preview { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; color: var(--text-secondary); font-size: .72rem; }
+@media (max-width: 760px) { .operations-grid { grid-template-columns: 1fr; } }
 .schedule-intro {
     display: flex;
     justify-content: space-between;
@@ -1089,6 +1112,48 @@ audio:hover {
 .quality-status-pass { color: #34d399; }
 .quality-status-flagged { color: #fbbf24; }
 .quality-status-fail { color: #fb7185; }
+
+.quality-attempt-row audio { width: min(260px, 100%); height: 30px; }
+.quality-attempt-history { grid-column: 1 / -1; margin-top: 12px; }
+.quality-attempt-history > summary { cursor: pointer; color: var(--text-secondary); }
+.quality-attempt-row.selected { border-color: rgba(52, 211, 153, .35); background: rgba(52, 211, 153, .06); }
+.join-review {
+    grid-column: 1 / -1;
+    margin-top: 18px;
+    padding: 16px;
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    background: rgba(255,255,255,.025);
+}
+.join-review-heading,
+.join-review-summary,
+.join-review-controls {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+.join-review-heading p { margin: 4px 0 0; color: var(--text-secondary); }
+.join-review-list { display: grid; gap: 12px; margin-top: 14px; }
+.join-review-item {
+    display: grid;
+    gap: 10px;
+    padding: 12px;
+    border: 1px solid rgba(255,255,255,.08);
+    border-radius: 11px;
+    background: rgba(0,0,0,.16);
+}
+.join-review-summary span,
+.join-review-item > small { color: var(--text-muted); font-size: .72rem; }
+.join-review-lines { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.join-review-lines > div { padding: 10px; background: rgba(255,255,255,.03); border-radius: 9px; }
+.join-review-lines p { min-height: 2.5em; margin: 5px 0 8px; font-size: .8rem; color: var(--text-secondary); }
+.join-review-lines audio { width: 100%; height: 32px; }
+.join-review-controls .join-note { flex: 1; }
+@media (max-width: 760px) {
+    .join-review-lines { grid-template-columns: 1fr; }
+    .join-review-controls { align-items: stretch; flex-direction: column; }
+}
 
 @media (max-width: 900px) {
     .work-status-panel { grid-template-columns: 1fr; }
@@ -1531,6 +1596,12 @@ audio:hover {
     display: block;
     width: 100%;
     height: 34px;
+}
+
+.voice-download-link {
+    display: inline-flex;
+    margin-top: 7px;
+    text-decoration: none;
 }
 
 .voice-preview-pending {

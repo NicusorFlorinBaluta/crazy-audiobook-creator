@@ -9,6 +9,7 @@ window.ScriptViewer = (() => {
         voices: null,
         script: null,
         quality: null,
+        qualityReview: null,
         pronunciations: null
     };
 
@@ -33,6 +34,7 @@ window.ScriptViewer = (() => {
             fetchVoices(projectId),
             fetchScript(projectId),
             fetchQuality(projectId),
+            fetchQualityReview(projectId),
             fetchPronunciations(projectId)
         ]);
         
@@ -93,6 +95,15 @@ window.ScriptViewer = (() => {
         }
     }
 
+    async function fetchQualityReview(projectId) {
+        try {
+            const res = await fetch(`api/projects/${projectId}/quality/review`);
+            currentData.qualityReview = res.ok ? await res.json() : null;
+        } catch (e) {
+            currentData.qualityReview = null;
+        }
+    }
+
     // ============================================================================
     // Characters Tab
     // ============================================================================
@@ -130,14 +141,16 @@ window.ScriptViewer = (() => {
         }
 
         const excluded = voiceState.non_speaking_count || 0;
+        const assignedProfileCount = voices.filter(voice => (voice.assigned_characters || []).length > 0).length;
+        const alternativeCount = Math.max(0, voices.length - assignedProfileCount);
         if (els.castingSummary) {
             els.castingSummary.innerHTML = `
                 <div>
                     <strong>${speakingCharacters.length} speaking character${speakingCharacters.length === 1 ? '' : 's'}</strong>
-                    using ${voices.length} reusable voice profile${voices.length === 1 ? '' : 's'}.
+                    using ${assignedProfileCount} assigned voice profile${assignedProfileCount === 1 ? '' : 's'}.
                 </div>
                 <div class="casting-exclusion">
-                    ${excluded} non-speaking registry entr${excluded === 1 ? 'y is' : 'ies are'} excluded from casting.
+                    ${alternativeCount} optional alternative${alternativeCount === 1 ? '' : 's'} available; ${excluded} non-speaking registry entr${excluded === 1 ? 'y is' : 'ies are'} excluded.
                 </div>
             `;
         }
@@ -172,10 +185,11 @@ window.ScriptViewer = (() => {
                         <strong>Voice Comparison</strong>
                         <div class="voice-comparison-player" style="margin: 10px 0; background: var(--bg-elevated); padding: 10px; border-radius: var(--radius-md);">
                             <audio class="voice-preview-player" style="width: 100%; margin-bottom: 10px;" controls preload="none" src="${escapeHtml(mainVoice.preview_url)}"></audio>
+                            <a class="btn btn-ghost btn-sm voice-download-link" href="${escapeHtml(mainVoice.download_url || '#')}">Download voice sample</a>
                             <div class="voice-candidates-toggles" style="display: flex; gap: 8px;">
                                 ${candidates.map((candidate, idx) => `
                                     <label class="btn btn-sm ${candidate.voice_id === mainVoice.voice_id ? 'btn-primary' : 'btn-outline'}" style="flex: 1; text-align: center; cursor: pointer;">
-                                        <input type="radio" style="display:none;" name="candidate-${ownerId}" value="${escapeHtml(candidate.voice_id)}"
+                                        <input type="radio" class="visually-hidden" name="candidate-${ownerId}" value="${escapeHtml(candidate.voice_id)}"
                                             data-preview-url="${escapeHtml(candidate.preview_url || '')}"
                                             ${candidate.voice_id === mainVoice.voice_id ? 'checked' : ''}
                                             ${voiceState.editable ? '' : 'disabled'}>
@@ -189,7 +203,7 @@ window.ScriptViewer = (() => {
                 `;
             } else {
                 candidatesHtml = mainVoice.ready
-                    ? `<div class="char-voice-preview"><audio class="voice-preview-player" controls preload="none" src="${escapeHtml(mainVoice.preview_url)}"></audio></div>`
+                    ? `<div class="char-voice-preview"><audio class="voice-preview-player" controls preload="none" src="${escapeHtml(mainVoice.preview_url)}"></audio><a class="btn btn-ghost btn-sm voice-download-link" href="${escapeHtml(mainVoice.download_url || '#')}">Download voice sample</a></div>`
                     : `<div class="voice-preview-loading">
                          <div class="voice-pulse-wave"><span></span><span></span><span></span><span></span></div>
                          <span class="voice-loading-text">Synthesizing voice audio preview...</span>
@@ -304,6 +318,7 @@ window.ScriptViewer = (() => {
                     const container = card.querySelector('.voice-comparison-player');
                     if (!container) return;
                     const player = container.querySelector('.voice-preview-player');
+                    const download = container.querySelector('.voice-download-link');
                     const isPlaying = !player.paused;
                     const currentTime = player.currentTime;
                     
@@ -319,6 +334,12 @@ window.ScriptViewer = (() => {
                     const newSrc = e.target.dataset.previewUrl;
                     if (newSrc && newSrc !== 'undefined') {
                         player.src = newSrc;
+                        const selectedVoice = voices.find(
+                            voice => voice.voice_id === e.target.value
+                        );
+                        if (download && selectedVoice?.download_url) {
+                            download.href = selectedVoice.download_url;
+                        }
                         player.currentTime = currentTime;
                         if (isPlaying) {
                             player.play().catch(err => console.warn('Could not auto-resume:', err));
@@ -457,7 +478,9 @@ window.ScriptViewer = (() => {
             els.voiceReviewBanner.innerHTML = '';
             return;
         }
-        const allReady = (voiceState.voices || []).every(voice => voice.ready);
+        const allReady = (voiceState.voices || [])
+            .filter(voice => voice.required || (voice.assigned_characters || []).length > 0)
+            .every(voice => voice.ready);
         const narratorChoice = voiceState.narrator_choice;
         const narratorOptionsHtml = narratorChoice?.options?.length ? `
             <div class="narrator-choice">
@@ -551,7 +574,8 @@ window.ScriptViewer = (() => {
             `).join('');
             const previewHtml = assignedVoice?.ready
                 ? `<audio class="voice-preview-player" controls preload="none"
-                       src="${escapeHtml(assignedVoice.preview_url)}"></audio>`
+                       src="${escapeHtml(assignedVoice.preview_url)}"></audio>
+                   <a class="btn btn-ghost btn-sm voice-download-link" href="${escapeHtml(assignedVoice.download_url || '#')}">Download voice sample</a>`
                 : '<span class="voice-preview-pending">Preview available after voice preparation.</span>';
             const editNote = voiceState.editable
                 ? 'A change marks only affected chapters for regeneration.'
@@ -600,7 +624,8 @@ window.ScriptViewer = (() => {
                 const voice = voicesById.get(select.value);
                 preview.innerHTML = voice?.ready
                     ? `<audio class="voice-preview-player" controls preload="none"
-                           src="${escapeHtml(voice.preview_url)}"></audio>`
+                           src="${escapeHtml(voice.preview_url)}"></audio>
+                       <a class="btn btn-ghost btn-sm voice-download-link" href="${escapeHtml(voice.download_url || '#')}">Download voice sample</a>`
                     : '<span class="voice-preview-pending">Preview available after voice preparation.</span>';
                 const description = card.querySelector('.voice-description-input');
                 if (description) description.value = voice?.description || '';
@@ -868,7 +893,8 @@ window.ScriptViewer = (() => {
     function renderQuality() {
         const hasQuality = currentData.quality && Object.keys(currentData.quality).length > 0;
         const hasPronunciations = currentData.pronunciations?.candidates?.length > 0;
-        if (!hasQuality && !hasPronunciations) {
+        const hasJoinReview = currentData.qualityReview?.join_warnings?.length > 0;
+        if (!hasQuality && !hasPronunciations && !hasJoinReview) {
             els.qualityOverview.innerHTML = '<div class="empty-state small"><p>Quality data will appear after audio generation and validation.</p></div>';
             return;
         }
@@ -884,7 +910,7 @@ window.ScriptViewer = (() => {
         const acceptedSegments = (q.passed_segments || 0) + (q.accepted_with_warning_segments || 0);
         const passRate = q.total_segments > 0 ? Math.round((acceptedSegments / q.total_segments) * 100) : 0;
         const passStatus = passRate > 95 ? 'good' : (passRate > 85 ? 'warn' : 'bad');
-        addQualityStat('First Pass Rate', `${passRate}%`, passStatus);
+        addQualityStat('Accepted Rate', `${passRate}%`, passStatus);
 
         addQualityStat(
             'Accepted Warnings',
@@ -927,15 +953,126 @@ window.ScriptViewer = (() => {
                             <span>Attempt ${item.attempt}</span>
                             <span>WER ${((item.wer || 0) * 100).toFixed(1)}%</span>
                             <span title="${escapeHtml(item.transcribed_text || '')}">${escapeHtml((item.acceptance_reason || 'unspecified').replaceAll('_', ' '))}</span>
+                            <audio controls preload="none" src="${escapeHtml(item.audio_url || '')}"></audio>
                         </div>
                     `).join('')}
                 </div>
             `;
             els.qualityOverview.appendChild(details);
         }
+        const attemptHistory = q.attempts || [];
+        const retriedIds = new Set(
+            attemptHistory.filter(item => item.attempt > 1).map(item => item.line_id)
+        );
+        if (retriedIds.size) {
+            const history = document.createElement('details');
+            history.className = 'quality-attempt-history';
+            history.innerHTML = `
+                <summary>All attempts for ${retriedIds.size} retried line${retriedIds.size === 1 ? '' : 's'}</summary>
+                <div class="quality-attempts-list">
+                    ${attemptHistory.filter(item => retriedIds.has(item.line_id)).map(item => `
+                        <div class="quality-attempt-row ${item.selected ? 'selected' : ''}">
+                            <span>Ch ${item.chapter_number} · ${escapeHtml(item.line_id)}</span>
+                            <strong>${item.selected ? 'Selected artifact' : 'Rejected candidate'}</strong>
+                            <span>Attempt ${item.attempt}</span>
+                            <span>${escapeHtml(item.status)}</span>
+                            <span>WER ${((item.wer || 0) * 100).toFixed(1)}%</span>
+                        </div>
+                    `).join('')}
+                </div>
+            `;
+            els.qualityOverview.appendChild(history);
+        }
         }
 
+        renderJoinReview();
         renderPronunciationInventory();
+    }
+
+    function renderJoinReview() {
+        const review = currentData.qualityReview;
+        const joins = review?.join_warnings || [];
+        if (!joins.length) return;
+        const section = document.createElement('section');
+        section.className = 'join-review';
+        const counts = review.review_counts || {};
+        section.innerHTML = `
+            <div class="join-review-heading">
+                <div>
+                    <strong>Chapter join review</strong>
+                    <p>${joins.length} diagnostic warning${joins.length === 1 ? '' : 's'}, sorted by measured severity. A warning is not automatically an audible defect.</p>
+                </div>
+                <span>${counts.unreviewed || 0} unreviewed</span>
+            </div>
+            <div class="join-review-list">
+                ${joins.map(item => `
+                    <article class="join-review-item" data-item-id="${escapeHtml(item.item_id)}">
+                        <div class="join-review-summary">
+                            <strong>Chapter ${item.chapter_number} · ${escapeHtml(item.previous_line_id)} → ${escapeHtml(item.current_line_id)}</strong>
+                            <span>Δ ${Number(item.loudness_delta_db || 0).toFixed(1)} dB · gap ${item.gap_ms || 0} ms · severity ${Number(item.severity || 0).toFixed(2)}</span>
+                        </div>
+                        <div class="join-review-lines">
+                            <div><small>${escapeHtml(item.previous_line?.speaker || '')}</small><p>${escapeHtml(item.previous_line?.text || '')}</p><audio controls preload="none" src="${escapeHtml(item.previous_audio_url)}"></audio></div>
+                            <div><small>${escapeHtml(item.current_line?.speaker || '')}</small><p>${escapeHtml(item.current_line?.text || '')}</p><audio controls preload="none" src="${escapeHtml(item.current_audio_url)}"></audio></div>
+                        </div>
+                        <div class="join-review-controls">
+                            <select class="join-disposition input-sm" aria-label="Review disposition">
+                                ${[
+                                    ['unreviewed', 'Unreviewed'],
+                                    ['acceptable', 'Acceptable'],
+                                    ['needs_remaster', 'Needs remaster'],
+                                    ['source_tts_issue', 'Source / TTS issue']
+                                ].map(([value, label]) => `<option value="${value}" ${item.disposition === value ? 'selected' : ''}>${label}</option>`).join('')}
+                            </select>
+                            <input class="join-note input-sm" maxlength="2000" value="${escapeHtml(item.review_note || '')}" placeholder="Optional listening note">
+                            <button type="button" class="btn btn-secondary btn-sm join-review-save">Save review</button>
+                        </div>
+                        <small>Reasons: ${escapeHtml((item.reasons || []).join(', ') || 'diagnostic threshold')}</small>
+                    </article>
+                `).join('')}
+            </div>
+        `;
+        section.querySelectorAll('.join-review-save').forEach(button => {
+            button.addEventListener('click', async () => {
+                const row = button.closest('.join-review-item');
+                await saveReviewDisposition(
+                    row?.dataset.itemId || '',
+                    row?.querySelector('.join-disposition')?.value || 'unreviewed',
+                    row?.querySelector('.join-note')?.value || '',
+                    button
+                );
+            });
+        });
+        els.qualityOverview.appendChild(section);
+    }
+
+    async function saveReviewDisposition(itemId, disposition, note, button) {
+        const projectId = window.state?.currentProjectId;
+        if (!projectId || !itemId) return;
+        button.disabled = true;
+        try {
+            const response = await fetch(
+                `api/projects/${encodeURIComponent(projectId)}/quality/review`,
+                {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        item_type: 'join',
+                        item_id: itemId,
+                        disposition,
+                        note: note.trim()
+                    })
+                }
+            );
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(data.detail || 'Could not save review');
+            showToast('Join review saved', 'success');
+            await fetchQualityReview(projectId);
+            renderQuality();
+        } catch (error) {
+            showToast(error.message, 'error');
+            button.disabled = false;
+        }
     }
 
     function renderPronunciationInventory() {

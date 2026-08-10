@@ -6,11 +6,18 @@ from brain.dashboard.api.security import (
     configured_dashboard_token,
     dashboard_request_authorized,
     is_loopback_client,
+    is_cross_site_mutation,
     is_private_client,
 )
 
 
 class DashboardSecurityTests(unittest.TestCase):
+    def test_cross_site_browser_mutations_are_rejected(self):
+        self.assertTrue(is_cross_site_mutation("POST", "cross-site"))
+        self.assertFalse(is_cross_site_mutation("GET", "cross-site"))
+        self.assertFalse(is_cross_site_mutation("POST", "same-origin"))
+        self.assertFalse(is_cross_site_mutation("POST", None))
+
     def test_loopback_detection_supports_ipv4_ipv6_and_mapped_addresses(self):
         self.assertTrue(is_loopback_client("127.0.0.1"))
         self.assertTrue(is_loopback_client("::1"))

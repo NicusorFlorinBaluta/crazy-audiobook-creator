@@ -23,10 +23,14 @@ def main():
         webbrowser.open("http://127.0.0.1:8000")
         return
 
-    # 8.3 Short path Python executable to avoid ROCm spaces path bug
-    python_exe = r"E:\PYTORC~1\my_venv\Scripts\python.exe"
-    if not os.path.exists(python_exe):
-        python_exe = sys.executable
+    candidates = [
+        os.environ.get("CAC_PYTHON"),
+        os.path.join(base_dir, "venv", "Scripts", "python.exe"),
+        sys.executable,
+    ]
+    python_exe = next(
+        candidate for candidate in candidates if candidate and os.path.exists(candidate)
+    )
 
     cmd = [
         python_exe,

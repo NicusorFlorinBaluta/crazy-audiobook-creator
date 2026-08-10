@@ -83,14 +83,14 @@ function setupEventListeners() {
     document.getElementById('nav-home-btn').addEventListener('click', showProjectsView);
     
     const STAGE_TOOLTIPS = {
-        extracting: 'Re-extract text from EPUB file (clears all script, cast, and audio files)',
+        extracting: 'Rebuild book text from the preserved source EPUB, then clear scripts, cast, segments, and mastered audio. Older projects without source.epub are left unchanged.',
         scripting: 'Re-run LLM script & character extraction (clears script JSONs and cast, keeps EPUB text)',
         bootstrapping: 'Re-generate voice design profiles and reference audio (keeps script intact)',
         voice_review: 'Re-open the Voice Review banner to change speaking voices or tweak cast without re-scripting',
         generating: 'Re-generate chapter audio segments (clears audio segments, keeps script and voice cast)',
-        validating: 'Re-run Whisper Speech-to-Text quality validation checks',
-        mastering: 'Re-run ffmpeg/sox chapter audio mastering (clears mastered audio and M4B)',
-        exporting: 'Re-run M4B audiobook packaging over mastered chapter files'
+        validating: 'Keep synthesized segment WAVs, invalidate validation results, and re-run Whisper, speaker, and audio checks. Mastered audio is cleared.',
+        mastering: 'Keep accepted segments, clear mastered chapter audio and M4B, then re-run chapter mastering.',
+        exporting: 'Keep mastered chapter audio and remove only the M4B package so export can run again.'
     };
 
     // Reset and Download features
@@ -298,6 +298,15 @@ function setupEventListeners() {
         });
     });
     document.getElementById('btn-save-schedule')?.addEventListener('click', saveSchedule);
+    document.getElementById('operations-section')?.addEventListener('toggle', event => {
+        if (event.target.open) loadOperations();
+    });
+    document.getElementById('btn-refresh-operations')?.addEventListener('click', loadOperations);
+    document.getElementById('btn-download-support')?.addEventListener('click', () => {
+        if (state.currentProjectId) {
+            window.location.href = `api/projects/${encodeURIComponent(state.currentProjectId)}/support-bundle`;
+        }
+    });
 }
 
 // ============================================================================
@@ -494,25 +503,34 @@ async function handleUploadSubmit() {
     els.uploadProgress.classList.remove('hidden');
     els.uploadProgressText.textContent = 'Uploading and extracting...';
     
-    // Simulate progress bar (actual progress requires XHR, using fetch for simplicity here)
-    let progress = 0;
-    const progressInterval = setInterval(() => {
-        progress += Math.random() * 10;
-        if (progress > 90) progress = 90;
-        els.uploadProgressFill.style.width = `${progress}%`;
-    }, 500);
-
     const formData = new FormData();
     formData.append('file', currentFile);
     // You could also add title/author inputs to the modal and append them here
 
     try {
-        const response = await fetch('api/projects', {
-            method: 'POST',
-            body: formData
+        const response = await new Promise((resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open('POST', 'api/projects');
+            xhr.responseType = 'json';
+            xhr.upload.addEventListener('progress', event => {
+                if (!event.lengthComputable) return;
+                const percent = Math.round((event.loaded / event.total) * 100);
+                els.uploadProgressFill.style.width = `${percent}%`;
+                els.uploadProgressText.textContent = `Uploading… ${percent}%`;
+            });
+            xhr.upload.addEventListener('load', () => {
+                els.uploadProgressFill.style.width = '100%';
+                els.uploadProgressText.textContent = 'Extracting EPUB…';
+            });
+            xhr.addEventListener('load', () => resolve({
+                ok: xhr.status >= 200 && xhr.status < 300,
+                json: async () => xhr.response || {},
+            }));
+            xhr.addEventListener('error', () => reject(new Error('Upload connection failed')));
+            xhr.addEventListener('abort', () => reject(new Error('Upload cancelled')));
+            xhr.send(formData);
         });
-        
-        clearInterval(progressInterval);
+
         els.uploadProgressFill.style.width = '100%';
         
         if (!response.ok) {
@@ -526,7 +544,6 @@ async function handleUploadSubmit() {
         await showDetailView(data.project_id);
         
     } catch (error) {
-        clearInterval(progressInterval);
         showToast(error.message, 'error');
         els.btnUpload.disabled = false;
         els.uploadRemove.disabled = false;
@@ -915,11 +932,19 @@ function renderWorkStatus(project) {
     const generated = new Set(project.generated_chapters || []);
     const currentChapter = project.current_gen_chapter || project.current_script_chapter;
     const currentDetail = detailMap.get(currentChapter) || {};
-    const stage = String(project.active_stage || project.status || 'created').toLowerCase();
+    const status = String(project.status || 'created').toLowerCase();
+    const terminalStatuses = new Set([
+        'paused', 'pausing', 'paused_scheduled', 'deploy_paused', 'error',
+        'complete', 'completed', 'selection_complete'
+    ]);
+    const stage = terminalStatuses.has(status)
+        ? status
+        : String(project.active_stage || status).toLowerCase();
     const chapterTitle = currentDetail.title || (
         currentChapter ? `Chapter ${currentChapter}` : ''
     );
     const workProgress = project.work_progress || {};
+    const progress = project.progress || null;
     const selectedNames = selected.map(chapter => {
         const title = detailMap.get(chapter)?.title || `Chapter ${chapter}`;
         return `Chapter ${chapter} — ${title}`;
@@ -1002,6 +1027,10 @@ function renderWorkStatus(project) {
             ? 'All audio files exist; acceptance checks and retries are finishing.'
             : `Utterance ${currentDetail.lines_generated || 0} of ${currentDetail.total_lines || 0}.`;
     } else if (stage.includes('validat')) {
+        lineMetric = currentDetail.total_lines
+            ? `${currentDetail.lines_validated || 0} / ${currentDetail.total_lines}`
+            : '—';
+        lineLabel = 'Validated utterances';
         activity = chapterTitle
             ? `Validating — ${chapterTitle}`
             : 'Validating generated audio';
@@ -1021,8 +1050,41 @@ function renderWorkStatus(project) {
         description = `${mastered.size} chapters are mastered and available.`;
     } else if (stage === 'error') {
         activity = 'Pipeline stopped on an error';
-        description = project.error ||
+        description = project.error_message ||
             'Inspect the logs, then resume after correcting the issue.';
+    }
+
+    if (progress && project.running) {
+        activity = progress.message || activity;
+        if (Number.isFinite(progress.percent)) {
+            overall = Math.round(progress.percent);
+            overallLabel = `${(progress.phase || progress.stage || 'Current').replaceAll('_', ' ')}`;
+        }
+        if (progress.chapter_position && progress.chapter_total) {
+            chapterMetric = `${progress.chapter_position} / ${progress.chapter_total}`;
+        }
+        if (progress.line_position && progress.line_total) {
+            lineMetric = `${progress.line_position} / ${progress.line_total}`;
+        }
+    }
+
+    const etaSeconds = progress?.eta_seconds;
+    const etaText = Number.isFinite(etaSeconds)
+        ? (etaSeconds >= 3600
+            ? `${(etaSeconds / 3600).toFixed(1)} h`
+            : etaSeconds >= 60
+                ? `${Math.ceil(etaSeconds / 60)} min`
+                : `${Math.ceil(etaSeconds)} sec`)
+        : '—';
+    const updatedAt = progress?.updated_at || project.last_activity_at || project.updated_at;
+    let freshness = 'No activity recorded yet.';
+    if (updatedAt) {
+        const ageSeconds = Math.max(0, Math.round((Date.now() - Date.parse(updatedAt)) / 1000));
+        freshness = ageSeconds < 10
+            ? 'Updated just now'
+            : ageSeconds < 120
+                ? `Updated ${ageSeconds} seconds ago`
+                : `Updated ${Math.round(ageSeconds / 60)} minutes ago`;
     }
 
     document.getElementById('work-status-title').textContent = activity;
@@ -1034,6 +1096,11 @@ function renderWorkStatus(project) {
     document.getElementById('work-chapter-label').textContent = chapterLabel;
     document.getElementById('work-line-position').textContent = lineMetric;
     document.getElementById('work-line-label').textContent = lineLabel;
+    document.getElementById('work-eta').textContent = etaText;
+    document.getElementById('work-eta-label').textContent = progress?.eta_confidence
+        ? `ETA · ${progress.eta_confidence} confidence`
+        : 'Estimated remaining';
+    document.getElementById('work-status-freshness').textContent = freshness;
 }
 
 // Retained temporarily for compatibility with older embedded shells. New
@@ -1394,6 +1461,72 @@ async function saveSchedule() {
         showToast(error.message, 'error');
     } finally {
         button.disabled = false;
+    }
+}
+
+async function loadOperations() {
+    const projectId = state.currentProjectId;
+    if (!projectId) return;
+    const preflightEl = document.getElementById('preflight-details');
+    const storageEl = document.getElementById('storage-details');
+    const cleanupEl = document.getElementById('cleanup-preview');
+    const stateEl = document.getElementById('operations-state');
+    stateEl.textContent = 'Checking';
+    stateEl.className = 'schedule-state';
+    try {
+        const [preflightResponse, storageResponse] = await Promise.all([
+            fetch('api/system/preflight'),
+            fetch(`api/projects/${encodeURIComponent(projectId)}/storage`)
+        ]);
+        if (!preflightResponse.ok || !storageResponse.ok) throw new Error('Operations check failed');
+        const preflight = await preflightResponse.json();
+        const storage = await storageResponse.json();
+        const runtime = preflight.effective_runtime || {};
+        const notices = [...(preflight.errors || []), ...(preflight.warnings || [])];
+        preflightEl.innerHTML = [
+            ['Status', preflight.compatible ? 'Compatible' : 'Action required'],
+            ['TTS', `${runtime.tts_model || 'unknown'} · ${runtime.attention_backend || 'default'}`],
+            ['Validator', `${runtime.whisper_backend || 'unknown'} · ${runtime.whisper_model || 'unknown'} · VAD ${runtime.whisper_vad_filter ? 'on' : 'off'}`],
+            ['FFmpeg', preflight.executables?.ffmpeg ? 'Available' : 'Missing'],
+            ['Notices', notices.length ? notices.join(' · ') : 'None']
+        ].map(([label, value]) => `<div class="operations-row"><span>${escapeHtml(label)}</span><strong>${escapeHtml(String(value))}</strong></div>`).join('');
+        storageEl.innerHTML = Object.entries(storage.categories || {}).map(([name, item]) =>
+            `<div class="operations-row"><span>${escapeHtml(name.replaceAll('_', ' '))}</span><strong>${formatBytes(item.bytes || 0)} · ${item.files || 0} files</strong></div>`
+        ).join('') + `<div class="operations-row"><span>Total</span><strong>${formatBytes(storage.total_bytes || 0)}</strong></div>`;
+        const preview = storage.cleanup_preview || {};
+        cleanupEl.innerHTML = `<span>Safe cleanup preview: ${preview.files?.length || 0} temporary files · ${formatBytes(preview.bytes || 0)}</span>`;
+        if (preview.files?.length) {
+            const button = document.createElement('button');
+            button.className = 'btn btn-danger btn-sm';
+            button.textContent = 'Remove previewed temp files';
+            button.addEventListener('click', () => runPreviewedCleanup(preview.confirmation_token));
+            cleanupEl.appendChild(button);
+        }
+        stateEl.textContent = preflight.compatible ? 'Healthy' : 'Review';
+        stateEl.className = `schedule-state ${preflight.compatible ? 'open' : 'closed'}`;
+        document.getElementById('operations-summary').textContent = `${formatBytes(storage.total_bytes || 0)} · ${notices.length} runtime notice${notices.length === 1 ? '' : 's'}`;
+    } catch (error) {
+        stateEl.textContent = 'Unavailable';
+        stateEl.className = 'schedule-state closed';
+        preflightEl.textContent = error.message;
+        storageEl.textContent = 'Could not load storage details.';
+    }
+}
+
+async function runPreviewedCleanup(confirmationToken) {
+    if (!state.currentProjectId || !confirm('Remove only the temporary files shown in the current preview?')) return;
+    try {
+        const response = await fetch(`api/projects/${encodeURIComponent(state.currentProjectId)}/storage/cleanup`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({confirmation_token: confirmationToken})
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.detail || 'Cleanup failed');
+        showToast(`Removed ${data.removed?.length || 0} temporary files (${formatBytes(data.removed_bytes || 0)})`, 'success');
+        await loadOperations();
+    } catch (error) {
+        showToast(error.message, 'error');
     }
 }
 
