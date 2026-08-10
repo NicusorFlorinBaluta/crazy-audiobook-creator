@@ -48,6 +48,37 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _source_control_state(root: Path) -> dict[str, Any]:
+    """Capture the exact candidate identity without mutating the repository."""
+    commands = {
+        "commit": ["git", "rev-parse", "HEAD"],
+        "branch": ["git", "branch", "--show-current"],
+        "status": ["git", "status", "--porcelain", "--untracked-files=normal"],
+    }
+    values: dict[str, str] = {}
+    errors: dict[str, str] = {}
+    for field, command in commands.items():
+        result = subprocess.run(
+            command,
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0:
+            values[field] = result.stdout.strip()
+        else:
+            errors[field] = (result.stderr or result.stdout).strip()
+    status = values.get("status", "")
+    return {
+        "commit": values.get("commit"),
+        "branch": values.get("branch"),
+        "dirty": bool(status),
+        "status": status.splitlines(),
+        "errors": errors,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -70,6 +101,7 @@ def main() -> int:
         "schema_version": 1,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "tier": args.tier,
+        "source_control": _source_control_state(root),
         "runtime": collect_runtime_report(),
         "checks": [],
         "artifacts": [],
