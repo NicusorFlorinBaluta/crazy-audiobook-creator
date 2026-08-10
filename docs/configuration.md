@@ -105,8 +105,16 @@ Cross-midnight windows belong to the weekday on which they start. The worker par
 | `max_text_length` | Maximum characters per Qwen inference chunk |
 | `attn_implementation` | Transformer attention backend; `sdpa` falls back to `eager` when unsupported |
 | `generation.*` | Qwen sampling parameters |
+| `post_processing.enabled` | Opt in to pitch/tempo/tone processing. Production default is `false` to preserve clean model output. |
+| `post_processing.allow_phase_vocoder_fallback` | Experimental legacy fallback. Keep `false`; the 2026-08-09 E2E associated it with audible echo/smearing. |
 
 Oversized script lines are split internally at sentence or whitespace boundaries, synthesized with the same voice prompt, and rejoined.
+
+Script emotion and speed remain descriptive metadata when post-processing is
+disabled. Enabling post-processing does not silently authorize the librosa
+phase vocoder: pitch/tempo changes are skipped when no quality-approved backend
+is available unless the unsafe experimental fallback is separately enabled.
+The complete policy and its revision are part of the synthesis fingerprint.
 
 The reference-voice test sentences in this file are informational; the canonical gender-specific sentences are defined in `shared/constants.py`.
 
@@ -115,14 +123,18 @@ The reference-voice test sentences in this file are informational; the canonical
 | Key | Meaning |
 |---|---|
 | `enabled` | Run validation during chapter generation |
-| `whisper_model`, `whisper_device` | Transcription backend settings |
+| `whisper_model`, `whisper_device` | Transcription model and device settings |
+| `whisper_backend`, `whisper_vad_filter` | Backend selection and optional VAD preprocessing. AMD/ROCm defaults to raw OpenAI Whisper because VAD can remove valid short or high-pitched speech. |
+| `whisper_backend` | `openai_whisper` for AMD/ROCm PyTorch, `faster_whisper` for a compatible CTranslate2 runtime, or `auto` |
 | `wer_threshold` | Maximum normalized word error rate |
+| `emotion_wer_allowance` | Optional WER relaxation for post-FX lines; defaults to `0.0` so transcript accuracy remains strict without benchmark evidence |
 | `max_retries` | Additional attempts for fail/flag outcomes |
 | `keep_tts_and_whisper_resident` | Keep both models inside one chapter's retry loop; Whisper is still released at the chapter boundary |
 | `risk_aware_first_attempt` | Listening-approved clarity policy for very short emphatic lines; longer dialogue and ordinary narration remain unchanged |
 | `speaker_similarity_threshold` | Minimum Qwen speaker-encoder cosine similarity |
 | `clipping_threshold` | Maximum sample peak in dBFS |
 | `max_silence_seconds` | Longest permitted internal silence |
+| `prosody.*` | Nonblocking monotone-warning enablement and explicit duration/pitch/dynamic-range thresholds; changes invalidate validation cache |
 | `duration_tolerance` | Expected-duration tolerance |
 
 Missing audio and missing line IDs always fail regardless of thresholds.
@@ -184,3 +196,16 @@ Controls workspace and voice-library roots plus retention preferences. Automatic
 ## Secrets
 
 Do not commit tokens or service credentials. The checked-in `.env` is legacy and should not contain live secrets; current local operation does not require SSH credentials.
+## Runtime validation and experimental performance settings
+
+Both YAML files are validated before clients or models are constructed. Invalid
+URLs, schedules, thresholds, attention backends, and validator backends fail
+fast with a combined actionable error. `scripts/runtime_preflight.py` reports
+the resolved Python/packages, FFmpeg, TTS attention backend, Whisper backend,
+model, device, and VAD mode without importing a GPU model.
+
+`tts.adaptive_max_new_tokens` is experimental and disabled by default. It must
+not be promoted until the fixed TTS fixture proves that its bounded cap and
+retry-on-truncation behavior improve median RTF without missing speech. The
+current `sdpa`, raw-audio OpenAI Whisper path, and one-worker ownership remain
+the production baseline.

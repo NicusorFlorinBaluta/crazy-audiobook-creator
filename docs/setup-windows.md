@@ -33,7 +33,13 @@ $python = "E:\PyTorch env\my_venv\Scripts\python.exe"
 .\scripts\setup-voice-server.ps1 -VenvPath "E:\PyTorch env\my_venv"
 ```
 
-The setup script adds the Qwen/Parler/Whisper packages used by this implementation and checks for FFmpeg. Review its third-party compatibility patch before using a different package version.
+The installer resolves `voice/requirements.txt` through
+`voice/constraints-windows-rocm-tested.txt`, which records the direct runtime
+versions observed in the successful 2026-08-09 AMD run. PyTorch remains a
+separate machine-specific ROCm installation. Use `-DryRun` to run only the
+read-only preflight and dependency-consistency checks.
+
+The setup script removes a stale `parler-tts` installation, installs the supported Qwen/Whisper requirements, runs `pip check`, and checks for FFmpeg. `parler_server.py` is legacy-only; if it must be evaluated, use `voice/requirements-legacy-parler.txt` in a separate environment because its Transformers requirement conflicts with Qwen.
 
 Verify core imports:
 
@@ -181,10 +187,10 @@ model is unloaded before retrying.
 
 ```powershell
 Invoke-RestMethod http://127.0.0.1:8100/health
-Get-Content .\parler.log -Tail 100
+Get-Content .\qwen-voice-design.log -Tail 100
 ```
 
-The Parler log is relevant only during reference bootstrap. Qwen/Whisper lifecycle appears in dashboard project logs.
+The VoiceDesign helper log is relevant during reference bootstrap. Qwen Base and Whisper lifecycle also appears in dashboard project logs.
 
 ### FFmpeg export failure
 
@@ -192,7 +198,13 @@ Ensure both `ffmpeg` and `ffprobe` resolve in the environment inherited by the d
 
 ### GPU out of memory
 
-Keep `server.workers: 1`. Do not start parallel project pipelines. The service intentionally unloads Parler before validation/Qwen and swaps Qwen/Whisper phases.
+Keep `server.workers: 1`. Do not start parallel project pipelines. The service starts models lazily and keeps VoiceDesign, Qwen Base, and Whisper out of VRAM concurrently unless an explicitly benchmarked validation setting says otherwise.
+
+On AMD/ROCm Windows, keep `validation.whisper_backend: openai_whisper`.
+The installed `faster-whisper` package uses CTranslate2's CUDA backend and must
+only be selected on a compatible runtime; selecting its `cuda` device on this
+AMD setup can terminate the native Voice service rather than raising a Python
+exception.
 
 ### Python path with spaces warning
 

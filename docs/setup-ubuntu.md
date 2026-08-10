@@ -1,6 +1,6 @@
 # Ubuntu Setup (Legacy)
 
-The current supported architecture is a single Windows workstation. The Voice API, Qwen3-TTS, Parler-TTS, Whisper, mastering, and export now run locally and default to loopback.
+The current supported architecture is a single Windows workstation. The Voice API, Qwen3-TTS VoiceDesign/Base, Whisper, mastering, and export now run locally and default to loopback.
 
 The former Ubuntu/NVIDIA deployment guide was removed because it described:
 
@@ -20,7 +20,7 @@ Treat it as a new deployment target requiring explicit engineering and verificat
 3. Configure the same nonempty API token in Brain and Voice.
 4. Restrict CORS and firewall rules to the intended Brain host.
 5. Ensure all project-relative paths remain meaningful to the Voice workspace; never accept arbitrary Brain filesystem paths.
-6. Replace local subprocess assumptions for the Parler bootstrap helper.
+6. Replace local subprocess assumptions for the Qwen VoiceDesign bootstrap helper.
 7. Verify cancellation, model locks, idle unload, downloads, and partial exports over the new boundary.
 8. Add remote integration tests before calling that topology supported.
 
