@@ -62,3 +62,27 @@ On the next clean representative or release run:
 
 The expensive multi-chapter/full-book run remains deferred until an exact
 commit candidate exists and the clean representative listening gate passes.
+
+## Clean-output audit result
+
+The user reviewed the nine-clip pack generated from candidate `3d96b3b` under
+`clean-output-v1`. All nine clips passed for echo, chorus, metallic smearing,
+and voice instability. This closes the phase-vocoder perceptual regression.
+
+Two expected/independent findings remain:
+
+- Lines formerly labelled intense or non-default-speed no longer sound
+  strongly emphasized. This is the intended safety tradeoff while mood DSP is
+  disabled; expression needs a future quality-approved implementation rather
+  than restoration of the old phase vocoder.
+- The reflective Dusk fixture exposed a real script defect. The source speaker
+  is Vathi, but `ch08_0047` is assigned to Dusk and includes narrator prose:
+  `"You're bored, I suppose," she said. Then she paused.` The old full-book
+  script contains 72 non-narrator lines with attached dialogue tags. Not all
+  have the wrong quoted speaker, but character delivery of narrator tags is a
+  systemic grouping behavior and some examples are genuine misattributions.
+
+Therefore the clean-audio gate is **approved**, but the release gate remains
+**blocked on dialogue attribution/tag segmentation**. Do not begin a clean
+full-book run until that behavior has deterministic regression coverage and a
+small scripting fixture confirms the correct split and speaker.
