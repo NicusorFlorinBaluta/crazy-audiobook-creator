@@ -406,6 +406,36 @@ class AssemblerTests(unittest.TestCase):
         self.assertEqual(result["join_warnings"], 0)
         self.assertEqual(result["join_diagnostics"][0]["status"], "clean")
 
+    def test_utterance_group_joins_without_pause_or_crossfade(self) -> None:
+        assembler = AudioAssembler(crossfade_ms=20)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sf.write(root / "dialogue.wav", np.full(2400, 0.08, dtype=np.float32), 24000)
+            sf.write(root / "tag.wav", np.full(2400, 0.09, dtype=np.float32), 24000)
+            result = assembler.assemble_chapter(
+                [
+                    MasterSegmentInfo(
+                        line_id="dialogue",
+                        file="dialogue.wav",
+                        pause_after_ms=400,
+                        utterance_group_id="utterance_dialogue",
+                    ),
+                    MasterSegmentInfo(
+                        line_id="tag",
+                        file="tag.wav",
+                        pause_before_ms=400,
+                        utterance_group_id="utterance_dialogue",
+                    ),
+                ],
+                root,
+            )
+
+        self.assertEqual(len(result["audio"]), 76800)
+        diagnostic = result["join_diagnostics"][0]
+        self.assertEqual(diagnostic["gap_ms"], 0)
+        self.assertEqual(diagnostic["utterance_group_id"], "utterance_dialogue")
+        self.assertFalse(diagnostic["crossfade_applied"])
+
 
 class AudioAnalyzerTests(unittest.TestCase):
     def test_metrics_are_json_serializable_native_scalars(self) -> None:

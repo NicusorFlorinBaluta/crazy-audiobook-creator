@@ -82,7 +82,26 @@ Two expected/independent findings remain:
   have the wrong quoted speaker, but character delivery of narrator tags is a
   systemic grouping behavior and some examples are genuine misattributions.
 
-Therefore the clean-audio gate is **approved**, but the release gate remains
-**blocked on dialogue attribution/tag segmentation**. Do not begin a clean
-full-book run until that behavior has deterministic regression coverage and a
-small scripting fixture confirms the correct split and speaker.
+## Dialogue attribution/tag correction
+
+Implemented after the audit:
+
+- character dialogue and attached narrator tags remain separate synthesis
+  lines instead of merging into the character voice;
+- both lines receive a shared utterance group and a zero-gap, no-crossfade
+  mastering contract;
+- deterministic `he`/`she` and explicitly named-tag contradictions reject bad
+  metadata while the correction retry is available;
+- the exact Vathi/Dusk sentence is covered by a source-preserving regression;
+- a scripting-only fixture confirms Vathi dialogue, narrator-owned
+  `she said. Then she paused.`, stable source coverage, and group timing;
+- the full static tier passes: 157 tests in 2.017 seconds, Python compilation,
+  four JavaScript syntax checks, and local Markdown link validation on
+  2026-08-10.
+
+The clean-audio and automated segmentation gates are now **approved**. The next
+human audio audit is needed only after a fresh candidate renders at least one
+real quote/tag group: listen for natural continuity, correct voice ownership,
+and any zero-gap click or level jump. Do not tune local gain or crossfade unless
+multiple fresh groups expose the same repeatable defect. A full-book run remains
+reserved for the exact release candidate.

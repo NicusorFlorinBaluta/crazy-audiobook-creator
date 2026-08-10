@@ -126,7 +126,18 @@ results remain unaccepted.
 
 ## Timing and mastering
 
-There is one timing owner. When adjacent lines both request a boundary pause, the assembler uses the larger pause rather than summing both. Crossfades are applied only to directly adjacent audio, never across an intended silence.
+There is one timing owner. When adjacent lines both request a boundary pause,
+the assembler uses the larger pause rather than summing both. Crossfades are
+applied only to directly adjacent audio, never across an intended silence.
+
+Quoted dialogue and a short attached narrator tag are separately synthesized
+with their correct voices, then linked by `utterance_group_id`. A grouped
+boundary overrides adjacent pause requests to zero and explicitly disables
+crossfade; this preserves a natural, tightly connected reading without making
+the character speak narrator prose. The usual join diagnostic still reports
+the level delta and abrupt-boundary measurement. Chapter-integrated loudness
+normalization remains the only automatic gain stage; local boundary gain is not
+changed without repeatable listening evidence.
 
 Loudness normalization is chapter-integrated. The peak ceiling uses an oversampled true-peak estimate. The optional noise gate uses asymmetric attack/release smoothing and is disabled by default for generated audio.
 
@@ -196,6 +207,9 @@ When modifying or introducing new pipeline features, developers and AI agents MU
 
 3. **Text Coverage Invariant (`assert_script_covers_source`)**:
    - Any script generator tweak or dialogue tag handler MUST validate against `assert_script_covers_source(script, source_text)`. No source text characters or sentences may be dropped or modified.
+   - Dialogue tags remain narrator-owned. If they are tightly coupled to a
+     quote, use `utterance_group_id`; do not merge their text into a character
+     line. A grouping-policy change must invalidate the script fingerprint.
 
 4. **Acoustic Similarity Verification**:
    - Voice prompt similarity MUST filter out template boilerplate words (`"clearly adult speaker"`, `"maintain vocal identity..."`) to prevent false similarity warnings. Acoustic evaluation uses the Qwen speaker encoder plus the model-independent normalized log-spectrogram diagnostic in `compute_audio_similarity`.

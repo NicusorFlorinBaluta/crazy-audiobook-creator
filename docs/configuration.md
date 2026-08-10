@@ -171,7 +171,10 @@ while reducing four-chapter loudness spread from 2.022 LU to 0.032 LU. The
 noise gate is normally disabled for synthesized audio; if enabled, threshold,
 attack, and release control its envelope.
 
-Only adjacent, pause-free segments are crossfaded. Output defaults to mono 44.1 kHz, 16-bit chapter WAVs.
+Only adjacent, pause-free segments are crossfaded. A dialogue/tag pair sharing
+an `utterance_group_id` is joined at zero gap without crossfade so the narrator
+tag remains a separate voice without sounding like an unrelated turn. Output
+defaults to mono 44.1 kHz, 16-bit chapter WAVs.
 
 ### `export`
 

@@ -1817,6 +1817,7 @@ class Pipeline:
                     file=f"{project_id}/segments/{line.line_id}.wav",
                     pause_before_ms=line.pause_before_ms,
                     pause_after_ms=line.pause_after_ms,
+                    utterance_group_id=line.utterance_group_id,
                 )
                 for line in chapter_script.lines
             ]
@@ -2354,6 +2355,7 @@ class Pipeline:
                                 ),
                                 pause_before_ms=line.pause_before_ms,
                                 pause_after_ms=line.pause_after_ms,
+                                utterance_group_id=line.utterance_group_id,
                             )
                             for line in chapter.lines
                         ],

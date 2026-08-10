@@ -77,11 +77,21 @@ class AudioAssembler:
         previous_was_audio = False
         previous_audio: np.ndarray | None = None
         previous_line_id = ""
+        previous_utterance_group_id: str | None = None
         for i, segment in enumerate(segments):
+            utterance_group_id = getattr(segment, "utterance_group_id", None)
+            same_utterance_group = (
+                utterance_group_id is not None
+                and utterance_group_id == previous_utterance_group_id
+            )
             # One timing owner: adjacent pause directives are combined with
             # max(), never added together. Chapter edges are owned here.
             pause_before = getattr(segment, "pause_before_ms", 0)
-            gap_before = 0 if i == 0 else max(previous_pause_after, pause_before)
+            gap_before = (
+                0
+                if i == 0 or same_utterance_group
+                else max(previous_pause_after, pause_before)
+            )
             if gap_before > 0:
                 parts.append(self._silence(gap_before))
                 previous_was_audio = False
@@ -109,7 +119,6 @@ class AudioAssembler:
                     logger.warning("librosa not available for resampling")
 
             audio = audio.astype(np.float32)
-
             if previous_audio is not None:
                 diagnostic = self._join_diagnostic(
                     previous_line_id=previous_line_id,
@@ -118,12 +127,19 @@ class AudioAssembler:
                     current=audio,
                     gap_ms=gap_before,
                 )
+                diagnostic["utterance_group_id"] = utterance_group_id
+                diagnostic["crossfade_applied"] = bool(
+                    self.crossfade_ms > 0
+                    and previous_was_audio
+                    and not same_utterance_group
+                )
                 join_diagnostics.append(diagnostic)
 
             # Cross-fade with previous segment
             if (
                 self.crossfade_ms > 0
                 and previous_was_audio
+                and not same_utterance_group
                 and len(parts) > 0
                 and len(parts[-1]) > 0
             ):
@@ -134,6 +150,7 @@ class AudioAssembler:
             previous_pause_after = getattr(segment, "pause_after_ms", 500)
             previous_audio = audio.copy()
             previous_line_id = str(getattr(segment, "line_id", i))
+            previous_utterance_group_id = utterance_group_id
 
         # The final script pause and chapter outro are alternatives, not
         # cumulative delays.

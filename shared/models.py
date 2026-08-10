@@ -183,6 +183,14 @@ class ScriptLine(BaseModel):
         le=5000,
         description="Silence after this segment (ms)",
     )
+    utterance_group_id: str | None = Field(
+        default=None,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
+        description=(
+            "Optional ID linking separately synthesized speaker turns that should "
+            "be mastered as one tightly connected utterance"
+        ),
+    )
     source_fragment_id: int | None = Field(
         default=None,
         ge=0,
@@ -522,6 +530,7 @@ class MasterSegmentInfo(BaseModel):
     file: str
     pause_before_ms: int = 0
     pause_after_ms: int = 500
+    utterance_group_id: str | None = None
 
 
 class MasteringConfig(BaseModel):

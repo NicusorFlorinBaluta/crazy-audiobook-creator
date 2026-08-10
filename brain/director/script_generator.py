@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from brain.director.ollama_client import OllamaClient
-from shared.constants import CHUNK_OVERLAP_WORDS, CHUNK_SIZE_WORDS
+from shared.constants import CHUNK_OVERLAP_WORDS, CHUNK_SIZE_WORDS, Gender
 from shared.artifacts import (
     assert_script_covers_source,
     atomic_write_json,
@@ -191,7 +191,7 @@ class ScriptGenerator:
             prompt_text=(
                 _SYSTEM_PROMPT
                 + _USER_PROMPT
-                + "\nGROUPING_POLICY=prosody-compatible-v2"
+                + "\nGROUPING_POLICY=narrator-tag-utterance-groups-v3"
             ),
             chunk_size_words=self.chunk_size_words,
             group_utterances=self.group_utterances,
@@ -471,6 +471,7 @@ class ScriptGenerator:
                     candidate,
                     fragments,
                     allowed_speakers,
+                    registry=registry,
                     id_offset=id_offset,
                     confidence_threshold=self.speaker_confidence_threshold,
                 )
@@ -769,6 +770,7 @@ class ScriptGenerator:
         fragments: list[SourceFragment],
         allowed_speakers: set[str],
         *,
+        registry: CharacterRegistry | None = None,
         id_offset: int = 0,
         confidence_threshold: float = 0.55,
     ) -> None:
@@ -788,6 +790,19 @@ class ScriptGenerator:
                 raise ValueError(
                     f"Fragment {id_offset + i} uses unknown speaker '{speaker}'"
                 )
+            next_text = fragments[i + 1].text if i + 1 < len(fragments) else ""
+            if ScriptGenerator._is_pure_dialogue_tag(next_text):
+                if speaker == "narrator":
+                    raise ValueError(
+                        f"Fragment {id_offset + i} is spoken dialogue followed by "
+                        "a dialogue tag but is assigned to narrator"
+                    )
+                ScriptGenerator._validate_dialogue_tag_attribution(
+                    speaker,
+                    next_text,
+                    registry,
+                    id_offset + i,
+                )
             confidence = metadata_map.get(i, {}).get("speaker_confidence")
             if confidence is None:
                 raise ValueError(
@@ -806,6 +821,73 @@ class ScriptGenerator:
                         f"low confidence ({parsed_confidence:.2f}); re-evaluate "
                         "the dialogue using source evidence"
                     )
+
+    @staticmethod
+    def _validate_dialogue_tag_attribution(
+        speaker: str,
+        tag_text: str,
+        registry: CharacterRegistry | None,
+        fragment_id: int,
+    ) -> None:
+        """Reject tag evidence that deterministically contradicts a speaker."""
+        if registry is None:
+            return
+        character = registry.characters.get(speaker)
+        if character is None:
+            return
+
+        tag = tag_text.casefold()
+        pronoun_gender = None
+        if re.search(r"\bshe\b", tag):
+            pronoun_gender = Gender.FEMALE
+        elif re.search(r"\bhe\b", tag):
+            pronoun_gender = Gender.MALE
+        if (
+            pronoun_gender is not None
+            and character.gender in (Gender.MALE, Gender.FEMALE)
+            and character.gender != pronoun_gender
+        ):
+            raise ValueError(
+                f"Fragment {fragment_id} assigns '{speaker}', but its attached "
+                f"dialogue tag uses '{pronoun_gender.value}' pronouns"
+            )
+
+        speech_verbs = (
+            r"said|asked|replied|whispered|shouted|murmured|exclaimed|"
+            r"continued|agreed|added|called|demanded|warned|answered|cried"
+        )
+        named_matches: list[tuple[int, str]] = []
+        for character_id, candidate in registry.characters.items():
+            if character_id == "narrator":
+                continue
+            names = {
+                value.strip().casefold().replace("_", " ")
+                for value in [character_id, candidate.name, *candidate.aliases]
+                if value.strip()
+            }
+            for name in names:
+                named_tag = re.search(
+                    r"\b" + re.escape(name) + r"\b(?:\s+\w+){0,2}\s+(?:"
+                    + speech_verbs
+                    + r")\b",
+                    tag,
+                )
+                if named_tag:
+                    named_matches.append((len(name), character_id))
+
+        if named_matches:
+            longest = max(length for length, _ in named_matches)
+            named_speakers = {
+                character_id
+                for length, character_id in named_matches
+                if length == longest
+            }
+            if len(named_speakers) == 1 and speaker not in named_speakers:
+                named_speaker = next(iter(named_speakers))
+                raise ValueError(
+                    f"Fragment {fragment_id} assigns '{speaker}', but its attached "
+                    f"dialogue tag names '{named_speaker}'"
+                )
 
     @staticmethod
     def _is_pure_dialogue_tag(text: str) -> bool:
@@ -1123,11 +1205,6 @@ class ScriptGenerator:
                 line.speaker == previous.speaker
                 and (line.voice_id or line.speaker) == (previous.voice_id or previous.speaker)
             )
-            dialogue_tag_merge = (
-                previous.speaker != "narrator"
-                and line.speaker == "narrator"
-                and ScriptGenerator._is_pure_dialogue_tag(line.text)
-            )
             speed_span = max(item.speed for item in [*bucket, line]) - min(
                 item.speed for item in [*bucket, line]
             )
@@ -1135,11 +1212,10 @@ class ScriptGenerator:
                 prosody_family(item.emotion) for item in [*bucket, line]
             }
             compatible_prosody = (
-                dialogue_tag_merge
-                or (len(prosody_families) == 1 and speed_span <= 0.12)
+                len(prosody_families) == 1 and speed_span <= 0.12
             )
             can_merge = (
-                (same_speaker or dialogue_tag_merge)
+                same_speaker
                 and compatible_prosody
                 and same_fx
                 and "\n\n" not in between
@@ -1150,6 +1226,29 @@ class ScriptGenerator:
                 flush()
             bucket.append(line)
         flush()
+        # Keep short narrator tags in the narrator voice while marking the
+        # quote/tag boundary as one tightly connected utterance. This metadata
+        # also tells mastering not to crossfade the two independently rendered
+        # voices.
+        for idx in range(len(grouped) - 1):
+            dialogue = grouped[idx]
+            narration = grouped[idx + 1]
+            between = ""
+            if dialogue.source_end is not None and narration.source_start is not None:
+                between = source_text[dialogue.source_end:narration.source_start]
+            if (
+                dialogue.speaker != "narrator"
+                and narration.speaker == "narrator"
+                and ScriptGenerator._is_pure_dialogue_tag(narration.text)
+                and "\n\n" not in between
+                and "\r\n\r\n" not in between
+            ):
+                group_id = f"utterance_{dialogue.line_id}"
+                dialogue.utterance_group_id = group_id
+                narration.utterance_group_id = group_id
+                dialogue.pause_after_ms = 0
+                narration.pause_before_ms = 0
+
         # Apply dynamic contextual pauses across grouped lines
         for idx in range(len(grouped)):
             curr_line = grouped[idx]
@@ -1159,7 +1258,14 @@ class ScriptGenerator:
                 if curr_line.source_end is not None and next_line.source_start is not None:
                     between = source_text[curr_line.source_end:next_line.source_start]
 
-                if "\n\n" in between or "\r\n\r\n" in between:
+                same_utterance_group = (
+                    curr_line.utterance_group_id is not None
+                    and curr_line.utterance_group_id == next_line.utterance_group_id
+                )
+                if same_utterance_group:
+                    curr_line.pause_after_ms = 0
+                    next_line.pause_before_ms = 0
+                elif "\n\n" in between or "\r\n\r\n" in between:
                     curr_line.pause_after_ms = 900
                 elif curr_line.speaker != next_line.speaker:
                     if curr_line.speaker != "narrator" and next_line.speaker == "narrator":

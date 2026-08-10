@@ -47,7 +47,12 @@ The source `text`, fragment ID, and source span are restored from the immutable 
 
 ### Smart Hybrid Dialogue Attribution (Option D)
 - **Dialogue Fragment Rule**: Quoted text (`"..."`) is guaranteed character attribution. If the LLM returns `narrator` for a dialogue fragment (e.g. `"No,"`), automatic fallback resolution (`_resolve_dialogue_speaker`) infers the character speaker from adjacent tags or context.
-- **Dialogue Tag Merging**: Pure dialogue tags (`"No," Frond said.`) immediately adjacent to character speech are merged directly into the character's utterance line (`frond | "No," Frond said.`). This eliminates 2-word narrator ping-pong while preserving **100.00% exact source coverage** without dropping a single word.
+- **Dialogue Tag Grouping**: Spoken dialogue and an immediately attached short
+  narrator tag remain separate synthesis lines and retain their correct voices.
+  Both lines receive one `utterance_group_id`, so mastering joins them with no
+  added pause and no crossfade. Same-speaker batching still handles ordinary
+  adjacent narration and dialogue, avoiding unnecessary TTS fragmentation while
+  preserving **100.00% exact source coverage**.
 - **Minor Character Mapping**: Unnamed background speakers (e.g., `"a little girl"`, `"the boy"`) receive dedicated minor voice profiles (`child_female`, `child_male`, `minor_female`, `minor_male`) rather than collapsing into the Narrator.
 - **Gender Normalization**: Register words like `"woman"`, `"female (elderly)"`, `"loremother"` are normalized to `Gender.FEMALE`, and `"boy"`, `"man"` map to `Gender.MALE`.
 
@@ -59,6 +64,8 @@ A metadata response is accepted only when:
 - no IDs are missing, duplicated, negative, or out of range
 - non-dialogue fragments use `narrator`
 - dialogue speakers exist in the book-wide registry
+- an attached `he`/`she` tag does not contradict a known binary-gender speaker,
+  and an explicitly named tag does not name a different registered character
 - numeric values can be parsed and clamped to model bounds
 
 The generator retries an invalid metadata response. Repeated incompleteness fails the chapter instead of accepting partial output.

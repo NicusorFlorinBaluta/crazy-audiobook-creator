@@ -483,7 +483,9 @@ Adjacent-line grouping now requires a stable measured control envelope in
 addition to the existing speaker, voice, effects, paragraph, character, and
 word limits. Calm/reflective, urgent/angry, whispered, bright, and neutral
 families do not merge across one another, and a speed span above 0.12 forces a
-boundary. Pure dialogue tags retain their existing safe merge exception.
+boundary. The former cross-speaker dialogue-tag merge was retired after the
+2026-08-10 listening audit: a character quote and narrator tag now remain
+separate lines linked by a zero-gap, no-crossfade utterance group.
 
 This prevents a long neutral chunk from absorbing a short shout or whispered
 transition merely because the same narrator reads both. Exact source offsets,

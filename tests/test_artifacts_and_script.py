@@ -294,6 +294,90 @@ class ScriptFidelityTests(unittest.TestCase):
             {"narrator"},
         )
 
+    def test_dialogue_tag_gender_contradiction_is_rejected(self) -> None:
+        source = '"You\'re bored, I suppose," she said. Then she paused.'
+        fragments = ScriptGenerator._split_into_fragment_spans(source)
+        registry = CharacterRegistry(
+            book_title="The Blind Owl",
+            book_author="Test",
+            characters={
+                "dusk": Character(
+                    id="dusk",
+                    name="Dusk",
+                    gender=Gender.MALE,
+                    age_range="adult",
+                    voice_description="low voice",
+                ),
+                "vathi": Character(
+                    id="vathi",
+                    name="Vathi",
+                    gender=Gender.FEMALE,
+                    age_range="adult",
+                    voice_description="clear voice",
+                ),
+            },
+        )
+        raw = {
+            "lines": [
+                {
+                    "id": index,
+                    "speaker": "dusk" if index == 0 else "narrator",
+                    "speaker_confidence": 0.95,
+                }
+                for index in range(len(fragments))
+            ]
+        }
+
+        with self.assertRaisesRegex(ValueError, "female.*pronouns"):
+            ScriptGenerator._validate_metadata_speakers(
+                raw,
+                fragments,
+                {"narrator", "dusk", "vathi"},
+                registry=registry,
+            )
+
+        raw["lines"][0]["speaker"] = "vathi"
+        ScriptGenerator._validate_metadata_speakers(
+            raw,
+            fragments,
+            {"narrator", "dusk", "vathi"},
+            registry=registry,
+        )
+
+    def test_explicit_named_dialogue_tag_contradiction_is_rejected(self) -> None:
+        source = '"Wait," Vathi quietly said.'
+        fragments = ScriptGenerator._split_into_fragment_spans(source)
+        registry = CharacterRegistry(
+            book_title="Test",
+            book_author="Author",
+            characters={
+                character_id: Character(
+                    id=character_id,
+                    name=character_id.title(),
+                    gender=gender,
+                    age_range="adult",
+                    voice_description="test voice",
+                )
+                for character_id, gender in (
+                    ("dusk", Gender.MALE),
+                    ("vathi", Gender.FEMALE),
+                )
+            },
+        )
+
+        with self.assertRaisesRegex(ValueError, "names 'vathi'"):
+            ScriptGenerator._validate_metadata_speakers(
+                {
+                    "lines": [
+                        {"id": 0, "speaker": "dusk", "speaker_confidence": 0.95},
+                        {"id": 1, "speaker": "narrator"},
+                    ]
+                },
+                fragments,
+                {"narrator", "dusk", "vathi"},
+                registry=registry,
+            )
+
     def test_voice_redesign_does_not_invalidate_script_fingerprint(self) -> None:
         chapter = ExtractedChapter(
             number=1,
@@ -508,6 +592,46 @@ class ScriptFidelityTests(unittest.TestCase):
         self.assertEqual(grouped.lines[0].text, "One sentence. Two sentences.")
         self.assertEqual(grouped.lines[0].source_fragment_ids, [0, 1])
         self.assertEqual(grouped.lines[1].text, "Three sentences.")
+        assert_script_covers_source(grouped, source)
+
+    def test_dialogue_tag_keeps_narrator_voice_in_tight_utterance_group(self) -> None:
+        source = '"You\'re bored, I suppose," she said. Then she paused. "Listen."'
+        fragments = ScriptGenerator._split_into_fragment_spans(source)
+        raw = {
+            "chapter_summary": "Vathi challenges Dusk.",
+            "lines": [
+                {
+                    "id": index,
+                    "speaker": "vathi" if index in (0, 3) else "narrator",
+                    "speaker_confidence": 0.95,
+                    "speaker_evidence": "Vathi is the active speaker.",
+                    "emotion": "controlled",
+                    "speed": 1.0,
+                    "pause_before_ms": 0,
+                    "pause_after_ms": 300,
+                }
+                for index in range(len(fragments))
+            ],
+        }
+        chapter = ScriptGenerator._parse_script_chapter(
+            raw,
+            8,
+            "Eight",
+            fragments,
+            allowed_speakers={"narrator", "vathi"},
+        )
+
+        grouped = ScriptGenerator(ollama=None)._group_adjacent_utterances(
+            chapter,
+            source,
+        )
+
+        self.assertEqual([line.speaker for line in grouped.lines], ["vathi", "narrator", "vathi"])
+        self.assertEqual(grouped.lines[1].text, "she said. Then she paused.")
+        self.assertEqual(grouped.lines[0].utterance_group_id, "utterance_ch08_0000")
+        self.assertEqual(grouped.lines[1].utterance_group_id, "utterance_ch08_0000")
+        self.assertEqual(grouped.lines[0].pause_after_ms, 0)
+        self.assertEqual(grouped.lines[1].pause_before_ms, 0)
         assert_script_covers_source(grouped, source)
 
     def test_adaptive_grouping_keeps_expressive_lines_shorter(self) -> None:

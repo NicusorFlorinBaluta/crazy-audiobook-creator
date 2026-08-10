@@ -71,6 +71,14 @@ The cache is keyed by line identity but validated by dependencies. Editing one l
 
 ## Speaker consistency
 
+Before metadata is accepted, deterministic evidence rejects contradictions
+that do not require literary inference: a known male speaker cannot own a quote
+whose attached tag says `she`, a known female speaker cannot own one tagged
+`he`, and an explicitly named tag cannot name a different registered
+character. Unknown/nonbinary metadata is not guessed from pronouns. These
+checks request a corrected metadata pass; they do not choose among multiple
+plausible characters.
+
 Before loading Whisper, the voice service uses Qwen's speaker encoder to
 compare generated segments to their reference voices. TTS is unloaded before
 Whisper unless `keep_tts_and_whisper_resident` is explicitly enabled from a
@@ -100,7 +108,12 @@ The generated manifest then captures the exact order and dependencies. Mastering
 
 ## Mastering checks
 
-The assembler refuses missing/empty segments. It uses one pause at each boundary—the larger adjacent request—to prevent double-counting. Crossfades are restricted to pause-free adjacency.
+The assembler refuses missing/empty segments. It uses one pause at each
+boundary—the larger adjacent request—to prevent double-counting. Crossfades
+are restricted to pause-free adjacency. Dialogue/tag lines sharing an
+`utterance_group_id` are an explicit exception: they join at zero gap without
+crossfade, remain separate voices, and retain join diagnostics for listening
+review.
 
 The normalizer:
 
