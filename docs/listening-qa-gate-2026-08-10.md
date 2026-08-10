@@ -105,3 +105,27 @@ real quote/tag group: listen for natural continuity, correct voice ownership,
 and any zero-gap click or level jump. Do not tune local gain or crossfade unless
 multiple fresh groups expose the same repeatable defect. A full-book run remains
 reserved for the exact release candidate.
+
+## Fresh quote/tag audio audit — approved
+
+Candidate `e58caee` generated the Vathi quote and narrator tag separately using
+the approved `vathi` and `narrator_male` references, then mastered them as one
+zero-gap, no-crossfade utterance group. The comparison control used a 400 ms
+pause.
+
+Automated evidence:
+
+- Vathi, narrator, and assembled-candidate WER: `0.0`;
+- speaker similarity: Vathi `0.98524`, narrator `0.98045`;
+- join loudness delta: `3.19 dB`;
+- zero-gap sample jump: `0.0`; crossfade applied: `false`;
+- mastered candidate: `-19.00 LUFS`, `-1.82 dBFS` peak;
+- TTS load `22.95 s`; generations `14.56 s` and `19.61 s`; Whisper load
+  `9.31 s`;
+- intensity post-processing and phase-vocoder fallback were disabled;
+- the external GPU process and model ports were released after completion.
+
+Human disposition: both individual voices sound correct, candidate 3 sounds
+more natural than the 400 ms control, and no click or level jump is audible.
+The quote/tag listening gate is **approved**. No boundary gain or crossfade
+tuning is warranted from this evidence.
