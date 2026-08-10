@@ -84,6 +84,17 @@ def speaking_character_ids(script_chapters: Iterable[Any]) -> set[str]:
     }
 
 
+def required_voice_character_ids(
+    script_chapters: Iterable[Any],
+    registry: CharacterRegistry,
+) -> set[str]:
+    """Return speaking roles plus narrator when mastering needs announcements."""
+    required = speaking_character_ids(script_chapters)
+    if "narrator" in registry.characters:
+        required.add("narrator")
+    return required
+
+
 def compile_effective_voice_prompt(
     *,
     gender: Gender | str,
@@ -118,7 +129,8 @@ def compile_effective_voice_prompt(
     if any(marker.lower() in description.lower() for marker in compiled_markers):
         description = re.sub(
             r"^(?:A clearly (?:female|male) .*? speaker|"
-            r"An androgynous or non-gendered .*? speaker)\.\s*",
+            r"An androgynous or non-gendered .*? speaker|"
+            r"(?:female|male|androgynous) speaker, .*? age)\.\s*",
             "",
             description,
             flags=re.IGNORECASE,
@@ -147,12 +159,38 @@ def compile_effective_voice_prompt(
             "description before recompilation."
         )
 
+    register_repairs: dict[str, dict[str, str]] = {
+        Gender.FEMALE.value: {
+            "baritone": "contralto",
+            "bass": "low contralto",
+            "tenor": "alto",
+        },
+        Gender.MALE.value: {
+            "contralto": "baritone",
+            "soprano": "tenor",
+            "alto": "tenor",
+        },
+    }
+    for contradictory, replacement in register_repairs.get(gender_value, {}).items():
+        repaired, count = re.subn(
+            rf"\b{re.escape(contradictory)}\b",
+            replacement,
+            description,
+            flags=re.IGNORECASE,
+        )
+        if count:
+            description = repaired
+            warnings.append(
+                f"Contradictory {contradictory} register wording was repaired "
+                f"to {replacement}."
+            )
+
     if gender_value == Gender.FEMALE.value:
-        identity = f"female speaker, {age} age"
+        identity = f"A clearly female {age} speaker"
     elif gender_value == Gender.MALE.value:
-        identity = f"male speaker, {age} age"
+        identity = f"A clearly male {age} speaker"
     else:
-        identity = f"androgynous speaker, {age} age"
+        identity = f"An androgynous or non-gendered {age} speaker"
 
     if not description:
         description = "clear mid-range pitch, natural resonance, and measured pacing"

@@ -11,8 +11,20 @@ class ProsodyScorer:
     Flags potential monotone or flat deliveries for review.
     """
     
-    def __init__(self, sample_rate: int = 24000):
+    def __init__(
+        self,
+        sample_rate: int = 24000,
+        *,
+        enabled: bool = True,
+        min_duration_seconds: float = 1.0,
+        pitch_cv_threshold: float = 0.06,
+        dynamic_range_threshold: float = 4.0,
+    ):
         self.sample_rate = sample_rate
+        self.enabled = enabled
+        self.min_duration_seconds = max(0.0, float(min_duration_seconds))
+        self.pitch_cv_threshold = max(0.0, float(pitch_cv_threshold))
+        self.dynamic_range_threshold = max(0.0, float(dynamic_range_threshold))
 
     def analyze(self, audio_path: str | Path, text: str) -> dict[str, float | str | bool]:
         """
@@ -20,6 +32,8 @@ class ProsodyScorer:
         Returns a dictionary of metrics and flags.
         """
         path = Path(audio_path)
+        if not self.enabled:
+            return {"monotone_warning": False, "reason": "Prosody analysis disabled"}
         if not path.exists():
             return {"error": "File not found", "monotone_warning": False}
             
@@ -31,7 +45,7 @@ class ProsodyScorer:
                 
             # If audio is too short, skip
             duration = len(y) / sr
-            if duration < 1.0:
+            if duration < self.min_duration_seconds:
                 return {"monotone_warning": False, "reason": "Too short for analysis"}
                 
             # 1. Pitch Variance (F0 Standard Deviation)
@@ -67,7 +81,10 @@ class ProsodyScorer:
             # Heuristics for "monotone" delivery
             # These thresholds are empirical and should be tuned.
             # A low pitch coefficient of variation (< 0.05) and low dynamic range (< 5.0) often means flat.
-            is_monotone = (pitch_cv < 0.06) and (dynamic_range < 4.0)
+            is_monotone = (
+                pitch_cv < self.pitch_cv_threshold
+                and dynamic_range < self.dynamic_range_threshold
+            )
             
             return {
                 "pitch_std_hz": pitch_std,

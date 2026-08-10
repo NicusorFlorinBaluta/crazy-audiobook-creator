@@ -124,21 +124,25 @@ class AudioAnalyzer:
         )
 
         return {
-            "duration_seconds": duration,
-            "expected_duration_seconds": expected_duration,
-            "duration_deviation": duration_deviation,
-            "duration_ok": duration_ok and not pacing_anomaly,
-            "peak_dbfs": peak_dbfs,
-            "rms_dbfs": rms_dbfs,
-            "clipping_detected": clipping_detected,
-            "noise_floor_db": noise_floor_db,
-            "has_long_silence": has_long_silence,
-            "pacing_anomaly": pacing_anomaly,
-            "pitch_median": pitch_median,
-            "cps": cps,
-            "artifact_score": artifact_score,
-            "duration_score": duration_score,
-            "sample_rate": sample_rate,
+            # These metrics are embedded in QualityResult.metrics (dict[str,
+            # Any]), where Pydantic intentionally does not coerce NumPy scalar
+            # types. Keep the analyzer boundary JSON-native so a completed
+            # chapter cannot fail while serializing its response.
+            "duration_seconds": float(duration),
+            "expected_duration_seconds": float(expected_duration),
+            "duration_deviation": float(duration_deviation),
+            "duration_ok": bool(duration_ok and not pacing_anomaly),
+            "peak_dbfs": float(peak_dbfs),
+            "rms_dbfs": float(rms_dbfs),
+            "clipping_detected": bool(clipping_detected),
+            "noise_floor_db": float(noise_floor_db),
+            "has_long_silence": bool(has_long_silence),
+            "pacing_anomaly": bool(pacing_anomaly),
+            "pitch_median": float(pitch_median),
+            "cps": float(cps),
+            "artifact_score": float(artifact_score),
+            "duration_score": float(duration_score),
+            "sample_rate": int(sample_rate),
         }
 
     @staticmethod

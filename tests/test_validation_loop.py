@@ -203,6 +203,32 @@ class ValidationLoopTests(unittest.TestCase):
         self.assertEqual(fx, line.voice_fx)
         self.assertIsNone(reason)
 
+    def test_spoken_text_is_also_used_as_validation_reference(self) -> None:
+        class SpokenTextWhisper(FakeWhisper):
+            def transcribe(self, audio_file: str) -> str:
+                return "Pah-chee arrived."
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            loop, _ = self.make_loop(root)
+            loop.whisper = SpokenTextWhisper()
+            response = loop.process_chapter(
+                project_id="book",
+                chapter_number=1,
+                lines=[
+                    ScriptLine(
+                        line_id="ch01_0000",
+                        speaker="narrator",
+                        text="Patji arrived.",
+                        spoken_text="Pah-chee arrived.",
+                    )
+                ],
+                workspace=root,
+            )
+
+        self.assertEqual(response.status, "success")
+        self.assertEqual(response.failed_line_ids, [])
+
     def test_risk_aware_short_shout_prefers_clear_emphatic_delivery(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             loop, _ = self.make_loop(Path(directory))
@@ -590,7 +616,15 @@ class ValidationLoopTests(unittest.TestCase):
                 ["ch01_0000", "ch01_0001"],
             )
             self.assertEqual(
-                [message["line_id"] for message in progress],
+                [
+                    message["line_id"]
+                    for message in progress
+                    if message.get("phase") == "synthesis"
+                ],
+                ["ch01_0000", "ch01_0001"],
+            )
+            self.assertEqual(
+                [message["line_id"] for message in progress if message.get("phase") == "validation"],
                 ["ch01_0000", "ch01_0001"],
             )
             self.assertEqual(engine.calls, ["hello"])
@@ -670,6 +704,56 @@ class ValidationLoopTests(unittest.TestCase):
             self.assertEqual(engine.calls, synthesis_calls)
             self.assertEqual(whisper.transcriptions, 2)
 
+            fourth = loop.process_chapter(
+                project_id="book",
+                chapter_number=1,
+                lines=[line],
+                workspace=root,
+                validation_terms={"hello"},
+                validation_revision="manual-reset-1",
+            )
+            self.assertEqual(fourth.validation_cache_hits, 0)
+            self.assertEqual(fourth.validation_cache_misses, 1)
+            self.assertEqual(engine.calls, synthesis_calls)
+            self.assertEqual(whisper.transcriptions, 3)
+
+    def test_resume_reuses_line_checkpointed_before_callback_crash(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reference = root / "reference.wav"
+            sf.write(reference, np.ones(2400, dtype=np.float32) * 0.01, 24000)
+            engine = FakeEngine()
+            store = EmbeddingStore(root / "cache.db")
+            loop = ValidationLoop(
+                whisper=FakeWhisper(), analyzer=FakeAnalyzer(), engine=engine,
+                library=FakeLibrary(reference), embedding_store=store,
+            )
+            lines = [
+                ScriptLine(line_id="ch01_0000", speaker="narrator", text="hello"),
+                ScriptLine(line_id="ch01_0001", speaker="narrator", text="hello"),
+            ]
+
+            def crash_after_first_checkpoint(message: dict) -> None:
+                if message.get("phase") == "validation":
+                    raise RuntimeError("injected callback crash")
+
+            with self.assertRaisesRegex(RuntimeError, "injected callback crash"):
+                loop.process_chapter(
+                    project_id="book", chapter_number=1, lines=lines,
+                    workspace=root, progress_callback=crash_after_first_checkpoint,
+                )
+
+            response = loop.process_chapter(
+                project_id="book", chapter_number=1, lines=lines, workspace=root,
+            )
+
+            self.assertEqual(response.status, "success")
+            self.assertEqual(response.synthesis_cache_hits, 2)
+            self.assertEqual(response.synthesis_cache_misses, 0)
+            self.assertEqual(response.validation_cache_hits, 1)
+            self.assertEqual(response.validation_cache_misses, 1)
+            self.assertEqual(engine.calls, ["hello", "hello"])
+
     def test_perfect_transcript_with_soft_duration_warning_is_accepted(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -699,6 +783,29 @@ class ValidationLoopTests(unittest.TestCase):
                 final.acceptance_reason,
                 "accepted_soft_audio_warning",
             )
+
+    def test_chapter_boundary_defers_nonresident_tts_reload(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            loop, engine = self.make_loop(root)
+
+            response = loop.process_chapter(
+                project_id="book",
+                chapter_number=1,
+                lines=[
+                    ScriptLine(
+                        line_id="ch01_0000",
+                        speaker="narrator",
+                        text="hello",
+                    )
+                ],
+                workspace=root,
+            )
+
+        self.assertEqual(response.status, "success")
+        self.assertEqual(engine.unload_calls, 1)
+        self.assertEqual(engine.load_calls, 0)
+        self.assertFalse(engine.is_loaded)
 
     def test_co_residency_is_released_at_chapter_boundary(self) -> None:
         class WrongWhisper(FakeWhisper):

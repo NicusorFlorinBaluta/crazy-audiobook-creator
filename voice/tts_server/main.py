@@ -57,6 +57,7 @@ from shared.models import (
     VoiceHealthResponse,
     ChapterQualityReport,
 )
+from shared.config_validation import validate_voice_config
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +78,8 @@ last_activity: float = 0.0
 active_gpu_jobs: int = 0
 server_event_loop: asyncio.AbstractEventLoop | None = None
 gpu_job_lock = threading.RLock()
-cancelled_projects: set[str] = set()
+active_project_runs: dict[str, threading.Event] = {}
+run_state_lock = threading.Lock()
 
 # WebSocket connections for progress updates
 ws_connections: list[WebSocket] = []
@@ -187,7 +189,7 @@ def load_config(config_path: str = "voice/config.yaml") -> dict[str, Any]:
     path = Path(config_path)
     if path.exists():
         with open(path, "r", encoding="utf-8") as f:
-            return yaml.safe_load(f) or {}
+            return validate_voice_config(yaml.safe_load(f) or {})
     logger.warning("Config not found: %s — using defaults", path)
     return {}
 
@@ -225,12 +227,15 @@ async def lifespan(app: FastAPI):
         max_text_length=tts_cfg.get("max_text_length", 500),
         language=tts_cfg.get("language", "English"),
         attn_implementation=tts_cfg.get("attn_implementation", "sdpa"),
+        post_processing_config=tts_cfg.get("post_processing", {}),
     )
 
     val_cfg = config.get("validation", {})
     whisper_val = WhisperValidator(
         model_name=val_cfg.get("whisper_model", "large-v3"),
         device=val_cfg.get("whisper_device", "auto"),
+        backend=val_cfg.get("whisper_backend", "auto"),
+        vad_filter=val_cfg.get("whisper_vad_filter", False),
     )
 
     storage_cfg = config.get("storage", {})
@@ -281,6 +286,8 @@ async def lifespan(app: FastAPI):
         risk_aware_first_attempt=val_cfg.get(
             "risk_aware_first_attempt", False
         ),
+        emotion_wer_allowance=val_cfg.get("emotion_wer_allowance", 0.0),
+        prosody_config=val_cfg.get("prosody", {}),
     )
 
     master_cfg = config.get("mastering", {})
@@ -301,9 +308,10 @@ async def lifespan(app: FastAPI):
     )
     exporter = M4BExporter()
 
-    # Load the TTS model
-    logger.info("Loading TTS model...")
-    engine.load()
+    # Models are loaded lazily by the operation that needs them.  In
+    # particular, eagerly loading Qwen Base here would make the bootstrap
+    # endpoint briefly co-resident with the VoiceDesign helper process.
+    logger.info("Voice server initialized; TTS models will load on demand")
 
     async def vram_cleanup_loop():
         """Unload models after a configurable idle period."""
@@ -387,8 +395,20 @@ async def health_check() -> VoiceHealthResponse:
         gpu=engine.get_gpu_name() if engine else "Unknown",
         vram_total_gb=vram.get("vram_total_gb", 0.0),
         vram_used_gb=vram.get("vram_used_gb", 0.0),
+        vram_reserved_gb=vram.get("vram_reserved_gb", 0.0),
+        vram_peak_allocated_gb=vram.get("vram_peak_allocated_gb", 0.0),
+        vram_peak_reserved_gb=vram.get("vram_peak_reserved_gb", 0.0),
         model_loaded=engine.model_name if engine and engine.is_loaded else "none",
         attention_backend=engine.attn_implementation if engine else "",
+        validator_backend=(
+            validator.whisper.backend if validator else ""
+        ),
+        validator_model=(
+            validator.whisper.model_name if validator else ""
+        ),
+        validator_vad_filter=(
+            bool(validator.whisper.vad_filter) if validator else False
+        ),
         uptime_seconds=time.time() - start_time,
     )
 
@@ -412,7 +432,6 @@ def bootstrap_voices(request: BootstrapVoicesRequest) -> BootstrapVoicesResponse
         finally:
             if designer.validator and designer.validator.is_loaded:
                 designer.validator.unload()
-            engine.load()
 
 
 @app.post("/voices/regenerate")
@@ -441,8 +460,6 @@ def regenerate_voice(
         finally:
             if designer.validator and designer.validator.is_loaded:
                 designer.validator.unload()
-            if engine:
-                engine.load()
     return {"status": "success", "result": result.model_dump()}
 
 
@@ -506,17 +523,6 @@ def generate_line(request: GenerateLineRequest) -> GenerateLineResponse:
         output_path.name,
     )
 
-
-    duration = len(audio) / engine.sample_rate
-    elapsed = time.time() - t0
-    logger.info(
-        "[VoiceServer] Line %s completed: audio_duration=%.2fs, gen_time=%.2fs → %s",
-        request.line.line_id,
-        duration,
-        elapsed,
-        output_path.name,
-    )
-
     return GenerateLineResponse(
         status="success",
         line_id=request.line.line_id,
@@ -544,7 +550,14 @@ def generate_chapter(request: GenerateChapterRequest, fast_req: Request):
     workspace = _workspace()
     _safe_workspace_project(request.project_id)
     _enforce_workspace_quota()
-    cancelled_projects.discard(request.project_id)
+    cancellation = threading.Event()
+    with run_state_lock:
+        if request.project_id in active_project_runs:
+            raise HTTPException(
+                status_code=409,
+                detail="A chapter request is already active for this project",
+            )
+        active_project_runs[request.project_id] = cancellation
 
     import queue
     import json
@@ -575,8 +588,10 @@ def generate_chapter(request: GenerateChapterRequest, fast_req: Request):
                     auto_retry=request.auto_retry,
                     max_retries=request.max_retries,
                     progress_callback=_stream_progress,
-                    cancel_check=lambda: request.project_id in cancelled_projects,
+                    cancel_check=cancellation.is_set,
                     validation_terms=set(request.validation_terms),
+                    validation_revision=request.validation_revision,
+                    language=request.language,
                 )
             if torch_module is not None:
                 try:
@@ -599,21 +614,28 @@ def generate_chapter(request: GenerateChapterRequest, fast_req: Request):
             logger.error("Generation error: %s", exc)
             q.put({"type": "error", "error": "exception", "detail": str(exc)})
         finally:
-            cancelled_projects.discard(request.project_id)
+            with run_state_lock:
+                if active_project_runs.get(request.project_id) is cancellation:
+                    active_project_runs.pop(request.project_id, None)
 
     threading.Thread(target=_worker, daemon=True).start()
 
     async def event_generator():
-        while True:
-            if await fast_req.is_disconnected():
-                break
-            try:
-                msg = await asyncio.to_thread(q.get, True, 1.0)
-                yield json.dumps(msg) + "\n"
-                if msg.get("type") in ("result", "error"):
+        try:
+            while True:
+                if await fast_req.is_disconnected():
+                    cancellation.set()
                     break
-            except queue.Empty:
-                yield "\n" # keepalive
+                try:
+                    msg = await asyncio.to_thread(q.get, True, 1.0)
+                    yield json.dumps(msg) + "\n"
+                    if msg.get("type") in ("result", "error"):
+                        break
+                except queue.Empty:
+                    yield "\n" # keepalive
+        finally:
+            if await fast_req.is_disconnected():
+                cancellation.set()
 
     return StreamingResponse(event_generator(), media_type="application/x-ndjson")
 
@@ -661,11 +683,17 @@ def master_chapter(request: MasterChapterRequest) -> MasterChapterResponse:
 
     announcement_audio = None
     if request.announce_chapter:
-        narrator_ref = library.get_voice_path(request.project_id, "narrator")
+        narrator_ref = library.get_voice_path(
+            request.project_id,
+            request.narrator_voice_id,
+        )
         if not narrator_ref.is_file():
             raise HTTPException(
                 status_code=422,
-                detail="Narrator voice is required for chapter announcements",
+                detail=(
+                    "Selected narrator voice is required for chapter "
+                    f"announcements: {request.narrator_voice_id}"
+                ),
             )
         announcement_text = request.chapter_title.strip() or (
             f"Chapter {request.chapter_number}"
@@ -675,7 +703,8 @@ def master_chapter(request: MasterChapterRequest) -> MasterChapterResponse:
                 text=announcement_text,
                 voice_reference_path=narrator_ref,
                 ref_text=library.get_voice_ref_text(
-                    request.project_id, "narrator"
+                    request.project_id,
+                    request.narrator_voice_id,
                 )
                 or "",
                 emotion_instruction="clear chapter announcement",
@@ -801,8 +830,14 @@ async def websocket_progress(websocket: WebSocket):
 @app.post("/cancel/{project_id}")
 async def cancel_project(project_id: str):
     """Request cooperative cancellation at the next segment boundary."""
-    cancelled_projects.add(project_id)
-    return {"status": "cancelling", "project_id": project_id}
+    with run_state_lock:
+        cancellation = active_project_runs.get(project_id)
+        if cancellation:
+            cancellation.set()
+    return {
+        "status": "cancelling" if cancellation else "idle",
+        "project_id": project_id,
+    }
 
 
 @app.post("/unload")

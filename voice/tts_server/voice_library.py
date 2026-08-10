@@ -101,6 +101,8 @@ class VoiceLibraryManager:
         if not resolved_file.is_relative_to(project_dir):
             raise ValueError("Voice reference is outside the project voice library")
         registry = self._load_registry(project_id)
+        previous = registry.get("voices", {}).get(character_id, {})
+        previous_path = Path(previous["file"]).resolve() if previous.get("file") else None
 
         registry["project_id"] = project_id
         registry.setdefault("created_at", datetime.now(timezone.utc).isoformat())
@@ -121,6 +123,8 @@ class VoiceLibraryManager:
         }
 
         self._save_registry(project_id, registry)
+        if previous_path and previous_path != resolved_file:
+            self._delete_unreferenced_artifact(project_id, previous_path, registry)
 
     def get_voice_info(self, project_id: str, character_id: str) -> dict[str, Any] | None:
         """Get info about a specific voice."""
@@ -141,16 +145,52 @@ class VoiceLibraryManager:
 
     def delete_voice(self, project_id: str, character_id: str) -> None:
         """Delete a voice reference clip and its registry entry."""
-        # Delete the audio file
         voice_path = self.get_voice_path(project_id, character_id)
-        if voice_path.exists():
-            voice_path.unlink()
-
-        # Remove from registry
         registry = self._load_registry(project_id)
         if character_id in registry.get("voices", {}):
             del registry["voices"][character_id]
             self._save_registry(project_id, registry)
+        self._delete_unreferenced_artifact(project_id, voice_path, registry)
+
+    def garbage_collect_project(self, project_id: str) -> list[str]:
+        """Remove superseded WAV/embedding pairs not referenced by the registry."""
+        project_dir = self._project_dir(project_id)
+        registry = self._load_registry(project_id)
+        referenced = {
+            Path(info["file"]).resolve()
+            for info in registry.get("voices", {}).values()
+            if info.get("file")
+        }
+        removed: list[str] = []
+        for audio_path in project_dir.glob("*.wav"):
+            if audio_path.resolve() in referenced:
+                continue
+            for artifact in (audio_path, audio_path.with_suffix(".pt")):
+                if artifact.is_file():
+                    artifact.unlink()
+                    removed.append(str(artifact))
+        return removed
+
+    def _delete_unreferenced_artifact(
+        self,
+        project_id: str,
+        voice_path: Path,
+        registry: dict[str, Any],
+    ) -> None:
+        project_dir = self._project_dir(project_id)
+        resolved = voice_path.resolve()
+        if not resolved.is_relative_to(project_dir):
+            logger.warning("Refusing to clean voice artifact outside %s", project_dir)
+            return
+        referenced = {
+            Path(info["file"]).resolve()
+            for info in registry.get("voices", {}).values()
+            if info.get("file")
+        }
+        if resolved in referenced:
+            return
+        for artifact in (resolved, resolved.with_suffix(".pt")):
+            artifact.unlink(missing_ok=True)
 
     # ------------------------------------------------------------------
     # Registry file management

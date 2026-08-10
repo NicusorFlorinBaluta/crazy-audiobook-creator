@@ -623,4 +623,10 @@ Benchmark of `small` vs `medium` Whisper models for quality validation. Tested o
 | Fails (WER > 20%) | 5 / 30 | 5 / 30 |
 | Validation Time / Line | ~3.97s (CPU) | ~12.46s (CPU) |
 
-**Conclusion**: Stick with `small`. The `medium` model is mathematically 3 times slower without reducing the fail rate. It even hallucinates incorrectly on short, clean lines (e.g., misheard "Is today special?" as "is today's special."). 
+**Historical conclusion (CPU benchmark)**: `small` outperformed `medium` for
+this 30-line CPU test. This conclusion is superseded for the Windows AMD/ROCm
+production path by the [2026-08-09 full-book E2E](e2e-run-2026-08-09.md): a
+controlled failure-set comparison found that custom VAD preprocessing removed
+valid short/repeated speech, while raw GPU `large-v3` transcribed the intended
+audio. The current configuration therefore uses raw `large-v3`; WER thresholds
+remain unchanged.

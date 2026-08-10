@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 # Increment when _MOOD_PROFILES keyword lists or deltas change so that cached
 # segments that relied on old post-FX settings are re-generated.
 MOOD_TIER_VERSION: str = "v2"
+AUDIO_PROCESSING_REVISION: str = "clean-output-v1"
 
 # Six-tier emotion → post-processing profile table.
 # pitch_delta: semitones added/subtracted from any character-level base offset.
@@ -97,6 +98,15 @@ _MOOD_PROFILES: list[dict] = [
 ]
 
 
+def mood_tier_for(emotion: str | None) -> str:
+    """Return the single post-FX mood tier used for an emotion label."""
+    mood = (emotion or "").lower()
+    for profile in _MOOD_PROFILES:
+        if any(word in mood for word in profile["keywords"]):
+            return str(profile["tier"])
+    return "neutral"
+
+
 class Qwen3TTSEngine:
     """Wrapper around Qwen3-TTS 1.7B model for speech synthesis."""
 
@@ -111,12 +121,25 @@ class Qwen3TTSEngine:
         max_text_length: int = 500,
         language: str = "English",
         attn_implementation: str = "sdpa",
+        post_processing_config: dict[str, Any] | None = None,
     ):
         self.model_name = model_name
         self.device = device
         self.dtype = dtype
         self.sample_rate = sample_rate
-        self.fx = AudioPostProcessor()
+        self.post_processing_config = dict(post_processing_config or {})
+        self.post_processing_enabled = bool(
+            self.post_processing_config.get("enabled", False)
+        )
+        self.allow_phase_vocoder_fallback = bool(
+            self.post_processing_config.get(
+                "allow_phase_vocoder_fallback",
+                False,
+            )
+        )
+        self.fx = AudioPostProcessor(
+            allow_phase_vocoder_fallback=self.allow_phase_vocoder_fallback
+        )
         self.embedding_store = embedding_store
         self.generation_config = generation_config or {}
         self.max_text_length = max(100, int(max_text_length))
@@ -242,8 +265,9 @@ class Qwen3TTSEngine:
     ) -> np.ndarray:
         """Generate speech audio for a script line.
 
-        Uses the saved reference clip to clone the voice character and applies
-        supported pacing/tone post-processing.
+        Uses the saved reference clip to clone the voice character. Optional
+        pacing/tone post-processing is disabled by default because the previous
+        phase-vocoder fallback caused echo-like artifacts.
 
         Args:
             text: Text to speak.
@@ -281,7 +305,7 @@ class Qwen3TTSEngine:
             speed=speed,
             emotion=emotion_instruction,
         )
-        if matched_tier != "neutral":
+        if self.post_processing_enabled and matched_tier != "neutral":
             logger.debug(
                 "Emotion post-FX: tier=%s pitch_delta=%.2f tone=%s speed=%.3f",
                 matched_tier,
@@ -289,7 +313,11 @@ class Qwen3TTSEngine:
                 effective_fx.tone,
                 effective_fx.speed,
             )
-        if self.fx and not effective_fx.is_identity():
+        if (
+            self.post_processing_enabled
+            and self.fx
+            and not effective_fx.is_identity()
+        ):
             audio = self.fx.apply(
                 audio,
                 self.sample_rate,
@@ -303,6 +331,14 @@ class Qwen3TTSEngine:
             self._write_audio_atomic(output_path, audio)
 
         return audio
+
+    def post_processing_context(self) -> dict[str, Any]:
+        """Return the audio-policy identity used by synthesis fingerprints."""
+        return {
+            "revision": AUDIO_PROCESSING_REVISION,
+            "enabled": self.post_processing_enabled,
+            "allow_phase_vocoder_fallback": self.allow_phase_vocoder_fallback,
+        }
 
     def generate_speech_batch(
         self,
@@ -367,11 +403,28 @@ class Qwen3TTSEngine:
             ref_text if use_icl else "",
             x_vec_mode,
         )
+        generation_config = dict(self.generation_config)
+        adaptive = generation_config.pop("adaptive_max_new_tokens", {}) or {}
+        if adaptive.get("enabled", False):
+            configured_cap = int(generation_config.get("max_new_tokens", 4096))
+            adaptive_cap = int(adaptive.get("base_tokens", 256)) + int(
+                len(text) * float(adaptive.get("tokens_per_character", 10.0))
+            )
+            adaptive_cap = max(
+                int(adaptive.get("minimum_tokens", 512)),
+                min(configured_cap, adaptive_cap),
+            )
+            generation_config["max_new_tokens"] = adaptive_cap
+            logger.info(
+                "Experimental adaptive decode cap: %d tokens for %d characters",
+                adaptive_cap,
+                len(text),
+            )
         wavs, _ = self._model.generate_voice_clone(
             text=text,
             language=self.language,
             voice_clone_prompt=clone_prompt,
-            **self.generation_config,
+            **generation_config,
         )
 
         audio = np.asarray(wavs[0], dtype=np.float32)
@@ -493,10 +546,9 @@ class Qwen3TTSEngine:
             fx = voice_fx.model_copy(deep=True)
         fx.speed = max(0.5, min(2.0, float(fx.speed) * float(speed)))
 
-        mood = (emotion or "").lower()
-        matched_tier = "neutral"
+        matched_tier = mood_tier_for(emotion)
         for profile in _MOOD_PROFILES:
-            if any(word in mood for word in profile["keywords"]):
+            if profile["tier"] == matched_tier:
                 delta = profile["pitch_delta"]
                 fx.pitch_semitones = max(-12.0, min(12.0, fx.pitch_semitones + delta))
                 # Only apply the default speed_mult if the script speed is the default 1.0
@@ -504,7 +556,6 @@ class Qwen3TTSEngine:
                     fx.speed = max(0.5, min(2.0, fx.speed * profile["speed_mult"]))
                 if fx.tone == "neutral" and profile["tone"] != "neutral":
                     fx.tone = profile["tone"]
-                matched_tier = profile["tier"]
                 break
 
         return fx, matched_tier
@@ -537,6 +588,9 @@ class Qwen3TTSEngine:
                 return {
                     "vram_total_gb": torch.cuda.get_device_properties(0).total_memory / 1e9,
                     "vram_used_gb": torch.cuda.memory_allocated() / 1e9,
+                    "vram_reserved_gb": torch.cuda.memory_reserved() / 1e9,
+                    "vram_peak_allocated_gb": torch.cuda.max_memory_allocated() / 1e9,
+                    "vram_peak_reserved_gb": torch.cuda.max_memory_reserved() / 1e9,
                 }
         except ImportError:
             pass
@@ -559,17 +613,11 @@ class Qwen3TTSEngine:
     ) -> float:
         """Compare generated and reference audio with Qwen's speaker encoder."""
         import torch
-        import torch.nn.functional as functional
 
         with torch.inference_mode():
             generated = self.speaker_embedding(generated_audio_path)
             reference = self.speaker_embedding(reference_audio_path)
-            return float(
-                functional.cosine_similarity(
-                    generated.unsqueeze(0),
-                    reference.unsqueeze(0),
-                ).item()
-            )
+            return self.embedding_similarity(generated, reference)
 
     def speaker_embedding(self, audio_path: str | Path):
         """Extract one reusable Qwen speaker embedding from an audio file."""
@@ -577,7 +625,13 @@ class Qwen3TTSEngine:
         pt_path = Path(audio_path).with_suffix(".pt")
         if pt_path.exists():
             try:
-                return torch.load(pt_path, map_location="cpu", weights_only=True)
+                return (
+                    torch.load(pt_path, map_location="cpu", weights_only=True)
+                    .detach()
+                    .float()
+                    .flatten()
+                    .cpu()
+                )
             except Exception as e:
                 logger.warning("Could not load cached embedding %s: %s", pt_path, e)
                 
@@ -597,12 +651,15 @@ class Qwen3TTSEngine:
         emb = self._model.model.extract_speaker_embedding(
             audio=audio,
             sr=target_rate,
-        ).flatten()
+        ).detach().float().flatten().cpu()
         
+        temp_path = pt_path.with_name(f".{pt_path.name}.tmp")
         try:
-            torch.save(emb.cpu(), pt_path)
+            torch.save(emb, temp_path)
+            temp_path.replace(pt_path)
         except Exception as e:
             logger.warning("Could not save cached embedding %s: %s", pt_path, e)
+            temp_path.unlink(missing_ok=True)
             
         return emb
 
@@ -611,6 +668,11 @@ class Qwen3TTSEngine:
         """Return cosine similarity for two previously extracted embeddings."""
         import torch.nn.functional as functional
 
+        # Cached embeddings are intentionally CPU-resident.  Normalize both
+        # operands here as a defensive boundary for callers holding an older
+        # accelerator tensor.
+        left = left.detach().float().flatten().cpu()
+        right = right.detach().float().flatten().cpu()
         return float(
             functional.cosine_similarity(
                 left.unsqueeze(0),

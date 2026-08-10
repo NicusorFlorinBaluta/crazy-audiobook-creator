@@ -24,9 +24,17 @@ class WhisperValidator:
         self,
         model_name: str = "medium",
         device: str = "auto",
+        backend: str = "auto",
+        vad_filter: bool = False,
     ):
+        if backend not in {"auto", "faster_whisper", "openai_whisper"}:
+            raise ValueError(
+                "backend must be auto, faster_whisper, or openai_whisper"
+            )
         self.model_name = model_name
         self.device = device
+        self.backend = backend
+        self.vad_filter = bool(vad_filter)
         self._model = None
         self._is_loaded = False
 
@@ -43,6 +51,8 @@ class WhisperValidator:
 
         try:
             try:
+                if self.backend == "openai_whisper":
+                    raise ImportError("OpenAI Whisper backend explicitly selected")
                 from faster_whisper import WhisperModel
 
                 compute_type = "float16"
@@ -65,6 +75,8 @@ class WhisperValidator:
                 )
                 self._backend = "faster_whisper"
             except ImportError:
+                if self.backend == "faster_whisper":
+                    raise
                 import whisper
                 import torch
 
@@ -99,7 +111,7 @@ class WhisperValidator:
 
             logger.info("Whisper model unloaded")
 
-    def transcribe(self, audio_file: str) -> str:
+    def transcribe(self, audio_file: str, language: str | None = None) -> str:
         """Transcribe an audio file to text.
 
         Args:
@@ -113,6 +125,11 @@ class WhisperValidator:
 
         try:
             if getattr(self, "_backend", "faster_whisper") == "openai_whisper":
+                kwargs = {"language": language} if language else {}
+                if not self.vad_filter:
+                    result = self._model.transcribe(audio_file, **kwargs)
+                    return result.get("text", "").strip()
+
                 import tempfile
                 import soundfile as sf
                 import torch
@@ -125,13 +142,26 @@ class WhisperValidator:
                 wav = torch.from_numpy(audio_np)  # VAD expects 1D
                 
                 if sr != 16000:
-                    import torchaudio
-                    wav = torchaudio.transforms.Resample(sr, 16000)(wav)
+                    import math
+                    from scipy.signal import resample_poly
+
+                    divisor = math.gcd(sr, 16000)
+                    audio_np = resample_poly(
+                        wav.numpy(),
+                        16000 // divisor,
+                        sr // divisor,
+                    ).astype("float32", copy=False)
+                    wav = torch.from_numpy(audio_np)
                     sr = 16000
                 
                 speech_timestamps = get_speech_timestamps(wav, vad_model, return_seconds=False)
                 if not speech_timestamps:
-                    return ""
+                    # Silero can reject valid very short, high-pitched, or
+                    # emphatic audiobook lines. Fall back to Whisper's raw
+                    # audio path rather than converting a VAD miss into a
+                    # guaranteed transcription failure.
+                    result = self._model.transcribe(audio_file, **kwargs)
+                    return result.get("text", "").strip()
                     
                 wav_speech = collect_chunks(speech_timestamps, wav)
                 
@@ -140,7 +170,7 @@ class WhisperValidator:
                 
                 try:
                     sf.write(tmp_path, wav_speech.numpy(), 16000)
-                    result = self._model.transcribe(tmp_path)
+                    result = self._model.transcribe(tmp_path, **kwargs)
                     return result.get("text", "").strip()
                 finally:
                     import os
@@ -150,6 +180,7 @@ class WhisperValidator:
                     audio_file,
                     beam_size=5,
                     vad_filter=True,
+                    language=language,
                 )
                 text = " ".join(segment.text for segment in segments)
                 return text.strip()

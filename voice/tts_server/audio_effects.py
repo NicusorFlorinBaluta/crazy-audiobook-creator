@@ -88,6 +88,13 @@ def convert_mp3_to_wav_if_needed(prompt_path: str) -> tuple[str, Optional[Path]]
 class AudioPostProcessor:
     """Applies pitch, speed, and tonal shaping to generated audio arrays."""
 
+    def __init__(self, *, allow_phase_vocoder_fallback: bool = False) -> None:
+        # The librosa phase vocoder produced audible smearing/echo across the
+        # 2026-08-09 full-book run. Keep it available only for deliberate
+        # experiments; production generation must never select it implicitly.
+        self.allow_phase_vocoder_fallback = bool(allow_phase_vocoder_fallback)
+        self._unsafe_fallback_warning_emitted = False
+
     @staticmethod
     def _find_sox() -> Optional[Path]:
         """Find a platform-appropriate SoX executable."""
@@ -167,14 +174,29 @@ class AudioPostProcessor:
         base_audio = audio.astype(np.float32, copy=False)
         processed = base_audio.copy()
 
+        has_timing_or_pitch = (
+            abs(float(fx.speed) - 1.0) > 1e-3
+            or abs(float(fx.pitch_semitones)) > 1e-3
+        )
         if self._can_use_sox(fx):
             try:
                 processed = self._apply_speed_pitch_sox(processed, sample_rate, fx.speed, fx.pitch_semitones)
             except Exception as exc:  # pragma: no cover - fallback for local installs
-                logger.warning("SoX FX failed (%s); falling back to librosa pipeline.", exc)
+                if not self.allow_phase_vocoder_fallback:
+                    raise RuntimeError(
+                        "SoX voice FX failed and the phase-vocoder fallback is disabled"
+                    ) from exc
+                logger.warning("SoX FX failed (%s); using opted-in librosa fallback.", exc)
                 processed = self._apply_speed_pitch_librosa(processed, sample_rate, fx)
-        else:
+        elif has_timing_or_pitch and self.allow_phase_vocoder_fallback:
             processed = self._apply_speed_pitch_librosa(processed, sample_rate, fx)
+        elif has_timing_or_pitch and not self._unsafe_fallback_warning_emitted:
+            logger.warning(
+                "Skipping pitch/tempo voice FX because no quality-approved "
+                "backend is available; the echo-prone phase-vocoder fallback "
+                "is disabled"
+            )
+            self._unsafe_fallback_warning_emitted = True
 
         if fx.tone and fx.tone != "neutral":
             processed = self._apply_tone(processed, sample_rate, fx.tone)

@@ -138,7 +138,7 @@ class VoiceClient:
         request: GenerateChapterRequest,
         progress_callback=None
     ) -> GenerateChapterResponse:
-        """Generate audio for an entire chapter via streaming SSE."""
+        """Generate audio for an entire chapter via an NDJSON event stream."""
         import json
         logger.info(
             "Generating chapter %d (%d lines) for project '%s'",
@@ -164,9 +164,10 @@ class VoiceClient:
                             
                             if data.get("type") == "progress":
                                 msg = data.get("data", {})
-                                # Do a granular logger.info here so the UI sees live progress
                                 line_id = msg.get("line_id", "unknown")
-                                logger.info("Generated segment %s", line_id)
+                                phase = msg.get("phase", "synthesis")
+                                cache_note = " (cache hit)" if msg.get("cache_hit") else ""
+                                logger.info("%s segment %s%s", phase.title(), line_id, cache_note)
                                 if progress_callback:
                                     progress_callback(msg)
                             elif data.get("type") == "result":

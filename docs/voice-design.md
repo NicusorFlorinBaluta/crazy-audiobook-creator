@@ -17,10 +17,12 @@ During character analysis the LLM is asked to invent a **unique, natural
 the narrator and a line of in-character dialogue for everyone else. The
 sentence is stored on the `Character` model as `test_sentence`.
 
-At bootstrap time `VoiceDesigner._build_test_sentence` returns `test_sentence`
-if one is set; it falls back to the gender-keyed global sentences in
-`voice.config.yaml` (`tts.voice_design_test_sentences`) only when the field is
-absent. The sentence has two roles:
+At bootstrap time the pipeline prefers enough exact dialogue from the completed
+script to form a useful reference. It uses or augments the analyzed
+`test_sentence` when dialogue is short, and `VoiceDesigner._build_test_sentence`
+adds a gender-keyed global fallback for a short minor-character reference. The
+final exact text and selection-policy version are included in the design
+fingerprint. The sentence has two roles:
 
 - It is spoken by the VoiceDesign model to produce the reference clip, giving
   the model a meaningful, character-specific utterance rather than an identical
@@ -53,7 +55,7 @@ near-duplicate profiles receive deterministic contrasting directions.
 
 ### Voice Similarity & Acoustic Embeddings
 - **Boilerplate Filtering**: Text token similarity comparison (`_token_similarity`) strips out common prompt template boilerplate words (`"clearly adult speaker"`, `"maintain vocal identity..."`) to prevent false similarity warnings between distinct character prompts.
-- **Acoustic Speaker Embeddings**: `compute_audio_similarity` extracts 128-dimensional log-mel spectrogram feature vectors using `soundfile` and `scipy.signal`. Cosine distance between actual voice audio files measures true acoustic pitch, timbre, and formant overlap.
+- **Acoustic Speaker Embeddings**: cast diagnostics primarily use the Qwen speaker encoder. `compute_audio_similarity` provides a model-independent 514-value vector formed from the mean and standard deviation of a normalized 257-bin log spectrogram. Cosine distance compares actual audio rather than prompt wording.
 
 ## Voice cap and sharing
 
@@ -76,12 +78,13 @@ male/female narrator candidates shown at first-project review):
 4. Generate and atomically save a known reference sentence.
 5. Stop VoiceDesign to release GPU memory.
 6. Transcribe the WAV with Whisper and compare it with that sentence.
-7. Register only references within the bootstrap WER limit.
+7. Validate every exposed candidate and register only references within the bootstrap WER limit. A failed optional alternative is discarded without invalidating a good canonical candidate.
 8. Pause a new project for one manual preview/approval step.
 9. Load Qwen Base when chapter generation starts.
 
 Each effective profile has a fingerprint containing its metadata, compiled
-instruction, design model, and design configuration. Unchanged references are
+instruction, exact final reference text, selection-policy version, design model,
+and design configuration. Unchanged references are
 reused. Existing projects created before the approval feature are
 grandfathered. Newly created projects wait once; later partial chapter batches
 do not prompt again.
@@ -89,7 +92,7 @@ do not prompt again.
 The narrator is a deliberate exception to the no-unused-profiles rule. Because
 the narrator speaks extensively and the choice materially changes the whole
 book, bootstrap prepares one male and one female narrator reference. The review
-banner plays both and stores the selected profile on the narrator character.
+banner plays both and stores the selected profile in `voice_cast.json`.
 Only that selection is used by line generation; changing it later invalidates
 only chapters that contain narration.
 
@@ -101,16 +104,25 @@ description, duration, sample rate, identity metadata, source type
 (`generated` or `uploaded`), and design/content fingerprint.
 
 The `"file"` field in each registry entry is an **absolute path** to the actual
-WAV, whose filename includes a content hash (e.g. `narrator_male_7f8dfaa9.wav`).
+WAV, whose filename includes a UUID suffix (e.g. `narrator_male_7f8dfaa9.wav`).
 `VoiceLibraryManager.get_voice_path` consults the registry first; it only falls
 back to the legacy `<character_id>.wav` convention when no entry exists. Do not
-assume a voice file is named `<character_id>.wav`.
+assume a voice file is named `<character_id>.wav`. When a registry entry is
+replaced, its unreferenced WAV and `.pt` speaker-embedding cache are removed.
 
 The casting dashboard is organized by reusable voice profile. It shows only
 real speakers and explicitly reports how many non-speaking analysis entries
 were excluded. A speaker can be assigned to another cast voice. A profile can
 be redesigned from text or replaced with an uploaded WAV, FLAC, MP3, M4A, AAC,
 or OGG sample.
+
+Every ready profile, including the selected narrator, also has a **Download
+voice sample** action. It downloads the canonical reference WAV with a
+descriptive `<book> - <character> - voice-reference.wav` filename. That file
+can be imported into a matching character profile in a later book with the
+normal upload action and the exact words spoken in the reference. The filename
+is descriptive only; cloning still depends on the accompanying exact
+transcript.
 
 Uploads are converted to mono 24 kHz PCM WAV. They must contain one clean,
 non-silent, non-clipped speaker and be 3–30 seconds long. The user supplies the
@@ -134,16 +146,21 @@ a mid-generation voice change.
 
 ## Emotion and speed
 
-The script supplies readable emotion and speed values. Their implemented
-effects are deliberately restrained:
+The script supplies readable emotion and speed values, but production output
+currently treats them as descriptive metadata. Automatic pitch/tempo/tone
+post-processing is disabled by default after the 2026-08-09 full-book output
+showed widespread echo-like smearing from the phase-vocoder fallback.
 
-- Speed is deterministic audio post-processing.
-- Character FX combine with line speed.
-- A small set of mood words maps to subtle pitch/tone adjustments.
-- Peak protection prevents overflow.
+- Qwen Base output is preserved without time-stretch or pitch-shift effects.
+- Numeric peak protection remains active.
+- Explicit post-processing is experimental and must be enabled in
+  `voice/config.yaml`.
+- The librosa phase-vocoder fallback requires a second explicit unsafe opt-in
+  and must not be used for production books.
 
-This preserves cloned timbre better than large transforms, but it is not
-equivalent to native natural-language acting direction in clone mode.
+Changing the clean-audio policy invalidates synthesis fingerprints. Audio made
+under the old policy is therefore not silently reused by a clean-output run.
+See [the echo incident report](audio-echo-incident-2026-08-10.md).
 
 ## Good design directions
 

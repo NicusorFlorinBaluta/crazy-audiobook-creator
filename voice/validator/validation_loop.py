@@ -28,7 +28,7 @@ from shared.models import (
     QualityResult,
     ScriptLine,
 )
-from voice.tts_server.qwen3_engine import Qwen3TTSEngine
+from voice.tts_server.qwen3_engine import Qwen3TTSEngine, mood_tier_for
 from voice.tts_server.voice_library import VoiceLibraryManager
 from voice.validator.audio_analyzer import AudioAnalyzer
 from voice.validator.prosody_scorer import ProsodyScorer
@@ -56,10 +56,24 @@ class ValidationLoop:
         speaker_similarity_threshold: float = 0.55,
         keep_models_resident: bool = False,
         risk_aware_first_attempt: bool = False,
+        emotion_wer_allowance: float = 0.0,
+        prosody_config: dict[str, Any] | None = None,
     ):
         self.whisper = whisper
         self.analyzer = analyzer
-        self.prosody_scorer = ProsodyScorer()
+        prosody_config = prosody_config or {}
+        self.prosody_scorer = ProsodyScorer(
+            enabled=bool(prosody_config.get("enabled", True)),
+            min_duration_seconds=float(
+                prosody_config.get("min_duration_seconds", 1.0)
+            ),
+            pitch_cv_threshold=float(
+                prosody_config.get("pitch_cv_threshold", 0.06)
+            ),
+            dynamic_range_threshold=float(
+                prosody_config.get("dynamic_range_threshold", 4.0)
+            ),
+        )
         self.engine = engine
         self.library = library
         self.wer_threshold = wer_threshold
@@ -68,6 +82,7 @@ class ValidationLoop:
         self.speaker_similarity_threshold = speaker_similarity_threshold
         self.keep_models_resident = keep_models_resident
         self.risk_aware_first_attempt = risk_aware_first_attempt
+        self.emotion_wer_allowance = max(0.0, float(emotion_wer_allowance))
 
     def process_chapter(
         self,
@@ -82,6 +97,8 @@ class ValidationLoop:
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
         cancel_check: Callable[[], bool] | None = None,
         validation_terms: set[str] | None = None,
+        validation_revision: str = "",
+        language: str | None = None,
     ) -> GenerateChapterResponse:
         """Generate a chapter with one output and one result per line ID."""
         request_started = time.perf_counter()
@@ -100,8 +117,14 @@ class ValidationLoop:
             raise ValueError(f"Chapter {chapter_number} contains duplicate line IDs")
 
         total_lines = len(lines)
+        expected_text_by_id = {
+            line.line_id: line.spoken_text or line.text for line in lines
+        }
         generated_ids: list[str] = []
         generation_errors: dict[str, str] = {}
+        synthesis_cache_hits = 0
+        synthesis_cache_misses = 0
+        segment_metrics: dict[str, dict[str, Any]] = {}
         reference_context: dict[str, tuple[Path, str, dict[str, Any]]] = {}
         total_duration = 0.0
         retry_limit = max(1, max_retries or self.max_retries)
@@ -165,7 +188,7 @@ class ValidationLoop:
 
             needs_regeneration = not self._valid_audio(output_path)
             if self.embedding_store and not needs_regeneration:
-                needs_regeneration = self.embedding_store.line_needs_regeneration(
+                needs_regeneration = self.embedding_store.line_needs_synthesis(
                     project_id=project_id,
                     line_id=line.line_id,
                     text=line.text,
@@ -178,6 +201,8 @@ class ValidationLoop:
                 )
 
             if needs_regeneration:
+                synthesis_cache_misses += 1
+                synthesis_elapsed = 0.0
                 last_error: Exception | None = None
                 for generation_attempt in range(1, retry_limit + 1):
                     self._raise_if_cancelled(cancel_check)
@@ -192,7 +217,11 @@ class ValidationLoop:
                             voice_fx=synthesis_fx,
                             output_path=output_path,
                         )
-                        record_timing("tts_synthesis", operation_started)
+                        attempt_elapsed = time.perf_counter() - operation_started
+                        timings["tts_synthesis"] = (
+                            timings.get("tts_synthesis", 0.0) + attempt_elapsed
+                        )
+                        synthesis_elapsed += attempt_elapsed
                         if not self._valid_audio(output_path):
                             raise RuntimeError("TTS returned no valid audio artifact")
                         last_error = None
@@ -210,8 +239,45 @@ class ValidationLoop:
                 if last_error is not None:
                     generation_errors[line.line_id] = str(last_error)
                     continue
+            else:
+                synthesis_cache_hits += 1
+                synthesis_elapsed = 0.0
 
             info = sf.info(str(output_path))
+            if self.embedding_store and needs_regeneration:
+                operation_started = time.perf_counter()
+                self.embedding_store.save_synthesis_fingerprint(
+                    project_id=project_id,
+                    line_id=line.line_id,
+                    text=line.text,
+                    speaker=line.voice_id or line.speaker,
+                    emotion=line.emotion or "",
+                    speed=line.speed,
+                    fx_dict=(
+                        line.voice_fx.model_dump() if line.voice_fx else None
+                    ),
+                    output_path=output_path,
+                    duration_seconds=info.duration,
+                    generation_context=context,
+                )
+                record_timing("synthesis_checkpoint_write", operation_started)
+            segment_metrics[line.line_id] = {
+                "line_id": line.line_id,
+                "text_characters": len(line.spoken_text or line.text),
+                "text_words": len((line.spoken_text or line.text).split()),
+                "audio_duration_seconds": round(float(info.duration), 6),
+                "synthesis_seconds": round(synthesis_elapsed, 6),
+                "synthesis_cache_hit": not needs_regeneration,
+                "synthesis_audio_rtf": (
+                    round(synthesis_elapsed / info.duration, 6)
+                    if synthesis_elapsed > 0 and info.duration > 0
+                    else 0.0
+                ),
+            }
+            try:
+                segment_metrics[line.line_id].update(self.engine.get_vram_info())
+            except Exception:
+                pass
             total_duration += info.duration
             generated_ids.append(line.line_id)
             self._send_progress(
@@ -222,6 +288,8 @@ class ValidationLoop:
                 line,
                 index,
                 total_lines,
+                phase="synthesis",
+                cache_hit=not needs_regeneration,
             )
 
         missing_ids = [line_id for line_id in ids if line_id not in generated_ids]
@@ -238,6 +306,9 @@ class ValidationLoop:
                 generated_ids,
                 missing_ids,
                 total_duration,
+                synthesis_cache_hits=synthesis_cache_hits,
+                synthesis_cache_misses=synthesis_cache_misses,
+                segment_metrics=list(segment_metrics.values()),
             )
 
         if not validate:
@@ -246,10 +317,13 @@ class ValidationLoop:
                 chapter_number=chapter_number,
                 total_lines=total_lines,
                 generated=len(generated_ids),
+                synthesis_cache_hits=synthesis_cache_hits,
+                synthesis_cache_misses=synthesis_cache_misses,
                 total_duration_seconds=total_duration,
                 segment_files_dir=str(segments_dir),
                 generated_line_ids=generated_ids,
                 failed_line_ids=[],
+                segment_metrics=list(segment_metrics.values()),
             )
 
         # Phase 2: validate every segment. Accepted validation is cached
@@ -259,12 +333,15 @@ class ValidationLoop:
         validation_context_by_id: dict[str, dict[str, Any]] = {}
         quality_by_id: dict[str, QualityResult] = {}
         uncached_lines: list[ScriptLine] = []
+        line_positions = {line.line_id: index for index, line in enumerate(lines, 1)}
         for line in lines:
             voice_ref, _, _ = reference_context[line.line_id]
             validation_context = self._validation_context(
                 voice_ref=voice_ref,
                 speed=line.speed,
                 validation_terms=validation_terms,
+                validation_revision=validation_revision,
+                language=language,
             )
             validation_context_by_id[line.line_id] = validation_context
             cached_result = None
@@ -274,7 +351,7 @@ class ValidationLoop:
                     project_id=project_id,
                     line_id=line.line_id,
                     output_path=segments_dir / f"{line.line_id}.wav",
-                    expected_text=line.text,
+                    expected_text=expected_text_by_id[line.line_id],
                     validation_context=validation_context,
                 )
                 record_timing("validation_cache_lookup", operation_started)
@@ -282,6 +359,18 @@ class ValidationLoop:
                 quality_by_id[line.line_id] = QualityResult(
                     **cached_result
                 ).model_copy(update={"attempt": 1})
+                self._send_progress(
+                    progress_callback,
+                    ws_connections,
+                    project_id,
+                    chapter_number,
+                    line,
+                    line_positions[line.line_id],
+                    total_lines,
+                    phase="validation",
+                    cache_hit=True,
+                    attempt=1,
+                )
                 continue
             uncached_lines.append(line)
 
@@ -314,9 +403,10 @@ class ValidationLoop:
                 self._raise_if_cancelled(cancel_check)
                 audio_path = segments_dir / f"{line.line_id}.wav"
                 voice_ref, _, _ = reference_context[line.line_id]
+                validation_started = time.perf_counter()
                 result = self._validate_segment(
                     str(audio_path),
-                    line.text,
+                    expected_text_by_id[line.line_id],
                     line.line_id,
                     line.speed,
                     voice_ref_path=voice_ref,
@@ -326,8 +416,34 @@ class ValidationLoop:
                     validation_terms=validation_terms,
                     timing_accumulator=timings,
                     emotion_adjusted=self._is_emotion_adjusted(line.emotion),
+                    language=language,
+                )
+                segment_metrics[line.line_id]["validation_seconds"] = round(
+                    time.perf_counter() - validation_started, 6
                 )
                 quality_by_id[line.line_id] = result
+                self._checkpoint_accepted_result(
+                    project_id=project_id,
+                    line=line,
+                    output_path=audio_path,
+                    expected_text=expected_text_by_id[line.line_id],
+                    validation_context=validation_context_by_id[line.line_id],
+                    generation_context=reference_context[line.line_id][2],
+                    result=result,
+                    timings=timings,
+                )
+                self._send_progress(
+                    progress_callback,
+                    ws_connections,
+                    project_id,
+                    chapter_number,
+                    line,
+                    line_positions[line.line_id],
+                    total_lines,
+                    phase="validation",
+                    cache_hit=False,
+                    attempt=result.attempt,
+                )
 
         quality_attempts: list[QualityResult] = [
             quality_by_id[line.line_id] for line in lines
@@ -400,7 +516,18 @@ class ValidationLoop:
                             voice_fx=retry_fx,
                             output_path=attempt_path,
                         )
-                        record_timing("retry_tts_synthesis", operation_started)
+                        retry_elapsed = time.perf_counter() - operation_started
+                        timings["retry_tts_synthesis"] = (
+                            timings.get("retry_tts_synthesis", 0.0)
+                            + retry_elapsed
+                        )
+                        segment_metrics[line.line_id]["retry_synthesis_seconds"] = round(
+                            segment_metrics[line.line_id].get(
+                                "retry_synthesis_seconds", 0.0
+                            )
+                            + retry_elapsed,
+                            6,
+                        )
                         if not self._valid_audio(attempt_path):
                             raise RuntimeError("Retry produced no valid audio artifact")
                         attempt_files[line.line_id] = attempt_path
@@ -442,9 +569,10 @@ class ValidationLoop:
                     if attempt_path is None:
                         next_candidates.append(line)
                         continue
+                    retry_validation_started = time.perf_counter()
                     candidate_result = self._validate_segment(
                         str(attempt_path),
-                        line.text,
+                        expected_text_by_id[line.line_id],
                         line.line_id,
                         attempt_speeds.get(line.line_id, line.speed),
                         attempt,
@@ -455,6 +583,15 @@ class ValidationLoop:
                         voice_ref_path=reference_context[line.line_id][0],
                         reference_pitch_median=reference_pitch_map[line.line_id],
                         emotion_adjusted=self._is_emotion_adjusted(retry_emotion),
+                        language=language,
+                    )
+                    segment_metrics[line.line_id]["retry_validation_seconds"] = round(
+                        segment_metrics[line.line_id].get(
+                            "retry_validation_seconds", 0.0
+                        )
+                        + time.perf_counter()
+                        - retry_validation_started,
+                        6,
                     )
                     quality_attempts.append(candidate_result)
                     current_result = quality_by_id[line.line_id]
@@ -469,19 +606,42 @@ class ValidationLoop:
                         attempt_path.unlink(missing_ok=True)
                     if not self._is_accepted(current_result.status):
                         next_candidates.append(line)
+                    else:
+                        self._checkpoint_accepted_result(
+                            project_id=project_id,
+                            line=line,
+                            output_path=segments_dir / f"{line.line_id}.wav",
+                            expected_text=expected_text_by_id[line.line_id],
+                            validation_context=validation_context_by_id[line.line_id],
+                            generation_context=reference_context[line.line_id][2],
+                            result=current_result,
+                            timings=timings,
+                        )
                 candidates = next_candidates
 
         # Co-residency is scoped to this chapter's retry loop. Always release
         # Whisper at the request boundary so the next chapter's long initial
-        # TTS pass runs without the measured co-residency slowdown.
+        # TTS pass runs without the measured co-residency slowdown. Do not
+        # eagerly reload TTS here: generation already lazy-loads it, and an
+        # immediate large GPU-model swap can terminate some ROCm runtimes
+        # before the completed chapter response is returned.
         operation_started = time.perf_counter()
         self.whisper.unload()
         record_timing("whisper_unload", operation_started)
-        operation_started = time.perf_counter()
-        self.engine.load()
-        record_timing("tts_load", operation_started)
 
         quality_results = [quality_by_id[line.line_id] for line in lines]
+        selected_attempts = {
+            line_id: result.attempt for line_id, result in quality_by_id.items()
+        }
+        quality_attempts = [
+            result.model_copy(
+                update={
+                    "selected": selected_attempts.get(result.line_id)
+                    == result.attempt
+                }
+            )
+            for result in quality_attempts
+        ]
         failed_ids = [
             result.line_id
             for result in quality_results
@@ -503,41 +663,6 @@ class ValidationLoop:
             for result in quality_results
             if not self._is_accepted(result.status)
         ]
-
-        # Cache only selected artifacts that passed every required check.
-        if self.embedding_store:
-            for line in lines:
-                result = quality_by_id[line.line_id]
-                if not self._is_accepted(result.status):
-                    continue
-                _, _, context = reference_context[line.line_id]
-                operation_started = time.perf_counter()
-                self.embedding_store.save_validation_result(
-                    project_id=project_id,
-                    line_id=line.line_id,
-                    output_path=segments_dir / f"{line.line_id}.wav",
-                    expected_text=line.text,
-                    validation_context=validation_context_by_id[line.line_id],
-                    result=result.model_dump(mode="json"),
-                )
-                record_timing("validation_cache_write", operation_started)
-                operation_started = time.perf_counter()
-                self.embedding_store.save_generation_fingerprint(
-                    project_id=project_id,
-                    line_id=line.line_id,
-                    text=line.text,
-                    speaker=line.voice_id or line.speaker,
-                    emotion=line.emotion or "",
-                    speed=line.speed,
-                    fx_dict=line.voice_fx.model_dump() if line.voice_fx else None,
-                    output_path=segments_dir / f"{line.line_id}.wav",
-                    duration_seconds=result.duration_seconds,
-                    wer=result.wer,
-                    quality_score=result.quality_score,
-                    validation_status=result.status.value,
-                    generation_context=context,
-                )
-                record_timing("generation_fingerprint_write", operation_started)
 
         wer_values = [result.wer for result in quality_results]
         quality_report = ChapterQualityReport(
@@ -581,6 +706,8 @@ class ValidationLoop:
             failed_validation=len(unaccepted_ids),
             accepted_with_warning=len(warning_ids),
             retried=retried,
+            synthesis_cache_hits=synthesis_cache_hits,
+            synthesis_cache_misses=synthesis_cache_misses,
             total_duration_seconds=total_duration,
             quality_report=quality_report,
             segment_files_dir=str(segments_dir),
@@ -590,6 +717,7 @@ class ValidationLoop:
             validation_cache_hits=validation_cache_hits,
             validation_cache_misses=validation_cache_misses,
             timings_seconds=rounded_timings,
+            segment_metrics=list(segment_metrics.values()),
             risk_adjusted_line_ids=risk_adjusted_line_ids,
         )
 
@@ -636,12 +764,22 @@ class ValidationLoop:
             if self.embedding_store
             else lambda value: ""
         )
+        post_processing_context = getattr(
+            self.engine,
+            "post_processing_context",
+            None,
+        )
         context = {
             "voice_reference_hash": hash_file(voice_ref),
             "reference_text_hash": hash_text(ref_text),
             "model": self.engine.model_name,
             "language": getattr(self.engine, "language", "auto"),
             "generation": getattr(self.engine, "generation_config", {}),
+            "post_processing": (
+                post_processing_context()
+                if callable(post_processing_context)
+                else {"revision": "legacy-unknown"}
+            ),
             # Frozen compatibility marker from generation fingerprint v1.
             # It is intentionally no longer tied to VALIDATION_SCHEMA_VERSION;
             # future validator changes therefore cannot invalidate audio.
@@ -695,6 +833,8 @@ class ValidationLoop:
         voice_ref: Path,
         speed: float,
         validation_terms: set[str],
+        validation_revision: str = "",
+        language: str | None = None,
     ) -> dict[str, Any]:
         """Return only inputs that can change validation acceptance."""
         hash_file = (
@@ -704,7 +844,13 @@ class ValidationLoop:
         )
         return {
             "validation_schema": VALIDATION_SCHEMA_VERSION,
+            "validation_revision": validation_revision,
+            "language": language or "auto",
             "whisper_model": getattr(self.whisper, "model_name", "unknown"),
+            "whisper_backend": getattr(self.whisper, "backend", "auto"),
+            "whisper_vad_filter": bool(
+                getattr(self.whisper, "vad_filter", False)
+            ),
             "wer_threshold": self.wer_threshold,
             "speaker_similarity_threshold": self.speaker_similarity_threshold,
             "voice_reference_hash": hash_file(voice_ref),
@@ -730,6 +876,13 @@ class ValidationLoop:
                     self.analyzer, "duration_tolerance", 0.3
                 ),
             },
+            "prosody": {
+                "enabled": self.prosody_scorer.enabled,
+                "min_duration_seconds": self.prosody_scorer.min_duration_seconds,
+                "pitch_cv_threshold": self.prosody_scorer.pitch_cv_threshold,
+                "dynamic_range_threshold": self.prosody_scorer.dynamic_range_threshold,
+            },
+            "emotion_wer_allowance": self.emotion_wer_allowance,
         }
 
     def _validate_segment(
@@ -746,13 +899,12 @@ class ValidationLoop:
         voice_ref_path: Path | None = None,
         reference_pitch_median: float = 0.0,
         emotion_adjusted: bool = False,
+        language: str | None = None,
     ) -> QualityResult:
-        # When emotion post-FX was applied (non-identity pitch/tone shift) the
-        # effective threshold is widened slightly to account for minor Whisper
-        # accuracy changes from pitch-shifted audio.  Hard checks are unchanged.
-        _EMOTION_WER_ALLOWANCE = 0.02  # 2 percentage points
+        # A nonzero, explicitly configured allowance may compensate for a
+        # benchmark-proven post-FX ASR penalty.  The production default is zero.
         effective_wer_threshold = (
-            self.wer_threshold + _EMOTION_WER_ALLOWANCE
+            self.wer_threshold + self.emotion_wer_allowance
             if emotion_adjusted
             else self.wer_threshold
         )
@@ -764,7 +916,11 @@ class ValidationLoop:
             )
 
         transcription_started = time.perf_counter()
-        transcribed = self.whisper.transcribe(audio_file)
+        transcribed = (
+            self.whisper.transcribe(audio_file, language=language)
+            if language
+            else self.whisper.transcribe(audio_file)
+        )
         if timing_accumulator is not None:
             timing_accumulator["whisper_transcription"] = (
                 timing_accumulator.get("whisper_transcription", 0.0)
@@ -1104,31 +1260,11 @@ class ValidationLoop:
 
         return re.sub(r"[^\W_]+", expand_repetition, text, flags=re.UNICODE)
 
-    @staticmethod
-    def _is_emotion_adjusted(emotion: str | None) -> bool:
-        """Return True if the emotion maps to a non-identity post-FX profile.
-        
-        Matches the keyword logic in qwen3_engine._effective_post_fx.
-        """
-        if not emotion:
-            return False
-        mood = emotion.lower()
-        # Profiles matching qwen3_engine._MOOD_PROFILES
-        adjusted_keywords = (
-            "angry", "panic", "urgent", "excited", "shout", "furious",
-            "enraged", "terrified", "desperate", "demand",
-            "somber", "sad", "weary", "hushed", "whisper", "gentle",
-            "tender", "comfort", "soothing", "quiet",
-            "chuckle", "banter", "sarcastic", "teasing", "amused",
-            "playful", "wry", "ironic", "lighthearted",
-            "suspenseful", "nervous", "wary", "cautious", "dread",
-            "anxious", "uneasy", "foreboding", "grim",
-            "commanding", "stern", "decisive", "firm", "warning",
-            "authoritative", "solemn", "grave", "resolute",
-            "contemplative", "nostalgic", "thoughtful", "pensive",
-            "reflective", "melancholic", "wistful", "introspective",
+    def _is_emotion_adjusted(self, emotion: str | None) -> bool:
+        """Return True when the TTS engine applies a non-neutral mood tier."""
+        return bool(getattr(self.engine, "post_processing_enabled", False)) and (
+            mood_tier_for(emotion) != "neutral"
         )
-        return any(word in mood for word in adjusted_keywords)
 
     @staticmethod
     def _valid_audio(path: Path) -> bool:
@@ -1139,6 +1275,57 @@ class ValidationLoop:
             return info.frames > 0 and info.samplerate > 0 and info.duration > 0
         except Exception:
             return False
+
+    def _checkpoint_accepted_result(
+        self,
+        *,
+        project_id: str,
+        line: ScriptLine,
+        output_path: Path,
+        expected_text: str,
+        validation_context: dict[str, Any],
+        generation_context: dict[str, Any],
+        result: QualityResult,
+        timings: dict[str, float],
+    ) -> None:
+        """Atomically checkpoint one accepted line before chapter completion."""
+        if not self.embedding_store or not self._is_accepted(result.status):
+            return
+        operation_started = time.perf_counter()
+        self.embedding_store.save_validation_result(
+            project_id=project_id,
+            line_id=line.line_id,
+            output_path=output_path,
+            expected_text=expected_text,
+            validation_context=validation_context,
+            result=result.model_dump(mode="json"),
+        )
+        timings["validation_cache_write"] = (
+            timings.get("validation_cache_write", 0.0)
+            + time.perf_counter()
+            - operation_started
+        )
+        operation_started = time.perf_counter()
+        self.embedding_store.save_generation_fingerprint(
+            project_id=project_id,
+            line_id=line.line_id,
+            text=line.text,
+            speaker=line.voice_id or line.speaker,
+            emotion=line.emotion or "",
+            speed=line.speed,
+            fx_dict=line.voice_fx.model_dump() if line.voice_fx else None,
+            output_path=output_path,
+            duration_seconds=result.duration_seconds,
+            wer=result.wer,
+            quality_score=result.quality_score,
+            validation_status=result.status.value,
+            generation_context=generation_context,
+        )
+        timings["generation_fingerprint_write"] = (
+            timings.get("generation_fingerprint_write", 0.0)
+            + time.perf_counter()
+            - operation_started
+        )
 
     @staticmethod
     def _raise_if_cancelled(
@@ -1156,17 +1343,25 @@ class ValidationLoop:
         line: ScriptLine,
         progress: int,
         total: int,
+        *,
+        phase: str = "synthesis",
+        cache_hit: bool = False,
+        attempt: int = 1,
     ) -> None:
         message = {
             "type": "progress",
             "project_id": project_id,
             "chapter": chapter_number,
             "line_id": line.line_id,
+            "phase": phase,
             "progress": progress,
+            "completed": progress,
             "total": total,
             "percent": round(progress / total * 100, 1) if total else 0,
             "current_speaker": line.speaker,
             "current_emotion": line.emotion,
+            "cache_hit": cache_hit,
+            "attempt": attempt,
         }
         if progress_callback:
             progress_callback(message)
@@ -1183,6 +1378,10 @@ class ValidationLoop:
         generated_ids: list[str],
         failed_ids: list[str],
         total_duration: float,
+        *,
+        synthesis_cache_hits: int = 0,
+        synthesis_cache_misses: int = 0,
+        segment_metrics: list[dict[str, Any]] | None = None,
     ) -> GenerateChapterResponse:
         return GenerateChapterResponse(
             status="failed",
@@ -1190,6 +1389,8 @@ class ValidationLoop:
             total_lines=total_lines,
             generated=len(generated_ids),
             failed_validation=len(failed_ids),
+            synthesis_cache_hits=synthesis_cache_hits,
+            synthesis_cache_misses=synthesis_cache_misses,
             total_duration_seconds=total_duration,
             quality_report=ChapterQualityReport(
                 chapter_number=chapter_number,
@@ -1199,4 +1400,5 @@ class ValidationLoop:
             ),
             generated_line_ids=generated_ids,
             failed_line_ids=failed_ids,
+            segment_metrics=segment_metrics or [],
         )

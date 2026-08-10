@@ -14,14 +14,25 @@ For each attempt the validator records:
 - Qwen speaker-encoder similarity to the selected reference voice
 - final `pass`, `accepted_with_warning`, `flagged`, or `fail` status and notes
 - text similarity, effective text error, attempt number, and the exact acceptance reason
+- nonblocking pitch-variation/dynamic-range metrics and a calibrated monotone warning when prosody diagnostics are enabled
+
+WER, clipping, speaker similarity, and prosody checks do not prove perceptual
+cleanliness. The 2026-08-09 run passed those objective gates while many
+phase-processed lines still sounded echoic. Output-changing DSP therefore also
+requires a controlled listening gate; it cannot be promoted solely from ASR or
+signal-level metrics.
 
 Reference audio and reference text are always paired. If a character reference lacks a trustworthy transcript, the validator does not combine it with the narrator transcript; synthesis falls back to supported speaker conditioning.
+
+Chapter validation passes the EPUB metadata language to Whisper. Auto-detection
+is used only when the project has no language metadata, avoiding independent
+language guesses for every short utterance.
 
 ## Outcome rules
 
 Hard failures include:
 
-- WER above `validation.wer_threshold`
+- WER above `validation.wer_threshold` (post-FX emotion labels do not relax this unless an explicit nonzero `emotion_wer_allowance` is configured)
 - clipped samples beyond the configured peak threshold
 - excessive silence
 - severe duration/pacing anomaly
@@ -51,7 +62,7 @@ mastering.
 
 A cached segment is eligible only when:
 
-1. Its generation fingerprint matches the current text, speaker/voice ID, voice-reference content, reference text, emotion, speed, pronunciation substitutions, FX, and generation configuration.
+1. Its generation fingerprint matches the current text, speaker/voice ID, voice-reference content, reference text, emotion, speed, pronunciation substitutions, FX, generation configuration, and versioned post-processing policy.
 2. The file content hash still matches the recorded hash.
 3. The previous validation status was acceptable.
 4. The file is readable audio with a nonzero waveform.
@@ -61,12 +72,11 @@ The cache is keyed by line identity but validated by dependencies. Editing one l
 ## Speaker consistency
 
 Before loading Whisper, the voice service uses Qwen's speaker encoder to
-compare generated segments to their reference voices. The production GPU passed
-short and 53-word co-residency benchmarks, so TTS and Whisper may remain loaded
-together inside one chapter's retry loop. Whisper is always released at the
-chapter request boundary; the next chapter's long initial TTS pass therefore
-runs without co-residency contention. Pipeline/service shutdown still unloads
-both models.
+compare generated segments to their reference voices. TTS is unloaded before
+Whisper unless `keep_tts_and_whisper_resident` is explicitly enabled from a
+hardware-specific benchmark. Whisper is always released at the chapter request
+boundary. VoiceDesign, Qwen Base, and Whisper are loaded lazily so reference
+bootstrap never requires all models to coexist in VRAM.
 
 The default similarity threshold is a starting point, not a universal calibration. Calibrate it against known-good reference/generated pairs from the actual model and hardware before raising it.
 
@@ -126,3 +136,21 @@ Before a long book:
 7. Select All and confirm the full export is refused until every chapter is valid, then succeeds.
 
 Unit tests use fake engines and do not replace this model-level smoke test.
+## Verification tiers
+
+Use the cheapest tier that can prove the changed contract:
+
+1. `scripts/verify_pipeline.py --tier static` runs unit, compile, JavaScript,
+   and documentation checks without models.
+2. `gpu-smoke`, `chapter`, and `full` require explicit `--allow-models`; these
+   are workstation gates, not ordinary CI tests.
+3. `artifact` hashes and inspects an existing export without generating it.
+
+Accepted synthesis and validation are checkpointed independently. Regression
+coverage must prove that a crash after synthesis revalidates the matching WAV,
+that changed hashes cannot be reused, and that an older selected retry remains
+the reported winner while all attempts still count toward retry metrics.
+
+Automated acceptance is not the final listening gate. The Quality tab preserves
+join dispositions and exposes both adjacent segments; accepted warnings and
+every retry attempt remain separately reviewable.

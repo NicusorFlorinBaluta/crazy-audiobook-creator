@@ -85,16 +85,28 @@ class VoiceDesigner:
             self.voice_design_test_sentences.get("neutral", self.voice_design_test_sentences.get("other", "This is a fallback test sentence to ensure adequate duration for voice design references.")),
         )
         
+        importance = getattr(character, "importance", "minor")
         if not character.test_sentence:
-            return fallback
+            if importance == "minor":
+                return fallback
+            raise ValueError(
+                f"Major voice '{char_id}' has no usable source-backed "
+                "reference text; choose dialogue before bootstrapping"
+            )
             
         # Pad short sentences to ensure VoiceDesign has enough text to generate ~10s of audio
         # Only do this for minor characters, to avoid making all major characters sound too similar.
-        importance = getattr(character, "importance", "minor")
         if len(character.test_sentence.split()) < 12 and importance == "minor":
             return f"{character.test_sentence.strip()} {fallback}"
             
         return character.test_sentence
+
+    @staticmethod
+    def _candidate_id(voice_id: str, candidate_index: int) -> str:
+        """Keep candidate one canonical; suffix only optional alternatives."""
+        if candidate_index < 1:
+            raise ValueError("candidate_index must start at 1")
+        return voice_id if candidate_index == 1 else f"{voice_id}_cand{candidate_index}"
 
     def bootstrap_voices(
         self,
@@ -181,11 +193,19 @@ class VoiceDesigner:
 
             for char_id, character in request.characters.items():
                 importance = getattr(character, "importance", "minor")
-                num_candidates = 3 if char_id == "narrator" or importance == "major" else 1
+                default_count = 3 if char_id == "narrator" or importance == "major" else 1
+                num_candidates = max(
+                    1,
+                    min(3, int(request.candidate_counts.get(char_id, default_count))),
+                )
 
                 candidates = []
                 for cand_idx in range(1, num_candidates + 1):
-                    cand_id = f"{char_id}_cand{cand_idx}" if num_candidates > 1 else char_id
+                    # Candidate one is the canonical, initially assigned profile.
+                    # Additional candidates are optional alternatives.  Keeping a
+                    # real registry entry under char_id makes a newly bootstrapped
+                    # major voice immediately usable and approvable.
+                    cand_id = self._candidate_id(char_id, cand_idx)
                     
                     if not request.force_regenerate and self.library.voice_exists(
                         project_id, cand_id
@@ -268,21 +288,35 @@ class VoiceDesigner:
                 character = request.characters[char_id]
                 expected = self._build_test_sentence(char_id, character)
 
-                transcribed = self.validator.transcribe(result.file)
-                wer = self.validator.calculate_wer(expected, transcribed)
-                result.transcription_wer = float(wer)
-                logger.info(
-                    "Reference check for '%s': WER=%.3f transcript=%r",
-                    char_id,
-                    wer,
-                    transcribed[:60],
-                )
-                
-                if wer > self.wer_threshold:
-                    self.library.delete_voice(project_id, char_id)
-                    validation_failures.append(
-                        f"{char_id} (WER={wer:.3f})"
+                validated_candidates: list[VoiceCandidate] = []
+                for candidate_index, candidate in enumerate(result.candidates):
+                    transcribed = self.validator.transcribe(candidate.file)
+                    wer = self.validator.calculate_wer(expected, transcribed)
+                    candidate.transcription_wer = float(wer)
+                    logger.info(
+                        "Reference check for '%s': WER=%.3f transcript=%r",
+                        candidate.id,
+                        wer,
+                        transcribed[:60],
                     )
+                    if wer > self.wer_threshold:
+                        self.library.delete_voice(project_id, candidate.id)
+                        if candidate_index == 0:
+                            validation_failures.append(
+                                f"{candidate.id} (WER={wer:.3f})"
+                            )
+                        else:
+                            logger.warning(
+                                "Discarding optional candidate '%s' after transcript failure",
+                                candidate.id,
+                            )
+                        continue
+                    validated_candidates.append(candidate)
+                result.candidates = validated_candidates
+                if not validated_candidates:
+                    continue
+                result.file = validated_candidates[0].file
+                result.transcription_wer = result.candidates[0].transcription_wer
             # Do not make chapter-scale TTS/Whisper co-residency an implicit
             # requirement. Release Whisper before loading the speaker encoder.
             self.validator.unload()
@@ -301,6 +335,9 @@ class VoiceDesigner:
                 )
                 cand.acoustic_metrics = metrics
                 cand.warnings.extend(warnings)
+            if result.candidates:
+                result.acoustic_metrics = result.candidates[0].acoustic_metrics
+                result.warnings = list(result.candidates[0].warnings)
             try:
                 embeddings[char_id] = self.engine.speaker_embedding(result.file)
             except Exception as exc:
@@ -349,26 +386,10 @@ class VoiceDesigner:
                         similarity,
                     )
 
-                    # Phase 3.2: Generate a distinct fallback candidate for minor speakers that fail distinctness
-                    for fallback_id in (left_id, right_id):
-                        if len(voices_generated[fallback_id].candidates) == 1:
-                            logger.info("Generating distinctness fallback candidate for '%s'", fallback_id)
-                            try:
-                                char_for_fallback = request.characters[fallback_id]
-                                fallback_cand_id = f"{fallback_id}_cand2"
-                                fallback_cand = self._generate_voice(
-                                    project_id,
-                                    fallback_cand_id,
-                                    char_for_fallback,
-                                    design_fingerprint="",
-                                )
-                                # Ensure we have metrics for the fallback too
-                                f_metrics, f_warnings = self._acoustic_diagnostics(Path(fallback_cand.file), char_for_fallback)
-                                fallback_cand.acoustic_metrics = f_metrics
-                                fallback_cand.warnings.extend(f_warnings)
-                                voices_generated[fallback_id].candidates.append(fallback_cand)
-                            except Exception as exc:
-                                logger.warning("Failed to generate distinctness fallback for '%s': %s", fallback_id, exc)
+                    # The VoiceDesign helper has already been stopped so the Base
+                    # speaker encoder can run without VRAM co-residency.  Do not
+                    # attempt an impossible late fallback generation here; the
+                    # warning is surfaced for an explicit user redesign instead.
 
         return BootstrapVoicesResponse(
             status="success",
@@ -563,9 +584,6 @@ class VoiceDesigner:
         design_fingerprint: str = "",
     ) -> VoiceCandidate:
         """Generate a single voice reference clip."""
-        if not self.engine.is_loaded:
-            self.engine.load()
-
         test_sentence = self._build_test_sentence(char_id, character)
 
         import uuid

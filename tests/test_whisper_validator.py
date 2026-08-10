@@ -1,11 +1,42 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import Mock
 
 from voice.validator.whisper_validator import WhisperValidator
 
 
 class WhisperValidatorTextTests(unittest.TestCase):
+    def test_backend_selection_is_explicit_and_validated(self) -> None:
+        validator = WhisperValidator(
+            model_name="tiny",
+            device="cpu",
+            backend="openai_whisper",
+        )
+        self.assertEqual(validator.backend, "openai_whisper")
+        with self.assertRaises(ValueError):
+            WhisperValidator(backend="unsupported")
+
+    def test_openai_backend_uses_raw_audio_when_vad_is_disabled(self) -> None:
+        validator = WhisperValidator(
+            model_name="tiny",
+            device="cpu",
+            backend="openai_whisper",
+            vad_filter=False,
+        )
+        validator._backend = "openai_whisper"
+        validator._is_loaded = True
+        validator._model = Mock()
+        validator._model.transcribe.return_value = {"text": " Uncle! "}
+
+        result = validator.transcribe("short-line.wav", language="en")
+
+        self.assertEqual(result, "Uncle!")
+        validator._model.transcribe.assert_called_once_with(
+            "short-line.wav",
+            language="en",
+        )
+
     def test_contraction_and_expanded_form_have_zero_wer(self) -> None:
         validator = WhisperValidator(model_name="tiny", device="cpu")
         self.assertEqual(

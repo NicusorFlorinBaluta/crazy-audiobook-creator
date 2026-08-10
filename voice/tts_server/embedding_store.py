@@ -402,6 +402,86 @@ class EmbeddingStore:
             and validation_status in {"pass", "accepted_with_warning"}
         )
 
+    def line_needs_synthesis(
+        self,
+        project_id: str,
+        line_id: str,
+        text: str,
+        speaker: str,
+        emotion: str = "",
+        speed: float = 1.0,
+        fx_dict: dict[str, Any] | None = None,
+        output_path: str | Path | None = None,
+        generation_context: dict[str, Any] | None = None,
+    ) -> bool:
+        """Return whether audio must be synthesized, independent of validation.
+
+        A crash may occur after a valid WAV is written but before validation or
+        the chapter manifest is committed. Such a WAV is safe to revalidate
+        when its generation fingerprint and content hash still match; it is
+        never treated as accepted until validation has its own matching record.
+        """
+        if output_path and (
+            not Path(output_path).exists()
+            or Path(output_path).stat().st_size < 1000
+        ):
+            return True
+        expected_fingerprint = self._generation_fingerprint(
+            text=text,
+            speaker=speaker,
+            emotion=emotion,
+            speed=speed,
+            fx_dict=fx_dict,
+            generation_context=generation_context,
+        )
+        current_output_hash = self.hash_file(output_path) if output_path else ""
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT fingerprint_hash, output_hash
+                FROM generation_fingerprints
+                WHERE project_id = ? AND line_id = ?
+                """,
+                (project_id, line_id),
+            ).fetchone()
+        return not (
+            row
+            and row[0] == expected_fingerprint
+            and row[1]
+            and row[1] == current_output_hash
+        )
+
+    def save_synthesis_fingerprint(
+        self,
+        *,
+        project_id: str,
+        line_id: str,
+        text: str,
+        speaker: str,
+        emotion: str,
+        speed: float,
+        fx_dict: dict[str, Any] | None,
+        output_path: str | Path,
+        duration_seconds: float,
+        generation_context: dict[str, Any] | None = None,
+    ) -> None:
+        """Checkpoint a valid but not-yet-accepted synthesis artifact."""
+        self.save_generation_fingerprint(
+            project_id=project_id,
+            line_id=line_id,
+            text=text,
+            speaker=speaker,
+            emotion=emotion,
+            speed=speed,
+            fx_dict=fx_dict,
+            output_path=output_path,
+            duration_seconds=duration_seconds,
+            wer=-1.0,
+            quality_score=-1.0,
+            validation_status="synthesized",
+            generation_context=generation_context,
+        )
+
     def save_generation_fingerprint(
         self,
         project_id: str,

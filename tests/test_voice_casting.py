@@ -12,6 +12,7 @@ from shared.voice_casting import (
     build_voice_cast,
     compile_effective_voice_prompt,
     speaking_character_ids,
+    required_voice_character_ids,
 )
 
 
@@ -123,19 +124,46 @@ class VoiceCastingTests(unittest.TestCase):
         self.assertEqual(speaking, {"narrator", "speaker"})
         self.assertEqual(
             set(cast["voices"]),
-            {"narrator", "narrator_male", "speaker"},
-        )
-        self.assertEqual(
-            cast["voices"]["narrator"]["assigned_characters"],
-            ["narrator"],
+            {"narrator_female", "narrator_male", "speaker"},
         )
         self.assertEqual(
             cast["voices"]["narrator_male"]["assigned_characters"],
+            ["narrator"],
+        )
+        self.assertEqual(
+            cast["voices"]["narrator_female"]["assigned_characters"],
             [],
         )
-        self.assertEqual(cast["voices"]["narrator"]["gender"], "female")
+        self.assertEqual(cast["voices"]["narrator_female"]["gender"], "female")
         self.assertEqual(cast["voices"]["narrator_male"]["gender"], "male")
         self.assertEqual(cast["non_speaking_characters"], ["island"])
+
+    def test_narrator_is_required_for_announcements_without_narration_lines(self) -> None:
+        registry = CharacterRegistry(
+            book_title="Dialogue only",
+            book_author="Author",
+            characters={
+                "narrator": _character(
+                    "narrator", gender=Gender.MALE,
+                    description="warm measured baritone",
+                ),
+                "speaker": _character(
+                    "speaker", gender=Gender.FEMALE,
+                    description="clear bright alto",
+                ),
+            },
+        )
+        chapters = [ScriptChapter(
+            chapter_number=1,
+            chapter_title="Only dialogue",
+            lines=[ScriptLine(
+                line_id="ch01_0001", speaker="speaker", text="Hello.",
+            )],
+        )]
+
+        required = required_voice_character_ids(chapters, registry)
+
+        self.assertEqual(required, {"narrator", "speaker"})
 
     def test_selected_narrator_alternative_survives_cast_rebuild(self) -> None:
         narrator = _character(

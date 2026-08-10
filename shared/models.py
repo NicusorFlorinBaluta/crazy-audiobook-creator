@@ -6,8 +6,8 @@ pipeline state persistence, and inter-stage data flow.
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Literal
+from datetime import datetime, timezone
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -309,6 +309,14 @@ class GenerateChapterRequest(BaseModel):
         default_factory=list,
         description="Approved names/glossary terms eligible for fuzzy ASR matching",
     )
+    validation_revision: str = Field(
+        default="",
+        description="Project-scoped revision used to explicitly invalidate validation cache",
+    )
+    language: str | None = Field(
+        default=None,
+        description="Optional project language code passed to speech recognition",
+    )
 
 
 class GenerateChapterResponse(BaseModel):
@@ -321,9 +329,12 @@ class GenerateChapterResponse(BaseModel):
     failed_validation: int = 0
     accepted_with_warning: int = 0
     retried: int = 0
+    synthesis_cache_hits: int = 0
+    synthesis_cache_misses: int = 0
     validation_cache_hits: int = 0
     validation_cache_misses: int = 0
     timings_seconds: dict[str, float] = Field(default_factory=dict)
+    segment_metrics: list[dict[str, Any]] = Field(default_factory=list)
     peak_vram_gb: float | None = None
     risk_adjusted_line_ids: list[str] = Field(default_factory=list)
     total_duration_seconds: float = 0.0
@@ -346,6 +357,7 @@ class BootstrapVoicesRequest(BaseModel):
     characters: dict[str, Character]
     force_regenerate: bool = False
     design_fingerprints: dict[str, str] = Field(default_factory=dict)
+    candidate_counts: dict[str, int] = Field(default_factory=dict)
 
 
 class VoiceCandidate(BaseModel):
@@ -438,6 +450,9 @@ class QualityResult(BaseModel):
         description="Composite quality score",
     )
     attempt: int = 1
+    selected: bool = False
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    passed_hard_gates: bool = True
     warnings: list[str] = Field(
         default_factory=list,
         description="Soft diagnostic messages that do not block acceptance",
@@ -497,6 +512,7 @@ class MasterChapterRequest(BaseModel):
     mastering_config: MasteringConfig | None = None
     chapter_title: str = ""
     announce_chapter: bool = True
+    narrator_voice_id: str = "narrator"
 
 
 class MasterSegmentInfo(BaseModel):
@@ -527,6 +543,8 @@ class MasterChapterResponse(BaseModel):
     lufs: float = 0.0
     peak_dbfs: float = 0.0
     file_size_mb: float = 0.0
+    join_warnings: int = 0
+    join_diagnostics: list[dict[str, Any]] = Field(default_factory=list)
 
 
 # ===================================================================
@@ -583,11 +601,39 @@ class ExportM4BResponse(BaseModel):
     total_chapters: int = 0
     file_size_mb: float = 0.0
     download_url: str = ""
+    book_loudness: dict[str, Any] = Field(default_factory=dict)
 
 
 # ===================================================================
 # Pipeline / Project Status (Stage ⑧: Dashboard)
 # ===================================================================
+
+
+class ProgressSnapshot(BaseModel):
+    """Versioned, stage-agnostic description of the currently active work."""
+
+    schema_version: int = 1
+    stage: str = ""
+    phase: str = ""
+    message: str = ""
+    chapter: int | None = None
+    chapter_position: int | None = None
+    chapter_total: int | None = None
+    line_id: str = ""
+    line_position: int | None = None
+    line_total: int | None = None
+    attempt: int = 1
+    cache_hit: bool | None = None
+    completed_units: float = 0.0
+    total_units: float = 0.0
+    percent: float = 0.0
+    elapsed_seconds: float = 0.0
+    eta_seconds: float | None = None
+    eta_confidence: Literal["none", "low", "medium", "high"] = "none"
+    started_at: datetime | None = None
+    updated_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
 
 
 class ProjectStatus(BaseModel):
@@ -623,6 +669,7 @@ class ProjectStatus(BaseModel):
     active_generation_chapter_selection: list[int] | None = None
     active_stage: PipelineStage | None = None
     pause_reason: str | None = None
+    progress: ProgressSnapshot | None = None
 
 
 class ProjectSummary(BaseModel):
@@ -704,6 +751,12 @@ class VoiceHealthResponse(BaseModel):
     gpu: str = ""
     vram_total_gb: float = 0.0
     vram_used_gb: float = 0.0
+    vram_reserved_gb: float = 0.0
+    vram_peak_allocated_gb: float = 0.0
+    vram_peak_reserved_gb: float = 0.0
     model_loaded: str = ""
     attention_backend: str = ""
+    validator_backend: str = ""
+    validator_model: str = ""
+    validator_vad_filter: bool = False
     uptime_seconds: float = 0.0

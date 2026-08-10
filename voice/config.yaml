@@ -12,6 +12,13 @@ tts:
   language: "English"                # Avoid unreliable auto-detection on short lines
   attn_implementation: "sdpa"        # ~16% faster wall time than eager in the local smoke benchmark
 
+  # Clean-audio policy. The 2026-08-09 E2E found echo-like smearing in lines
+  # processed by the librosa phase-vocoder fallback. Keep output dry until a
+  # replacement backend passes controlled listening tests.
+  post_processing:
+    enabled: false
+    allow_phase_vocoder_fallback: false
+
   # Reference-voice design settings
   voice_design_model: "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign"
   voice_design_duration: 10          # Duration of reference clips (seconds)
@@ -28,6 +35,13 @@ tts:
     top_k: 50
     top_p: 1.0
     repetition_penalty: 1.05
+    # Experimental only. Keep disabled until the fixed-fixture and chapter
+    # benchmarks prove no truncation or quality regression.
+    adaptive_max_new_tokens:
+      enabled: false
+      base_tokens: 256
+      tokens_per_character: 10.0
+      minimum_tokens: 512
 
 # --- Quality Validation ---
 validation:
@@ -38,11 +52,19 @@ validation:
   # Listening-approved clarity policy for very short emphatic lines. Longer
   # dialogue, repetitions, names, and ordinary narration remain unchanged.
   risk_aware_first_attempt: true
-  whisper_model: "small"           # "tiny" | "base" | "small" | "medium" | "large-v3"
+  whisper_model: "large-v3"        # "tiny" | "base" | "small" | "medium" | "large-v3"
   whisper_device: "cuda"            # "auto" | "cuda" | "cpu"
+  # CTranslate2's faster-whisper CUDA runtime targets NVIDIA on Windows.
+  # Use PyTorch OpenAI Whisper for this AMD/ROCm environment.
+  whisper_backend: "openai_whisper" # "auto" | "faster_whisper" | "openai_whisper"
+  # Raw OpenAI Whisper preserved short/high-pitched and repeated speech in the
+  # full-book ROCm E2E run. Optional Silero preprocessing remains available,
+  # with a raw-audio fallback when VAD detects no speech.
+  whisper_vad_filter: false
 
   # Thresholds
   wer_threshold: 0.20               # 20%
+  emotion_wer_allowance: 0.0        # Keep transcript accuracy strict unless benchmark evidence justifies a relaxation
   max_retries: 3
   speaker_similarity_threshold: 0.55
   voice_profile_similarity_warning: 0.985
@@ -54,6 +76,14 @@ validation:
   min_duration_seconds: 0.3
   max_silence_seconds: 3.0
   duration_tolerance: 0.6            # ±60%, plus 0.8s allowance for short lines
+
+  # Non-blocking diagnostics. Thresholds are explicit so benchmark tuning
+  # invalidates cached validation results deterministically.
+  prosody:
+    enabled: true
+    min_duration_seconds: 1.0
+    pitch_cv_threshold: 0.06
+    dynamic_range_threshold: 4.0
 
   # Text normalization for WER
   normalize_text: true
