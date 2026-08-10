@@ -80,6 +80,13 @@ male/female narrator candidates shown at first-project review):
 6. Transcribe the WAV with Whisper and compare it with that sentence.
 7. Validate every exposed candidate and register only references within the bootstrap WER limit. A failed optional alternative is discarded without invalidating a good canonical candidate.
 8. Pause a new project for one manual preview/approval step.
+
+At voice review, the selected A/B option is stated explicitly. Applying an
+option shows an in-progress state and a success or failure notification.
+Regeneration replaces only the currently selected option; the button names
+that option before the destructive replacement. Character reference text is
+drawn from speaker-pure script lines, so narrator tags and action beats must
+not be embedded in a character's preview.
 9. Load Qwen Base when chapter generation starts.
 
 Each effective profile has a fingerprint containing its metadata, compiled

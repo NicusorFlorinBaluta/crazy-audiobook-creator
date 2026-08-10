@@ -25,6 +25,10 @@ from shared.models import (
 
 logger = logging.getLogger(__name__)
 
+# Included in project dependency fingerprints. Increment whenever deterministic
+# post-processing changes the contents or meaning of a character registry.
+CHARACTER_ANALYSIS_REVISION = 2
+
 # Load prompt template
 _PROMPT_DIR = Path(__file__).parent / "prompts"
 
@@ -306,6 +310,9 @@ class CharacterAnalyzer:
             }
             registry = self._parse_registry(final_raw, book_title, book_author)
 
+        registry = self._ensure_explicit_unnamed_speakers(registry, book)
+        self._assign_voice_ids(registry.characters)
+
         elapsed = _time.time() - t0
         logger.info(
             "[CharacterAnalyzer] Pass 1 complete in %.1fs | %d characters: %s",
@@ -474,8 +481,18 @@ class CharacterAnalyzer:
             )
             logger.warning("[CharacterAnalyzer] LLM didn't produce a narrator — using default")
 
-        # Keep every speaking character for attribution, but cap distinct voice
-        # references by assigning low-dialogue characters a stable shared voice.
+        self._assign_voice_ids(characters)
+
+        return CharacterRegistry(
+            book_title=raw.get("book_title", fallback_title),
+            book_author=raw.get("book_author", fallback_author),
+            genre=raw.get("genre", self.genre),
+            tone=raw.get("tone", ""),
+            characters=characters,
+        )
+
+    def _assign_voice_ids(self, characters: dict[str, Character]) -> None:
+        """Apply the unique-voice cap after all deterministic role discovery."""
         if len(characters) > self.max_unique_voices:
             logger.info(
                 "[CharacterAnalyzer] Capping %d → %d unique voices",
@@ -519,13 +536,104 @@ class CharacterAnalyzer:
             for character_id, character in characters.items():
                 character.voice_id = character_id
 
-        return CharacterRegistry(
-            book_title=raw.get("book_title", fallback_title),
-            book_author=raw.get("book_author", fallback_author),
-            genre=raw.get("genre", self.genre),
-            tone=raw.get("tone", ""),
-            characters=characters,
+    @staticmethod
+    def _ensure_explicit_unnamed_speakers(
+        registry: CharacterRegistry,
+        book: ExtractedBook,
+    ) -> CharacterRegistry:
+        """Add gendered unnamed speakers that are explicit in dialogue tags.
+
+        This is deliberately narrow: it only reacts to a quoted utterance
+        immediately followed by an unambiguous generic noun and speech verb.
+        It does not infer identities or merge the role with a named character.
+        """
+        role_specs = {
+            "boy": (
+                "child_male",
+                "Boy",
+                Gender.MALE,
+                "child",
+                "male child speaker, child age. medium-high pitch, moderate volume, natural speed. clear texture, high clarity, natural fluency. curious emotion, direct tone, youthful personality.",
+            ),
+            "girl": (
+                "child_female",
+                "Girl",
+                Gender.FEMALE,
+                "child",
+                "female child speaker, child age. high pitch, moderate volume, natural speed. clear texture, high clarity, natural fluency. curious emotion, direct tone, youthful personality.",
+            ),
+            "man": (
+                "minor_male",
+                "Unnamed Man",
+                Gender.MALE,
+                "adult",
+                "male speaker, adult age. medium pitch, moderate volume, natural speed. clear texture, high clarity, natural fluency. neutral emotion, conversational tone, grounded personality.",
+            ),
+            "woman": (
+                "minor_female",
+                "Unnamed Woman",
+                Gender.FEMALE,
+                "adult",
+                "female speaker, adult age. medium pitch, moderate volume, natural speed. clear texture, high clarity, natural fluency. neutral emotion, conversational tone, grounded personality.",
+            ),
+        }
+        speech_verbs = (
+            r"said|asked|replied|whispered|shouted|murmured|exclaimed|"
+            r"continued|agreed|added|called|demanded|warned|answered|cried"
         )
+        pattern = re.compile(
+            r"(?:\"[^\"\n]+\"|\u201c[^\u201d\n]+\u201d)\s*"
+            r"(?:,\s*)?(?:the|a)\s+(boy|girl|man|woman)\s+(?:"
+            + speech_verbs
+            + r")\b",
+            re.IGNORECASE,
+        )
+        counts: dict[str, int] = {}
+        for chapter in book.chapters:
+            for match in pattern.finditer(chapter.text):
+                noun = match.group(1).casefold()
+                counts[noun] = counts.get(noun, 0) + 1
+
+        for noun, count in counts.items():
+            role_id, name, gender, age_range, description = role_specs[noun]
+            existing = registry.characters.get(role_id)
+            if existing is None:
+                existing = next(
+                    (
+                        candidate
+                        for candidate in registry.characters.values()
+                        if candidate.gender == gender
+                        and noun
+                        in {
+                            candidate.id.casefold(),
+                            candidate.name.casefold(),
+                            *(alias.casefold() for alias in candidate.aliases),
+                        }
+                    ),
+                    None,
+                )
+            if existing is not None:
+                existing.dialogue_count = max(existing.dialogue_count, count)
+                continue
+            registry.characters[role_id] = Character(
+                id=role_id,
+                name=name,
+                gender=gender,
+                age_range=age_range,
+                personality_traits=["unnamed", "source-explicit"],
+                voice_description=description,
+                speaking_style="Natural dialogue matching the source context",
+                dialogue_count=count,
+                test_sentence=(
+                    "I know what I saw, and I can explain it if you listen."
+                ),
+            )
+            logger.warning(
+                "[CharacterAnalyzer] Added explicit unnamed speaker '%s' from %d source tag(s)",
+                role_id,
+                count,
+            )
+        return registry
 
     @staticmethod
     def _consolidate_accumulated_characters(

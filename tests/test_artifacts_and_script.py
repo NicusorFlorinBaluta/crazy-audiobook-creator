@@ -378,6 +378,51 @@ class ScriptFidelityTests(unittest.TestCase):
                 registry=registry,
             )
 
+    def test_gendered_noun_dialogue_tag_contradiction_is_rejected(self) -> None:
+        registry = CharacterRegistry(
+            book_title="Test",
+            book_author="Author",
+            characters={
+                "child_female": Character(
+                    id="child_female",
+                    name="Girl",
+                    gender=Gender.FEMALE,
+                    age_range="child",
+                    voice_description="young female voice",
+                )
+            },
+        )
+
+        with self.assertRaisesRegex(ValueError, "male speaker"):
+            ScriptGenerator._validate_dialogue_tag_attribution(
+                "child_female",
+                "the boy said, folding his arms.",
+                registry,
+                54,
+            )
+
+    def test_explicit_boy_tag_adds_missing_male_child_role(self) -> None:
+        source = '"I followed the star," the boy said, folding his arms.'
+        book = ExtractedBook(
+            metadata=BookMetadata(title="Book", author="Author", total_chapters=1),
+            chapters=[
+                ExtractedChapter(
+                    number=1,
+                    title="One",
+                    text=source,
+                    word_count=len(source.split()),
+                )
+            ],
+        )
+        analyzer = CharacterAnalyzer(FakeCharacterOllama())
+
+        registry = analyzer.analyze(book)
+
+        self.assertIn("child_male", registry.characters)
+        self.assertEqual(registry.characters["child_male"].gender, Gender.MALE)
+        self.assertEqual(registry.characters["child_male"].voice_id, "child_male")
+        self.assertEqual(registry.characters["child_male"].dialogue_count, 1)
+
     def test_voice_redesign_does_not_invalidate_script_fingerprint(self) -> None:
         chapter = ExtractedChapter(
             number=1,

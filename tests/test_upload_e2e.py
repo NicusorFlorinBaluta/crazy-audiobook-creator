@@ -1,61 +1,67 @@
-import httpx
-import sys
+"""Opt-in live voice-upload checks.
+
+These tests require a running dashboard, a prepared project, and real audio.
+They are excluded from ordinary discovery unless ``RUN_LIVE_UPLOAD_E2E=1``.
+"""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
 import shutil
+from tempfile import TemporaryDirectory
+import unittest
 
-BASE_URL = "http://127.0.0.1:8000"
-PROJECT_ID = "sample_book-1"
-VOICE_ID = "fake_cand"
-FILE_PATH = r"e:\Projects\crazy-audiobook-creator\voice_library\sample_book-1\child_female.wav"
-TEMP_FILE_PATH = "temp_child_female.wav"
-TRANSCRIPT = "She walked through the moonlit garden, listening as fallen leaves whispered beneath each careful step."
+import httpx
 
-shutil.copy(FILE_PATH, TEMP_FILE_PATH)
 
-def test_upload():
-    print(f"Testing upload of {TEMP_FILE_PATH} to {VOICE_ID}...")
-    
-    with open(TEMP_FILE_PATH, "rb") as f:
-        files = {"file": ("child_female.wav", f, "audio/wav")}
-        data = {"transcript": TRANSCRIPT}
-        
-        response = httpx.post(
-            f"{BASE_URL}/api/projects/{PROJECT_ID}/voices/{VOICE_ID}/upload",
-            files=files,
-            data=data,
-            timeout=300.0
+RUN_LIVE = os.environ.get("RUN_LIVE_UPLOAD_E2E") == "1"
+BASE_URL = os.environ.get("UPLOAD_E2E_BASE_URL", "http://127.0.0.1:8000")
+PROJECT_ID = os.environ.get("UPLOAD_E2E_PROJECT_ID", "sample_book-1")
+VOICE_ID = os.environ.get("UPLOAD_E2E_VOICE_ID", "fake_cand")
+FILE_PATH = Path(
+    os.environ.get(
+        "UPLOAD_E2E_AUDIO_FILE",
+        "voice_library/sample_book-1/child_female.wav",
+    )
+)
+TRANSCRIPT = (
+    "She walked through the moonlit garden, listening as fallen leaves "
+    "whispered beneath each careful step."
+)
+
+
+@unittest.skipUnless(RUN_LIVE, "set RUN_LIVE_UPLOAD_E2E=1 for live API tests")
+class VoiceUploadLiveTests(unittest.TestCase):
+    def setUp(self) -> None:
+        if not FILE_PATH.is_file():
+            self.skipTest(f"live audio fixture not found: {FILE_PATH}")
+        self.temp_dir = TemporaryDirectory()
+        self.audio_path = Path(self.temp_dir.name) / FILE_PATH.name
+        shutil.copy2(FILE_PATH, self.audio_path)
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def _upload(self, transcript: str) -> httpx.Response:
+        with self.audio_path.open("rb") as audio:
+            return httpx.post(
+                f"{BASE_URL}/api/projects/{PROJECT_ID}/voices/{VOICE_ID}/upload",
+                files={"file": (self.audio_path.name, audio, "audio/wav")},
+                data={"transcript": transcript},
+                timeout=300.0,
+            )
+
+    def test_matching_transcript_is_accepted(self) -> None:
+        response = self._upload(TRANSCRIPT)
+        self.assertEqual(response.status_code, 200, response.text)
+
+    def test_mismatched_transcript_is_rejected(self) -> None:
+        response = self._upload(
+            "This is completely different text that should fail."
         )
-    
-    if response.status_code == 200:
-        print("Success!")
-        print(response.json())
-    else:
-        print(f"Failed: {response.status_code}")
-        print(response.text)
-        sys.exit(1)
+        self.assertNotEqual(response.status_code, 200, response.text)
 
-def test_upload_mismatch():
-    print(f"Testing upload of {TEMP_FILE_PATH} to {VOICE_ID} with mismatched transcript...")
-    
-    with open(TEMP_FILE_PATH, "rb") as f:
-        files = {"file": ("child_female.wav", f, "audio/wav")}
-        data = {"transcript": "This is completely different text that should fail."}
-        
-        response = httpx.post(
-            f"{BASE_URL}/api/projects/{PROJECT_ID}/voices/{VOICE_ID}/upload",
-            files=files,
-            data=data,
-            timeout=300.0
-        )
-    
-    if response.status_code != 200:
-        print("Expected Failure Caught:")
-        print(f"Status: {response.status_code}")
-        print(response.text)
-    else:
-        print(f"Test failed! Mismatch was incorrectly accepted: {response.status_code}")
-        sys.exit(1)
 
 if __name__ == "__main__":
-    test_upload_mismatch()
-    print("-" * 40)
-    test_upload()
+    unittest.main()

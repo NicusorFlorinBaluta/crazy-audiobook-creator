@@ -177,6 +177,10 @@ window.ScriptViewer = (() => {
             const assigned = (mainVoice.assigned_characters || [])
                 .map(characterId => speakerById.get(characterId))
                 .filter(Boolean);
+            const mainCandidateIndex = candidates.findIndex(
+                candidate => candidate.voice_id === mainVoice.voice_id
+            );
+            const mainOptionLabel = String.fromCharCode(65 + Math.max(0, mainCandidateIndex));
 
             let candidatesHtml = '';
             if (candidates.length > 1) {
@@ -198,7 +202,8 @@ window.ScriptViewer = (() => {
                                 `).join('')}
                             </div>
                         </div>
-                        <button class="btn btn-secondary apply-candidate" data-owner-id="${ownerId}" ${voiceState.editable ? '' : 'disabled'}>Apply Selected Candidate</button>
+                        <div class="selected-candidate-status" aria-live="polite">Option ${mainOptionLabel} is currently applied</div>
+                        <button class="btn btn-secondary apply-candidate" data-owner-id="${ownerId}" disabled>Option ${mainOptionLabel} is applied</button>
                     </div>
                 `;
             } else {
@@ -268,8 +273,8 @@ window.ScriptViewer = (() => {
                     <textarea class="voice-description-input" rows="4"
                               ${voiceState.editable ? '' : 'disabled'}>${escapeHtml(mainVoice.source_description || mainVoice.description || '')}</textarea>
                     <button class="btn btn-secondary voice-regenerate"
-                            ${voiceState.editable ? '' : 'disabled'}>Generate new preview</button>
-                    <small>The app enforces this profile's gender and age metadata and marks only dependent chapters stale.</small>
+                            ${voiceState.editable ? '' : 'disabled'}>${candidates.length > 1 ? `Regenerate option ${mainOptionLabel} (replaces option ${mainOptionLabel})` : 'Generate new preview'}</button>
+                    <small class="voice-regenerate-help">${candidates.length > 1 ? 'Only the selected comparison option will be replaced.' : "The app enforces this profile's gender and age metadata and marks only dependent chapters stale."}</small>
                 </details>
                 <details class="voice-upload">
                     <summary>Use a recorded voice sample</summary>
@@ -291,18 +296,21 @@ window.ScriptViewer = (() => {
 
             card.querySelectorAll('.voice-assignment-row').forEach(row => {
                 const select = row.querySelector('.char-voice-select');
-                row.querySelector('.char-voice-save')?.addEventListener(
-                    'click',
-                    () => saveVoiceAssignment(row.dataset.characterId, select.value)
+                const saveButton = row.querySelector('.char-voice-save');
+                saveButton?.addEventListener('click', () =>
+                    saveVoiceAssignment(row.dataset.characterId, select.value, saveButton)
                 );
             });
-            card.querySelector('.voice-regenerate')?.addEventListener(
-                'click',
-                () => regenerateVoice(
-                    mainVoice.voice_id,
+            const regenerateButton = card.querySelector('.voice-regenerate');
+            regenerateButton?.addEventListener('click', () => {
+                const selected = card.querySelector(
+                    `input[name="candidate-${ownerId}"]:checked`
+                );
+                regenerateVoice(
+                    selected?.value || mainVoice.voice_id,
                     card.querySelector('.voice-description-input').value
-                )
-            );
+                );
+            });
             card.querySelector('.voice-upload-submit')?.addEventListener(
                 'click',
                 () => uploadVoiceSample(
@@ -329,14 +337,38 @@ window.ScriptViewer = (() => {
                     });
                     e.target.closest('.btn').classList.remove('btn-outline');
                     e.target.closest('.btn').classList.add('btn-primary');
+
+                    const selectedIndex = candidates.findIndex(
+                        candidate => candidate.voice_id === e.target.value
+                    );
+                    const optionLabel = String.fromCharCode(65 + selectedIndex);
+                    const selectedVoice = candidates[selectedIndex];
+                    const status = card.querySelector('.selected-candidate-status');
+                    const apply = card.querySelector('.apply-candidate');
+                    const description = card.querySelector('.voice-description-input');
+                    const regenerate = card.querySelector('.voice-regenerate');
+                    if (status) {
+                        status.textContent = selectedVoice.voice_id === mainVoice.voice_id
+                            ? `Option ${optionLabel} is currently applied`
+                            : `Option ${optionLabel} selected; not yet applied`;
+                    }
+                    if (apply) {
+                        apply.disabled = !voiceState.editable || selectedVoice.voice_id === mainVoice.voice_id;
+                        apply.textContent = selectedVoice.voice_id === mainVoice.voice_id
+                            ? `Option ${optionLabel} is applied`
+                            : `Apply option ${optionLabel}`;
+                    }
+                    if (description) {
+                        description.value = selectedVoice.source_description || selectedVoice.description || '';
+                    }
+                    if (regenerate) {
+                        regenerate.textContent = `Regenerate option ${optionLabel} (replaces option ${optionLabel})`;
+                    }
                     
                     // Swap source and sync time
                     const newSrc = e.target.dataset.previewUrl;
                     if (newSrc && newSrc !== 'undefined') {
                         player.src = newSrc;
-                        const selectedVoice = voices.find(
-                            voice => voice.voice_id === e.target.value
-                        );
                         if (download && selectedVoice?.download_url) {
                             download.href = selectedVoice.download_url;
                         }
@@ -352,7 +384,10 @@ window.ScriptViewer = (() => {
             if (applyBtn) {
                 applyBtn.addEventListener('click', async () => {
                     const selected = card.querySelector(`input[name="candidate-${ownerId}"]:checked`).value;
-                    if (selected === mainVoice.voice_id) return;
+                    if (selected === mainVoice.voice_id) {
+                        showToast('That voice option is already applied', 'info');
+                        return;
+                    }
                     
                     const btn = applyBtn;
                     const prevText = btn.textContent;
@@ -361,14 +396,24 @@ window.ScriptViewer = (() => {
                     try {
                         const projectId = window.state?.currentProjectId;
                         for (const character of assigned) {
-                            await fetch(`api/projects/${projectId}/voices/${character.character_id}/assign`, {
-                                method: 'POST',
+                            const response = await fetch(
+                                `api/projects/${encodeURIComponent(projectId)}/characters/${encodeURIComponent(character.character_id)}/voice`, {
+                                method: 'PATCH',
                                 headers: { 'Content-Type': 'application/json' },
                                 body: JSON.stringify({ voice_id: selected })
                             });
+                            const data = await response.json().catch(() => ({}));
+                            if (!response.ok) {
+                                throw new Error(data.detail || `Could not update ${character.name}`);
+                            }
                         }
+                        showToast(`Voice option applied to ${assigned.length} character${assigned.length === 1 ? '' : 's'}`, 'success');
+                        await Promise.all([fetchCharacters(projectId), fetchVoices(projectId)]);
+                        renderCharacters();
                     } catch (e) {
-                        console.error('Failed to apply candidate', e);
+                        showToast(e.message || 'Failed to apply voice option', 'error');
+                        btn.textContent = prevText;
+                        btn.disabled = false;
                     }
                 });
             }
@@ -630,9 +675,9 @@ window.ScriptViewer = (() => {
                 const description = card.querySelector('.voice-description-input');
                 if (description) description.value = voice?.description || '';
             });
-            card.querySelector('.char-voice-save')?.addEventListener(
-                'click',
-                () => saveVoiceAssignment(char.id, select.value)
+            const saveButton = card.querySelector('.char-voice-save');
+            saveButton?.addEventListener('click', () =>
+                saveVoiceAssignment(char.id, select.value, saveButton)
             );
             card.querySelector('.voice-regenerate')?.addEventListener(
                 'click',
@@ -646,9 +691,14 @@ window.ScriptViewer = (() => {
         });
     }
 
-    async function saveVoiceAssignment(characterId, voiceId) {
+    async function saveVoiceAssignment(characterId, voiceId, button = null) {
         const projectId = window.state?.currentProjectId;
         if (!projectId) return;
+        const previousText = button?.textContent;
+        if (button) {
+            button.disabled = true;
+            button.textContent = 'Assigning...';
+        }
         try {
             const response = await fetch(
                 `api/projects/${encodeURIComponent(projectId)}/characters/${encodeURIComponent(characterId)}/voice`,
@@ -671,6 +721,11 @@ window.ScriptViewer = (() => {
             renderCharacters();
         } catch (error) {
             showToast(error.message, 'error');
+        } finally {
+            if (button?.isConnected) {
+                button.disabled = false;
+                button.textContent = previousText;
+            }
         }
     }
 

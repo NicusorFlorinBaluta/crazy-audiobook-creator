@@ -838,9 +838,16 @@ class ScriptGenerator:
 
         tag = tag_text.casefold()
         pronoun_gender = None
+        gender_evidence = "speaker description"
         if re.search(r"\bshe\b", tag):
             pronoun_gender = Gender.FEMALE
+            gender_evidence = "pronouns"
         elif re.search(r"\bhe\b", tag):
+            pronoun_gender = Gender.MALE
+            gender_evidence = "pronouns"
+        elif re.search(r"\b(?:the|a)\s+(?:girl|woman)\b", tag):
+            pronoun_gender = Gender.FEMALE
+        elif re.search(r"\b(?:the|a)\s+(?:boy|man)\b", tag):
             pronoun_gender = Gender.MALE
         if (
             pronoun_gender is not None
@@ -849,7 +856,8 @@ class ScriptGenerator:
         ):
             raise ValueError(
                 f"Fragment {fragment_id} assigns '{speaker}', but its attached "
-                f"dialogue tag uses '{pronoun_gender.value}' pronouns"
+                f"dialogue tag identifies a {pronoun_gender.value} speaker "
+                f"through {gender_evidence}"
             )
 
         speech_verbs = (

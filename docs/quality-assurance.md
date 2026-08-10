@@ -74,8 +74,11 @@ The cache is keyed by line identity but validated by dependencies. Editing one l
 Before metadata is accepted, deterministic evidence rejects contradictions
 that do not require literary inference: a known male speaker cannot own a quote
 whose attached tag says `she`, a known female speaker cannot own one tagged
-`he`, and an explicitly named tag cannot name a different registered
-character. Unknown/nonbinary metadata is not guessed from pronouns. These
+`he`, gendered noun tags such as `the boy said` and `the woman asked` must
+match binary speaker metadata, and an explicitly named tag cannot name a
+different registered character. Explicit unnamed boy/girl/man/woman speakers
+missed by model analysis are added deterministically before scripting.
+Unknown/nonbinary metadata is not guessed from pronouns. These
 checks request a corrected metadata pass; they do not choose among multiple
 plausible characters.
 

@@ -58,6 +58,24 @@ class DashboardBasePathTests(unittest.TestCase):
         )
         self.assertIn('"X-Crazy-Audiobook-UI-Version"', api_source)
 
+    def test_voice_candidate_controls_use_supported_assignment_route(self):
+        viewer = (FRONTEND / "js/script-viewer.js").read_text(encoding="utf-8")
+        self.assertNotIn("/voices/${character.character_id}/assign", viewer)
+        self.assertIn("/characters/${encodeURIComponent(character.character_id)}/voice", viewer)
+        self.assertIn("if (!response.ok)", viewer)
+        self.assertIn("Voice option applied", viewer)
+
+    def test_voice_regeneration_targets_the_selected_option(self):
+        viewer = (FRONTEND / "js/script-viewer.js").read_text(encoding="utf-8")
+        self.assertIn("selected?.value || mainVoice.voice_id", viewer)
+        self.assertIn("Regenerate option ${optionLabel} (replaces option ${optionLabel})", viewer)
+        self.assertIn("Only the selected comparison option will be replaced", viewer)
+
+    def test_voice_assignment_button_has_busy_feedback(self):
+        viewer = (FRONTEND / "js/script-viewer.js").read_text(encoding="utf-8")
+        self.assertIn("button.textContent = 'Assigning...'", viewer)
+        self.assertIn("button.disabled = true", viewer)
+
 
 if __name__ == "__main__":
     unittest.main()

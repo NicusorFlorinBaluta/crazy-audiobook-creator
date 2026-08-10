@@ -23,6 +23,7 @@ from zoneinfo import ZoneInfo
 import yaml
 
 from brain.director.character_analyzer import (
+    CHARACTER_ANALYSIS_REVISION,
     CharacterAnalyzer,
     _SYSTEM_PROMPT as CHARACTER_SYSTEM_PROMPT,
 )
@@ -1020,6 +1021,7 @@ class Pipeline:
                     "book": book.model_dump(mode="json"),
                     "model": self.ollama.model,
                     "prompt": CHARACTER_SYSTEM_PROMPT,
+                    "analysis_revision": CHARACTER_ANALYSIS_REVISION,
                     "max_unique_voices": self.character_analyzer.max_unique_voices,
                 }
             )
@@ -1058,6 +1060,7 @@ class Pipeline:
                 "book": book.model_dump(mode="json"),
                 "model": self.ollama.model,
                 "prompt": CHARACTER_SYSTEM_PROMPT,
+                "analysis_revision": CHARACTER_ANALYSIS_REVISION,
                 "max_unique_voices": self.character_analyzer.max_unique_voices,
             }
         )
