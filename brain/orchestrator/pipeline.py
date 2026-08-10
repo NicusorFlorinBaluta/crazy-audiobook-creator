@@ -54,13 +54,21 @@ from shared.models import (
     MasterSegmentInfo,
     ProjectStatus,
 )
-from shared.voice_casting import build_voice_cast, speaking_character_ids
+from shared.voice_casting import (
+    build_voice_cast,
+    required_voice_character_ids,
+    speaking_character_ids,
+)
 from shared.pronunciation import (
     apply_pronunciations,
     build_pronunciation_inventory,
     load_pronunciation_dictionary,
 )
 from shared.single_instance import SingleInstanceLock
+from shared.progress import ProgressEstimator
+from shared.logging_utils import rotate_file
+from shared.reference_selection import select_reference_text
+from shared.config_validation import validate_brain_config
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +171,8 @@ class Pipeline:
         self._ollama_server_proc = None
         self._ollama_server_log_handle = None
         self._voice_server_proc = None
+        self._voice_server_log_handle = None
+        self._progress_estimator = ProgressEstimator(window_size=20)
 
     def stop(self, project_id: str) -> None:
         """Immediately interrupt work; completed checkpoints remain reusable."""
@@ -237,7 +247,7 @@ class Pipeline:
         """Load pipeline configuration from YAML."""
         if self.config_path.exists():
             with open(self.config_path, "r", encoding="utf-8") as f:
-                return yaml.safe_load(f) or {}
+                return validate_brain_config(yaml.safe_load(f) or {})
         logger.warning("Config file not found: %s — using defaults", self.config_path)
         return {}
 
@@ -322,6 +332,7 @@ class Pipeline:
             )
         )
         log_path.parent.mkdir(parents=True, exist_ok=True)
+        rotate_file(log_path)
         self._ollama_server_log_handle = open(
             log_path,
             "a",
@@ -503,11 +514,28 @@ class Pipeline:
             str(voice_cfg.get("rocm_target_family", "custom")),
         )
 
-        self._voice_server_proc = subprocess.Popen(
-            [str(python_exe), "-m", "voice.tts_server.main"],
-            cwd=str(Path.cwd()),
-            env=env,
+        log_path = self.projects_dir / "voice-server-managed.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        rotate_file(log_path)
+        self._voice_server_log_handle = open(
+            log_path,
+            "a",
+            encoding="utf-8",
+            buffering=1,
         )
+        logger.info("Managed Voice Server output: %s", log_path)
+        try:
+            self._voice_server_proc = subprocess.Popen(
+                [str(python_exe), "-m", "voice.tts_server.main"],
+                cwd=str(Path.cwd()),
+                env=env,
+                stdout=self._voice_server_log_handle,
+                stderr=subprocess.STDOUT,
+            )
+        except Exception:
+            self._voice_server_log_handle.close()
+            self._voice_server_log_handle = None
+            raise
 
         timeout = voice_cfg.get("startup_timeout_seconds", 120)
         if not self.voice_client.wait_for_server(max_wait_seconds=timeout):
@@ -530,6 +558,15 @@ class Pipeline:
                     pass
             finally:
                 self._voice_server_proc = None
+                log_handle = getattr(self, "_voice_server_log_handle", None)
+                if log_handle is not None:
+                    log_handle.close()
+                    self._voice_server_log_handle = None
+        else:
+            log_handle = getattr(self, "_voice_server_log_handle", None)
+            if log_handle is not None:
+                log_handle.close()
+                self._voice_server_log_handle = None
 
     # ------------------------------------------------------------------
     # Schedule & Deployment Controls
@@ -640,6 +677,11 @@ class Pipeline:
         project_dir = self.projects_dir / project_id
         project_dir.mkdir(parents=True, exist_ok=True)
 
+        # Preserve the immutable import source so an explicit re-extraction can
+        # be performed later.  Older projects without this file are rejected by
+        # reextract_project rather than having their only book.json deleted.
+        shutil.copy2(Path(epub_path), project_dir / "source.epub")
+
         book_path = project_dir / "book.json"
         if book.metadata.cover_image_path:
             cover_src = Path(book.metadata.cover_image_path)
@@ -680,6 +722,34 @@ class Pipeline:
         )
 
         return status
+
+    def reextract_project(self, project_id: str) -> ProjectStatus:
+        """Rebuild book.json from the preserved project source EPUB."""
+        project_dir = self.projects_dir / project_id
+        source_path = project_dir / "source.epub"
+        if not source_path.is_file():
+            raise FileNotFoundError(
+                "This project predates source preservation and cannot be "
+                "re-extracted. Import the EPUB as a new project instead."
+            )
+        state = self.job_queue.get_job(project_id)
+        book = self.parser.parse(source_path)
+        if state.get("title"):
+            book.metadata.title = str(state["title"])
+        if state.get("author"):
+            book.metadata.author = str(state["author"])
+        if book.metadata.cover_image_path:
+            cover_src = Path(book.metadata.cover_image_path)
+            if cover_src.exists():
+                cover_dest = project_dir / cover_src.name
+                if cover_src.resolve() != cover_dest.resolve():
+                    shutil.copy2(cover_src, cover_dest)
+                book.metadata.cover_image_path = str(cover_dest)
+        atomic_write_text(
+            project_dir / "book.json",
+            book.model_dump_json(indent=2),
+        )
+        return ProjectStatus(**state)
 
     # ------------------------------------------------------------------
     # Full pipeline run
@@ -834,10 +904,15 @@ class Pipeline:
                 return ProjectStatus(**self.job_queue.get_job(project_id))
 
             self._check_stop(project_id)
-            self._run_generation(project_id, project_dir)
+            if current_stage not in {
+                PipelineStage.MASTERING,
+                PipelineStage.EXPORTING,
+            }:
+                self._run_generation(project_id, project_dir)
 
             self._check_stop(project_id)
-            self._run_mastering(project_id, project_dir)
+            if current_stage != PipelineStage.EXPORTING:
+                self._run_mastering(project_id, project_dir)
 
             # Stage ⑦: M4B Export
             self._check_stop(project_id)
@@ -1026,11 +1101,68 @@ class Pipeline:
         scripts_dir = project_dir / "script"
         scripts_dir.mkdir(exist_ok=True)
 
+        current_script_chapter = 1
+        script_tick = time.perf_counter()
+
         def on_chapter_start(chapter_num: int):
+            nonlocal current_script_chapter, script_tick
             self._check_stop(project_id)
+            current_script_chapter = chapter_num
+            script_tick = time.perf_counter()
             self.job_queue.update_job(project_id, {
                 "current_script_chapter": chapter_num,
             })
+            completed = len(self.job_queue.get_job(project_id).get("scripted_chapters", []))
+            self.job_queue.update_progress(
+                project_id,
+                self._progress_estimator.snapshot(
+                    f"{project_id}:scripting",
+                    stage=PipelineStage.SCRIPTING.value,
+                    phase="chapter_start",
+                    message=f"Preparing script chapter {chapter_num} of {len(book.chapters)}",
+                    completed_units=completed,
+                    total_units=len(book.chapters),
+                    chapter=chapter_num,
+                    chapter_position=chapter_num,
+                    chapter_total=len(book.chapters),
+                ),
+            )
+
+        def on_script_chunk(chunk_num: int, chunk_total: int) -> None:
+            nonlocal script_tick
+            now = time.perf_counter()
+            if chunk_num > 1:
+                self._progress_estimator.observe(
+                    f"{project_id}:scripting",
+                    1.0 / max(chunk_total, 1),
+                    now - script_tick,
+                )
+            script_tick = now
+            completed_chapters = len(
+                self.job_queue.get_job(project_id).get("scripted_chapters", [])
+            )
+            completed = completed_chapters + max(0, chunk_num - 1) / max(
+                chunk_total, 1
+            )
+            self.job_queue.update_progress(
+                project_id,
+                self._progress_estimator.snapshot(
+                    f"{project_id}:scripting",
+                    stage=PipelineStage.SCRIPTING.value,
+                    phase="fragment_annotation",
+                    message=(
+                        f"Scripting chapter {current_script_chapter}: "
+                        f"fragment batch {chunk_num} of {chunk_total}"
+                    ),
+                    completed_units=completed,
+                    total_units=len(book.chapters),
+                    chapter=current_script_chapter,
+                    chapter_position=current_script_chapter,
+                    chapter_total=len(book.chapters),
+                    line_position=chunk_num,
+                    line_total=chunk_total,
+                ),
+            )
 
         def on_chapter_scripted(chapter_script):
             self._check_stop(project_id)
@@ -1049,6 +1181,7 @@ class Pipeline:
             scripts_dir=scripts_dir,
             progress_callback=on_chapter_scripted,
             chapter_start_callback=on_chapter_start,
+            chunk_progress_callback=on_script_chunk,
         )
 
         total_lines = 0
@@ -1077,10 +1210,33 @@ class Pipeline:
             "script_completed": True,
             "current_script_chapter": None,
         })
+        self._append_performance_metric(
+            project_dir,
+            {
+                "event": "script_generation",
+                "pass1_seconds": round(pass1_elapsed, 6),
+                "pass2_seconds": round(max(0.0, total_elapsed - pass1_elapsed), 6),
+                "total_seconds": round(total_elapsed, 6),
+                "chapters": len(chapter_scripts),
+                "segments": total_lines,
+                "calls": list(self.script_generator.call_metrics),
+            },
+        )
 
     def _run_voice_bootstrap(self, project_id: str, project_dir: Path) -> None:
         """Run Stage ③: Generate voice reference clips."""
         self._update_stage(project_id, PipelineStage.BOOTSTRAPPING)
+        self.job_queue.update_progress(
+            project_id,
+            self._progress_estimator.snapshot(
+                f"{project_id}:bootstrap",
+                stage=PipelineStage.BOOTSTRAPPING.value,
+                phase="reference_generation",
+                message="Preparing reusable voice references",
+                completed_units=0,
+                total_units=1,
+            ),
+        )
 
         chars_path = project_dir / "characters.json"
         from shared.models import CharacterRegistry
@@ -1101,7 +1257,7 @@ class Pipeline:
                     script_path.read_text(encoding="utf-8")
                 )
             )
-        speaking_ids = speaking_character_ids(script_chapters)
+        speaking_ids = required_voice_character_ids(script_chapters, registry)
 
         voice_config_path = Path("voice/config.yaml")
         voice_config = (
@@ -1124,53 +1280,101 @@ class Pipeline:
                     "voice_design_test_sentences", {}
                 ),
                 "language": tts_config.get("language", "English"),
+                "reference_text_policy": "ranked-actual-dialogue-v2",
             },
         )
         # Extract actual script lines for each character
-        character_script_lines = {}
+        character_script_lines: dict[str, list[str]] = {}
+        speaker_script_lines: dict[str, list[str]] = {}
         for ch in script_chapters:
             for line in ch.lines:
                 vid = line.voice_id or line.speaker
                 character_script_lines.setdefault(vid, []).append(line.text)
+                speaker_script_lines.setdefault(line.speaker, []).append(line.text)
 
         characters_for_request = {}
         for voice_id, profile in cast["voices"].items():
             owner_id = profile.get("owner_character_id", voice_id)
             base_char = registry.characters[owner_id]
             
-            # Combine real script lines until we reach > 15 words
-            real_lines = character_script_lines.get(voice_id, character_script_lines.get(owner_id, []))
-            combined_real = ""
-            for rline in real_lines:
-                combined_real += " " + rline
-                if len(combined_real.split()) >= 15:
-                    break
-            combined_real = combined_real.strip()
-            
-            ts = base_char.test_sentence or ""
-            # If the LLM sentence is too short, augment it with real lines
-            if len(ts.split()) < 15:
-                if len(combined_real.split()) >= 15:
-                    ts = combined_real
-                elif combined_real:
-                    ts = f"{ts} {combined_real}".strip()
+            real_lines = list(character_script_lines.get(voice_id, []))
+            if not real_lines:
+                for speaker_id in profile.get("assigned_characters", []):
+                    real_lines.extend(speaker_script_lines.get(speaker_id, []))
+            if not real_lines:
+                real_lines = list(character_script_lines.get(owner_id, []))
+            reference_selection = select_reference_text(
+                real_lines,
+                seed_text=base_char.test_sentence or "",
+                minimum_words=15,
+                maximum_words=38,
+            )
+            ts = reference_selection.text
                     
+            dialogue_turns = sum(
+                len(speaker_script_lines.get(speaker_id, []))
+                for speaker_id in profile.get("assigned_characters", [])
+            )
+            effective_importance = (
+                "major"
+                if owner_id == "narrator"
+                or base_char.importance == "major"
+                or dialogue_turns >= 5
+                else "minor"
+            )
             characters_for_request[voice_id] = base_char.model_copy(
                 update={
                     "id": voice_id,
                     "name": profile.get("name") or voice_id,
                     "gender": Gender(profile["gender"]),
                     "voice_description": profile["effective_prompt"],
-                    "test_sentence": ts
+                    "test_sentence": ts,
+                    "importance": effective_importance,
+                }
+            )
+            # The actual reference text is part of the voice-design artifact.
+            # Update the profile and its fingerprint after selecting real script
+            # dialogue so cache reuse cannot cross a reference-text change.
+            profile["test_sentence"] = ts
+            profile["reference_selection"] = {
+                "policy": "ranked-actual-dialogue-v2",
+                "source_line_count": reference_selection.source_line_count,
+                "used_seed_text": reference_selection.used_seed_text,
+                "text_score": reference_selection.score,
+            }
+            profile["design_fingerprint"] = fingerprint(
+                {
+                    "schema": profile.get("schema", cast.get("schema", "1")),
+                    "voice_id": voice_id,
+                    "gender": profile["gender"],
+                    "age_range": profile["age_range"],
+                    "effective_prompt": profile["effective_prompt"],
+                    "test_sentence": ts,
+                    "design_model": profile.get("design_model", ""),
+                    "design_config": profile.get("design_config", {}),
                 }
             )
 
         request = BootstrapVoicesRequest(
             project_id=project_id,
             characters=characters_for_request,
-            force_regenerate=False,
+            force_regenerate=bool(
+                self.job_queue.get_job(project_id).get(
+                    "force_voice_regeneration", False
+                )
+            ),
             design_fingerprints={
                 voice_id: profile["design_fingerprint"]
+                for voice_id, profile in cast["voices"].items()
+            },
+            candidate_counts={
+                voice_id: (
+                    1
+                    if profile.get("owner_character_id") == "narrator"
+                    else 3
+                    if characters_for_request[voice_id].importance == "major"
+                    else 1
+                )
                 for voice_id, profile in cast["voices"].items()
             },
         )
@@ -1226,6 +1430,8 @@ class Pipeline:
                     for item in response.cast_diagnostics
                 ),
             }
+            cast.pop("fingerprint", None)
+            cast["fingerprint"] = fingerprint(cast)
             atomic_write_json(project_dir / "voice_cast.json", cast)
             current_state = self.job_queue.get_job(project_id)
             review_status = current_state.get(
@@ -1244,6 +1450,7 @@ class Pipeline:
                     "bootstrapping_fingerprint": cast["fingerprint"],
                     "voice_cast_revision": cast["fingerprint"],
                     "voice_review_status": review_status,
+                    "force_voice_regeneration": False,
                 },
             )
             logger.info("Voice bootstrapping complete: %d voices generated", len(response.voices_generated))
@@ -1261,10 +1468,30 @@ class Pipeline:
         from shared.models import ScriptChapter
 
         state = self.job_queue.get_job(project_id)
+        project_language: str | None = None
+        try:
+            project_language = str(
+                json.loads((project_dir / "book.json").read_text(encoding="utf-8"))
+                .get("metadata", {})
+                .get("language")
+                or ""
+            ).strip() or None
+        except (OSError, ValueError, TypeError):
+            project_language = None
         generated_chapters, mastered_chapters = self._reconcile_artifacts(
             project_id, project_dir, script_files
         )
         selection = state.get("active_generation_chapter_selection")
+        selected_numbers = sorted(
+            selection
+            if selection is not None
+            else [
+                ScriptChapter.model_validate_json(
+                    path.read_text(encoding="utf-8")
+                ).chapter_number
+                for path in script_files
+            ]
+        )
         self.job_queue.update_job(
             project_id,
             {
@@ -1309,6 +1536,7 @@ class Pipeline:
             )
 
             try:
+                progress_ticks: dict[str, float] = {}
                 request = GenerateChapterRequest(
                     project_id=project_id,
                     chapter_number=chapter_script.chapter_number,
@@ -1317,20 +1545,83 @@ class Pipeline:
                     auto_retry=True,
                     max_retries=self.config.get("validation", {}).get("max_retries", 3),
                     validation_terms=self._validation_terms(project_dir),
+                    validation_revision=str(state.get("validation_revision") or ""),
+                    language=project_language,
                 )
 
                 def _on_generation_progress(msg: dict) -> None:
-                    # Update job queue so UI progress bar moves in real-time
-                    self.job_queue.update_job(project_id, {
-                        "lines_generated": msg.get("progress", 0),
-                        "total_lines": msg.get("total", len(request_lines))
-                    })
+                    phase = msg.get("phase", "synthesis")
+                    now = time.perf_counter()
+                    estimator_key = (
+                        f"{project_id}:chapter:{chapter_script.chapter_number}:"
+                        f"{phase}"
+                    )
+                    previous_tick = progress_ticks.get(phase)
+                    if previous_tick is None:
+                        self._progress_estimator.reset(estimator_key)
+                    else:
+                        self._progress_estimator.observe(
+                            estimator_key, 1.0, now - previous_tick
+                        )
+                    progress_ticks[phase] = now
+                    completed = int(msg.get("progress", 0) or 0)
+                    total = int(msg.get("total", len(request_lines)) or 0)
+                    stage_value = (
+                        PipelineStage.VALIDATING.value
+                        if phase == "validation"
+                        else PipelineStage.GENERATING.value
+                    )
+                    chapter_position = (
+                        selected_numbers.index(chapter_script.chapter_number) + 1
+                        if chapter_script.chapter_number in selected_numbers
+                        else None
+                    )
+                    self.job_queue.update_progress(
+                        project_id,
+                        self._progress_estimator.snapshot(
+                            estimator_key,
+                            stage=stage_value,
+                            phase=phase,
+                            message=(
+                                f"{phase.title()} chapter "
+                                f"{chapter_script.chapter_number}: "
+                                f"utterance {completed} of {total}"
+                            ),
+                            completed_units=completed,
+                            total_units=total,
+                            chapter=chapter_script.chapter_number,
+                            chapter_position=chapter_position,
+                            chapter_total=len(selected_numbers),
+                            line_id=str(msg.get("line_id") or ""),
+                            line_position=completed,
+                            line_total=total,
+                            attempt=int(msg.get("attempt", 1) or 1),
+                            cache_hit=bool(msg.get("cache_hit")),
+                        ),
+                    )
+                    progress_update = {
+                        "current_work_phase": phase,
+                        "total_lines": msg.get("total", len(request_lines)),
+                        "current_line_id": msg.get("line_id"),
+                        "current_attempt": msg.get("attempt", 1),
+                        "current_cache_hit": bool(msg.get("cache_hit")),
+                    }
+                    if phase == "validation":
+                        progress_update["lines_validated"] = msg.get("progress", 0)
+                        progress_update["active_stage"] = PipelineStage.VALIDATING.value
+                    else:
+                        progress_update["lines_generated"] = msg.get("progress", 0)
+                        progress_update["active_stage"] = PipelineStage.GENERATING.value
+                    self.job_queue.update_job(project_id, progress_update)
 
                 response = self.voice_client.generate_chapter(request, progress_callback=_on_generation_progress)
                 logger.info(
-                    "[AudioGenerationMetrics] chapter=%d cache_hits=%d "
-                    "cache_misses=%d timings=%s",
+                    "[AudioGenerationMetrics] chapter=%d synthesis_cache_hits=%d "
+                    "synthesis_cache_misses=%d validation_cache_hits=%d "
+                    "validation_cache_misses=%d timings=%s",
                     chapter_script.chapter_number,
+                    response.synthesis_cache_hits,
+                    response.synthesis_cache_misses,
                     response.validation_cache_hits,
                     response.validation_cache_misses,
                     json.dumps(response.timings_seconds, sort_keys=True),
@@ -1341,6 +1632,8 @@ class Pipeline:
                         "event": "chapter_generation",
                         "chapter_number": chapter_script.chapter_number,
                         "segments": len(request_lines),
+                        "synthesis_cache_hits": response.synthesis_cache_hits,
+                        "synthesis_cache_misses": response.synthesis_cache_misses,
                         "validation_cache_hits": response.validation_cache_hits,
                         "validation_cache_misses": response.validation_cache_misses,
                         "retries": response.retried,
@@ -1350,6 +1643,7 @@ class Pipeline:
                         "peak_vram_gb": response.peak_vram_gb,
                         "risk_adjusted_line_ids": response.risk_adjusted_line_ids,
                         "timings_seconds": response.timings_seconds,
+                        "segment_metrics": response.segment_metrics,
                     },
                 )
                 self.job_queue.clear_quality_logs(
@@ -1460,6 +1754,17 @@ class Pipeline:
             },
         )
         selection = state.get("active_generation_chapter_selection")
+        selected_numbers = sorted(
+            selection
+            if selection is not None
+            else [
+                ScriptChapter.model_validate_json(
+                    path.read_text(encoding="utf-8")
+                ).chapter_number
+                for path in script_files
+            ]
+        )
+        narrator_voice_id = self._selected_narrator_voice_id(project_dir)
 
         for script_file in script_files:
             self._check_stop(project_id)
@@ -1483,6 +1788,29 @@ class Pipeline:
                     "its segment manifest is incomplete"
                 )
 
+            chapter_position = (
+                selected_numbers.index(chapter_script.chapter_number) + 1
+                if chapter_script.chapter_number in selected_numbers
+                else None
+            )
+            self.job_queue.update_progress(
+                project_id,
+                self._progress_estimator.snapshot(
+                    f"{project_id}:mastering",
+                    stage=PipelineStage.MASTERING.value,
+                    phase="chapter_mastering",
+                    message=(
+                        f"Mastering chapter {chapter_script.chapter_number} "
+                        f"of {len(selected_numbers)}"
+                    ),
+                    completed_units=len(mastered_chapters),
+                    total_units=len(selected_numbers),
+                    chapter=chapter_script.chapter_number,
+                    chapter_position=chapter_position,
+                    chapter_total=len(selected_numbers),
+                ),
+            )
+
             segments = [
                 MasterSegmentInfo(
                     line_id=line.line_id,
@@ -1500,6 +1828,7 @@ class Pipeline:
                     segments=segments,
                     chapter_title=chapter_script.chapter_title,
                     announce_chapter=True,
+                    narrator_voice_id=narrator_voice_id,
                 )
 
                 mastering_started = time.perf_counter()
@@ -1545,6 +1874,9 @@ class Pipeline:
                 self.job_queue.update_job(project_id, {
                     "mastered_chapters": mastered_chapters,
                 })
+                self._progress_estimator.observe(
+                    f"{project_id}:mastering", 1.0, mastering_seconds
+                )
                 self._append_performance_metric(
                     project_dir,
                     {
@@ -1572,6 +1904,18 @@ class Pipeline:
     ) -> None:
         """Run Stage ⑦: M4B export."""
         self._update_stage(project_id, PipelineStage.EXPORTING)
+        self._progress_estimator.reset(f"{project_id}:export")
+        self.job_queue.update_progress(
+            project_id,
+            self._progress_estimator.snapshot(
+                f"{project_id}:export",
+                stage=PipelineStage.EXPORTING.value,
+                phase="package",
+                message="Packaging mastered chapters into M4B",
+                completed_units=0,
+                total_units=1,
+            ),
+        )
 
         book_path = project_dir / "book.json"
         from shared.models import ExtractedBook, ScriptChapter
@@ -1772,68 +2116,6 @@ class Pipeline:
         except Exception:
             return False
 
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-
-    def _update_stage(
-        self,
-        project_id: str,
-        stage: PipelineStage,
-        **extra: Any,
-    ) -> None:
-        """Update the pipeline stage in the job queue."""
-        is_done_stage = stage in (
-            PipelineStage.COMPLETE,
-            PipelineStage.SELECTION_COMPLETE,
-            PipelineStage.ERROR,
-            PipelineStage.PAUSED,
-            PipelineStage.VOICE_REVIEW,
-        )
-        is_running = not is_done_stage
-        preserve_active_stage = stage in (
-            PipelineStage.PAUSED,
-            PipelineStage.PAUSING,
-            PipelineStage.PAUSED_SCHEDULED,
-            PipelineStage.DEPLOY_PAUSED,
-            PipelineStage.ERROR,
-        )
-        if preserve_active_stage:
-            state = self.job_queue.get_job(project_id)
-            active_stage = state.get("active_stage") or state.get("status")
-        else:
-            active_stage = stage
-        update = {
-            "status": stage,
-            "active_stage": active_stage,
-            "running": is_running,
-            **extra,
-        }
-        self.job_queue.update_job(project_id, update)
-        logger.info("Pipeline stage: %s → %s (running=%s)", project_id, stage, is_running)
-
-    @staticmethod
-    def _make_project_id(title: str) -> str:
-        """Generate a URL-safe project ID from a book title."""
-        import re
-        project_id = title.lower().strip()
-        project_id = re.sub(r"[^\w\s-]", "", project_id)
-        project_id = re.sub(r"[-\s]+", "-", project_id)
-        project_id = project_id.strip("-_")
-        return project_id[:64] or "book"
-
-    @staticmethod
-    def _valid_audio(path: Path) -> bool:
-        if not path.is_file() or path.stat().st_size < 1000:
-            return False
-        try:
-            import soundfile as sf
-
-            info = sf.info(str(path))
-            return info.frames > 0 and info.samplerate > 0 and info.duration > 0
-        except Exception:
-            return False
-
     def _prepare_generation_lines(
         self,
         chapter: Any,
@@ -1940,6 +2222,7 @@ class Pipeline:
         """Append one durable, failure-isolated performance measurement."""
         try:
             metric = {
+                "schema_version": 2,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 **payload,
             }
@@ -1965,6 +2248,7 @@ class Pipeline:
         generated: list[int] = []
         mastered: list[int] = []
         workspace = Path("workspace") / project_id
+        narrator_voice_id = self._selected_narrator_voice_id(project_dir)
 
         for script_file in script_files:
             chapter = ScriptChapter.model_validate_json(
@@ -2075,6 +2359,7 @@ class Pipeline:
                         ],
                         chapter_title=chapter.chapter_title,
                         announce_chapter=True,
+                        narrator_voice_id=narrator_voice_id,
                     ),
                 )
                 and master_info.get("output_hash") == hash_file(master_file)
@@ -2082,6 +2367,25 @@ class Pipeline:
                 mastered.append(chapter.chapter_number)
 
         return sorted(generated), sorted(mastered)
+
+    @staticmethod
+    def _selected_narrator_voice_id(project_dir: Path) -> str:
+        """Resolve the approved voice assigned to the narrator character."""
+        cast_path = project_dir / "voice_cast.json"
+        if cast_path.is_file():
+            try:
+                voices = json.loads(
+                    cast_path.read_text(encoding="utf-8")
+                ).get("voices", {})
+                for voice_id, profile in voices.items():
+                    if "narrator" in profile.get("assigned_characters", []):
+                        return str(voice_id)
+            except (OSError, json.JSONDecodeError, AttributeError):
+                logger.warning(
+                    "Could not resolve narrator assignment from %s",
+                    cast_path,
+                )
+        return "narrator"
 
     @staticmethod
     def _voice_generation_config(project_id: str | None = None) -> dict[str, Any]:
@@ -2122,16 +2426,16 @@ class Pipeline:
             voice_config = yaml.safe_load(
                 voice_config_path.read_text(encoding="utf-8")
             ) or {}
-        narrator_reference = (
+        from voice.tts_server.voice_library import VoiceLibraryManager
+
+        narrator_reference = VoiceLibraryManager(
             Path(
                 voice_config.get("storage", {}).get(
                     "voice_library_dir",
                     "voice_library",
                 )
             )
-            / project_id
-            / "narrator.wav"
-        )
+        ).get_voice_path(project_id, request.narrator_voice_id)
         return fingerprint(
             {
                 "schema": MASTERING_SCHEMA_VERSION,

@@ -10,7 +10,7 @@ The supported default is one Windows workstation:
 Browser / Electron shell
         │
         ▼
-Dashboard API :8000 ─── Ollama :11434
+Dashboard API :8000 ─── Ollama :11435
         │
         ▼
 Voice API :8100 ─── Qwen VoiceDesign bootstrap helper :8101
@@ -30,19 +30,19 @@ scratch-runner concurrency.
 ## Processing stages
 
 1. **Created** (`created`): EPUB upload uploaded and project initialized.
-2. **Extraction** (`extracting`): EPUB text extracted, chapter structure built, cover art saved.
+2. **Import / extraction**: EPUB text is extracted synchronously during project creation, chapter structure is built, cover art is saved, and the immutable upload is retained as `source.epub` for an explicit future re-extraction.
 3. **Scripting** (`scripting`): LLM Pass 1 character analysis & Pass 2 text-to-script annotation.
    - Dialogue attribution is model-driven and source-grounded. Unknown IDs and
      low-confidence results trigger focused retries. Pass 2 cannot invent cast
      members; its conservative final fallback is narrator rather than a
      gender/proximity guess.
-4. **Bootstrapping** (`bootstrapping`): Speaking cast derived, voice design directions compiled, reference audio generated via Qwen VoiceDesign. Acoustic speaker embeddings (128-dim log-mel features) verify acoustic distinctness without prompt-text false positives.
+4. **Bootstrapping** (`bootstrapping`): Speaking cast derived, voice design directions compiled, reference audio generated via Qwen VoiceDesign. Qwen speaker-encoder embeddings provide the primary distinctness signal; a 514-value normalized log-spectrogram summary provides a model-independent fallback diagnostic.
 5. **Voice Review** (`voice_review`): Automated pause gate for user approval. Displays voice cards, preview players, and `[Approve voices & continue]` action banner.
 6. **Generating** (`generating`): Qwen3-TTS synthesizes chapter audio line by line with dynamic contextual pauses (250ms same speaker, 380ms narrator, 400ms quote-to-action, 450ms turn change, 900ms paragraph break).
 7. **Validating** (`validating`): Whisper Speech-to-Text transcribes audio to verify Word Error Rate (WER), acoustic clipping, and length bounds.
 8. **Mastering** (`mastering`): Chapter audio assembled with chapter announcements, crossfading, and LUFS volume normalization.
 9. **Exporting** (`exporting`): Mastered chapter WAVs packaged as chaptered M4B (AAC) with metadata and embedded cover art.
-10. **Completed** (`completed`): Audiobook creation complete and ready for download or Home Assistant playback.
+10. **Complete** (`complete`): Audiobook creation complete and ready for download or Home Assistant playback.
 
 ## Why analysis is book-wide but audio is incremental
 
@@ -90,7 +90,22 @@ File existence is never sufficient evidence of completion.
 
 At run start, generated and mastered chapter sets are independently reconstructed from these artifacts. A valid generated chapter does not imply a valid master, and a master is not trusted without its own matching manifest.
 
-Atomic replacement is used for JSON state and final audio writes. Individual line cache entries are committed only after a selected attempt passes validation.
+Atomic replacement is used for JSON state and final audio writes. A valid WAV
+gets a synthesis fingerprint immediately, while validation acceptance is a
+separate hash-bound checkpoint. This lets an interrupted run reuse synthesis
+without falsely treating unvalidated audio as accepted. The chapter manifest
+remains the completeness boundary.
+
+Pipeline state also carries a versioned progress snapshot alongside temporary
+legacy fields. The snapshot names the stage/phase, stable line ID and ordinal,
+cache state, elapsed time, server-derived ETA/confidence, and update timestamp.
+Performance JSONL records use schema version 2 and are summarized by selecting
+the latest successful record for each chapter.
+
+Human join-review dispositions live in the state database and never mutate
+source or audio artifacts. Cleanup is similarly constrained: the API returns
+an exact preview token and accepts deletion only if that candidate set is
+unchanged and remains inside the project workspace.
 
 ## Validation policy
 
@@ -177,13 +192,13 @@ When modifying or introducing new pipeline features, developers and AI agents MU
 
 2. **Stage Reset Endpoint Maintenance (`POST /api/projects/{id}/reset`)**:
    - Any new file artifact, directory path, or pipeline flag MUST be registered in `reset_pipeline_stage` inside `brain/dashboard/api/main.py`.
-   - Resetting to a stage must clean up downstream state AND delete corresponding disk files to guarantee clean execution upon resume.
+   - Resetting must invalidate only the artifacts owned by that operation. Re-validation preserves segment WAVs, re-export preserves mastered WAVs, and re-extraction is allowed only when the preserved `source.epub` exists.
 
 3. **Text Coverage Invariant (`assert_script_covers_source`)**:
    - Any script generator tweak or dialogue tag handler MUST validate against `assert_script_covers_source(script, source_text)`. No source text characters or sentences may be dropped or modified.
 
 4. **Acoustic Similarity Verification**:
-   - Voice prompt similarity MUST filter out template boilerplate words (`"clearly adult speaker"`, `"maintain vocal identity..."`) to prevent false similarity warnings. Acoustic evaluation should compare 128-dim log-mel spectrogram vectors (`compute_audio_similarity`).
+   - Voice prompt similarity MUST filter out template boilerplate words (`"clearly adult speaker"`, `"maintain vocal identity..."`) to prevent false similarity warnings. Acoustic evaluation uses the Qwen speaker encoder plus the model-independent normalized log-spectrogram diagnostic in `compute_audio_similarity`.
 
 5. **Verification Protocol**:
    - Always run unit test discovery (`python -m unittest discover -s tests -p "test_*.py"`) and verify project reset/progress flows after making backend schema or stage changes.
@@ -192,4 +207,3 @@ When modifying or introducing new pipeline features, developers and AI agents MU
    - `voice_cast.json` (in `brain/projects/<id>/`) is the **authoritative speaker → voice mapping** during generation. The narrator's approved candidate (e.g. `narrator_male`) is stored there under `assigned_characters` and is **not** written back to `characters.json`.
    - Any code that resolves which voice to use for a script line MUST read `voice_cast.json` first (via `assigned_characters`), then fall back to `characters.json`'s `voice_id` field, then fall back to the raw speaker ID. See `_prepare_generation_lines` in `pipeline.py`.
    - `VoiceLibraryManager.get_voice_path` consults `voices.json` to find the actual hashed WAV filename. Do not construct voice file paths by hand as `<voice_id>.wav` — they are content-hashed and registered in the voice library registry.
-

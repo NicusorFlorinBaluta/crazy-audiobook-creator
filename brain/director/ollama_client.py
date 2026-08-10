@@ -42,6 +42,7 @@ class OllamaClient:
         self._client_lock = threading.Lock()
         self._client = self._new_client()
         self._cancel_event = threading.Event()
+        self.last_generation_metrics: dict[str, Any] = {}
 
     def _new_client(self) -> httpx.Client:
         return httpx.Client(
@@ -156,6 +157,7 @@ class OllamaClient:
                 full_text = []
                 token_count = 0
                 last_log_tokens = 0
+                final_chunk: dict[str, Any] = {}
 
                 client = self._ensure_client()
                 with client.stream(
@@ -186,6 +188,8 @@ class OllamaClient:
                         self._raise_if_cancelled()
                         if line:
                             chunk = json.loads(line)
+                            if chunk.get("done"):
+                                final_chunk = chunk
                             if "message" in chunk and "content" in chunk["message"]:
                                 full_text.append(chunk["message"]["content"])
                                 token_count += 1
@@ -221,6 +225,21 @@ class OllamaClient:
                     token_count / elapsed if elapsed > 0 else 0,
                     text[:120].replace("\n", " "),
                 )
+                self.last_generation_metrics = {
+                    "attempt": attempt,
+                    "prompt_characters": sum(len(m["content"]) for m in messages),
+                    "response_characters": len(text),
+                    "stream_chunks": token_count,
+                    "elapsed_seconds": round(elapsed, 6),
+                    "chunks_per_second": round(
+                        token_count / elapsed if elapsed > 0 else 0.0, 6
+                    ),
+                    "prompt_eval_count": final_chunk.get("prompt_eval_count"),
+                    "eval_count": final_chunk.get("eval_count"),
+                    "prompt_eval_duration_ns": final_chunk.get("prompt_eval_duration"),
+                    "eval_duration_ns": final_chunk.get("eval_duration"),
+                    "load_duration_ns": final_chunk.get("load_duration"),
+                }
                 return text
 
             except httpx.TimeoutException as e:

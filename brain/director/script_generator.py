@@ -173,6 +173,7 @@ class ScriptGenerator:
         self.speaker_confidence_threshold = max(
             0.0, min(1.0, speaker_confidence_threshold)
         )
+        self.call_metrics: list[dict[str, Any]] = []
 
     def chapter_fingerprint(
         self,
@@ -301,6 +302,7 @@ class ScriptGenerator:
 
         import time as _time
         pipeline_t0 = _time.time()
+        self.call_metrics = []
 
         for i, chapter in enumerate(chapters):
             logger.info(
@@ -442,6 +444,7 @@ class ScriptGenerator:
         t0 = _time.time()
         raw = None
         last_error: Exception | None = None
+        used_fallback = False
         allowed_speakers = set(registry.characters)
         for attempt in range(1, 4):
             try:
@@ -482,6 +485,7 @@ class ScriptGenerator:
                     exc,
                 )
         if raw is None:
+            used_fallback = True
             logger.warning(
                 "LLM metadata annotation failed for chapter %d after retries. "
                 "Using conservative exact-evidence fallback metadata.",
@@ -524,6 +528,21 @@ class ScriptGenerator:
             chapter_number,
             elapsed,
             len(result.lines),
+        )
+        self.call_metrics.append(
+            {
+                "chapter_number": chapter_number,
+                "chapter_title": chapter_title,
+                "fragment_count": len(fragments),
+                "source_words": sum(len(item.text.split()) for item in fragments),
+                "prompt_characters": len(system_prompt) + len(prompt),
+                "wall_seconds": round(elapsed, 6),
+                "attempts": attempt if raw is not None else 3,
+                "used_fallback": used_fallback,
+                "ollama": dict(
+                    getattr(self.ollama, "last_generation_metrics", {}) or {}
+                ),
+            }
         )
         return result
 

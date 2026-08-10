@@ -90,6 +90,41 @@ class JobQueueTests(unittest.TestCase):
             self.assertEqual(summary["total_retries"], 1)
             self.assertAlmostEqual(summary["average_wer"], 0.05)
 
+    def test_project_quality_summary_uses_explicit_selected_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            queue = JobQueue(str(Path(directory) / "state.db"))
+            queue.create_job("book", {"status": "created"})
+            queue.log_quality(
+                "book", "line-1", 1, 1, 0.0, 0.95, "pass",
+                details={"selected": True},
+            )
+            queue.log_quality(
+                "book", "line-1", 1, 2, 0.5, 0.10, "fail",
+                details={"selected": False},
+            )
+
+            summary = queue.get_project_quality_summary("book")
+
+            self.assertEqual(summary["passed"], 1)
+            self.assertEqual(summary["failed"], 0)
+            self.assertEqual(summary["total_retries"], 1)
+            self.assertEqual(summary["average_wer"], 0.0)
+
+    def test_review_disposition_is_persisted_and_replaced(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            queue = JobQueue(str(Path(directory) / "state.db"))
+            queue.create_job("book", {"status": "created"})
+            queue.set_review_item("book", "join", "ch01-2", "acceptable")
+            queue.set_review_item(
+                "book", "join", "ch01-2", "needs_remaster", "Level jump",
+            )
+
+            items = queue.get_review_items("book", "join")
+
+            self.assertEqual(len(items), 1)
+            self.assertEqual(items[0]["disposition"], "needs_remaster")
+            self.assertEqual(items[0]["note"], "Level jump")
+
 
 class VoiceDiagnosticTests(unittest.TestCase):
     def test_obvious_pitch_mismatch_is_reported_as_warning(self) -> None:
@@ -163,6 +198,27 @@ class VoiceDiagnosticTests(unittest.TestCase):
 
 
 class ArtifactStateTests(unittest.TestCase):
+    def test_mastering_resolves_approved_narrator_voice(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project_dir = Path(directory)
+            atomic_write_json(
+                project_dir / "voice_cast.json",
+                {
+                    "voices": {
+                        "narrator_female": {
+                            "assigned_characters": [],
+                        },
+                        "narrator_male": {
+                            "assigned_characters": ["narrator"],
+                        },
+                    }
+                },
+            )
+
+            selected = Pipeline._selected_narrator_voice_id(project_dir)
+
+        self.assertEqual(selected, "narrator_male")
+
     def test_generated_and_mastered_are_reconciled_independently(self) -> None:
         old_cwd = Path.cwd()
         with tempfile.TemporaryDirectory() as directory:
@@ -352,6 +408,22 @@ class AssemblerTests(unittest.TestCase):
 
 
 class AudioAnalyzerTests(unittest.TestCase):
+    def test_metrics_are_json_serializable_native_scalars(self) -> None:
+        from voice.validator.audio_analyzer import AudioAnalyzer
+
+        sample_rate = 24000
+        audio = np.full(sample_rate, 0.05, dtype=np.float32)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "native-scalars.wav"
+            sf.write(path, audio, sample_rate)
+            result = AudioAnalyzer().analyze(str(path), "hello world")
+
+        json.dumps(result)
+        self.assertIs(type(result["clipping_detected"]), bool)
+        self.assertIs(type(result["duration_ok"]), bool)
+        self.assertIs(type(result["peak_dbfs"]), float)
+        self.assertIs(type(result["sample_rate"]), int)
+
     def test_short_spoken_line_allows_fixed_onset_duration(self) -> None:
         from voice.validator.audio_analyzer import AudioAnalyzer
 
@@ -404,6 +476,37 @@ class LoudnessNormalizerTests(unittest.TestCase):
 
 
 class FingerprintTests(unittest.TestCase):
+    def test_synthesized_audio_can_resume_before_validation_acceptance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = EmbeddingStore(root / "cache.db")
+            audio = root / "line.wav"
+            sf.write(audio, np.ones(2400, dtype=np.float32) * 0.01, 24000)
+            context = {"voice_reference_hash": "voice-a", "model": "model"}
+            store.save_synthesis_fingerprint(
+                project_id="book",
+                line_id="line",
+                text="Text",
+                speaker="speaker",
+                emotion="neutral",
+                speed=1.0,
+                fx_dict=None,
+                output_path=audio,
+                duration_seconds=0.1,
+                generation_context=context,
+            )
+
+            self.assertFalse(store.line_needs_synthesis(
+                project_id="book", line_id="line", text="Text",
+                speaker="speaker", emotion="neutral", speed=1.0,
+                fx_dict=None, output_path=audio, generation_context=context,
+            ))
+            self.assertTrue(store.line_needs_regeneration(
+                project_id="book", line_id="line", text="Text",
+                speaker="speaker", emotion="neutral", speed=1.0,
+                fx_dict=None, output_path=audio, generation_context=context,
+            ))
+
     def test_voice_reference_change_invalidates_line(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -530,6 +633,59 @@ class VoiceLibrarySafetyTests(unittest.TestCase):
                     sample_rate=24000,
                     ref_text="Text",
                 )
+
+    def test_replacing_voice_cleans_superseded_audio_and_embedding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            library = VoiceLibraryManager(directory)
+            project_dir = Path(directory) / "book"
+            project_dir.mkdir()
+            first = project_dir / "narrator_old.wav"
+            first.write_bytes(b"old audio")
+            first.with_suffix(".pt").write_bytes(b"old embedding")
+            second = project_dir / "narrator_new.wav"
+            second.write_bytes(b"new audio")
+
+            values = {
+                "project_id": "book",
+                "character_id": "narrator",
+                "name": "Narrator",
+                "description": "Clear",
+                "gender": "other",
+                "duration_seconds": 1.0,
+                "sample_rate": 24000,
+                "ref_text": "Text",
+            }
+            library.register_voice(file_path=str(first), **values)
+            library.register_voice(file_path=str(second), **values)
+
+            self.assertFalse(first.exists())
+            self.assertFalse(first.with_suffix(".pt").exists())
+            self.assertTrue(second.exists())
+
+    def test_delete_voice_cleans_embedding_after_registry_update(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            library = VoiceLibraryManager(directory)
+            project_dir = Path(directory) / "book"
+            project_dir.mkdir()
+            audio = project_dir / "speaker.wav"
+            audio.write_bytes(b"audio")
+            audio.with_suffix(".pt").write_bytes(b"embedding")
+            library.register_voice(
+                project_id="book",
+                character_id="speaker",
+                name="Speaker",
+                description="Clear",
+                gender="other",
+                file_path=str(audio),
+                duration_seconds=1.0,
+                sample_rate=24000,
+                ref_text="Text",
+            )
+
+            library.delete_voice("book", "speaker")
+
+            self.assertFalse(audio.exists())
+            self.assertFalse(audio.with_suffix(".pt").exists())
 
 
 class ExportMetadataTests(unittest.TestCase):

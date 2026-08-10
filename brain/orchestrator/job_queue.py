@@ -15,6 +15,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from shared.models import ProgressSnapshot
+
 logger = logging.getLogger(__name__)
 
 
@@ -66,6 +68,22 @@ class JobQueue:
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_quality_project
                 ON quality_logs(project_id, chapter_number)
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS review_items (
+                    project_id TEXT NOT NULL,
+                    item_type TEXT NOT NULL,
+                    item_id TEXT NOT NULL,
+                    disposition TEXT NOT NULL DEFAULT 'unreviewed',
+                    note TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (project_id, item_type, item_id),
+                    FOREIGN KEY (project_id) REFERENCES jobs(project_id)
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_review_project
+                ON review_items(project_id, item_type, disposition)
             """)
             conn.commit()
 
@@ -141,6 +159,32 @@ class JobQueue:
             )
             conn.commit()
 
+    def update_progress(
+        self,
+        project_id: str,
+        progress: ProgressSnapshot | dict[str, Any],
+    ) -> None:
+        """Persist one canonical progress snapshot and compatibility fields."""
+        snapshot = (
+            progress
+            if isinstance(progress, ProgressSnapshot)
+            else ProgressSnapshot.model_validate(progress)
+        )
+        payload = snapshot.model_dump(mode="json")
+        updates: dict[str, Any] = {
+            "progress": payload,
+            "current_work_phase": snapshot.phase,
+            "current_line_id": snapshot.line_id or None,
+            "current_line": snapshot.line_position,
+            "current_attempt": snapshot.attempt,
+            "current_cache_hit": snapshot.cache_hit,
+            "eta_seconds": snapshot.eta_seconds,
+            "last_activity_at": payload["updated_at"],
+        }
+        if snapshot.chapter is not None:
+            updates["current_chapter"] = snapshot.chapter
+        self.update_job(project_id, updates)
+
     def list_jobs(self) -> list[dict[str, Any]]:
         """List all jobs with their states."""
         with self._connect() as conn:
@@ -169,8 +213,74 @@ class JobQueue:
             if exists is None:
                 raise KeyError(f"Job not found: {project_id}")
             conn.execute("DELETE FROM quality_logs WHERE project_id = ?", (project_id,))
+            conn.execute("DELETE FROM review_items WHERE project_id = ?", (project_id,))
             conn.execute("DELETE FROM jobs WHERE project_id = ?", (project_id,))
             conn.commit()
+
+    # ------------------------------------------------------------------
+    # Human quality review
+    # ------------------------------------------------------------------
+
+    def set_review_item(
+        self,
+        project_id: str,
+        item_type: str,
+        item_id: str,
+        disposition: str,
+        note: str = "",
+    ) -> dict[str, Any]:
+        """Create or replace a non-destructive human review disposition."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO review_items
+                    (project_id, item_type, item_id, disposition, note, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(project_id, item_type, item_id) DO UPDATE SET
+                    disposition=excluded.disposition,
+                    note=excluded.note,
+                    updated_at=excluded.updated_at
+                """,
+                (project_id, item_type, item_id, disposition, note, now),
+            )
+            conn.commit()
+        return {
+            "project_id": project_id,
+            "item_type": item_type,
+            "item_id": item_id,
+            "disposition": disposition,
+            "note": note,
+            "updated_at": now,
+        }
+
+    def get_review_items(
+        self,
+        project_id: str,
+        item_type: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return persisted human review dispositions for a project."""
+        query = (
+            "SELECT item_type, item_id, disposition, note, updated_at "
+            "FROM review_items WHERE project_id = ?"
+        )
+        params: list[Any] = [project_id]
+        if item_type:
+            query += " AND item_type = ?"
+            params.append(item_type)
+        query += " ORDER BY item_type, item_id"
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [
+            {
+                "item_type": row[0],
+                "item_id": row[1],
+                "disposition": row[2],
+                "note": row[3],
+                "updated_at": row[4],
+            }
+            for row in rows
+        ]
 
     # ------------------------------------------------------------------
     # Quality logging
@@ -256,85 +366,73 @@ class JobQueue:
             for row in rows
         ]
 
+    @staticmethod
+    def _selected_quality_logs(
+        logs: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Choose the winning artifact attempt, with legacy max-attempt fallback."""
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for item in logs:
+            grouped.setdefault(item["line_id"], []).append(item)
+        selected: list[dict[str, Any]] = []
+        for attempts in grouped.values():
+            explicit = [
+                item for item in attempts if item.get("details", {}).get("selected")
+            ]
+            selected.append(
+                max(explicit or attempts, key=lambda item: int(item.get("attempt") or 1))
+            )
+        return selected
+
+    @staticmethod
+    def _quality_retry_count(logs: list[dict[str, Any]]) -> int:
+        """Count attempted retries independently of which artifact won."""
+        highest_attempt: dict[str, int] = {}
+        for item in logs:
+            line_id = str(item["line_id"])
+            highest_attempt[line_id] = max(
+                highest_attempt.get(line_id, 1),
+                int(item.get("attempt") or 1),
+            )
+        return sum(max(0, attempt - 1) for attempt in highest_attempt.values())
+
     def get_chapter_quality_summary(self, project_id: str, chapter_number: int) -> dict[str, Any]:
         """Get aggregated quality metrics for a chapter."""
-        with self._connect() as conn:
-            row = conn.execute(
-                """
-                SELECT
-                    COUNT(*) as total,
-                    SUM(CASE WHEN status = 'pass' THEN 1 ELSE 0 END) as passed,
-                    SUM(CASE WHEN status = 'accepted_with_warning' THEN 1 ELSE 0 END) as accepted_with_warning,
-                    SUM(CASE WHEN status = 'fail' THEN 1 ELSE 0 END) as failed,
-                    SUM(CASE WHEN status = 'flagged' THEN 1 ELSE 0 END) as flagged,
-                    AVG(wer) as avg_wer,
-                    MAX(wer) as worst_wer,
-                    AVG(quality_score) as avg_score,
-                    SUM(CASE WHEN attempt > 1 THEN 1 ELSE 0 END) as retries
-                FROM quality_logs
-                WHERE project_id = ? AND chapter_number = ?
-                  AND attempt = (
-                    SELECT MAX(attempt) FROM quality_logs q2
-                    WHERE q2.project_id = quality_logs.project_id
-                      AND q2.line_id = quality_logs.line_id
-                  )
-                """,
-                (project_id, chapter_number),
-            ).fetchone()
-
-        if row is None:
+        logs = [
+            item for item in self.get_quality_report(project_id)
+            if item.get("chapter_number") == chapter_number
+        ]
+        final = self._selected_quality_logs(logs)
+        if not final:
             return {}
-
+        wers = [float(item.get("wer") or 0.0) for item in final]
+        scores = [float(item.get("quality_score") or 0.0) for item in final]
         return {
-            "total_segments": row[0],
-            "passed": row[1],
-            "accepted_with_warning": row[2] or 0,
-            "failed": row[3],
-            "flagged": row[4],
-            "average_wer": row[5] or 0.0,
-            "worst_wer": row[6] or 0.0,
-            "average_quality_score": row[7] or 0.0,
-            "total_retries": row[8] or 0,
+            "total_segments": len(final),
+            "passed": sum(item.get("status") == "pass" for item in final),
+            "accepted_with_warning": sum(item.get("status") == "accepted_with_warning" for item in final),
+            "failed": sum(item.get("status") == "fail" for item in final),
+            "flagged": sum(item.get("status") == "flagged" for item in final),
+            "average_wer": sum(wers) / len(wers),
+            "worst_wer": max(wers, default=0.0),
+            "average_quality_score": sum(scores) / len(scores),
+            "total_retries": self._quality_retry_count(logs),
         }
 
     def get_project_quality_summary(self, project_id: str) -> dict[str, Any]:
         """Aggregate only each line's final validation attempt for a project."""
-        with self._connect() as conn:
-            row = conn.execute(
-                """
-                WITH final_attempts AS (
-                    SELECT line_id, MAX(attempt) AS max_attempt
-                    FROM quality_logs
-                    WHERE project_id = ?
-                    GROUP BY line_id
-                )
-                SELECT
-                    COUNT(*) AS total,
-                    SUM(CASE WHEN q.status = 'pass' THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN q.status = 'accepted_with_warning' THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN q.status = 'fail' THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN q.status = 'flagged' THEN 1 ELSE 0 END),
-                    AVG(q.wer),
-                    MAX(q.wer),
-                    SUM(MAX(0, f.max_attempt - 1))
-                FROM final_attempts f
-                JOIN quality_logs q
-                  ON q.project_id = ?
-                 AND q.line_id = f.line_id
-                 AND q.attempt = f.max_attempt
-                """,
-                (project_id, project_id),
-            ).fetchone()
-
-        if row is None:
+        logs = self.get_quality_report(project_id)
+        final = self._selected_quality_logs(logs)
+        if not final:
             return {}
+        wers = [float(item.get("wer") or 0.0) for item in final]
         return {
-            "total_segments": row[0] or 0,
-            "passed": row[1] or 0,
-            "accepted_with_warning": row[2] or 0,
-            "failed": row[3] or 0,
-            "flagged": row[4] or 0,
-            "average_wer": row[5] or 0.0,
-            "worst_wer": row[6] or 0.0,
-            "total_retries": row[7] or 0,
+            "total_segments": len(final),
+            "passed": sum(item.get("status") == "pass" for item in final),
+            "accepted_with_warning": sum(item.get("status") == "accepted_with_warning" for item in final),
+            "failed": sum(item.get("status") == "fail" for item in final),
+            "flagged": sum(item.get("status") == "flagged" for item in final),
+            "average_wer": sum(wers) / len(wers),
+            "worst_wer": max(wers, default=0.0),
+            "total_retries": self._quality_retry_count(logs),
         }
