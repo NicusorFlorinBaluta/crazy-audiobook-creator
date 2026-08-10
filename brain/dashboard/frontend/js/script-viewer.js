@@ -169,7 +169,9 @@ window.ScriptViewer = (() => {
         let idx = 0;
         groupedVoices.forEach((candidates, ownerId) => {
             const mainVoice = candidates.find(c => c.assigned_characters.length > 0) || candidates[0];
-            const colorVar = mainVoice.voice_id.toLowerCase() === 'narrator'
+            const cardCharacter = speakerById.get(ownerId);
+            const cardDisplayName = cardCharacter?.name || mainVoice.name || ownerId;
+            const colorVar = ownerId.toLowerCase() === 'narrator'
                 ? 'var(--speaker-narrator)'
                 : `var(--speaker-${(idx % 10) + 1})`;
             idx++;
@@ -244,10 +246,10 @@ window.ScriptViewer = (() => {
             card.innerHTML = `
                 <div class="char-header voice-profile-header">
                     <div class="char-avatar" style="background: ${colorVar}">
-                        ${escapeHtml((mainVoice.name || mainVoice.voice_id).substring(0, 2).toUpperCase())}
+                        ${escapeHtml(cardDisplayName.substring(0, 2).toUpperCase())}
                     </div>
                     <div>
-                        <div class="char-name">${escapeHtml(mainVoice.name)}</div>
+                        <div class="char-name">${escapeHtml(cardDisplayName)}</div>
                         <div class="char-meta">
                             ${escapeHtml(mainVoice.gender || 'unknown')} · ${escapeHtml(mainVoice.age_range || 'unknown')}
                             · ${mainVoice.source_type === 'uploaded' ? 'uploaded reference' : 'generated design'}
@@ -327,8 +329,6 @@ window.ScriptViewer = (() => {
                     if (!container) return;
                     const player = container.querySelector('.voice-preview-player');
                     const download = container.querySelector('.voice-download-link');
-                    const isPlaying = !player.paused;
-                    const currentTime = player.currentTime;
                     
                     // Update button UI styles
                     container.querySelectorAll('.btn').forEach(btn => {
@@ -365,16 +365,16 @@ window.ScriptViewer = (() => {
                         regenerate.textContent = `Regenerate option ${optionLabel} (replaces option ${optionLabel})`;
                     }
                     
-                    // Swap source and sync time
+                    // A newly selected audition is a new comparison, not a
+                    // continuation of the previous option's playback position.
                     const newSrc = e.target.dataset.previewUrl;
                     if (newSrc && newSrc !== 'undefined') {
+                        player.pause();
                         player.src = newSrc;
+                        player.load();
+                        player.currentTime = 0;
                         if (download && selectedVoice?.download_url) {
                             download.href = selectedVoice.download_url;
-                        }
-                        player.currentTime = currentTime;
-                        if (isPlaying) {
-                            player.play().catch(err => console.warn('Could not auto-resume:', err));
                         }
                     }
                 });

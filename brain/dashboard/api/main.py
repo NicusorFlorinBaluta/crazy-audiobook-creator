@@ -74,7 +74,7 @@ from voice.tts_server.voice_library import VoiceLibraryManager
 
 logger = logging.getLogger(__name__)
 
-FRONTEND_BUILD = "2026.08.10.2"
+FRONTEND_BUILD = "2026.08.10.3"
 
 
 class AsyncioConnectionResetFilter(logging.Filter):

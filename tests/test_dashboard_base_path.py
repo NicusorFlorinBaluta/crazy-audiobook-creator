@@ -76,6 +76,19 @@ class DashboardBasePathTests(unittest.TestCase):
         self.assertIn("button.textContent = 'Assigning...'", viewer)
         self.assertIn("button.disabled = true", viewer)
 
+    def test_voice_option_change_restarts_preview_from_beginning(self):
+        viewer = (FRONTEND / "js/script-viewer.js").read_text(encoding="utf-8")
+        self.assertIn("player.pause()", viewer)
+        self.assertIn("player.load()", viewer)
+        self.assertIn("player.currentTime = 0", viewer)
+        self.assertNotIn("player.currentTime = currentTime", viewer)
+
+    def test_voice_card_title_is_anchored_to_character_owner(self):
+        viewer = (FRONTEND / "js/script-viewer.js").read_text(encoding="utf-8")
+        self.assertIn("const cardCharacter = speakerById.get(ownerId)", viewer)
+        self.assertIn("const cardDisplayName = cardCharacter?.name", viewer)
+        self.assertIn('<div class="char-name">${escapeHtml(cardDisplayName)}</div>', viewer)
+
 
 if __name__ == "__main__":
     unittest.main()

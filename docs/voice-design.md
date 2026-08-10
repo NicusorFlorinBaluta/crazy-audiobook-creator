@@ -84,7 +84,9 @@ male/female narrator candidates shown at first-project review):
 At voice review, the selected A/B option is stated explicitly. Applying an
 option shows an in-progress state and a success or failure notification.
 Regeneration replaces only the currently selected option; the button names
-that option before the destructive replacement. Character reference text is
+that option before the destructive replacement. Switching options resets the
+audition player to the beginning, and applying an option never replaces the
+character card title with an internal candidate label. Character reference text is
 drawn from speaker-pure script lines, so narrator tags and action beats must
 not be embedded in a character's preview.
 9. Load Qwen Base when chapter generation starts.
