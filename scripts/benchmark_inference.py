@@ -102,4 +102,7 @@ def main():
             torch.cuda.empty_cache()
 
 if __name__ == "__main__":
+    import sys
+    from shared.live_test_guard import require_model_opt_in
+    require_model_opt_in(sys.argv[1:])
     main()

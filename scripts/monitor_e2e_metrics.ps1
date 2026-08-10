@@ -5,7 +5,8 @@ param(
     [string]$BaseUrl = "http://127.0.0.1:8000",
     [Parameter(Mandatory = $true)]
     [string]$OutputPath,
-    [int]$PollSeconds = 5,
+    # Set to a positive value to override stage-aware polling.
+    [int]$PollSeconds = 0,
     [int]$MaxHours = 8
 )
 
@@ -50,6 +51,32 @@ while ((Get-Date) -lt $deadline) {
         vram_used_gb = $voice.vram_used_gb
         vram_total_gb = $voice.vram_total_gb
     }
+
+    $stagePollSeconds = switch ([string]$project.active_stage) {
+        "extracting" { 20 }
+        "scripting" { 120 }
+        "bootstrapping" { 90 }
+        "voice_review" { 300 }
+        "generating" { 180 }
+        "validating" { 120 }
+        "mastering" { 90 }
+        "exporting" { 45 }
+        "paused_scheduled" { 300 }
+        "deploy_paused" { 300 }
+        default { 30 }
+    }
+    $nextPollSeconds = if ($PollSeconds -gt 0) {
+        $PollSeconds
+    } else {
+        $stagePollSeconds
+    }
+    if ($project.progress.eta_seconds -ne $null) {
+        $eta = [double]$project.progress.eta_seconds
+        if ($eta -gt 0 -and $eta -lt $nextPollSeconds) {
+            $nextPollSeconds = [math]::Max(15, [math]::Ceiling($eta / 2))
+        }
+    }
+    $record.next_poll_seconds = $nextPollSeconds
     $record | ConvertTo-Json -Compress | Add-Content `
         -LiteralPath $OutputPath `
         -Encoding utf8
@@ -61,5 +88,5 @@ while ((Get-Date) -lt $deadline) {
     ) {
         break
     }
-    Start-Sleep -Seconds ([math]::Max(1, $PollSeconds))
+    Start-Sleep -Seconds ([math]::Max(15, $nextPollSeconds))
 }

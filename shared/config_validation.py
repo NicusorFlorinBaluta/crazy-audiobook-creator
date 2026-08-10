@@ -1,0 +1,113 @@
+"""Startup validation for user-editable YAML configuration."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any
+from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
+
+
+def _number(
+    errors: list[str],
+    payload: dict[str, Any],
+    key: str,
+    *,
+    minimum: float | None = None,
+    maximum: float | None = None,
+) -> None:
+    if key not in payload:
+        return
+    try:
+        value = float(payload[key])
+    except (TypeError, ValueError):
+        errors.append(f"{key} must be numeric")
+        return
+    if minimum is not None and value < minimum:
+        errors.append(f"{key} must be >= {minimum}")
+    if maximum is not None and value > maximum:
+        errors.append(f"{key} must be <= {maximum}")
+
+
+def validate_brain_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Validate brain config before clients or models are initialized."""
+    errors: list[str] = []
+    voice = config.get("voice_server", {})
+    host = str(voice.get("host", "http://127.0.0.1:8100"))
+    parsed = urlsplit(host)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        errors.append("voice_server.host must be an absolute HTTP(S) URL")
+    _number(errors, voice, "startup_timeout_seconds", minimum=1)
+    _number(errors, voice, "timeout", minimum=1)
+    _number(errors, voice, "retries", minimum=0, maximum=20)
+    script = config.get("script", {})
+    _number(errors, script, "chunk_size_words", minimum=50)
+    _number(errors, script, "max_fragments_per_chunk", minimum=1)
+    _number(errors, script, "speaker_confidence_threshold", minimum=0, maximum=1)
+    schedule = config.get("schedule", {})
+    timezone_name = str(schedule.get("timezone", "UTC"))
+    try:
+        ZoneInfo(timezone_name)
+    except Exception:
+        errors.append(f"schedule.timezone is unknown: {timezone_name}")
+    valid_days = {
+        "Monday", "Tuesday", "Wednesday", "Thursday",
+        "Friday", "Saturday", "Sunday",
+    }
+    windows = schedule.get("windows", [])
+    if not isinstance(windows, list):
+        errors.append("schedule.windows must be a list")
+    else:
+        for index, window in enumerate(windows, 1):
+            if not isinstance(window, dict):
+                errors.append(f"schedule window {index} must be an object")
+                continue
+            for field in ("start", "end"):
+                try:
+                    datetime.strptime(str(window.get(field, "")), "%H:%M")
+                except ValueError:
+                    errors.append(f"schedule window {index} {field} must use HH:MM")
+            days = window.get("days", [])
+            if not isinstance(days, list) or any(day not in valid_days for day in days):
+                errors.append(f"schedule window {index} has invalid days")
+    if schedule.get("enabled") and not windows:
+        errors.append("enabled schedule requires at least one window")
+    if errors:
+        raise ValueError("Invalid brain configuration: " + "; ".join(errors))
+    return config
+
+
+def validate_voice_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Validate voice config before any GPU component is constructed."""
+    errors: list[str] = []
+    tts = config.get("tts", {})
+    validation = config.get("validation", {})
+    _number(errors, tts, "sample_rate", minimum=8_000, maximum=192_000)
+    _number(errors, tts, "max_text_length", minimum=100, maximum=10_000)
+    post_processing = tts.get("post_processing", {})
+    if not isinstance(post_processing, dict):
+        errors.append("tts.post_processing must be an object")
+    else:
+        for field in ("enabled", "allow_phase_vocoder_fallback"):
+            if field in post_processing and not isinstance(
+                post_processing[field],
+                bool,
+            ):
+                errors.append(f"tts.post_processing.{field} must be boolean")
+    if tts.get("attn_implementation", "sdpa") not in {"sdpa", "eager"}:
+        errors.append("tts.attn_implementation must be sdpa or eager")
+    if validation.get("whisper_backend", "auto") not in {
+        "auto", "faster_whisper", "openai_whisper"
+    }:
+        errors.append("validation.whisper_backend is invalid")
+    _number(errors, validation, "wer_threshold", minimum=0, maximum=1)
+    _number(errors, validation, "speaker_similarity_threshold", minimum=-1, maximum=1)
+    _number(errors, validation, "max_retries", minimum=0, maximum=20)
+    mastering = config.get("mastering", {})
+    _number(errors, mastering, "crossfade_ms", minimum=0, maximum=500)
+    _number(errors, mastering, "target_lufs", minimum=-40, maximum=-5)
+    _number(errors, mastering, "peak_limit_dbfs", minimum=-20, maximum=0)
+    _number(errors, config.get("storage", {}), "max_workspace_gb", minimum=0)
+    if errors:
+        raise ValueError("Invalid voice configuration: " + "; ".join(errors))
+    return config

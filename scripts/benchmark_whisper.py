@@ -135,12 +135,13 @@ def run_benchmark(project_id: str, chapter_num: int = 1, limit: int = 30):
             print(f"  Medium:{rm['transcribed']} (WER: {rm['wer']:.3f})")
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python benchmark_whisper.py <project_id> [chapter_num] [limit]")
+    from shared.live_test_guard import require_model_opt_in
+    args = require_model_opt_in(sys.argv[1:])
+    if len(args) < 1:
+        print("Usage: python benchmark_whisper.py --allow-models <project_id> [chapter_num] [limit]")
         sys.exit(1)
-        
-    project_id = sys.argv[1]
-    chapter_num = int(sys.argv[2]) if len(sys.argv) > 2 else 1
-    limit = int(sys.argv[3]) if len(sys.argv) > 3 else 30
+    project_id = args[0]
+    chapter_num = int(args[1]) if len(args) > 1 else 1
+    limit = int(args[2]) if len(args) > 2 else 30
     
     run_benchmark(project_id, chapter_num, limit)

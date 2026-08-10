@@ -1,0 +1,5 @@
+# Optional dependencies for the retired standalone parler_server.py only.
+# Keep these isolated from the supported Qwen environment because Parler 0.2.2
+# requires Transformers 4.46.1 while Qwen uses a newer Transformers release.
+transformers==4.46.1
+parler-tts @ git+https://github.com/huggingface/parler-tts.git

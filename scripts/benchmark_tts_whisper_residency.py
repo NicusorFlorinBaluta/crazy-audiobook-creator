@@ -25,6 +25,7 @@ if str(REPO_ROOT) not in sys.path:
 from voice.tts_server.qwen3_engine import Qwen3TTSEngine
 from voice.tts_server.voice_library import VoiceLibraryManager
 from voice.validator.whisper_validator import WhisperValidator
+from shared.live_test_guard import add_model_opt_in
 
 
 def _gpu_snapshot(label: str) -> dict[str, float | str]:
@@ -79,7 +80,10 @@ def main() -> int:
     parser.add_argument("--repeats", type=int, default=2)
     parser.add_argument("--profile", choices=("short", "long"), default="short")
     parser.add_argument("--output-json", type=Path)
+    add_model_opt_in(parser)
     args = parser.parse_args()
+    if not args.allow_models:
+        parser.error("--allow-models is required for this GPU benchmark")
 
     config = yaml.safe_load(Path("voice/config.yaml").read_text("utf-8")) or {}
     tts_cfg = config.get("tts", {})
@@ -118,6 +122,8 @@ def main() -> int:
     whisper = WhisperValidator(
         model_name=val_cfg.get("whisper_model", "small"),
         device=val_cfg.get("whisper_device", "auto"),
+        backend=val_cfg.get("whisper_backend", "auto"),
+        vad_filter=val_cfg.get("whisper_vad_filter", False),
     )
     report: dict[str, object] = {
         "project": args.project,
@@ -125,8 +131,18 @@ def main() -> int:
         "profile": args.profile,
         "text_words": len(text.split()),
         "repeats": max(1, args.repeats),
+        "whisper_backend": val_cfg.get("whisper_backend", "auto"),
+        "whisper_vad_filter": bool(val_cfg.get("whisper_vad_filter", False)),
         "snapshots": [_gpu_snapshot("initial")],
     }
+    def save_report() -> None:
+        if args.output_json:
+            args.output_json.parent.mkdir(parents=True, exist_ok=True)
+            args.output_json.write_text(
+                json.dumps(report, indent=2) + "\n",
+                encoding="utf-8",
+            )
+
     temporary = tempfile.TemporaryDirectory(prefix="tts-whisper-benchmark-")
     output_dir = Path(temporary.name)
     try:
@@ -150,6 +166,15 @@ def main() -> int:
             for index in range(max(1, args.repeats))
         ]
         report["snapshots"].append(_gpu_snapshot("tts_warm"))
+        report["tts_only_runs"] = tts_only
+        report["tts_only_median_seconds"] = statistics.median(
+            item["wall_seconds"] for item in tts_only
+        )
+        report["tts_only_median_realtime_factor"] = statistics.median(
+            item["realtime_factor"] for item in tts_only
+        )
+        report["checkpoint"] = "tts_only_complete"
+        save_report()
 
         whisper.load()
         report["snapshots"].append(_gpu_snapshot("tts_and_whisper_loaded"))
@@ -170,6 +195,9 @@ def main() -> int:
         transcription_seconds = time.perf_counter() - transcription_started
         final_snapshot = _gpu_snapshot("after_co_resident_work")
         report["snapshots"].append(final_snapshot)
+        report["co_resident_runs"] = co_resident
+        report["checkpoint"] = "co_resident_complete"
+        save_report()
 
         tts_only_median = statistics.median(
             item["wall_seconds"] for item in tts_only
@@ -216,12 +244,16 @@ def main() -> int:
                 ),
             }
         )
+        report["checkpoint"] = "complete"
         rendered = json.dumps(report, indent=2)
         if args.output_json:
-            args.output_json.parent.mkdir(parents=True, exist_ok=True)
-            args.output_json.write_text(rendered + "\n", encoding="utf-8")
+            save_report()
         print(rendered)
         return 0
+    except Exception as exc:
+        report["error"] = f"{type(exc).__name__}: {exc}"
+        save_report()
+        raise
     finally:
         whisper.unload()
         engine.unload()

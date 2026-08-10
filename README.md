@@ -92,8 +92,11 @@ cd ..
 - [Voice design](docs/voice-design.md)
 - [Prompt and source-fidelity rules](docs/prompts.md)
 - [Production-readiness changes and next E2E gates](docs/production-readiness-2026-08-02.md)
+- [Full-book E2E run and metrics (2026-08-09)](docs/e2e-run-2026-08-09.md)
+- [Post-E2E prioritized improvement plan (2026-08-09)](docs/improvement-plan-post-e2e-2026-08-09.md)
+- [Deferred model/GPU/listening validation plan (2026-08-10)](docs/live-validation-plan-2026-08-10.md)
 
-`implementation_plan*.md` and `chat-history.md` are historical records, not current specifications.
+`implementation_plan*.md` and the `*chat*history*.md` conversation dumps are historical records, not current specifications. Current behavior is defined by this README, `docs/`, models, and executable tests.
 
 ## Tests
 
@@ -102,3 +105,15 @@ cd ..
 ```
 
 The unit suite does not load the production TTS models. A real end-to-end smoke test still requires the configured Ollama, GPU models, and FFmpeg.
+
+Low-resource verification and environment inspection can be run separately:
+
+```powershell
+& "E:\PyTorch env\my_venv\Scripts\python.exe" scripts\runtime_preflight.py --pip-check
+& "E:\PyTorch env\my_venv\Scripts\python.exe" scripts\verify_pipeline.py --tier static
+& "E:\PyTorch env\my_venv\Scripts\python.exe" scripts\summarize_metrics.py brain\projects\PROJECT_ID\performance_metrics.jsonl
+```
+
+Model-backed verification tiers require an explicit `--allow-models` opt-in.
+The dashboard's **Runtime & storage** panel exposes the same preflight, a safe
+cleanup preview, and a redacted support bundle without including book audio.

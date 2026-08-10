@@ -27,7 +27,6 @@ def run_benchmark():
     configs = [
         {"name": "Baseline SDPA", "kwargs": {"attn_implementation": "sdpa"}},
         {"name": "Eager", "kwargs": {"attn_implementation": "eager"}},
-        {"name": "Flash Attention 2", "kwargs": {"attn_implementation": "flash_attention_2"}},
     ]
 
     results = []
@@ -61,4 +60,7 @@ def run_benchmark():
         print(f"{name}: {elapsed:.2f}s")
 
 if __name__ == "__main__":
+    import sys
+    from shared.live_test_guard import require_model_opt_in
+    require_model_opt_in(sys.argv[1:])
     run_benchmark()
