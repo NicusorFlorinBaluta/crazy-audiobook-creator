@@ -149,6 +149,9 @@ class Qwen3TTSEngine:
         self._model = None
         self._is_loaded = False
         self._load_time: float = 0.0
+        self.last_generation_metrics: dict[str, Any] = {}
+        self._last_part_generation_metrics: dict[str, Any] = {}
+        self._last_prompt_cache_hit = False
 
     @property
     def is_loaded(self) -> bool:
@@ -281,56 +284,122 @@ class Qwen3TTSEngine:
         Returns:
             NumPy array of audio samples.
         """
-        self._ensure_loaded()
+        metrics: dict[str, Any] = {
+            "schema_version": 1,
+            "model_load_seconds": 0.0,
+            "reference_prompt_seconds": 0.0,
+            "autoregressive_generation_seconds": 0.0,
+            "audio_decode_seconds": 0.0,
+            "audio_concatenation_seconds": 0.0,
+            "post_processing_seconds": 0.0,
+            "wav_write_seconds": 0.0,
+            "reference_prompt_cache_hits": 0,
+            "reference_prompt_cache_misses": 0,
+            "text_parts": 0,
+            "cold_model_load": not self._is_loaded,
+            "attention_implementation": self.attn_implementation,
+        }
+        self.last_generation_metrics = metrics
+        generation_started = time.perf_counter()
+        try:
+            was_loaded = self._is_loaded
+            load_started = time.perf_counter()
+            try:
+                self._ensure_loaded()
+            finally:
+                if not was_loaded:
+                    metrics["model_load_seconds"] = (
+                        time.perf_counter() - load_started
+                    )
+            metrics["attention_implementation"] = self.attn_implementation
 
-        parts = self._split_tts_text(text)
-        generated_parts = [
-            self._generate(
-                text=part,
-                voice_reference=str(voice_reference_path)
-                if voice_reference_path
-                else None,
-                ref_text=ref_text,
+            parts = self._split_tts_text(text)
+            metrics["text_parts"] = len(parts)
+            generated_parts: list[np.ndarray] = []
+            for part in parts:
+                self._last_part_generation_metrics = {}
+                part_started = time.perf_counter()
+                try:
+                    generated_part = self._generate(
+                        text=part,
+                        voice_reference=str(voice_reference_path)
+                        if voice_reference_path
+                        else None,
+                        ref_text=ref_text,
+                    )
+                finally:
+                    part_elapsed = time.perf_counter() - part_started
+                    part_metrics = dict(self._last_part_generation_metrics)
+                    if not part_metrics:
+                        part_metrics["autoregressive_generation_seconds"] = (
+                            part_elapsed
+                        )
+                    for key in (
+                        "reference_prompt_seconds",
+                        "autoregressive_generation_seconds",
+                        "audio_decode_seconds",
+                    ):
+                        metrics[key] += float(
+                            part_metrics.get(key, 0.0) or 0.0
+                        )
+                    cache_hit = part_metrics.get("reference_prompt_cache_hit")
+                    if cache_hit is True:
+                        metrics["reference_prompt_cache_hits"] += 1
+                    elif cache_hit is False:
+                        metrics["reference_prompt_cache_misses"] += 1
+                generated_parts.append(generated_part)
+
+            concatenate_started = time.perf_counter()
+            audio = (
+                np.concatenate(generated_parts)
+                if generated_parts
+                else np.zeros(0, dtype=np.float32)
             )
-            for part in parts
-        ]
-        audio = (
-            np.concatenate(generated_parts)
-            if generated_parts
-            else np.zeros(0, dtype=np.float32)
-        )
-
-        effective_fx, matched_tier = self._effective_post_fx(
-            voice_fx,
-            speed=speed,
-            emotion=emotion_instruction,
-        )
-        if self.post_processing_enabled and matched_tier != "neutral":
-            logger.debug(
-                "Emotion post-FX: tier=%s pitch_delta=%.2f tone=%s speed=%.3f",
-                matched_tier,
-                effective_fx.pitch_semitones,
-                effective_fx.tone,
-                effective_fx.speed,
-            )
-        if (
-            self.post_processing_enabled
-            and self.fx
-            and not effective_fx.is_identity()
-        ):
-            audio = self.fx.apply(
-                audio,
-                self.sample_rate,
-                effective_fx,
-                blend_override=0.0,
+            metrics["audio_concatenation_seconds"] = (
+                time.perf_counter() - concatenate_started
             )
 
-        if output_path:
-            output_path = Path(output_path)
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            self._write_audio_atomic(output_path, audio)
+            post_started = time.perf_counter()
+            effective_fx, matched_tier = self._effective_post_fx(
+                voice_fx,
+                speed=speed,
+                emotion=emotion_instruction,
+            )
+            if self.post_processing_enabled and matched_tier != "neutral":
+                logger.debug(
+                    "Emotion post-FX: tier=%s pitch_delta=%.2f tone=%s speed=%.3f",
+                    matched_tier,
+                    effective_fx.pitch_semitones,
+                    effective_fx.tone,
+                    effective_fx.speed,
+                )
+            if (
+                self.post_processing_enabled
+                and self.fx
+                and not effective_fx.is_identity()
+            ):
+                audio = self.fx.apply(
+                    audio,
+                    self.sample_rate,
+                    effective_fx,
+                    blend_override=0.0,
+                )
+            metrics["post_processing_seconds"] = (
+                time.perf_counter() - post_started
+            )
 
-        return audio
+            if output_path:
+                write_started = time.perf_counter()
+                output_path = Path(output_path)
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                self._write_audio_atomic(output_path, audio)
+                metrics["wav_write_seconds"] = (
+                    time.perf_counter() - write_started
+                )
+
+            return audio
+        finally:
+            metrics["total_seconds"] = time.perf_counter() - generation_started
 
     def post_processing_context(self) -> dict[str, Any]:
         """Return the audio-policy identity used by synthesis fingerprints."""
@@ -377,6 +446,8 @@ class Qwen3TTSEngine:
         ref_text: str = "",
     ) -> np.ndarray:
         """Internal generation method using qwen_tts."""
+        part_metrics: dict[str, Any] = {}
+        self._last_part_generation_metrics = part_metrics
         if not voice_reference:
             raise RuntimeError(
                 "Qwen3-TTS Base generation requires a registered voice reference"
@@ -398,11 +469,20 @@ class Qwen3TTSEngine:
                 voice_reference,
             )
 
-        clone_prompt = self._get_voice_clone_prompt(
-            voice_reference,
-            ref_text if use_icl else "",
-            x_vec_mode,
-        )
+        prompt_started = time.perf_counter()
+        try:
+            clone_prompt = self._get_voice_clone_prompt(
+                voice_reference,
+                ref_text if use_icl else "",
+                x_vec_mode,
+            )
+        finally:
+            part_metrics["reference_prompt_seconds"] = (
+                time.perf_counter() - prompt_started
+            )
+            part_metrics["reference_prompt_cache_hit"] = (
+                self._last_prompt_cache_hit
+            )
         generation_config = dict(self.generation_config)
         adaptive = generation_config.pop("adaptive_max_new_tokens", {}) or {}
         if adaptive.get("enabled", False):
@@ -420,20 +500,32 @@ class Qwen3TTSEngine:
                 adaptive_cap,
                 len(text),
             )
-        wavs, _ = self._model.generate_voice_clone(
-            text=text,
-            language=self.language,
-            voice_clone_prompt=clone_prompt,
-            **generation_config,
-        )
+        generation_started = time.perf_counter()
+        try:
+            wavs, _ = self._model.generate_voice_clone(
+                text=text,
+                language=self.language,
+                voice_clone_prompt=clone_prompt,
+                **generation_config,
+            )
+        finally:
+            part_metrics["autoregressive_generation_seconds"] = (
+                time.perf_counter() - generation_started
+            )
 
-        audio = np.asarray(wavs[0], dtype=np.float32)
+        decode_started = time.perf_counter()
+        try:
+            audio = np.asarray(wavs[0], dtype=np.float32)
 
-        # Preserve model dynamics. Only protect the file from numeric clipping;
-        # chapter-level loudness is handled by the mastering stage.
-        max_peak = np.max(np.abs(audio)) if len(audio) else 0.0
-        if max_peak > 0.99:
-            audio = audio * (0.99 / max_peak)
+            # Preserve model dynamics. Only protect the file from numeric clipping;
+            # chapter-level loudness is handled by the mastering stage.
+            max_peak = np.max(np.abs(audio)) if len(audio) else 0.0
+            if max_peak > 0.99:
+                audio = audio * (0.99 / max_peak)
+        finally:
+            part_metrics["audio_decode_seconds"] = (
+                time.perf_counter() - decode_started
+            )
 
         return audio
 
@@ -446,6 +538,7 @@ class Qwen3TTSEngine:
         """Create or restore the complete Qwen clone prompt, not only an embedding."""
         from qwen_tts import VoiceClonePromptItem
 
+        self._last_prompt_cache_hit = False
         cached = None
         if self.embedding_store:
             cached = self.embedding_store.get_voice_clone_prompt(
@@ -454,6 +547,7 @@ class Qwen3TTSEngine:
                 self.model_name,
             )
         if cached:
+            self._last_prompt_cache_hit = True
             import torch
 
             items = []

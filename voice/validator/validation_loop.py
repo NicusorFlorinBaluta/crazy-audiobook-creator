@@ -145,6 +145,7 @@ class ValidationLoop:
         for index, line in enumerate(lines, 1):
             self._raise_if_cancelled(cancel_check)
             output_path = segments_dir / f"{line.line_id}.wav"
+            tts_substage_metrics: dict[str, Any] = {}
             voice_ref, ref_text = self._resolve_reference(project_id, line)
             
             # Cache reference pitch for validation
@@ -212,20 +213,33 @@ class ValidationLoop:
                     self._raise_if_cancelled(cancel_check)
                     try:
                         operation_started = time.perf_counter()
-                        self.engine.generate_speech(
-                            text=synthesis_text,
-                            voice_reference_path=voice_ref,
-                            ref_text=ref_text,
-                            emotion_instruction=synthesis_emotion,
-                            speed=synthesis_speed,
-                            voice_fx=synthesis_fx,
-                            output_path=output_path,
-                        )
-                        attempt_elapsed = time.perf_counter() - operation_started
-                        timings["tts_synthesis"] = (
-                            timings.get("tts_synthesis", 0.0) + attempt_elapsed
-                        )
-                        synthesis_elapsed += attempt_elapsed
+                        try:
+                            self.engine.generate_speech(
+                                text=synthesis_text,
+                                voice_reference_path=voice_ref,
+                                ref_text=ref_text,
+                                emotion_instruction=synthesis_emotion,
+                                speed=synthesis_speed,
+                                voice_fx=synthesis_fx,
+                                output_path=output_path,
+                            )
+                        finally:
+                            attempt_elapsed = (
+                                time.perf_counter() - operation_started
+                            )
+                            timings["tts_synthesis"] = (
+                                timings.get("tts_synthesis", 0.0)
+                                + attempt_elapsed
+                            )
+                            synthesis_elapsed += attempt_elapsed
+                            self._merge_engine_generation_metrics(
+                                tts_substage_metrics,
+                                getattr(
+                                    self.engine,
+                                    "last_generation_metrics",
+                                    {},
+                                ),
+                            )
                         if not self._valid_audio(output_path):
                             raise RuntimeError("TTS returned no valid audio artifact")
                         last_error = None
@@ -242,6 +256,27 @@ class ValidationLoop:
                         )
                 if last_error is not None:
                     generation_errors[line.line_id] = str(last_error)
+                    segment_metrics[line.line_id] = {
+                        "line_id": line.line_id,
+                        "speaker_role": (
+                            "narrator"
+                            if line.speaker == "narrator"
+                            else "character"
+                        ),
+                        "voice_profile_id": line.voice_id or line.speaker,
+                        "text_characters": len(line.spoken_text or line.text),
+                        "text_words": len(
+                            (line.spoken_text or line.text).split()
+                        ),
+                        "synthesis_seconds": round(synthesis_elapsed, 6),
+                        "synthesis_cache_hit": False,
+                        "generation_failed": True,
+                    }
+                    self._write_engine_generation_metrics(
+                        segment_metrics[line.line_id],
+                        tts_substage_metrics,
+                        prefix="tts_",
+                    )
                     continue
             else:
                 synthesis_cache_hits += 1
@@ -267,6 +302,10 @@ class ValidationLoop:
                 record_timing("synthesis_checkpoint_write", operation_started)
             segment_metrics[line.line_id] = {
                 "line_id": line.line_id,
+                "speaker_role": (
+                    "narrator" if line.speaker == "narrator" else "character"
+                ),
+                "voice_profile_id": line.voice_id or line.speaker,
                 "text_characters": len(line.spoken_text or line.text),
                 "text_words": len((line.spoken_text or line.text).split()),
                 "audio_duration_seconds": round(float(info.duration), 6),
@@ -278,6 +317,11 @@ class ValidationLoop:
                     else 0.0
                 ),
             }
+            self._write_engine_generation_metrics(
+                segment_metrics[line.line_id],
+                tts_substage_metrics,
+                prefix="tts_",
+            )
             try:
                 segment_metrics[line.line_id].update(self.engine.get_vram_info())
             except Exception:
@@ -512,27 +556,47 @@ class ValidationLoop:
                             ),
                         )
                         operation_started = time.perf_counter()
-                        self.engine.generate_speech(
-                            text=retry_text,
-                            voice_reference_path=voice_ref,
-                            ref_text=ref_text,
-                            emotion_instruction=retry_emotion,
-                            speed=retry_speed,
-                            voice_fx=retry_fx,
-                            output_path=attempt_path,
-                        )
-                        retry_elapsed = time.perf_counter() - operation_started
-                        timings["retry_tts_synthesis"] = (
-                            timings.get("retry_tts_synthesis", 0.0)
-                            + retry_elapsed
-                        )
-                        segment_metrics[line.line_id]["retry_synthesis_seconds"] = round(
-                            segment_metrics[line.line_id].get(
-                                "retry_synthesis_seconds", 0.0
+                        try:
+                            self.engine.generate_speech(
+                                text=retry_text,
+                                voice_reference_path=voice_ref,
+                                ref_text=ref_text,
+                                emotion_instruction=retry_emotion,
+                                speed=retry_speed,
+                                voice_fx=retry_fx,
+                                output_path=attempt_path,
                             )
-                            + retry_elapsed,
-                            6,
-                        )
+                        finally:
+                            retry_elapsed = (
+                                time.perf_counter() - operation_started
+                            )
+                            retry_substages: dict[str, Any] = {}
+                            self._merge_engine_generation_metrics(
+                                retry_substages,
+                                getattr(
+                                    self.engine,
+                                    "last_generation_metrics",
+                                    {},
+                                ),
+                            )
+                            self._write_engine_generation_metrics(
+                                segment_metrics[line.line_id],
+                                retry_substages,
+                                prefix="retry_tts_",
+                            )
+                            timings["retry_tts_synthesis"] = (
+                                timings.get("retry_tts_synthesis", 0.0)
+                                + retry_elapsed
+                            )
+                            segment_metrics[line.line_id][
+                                "retry_synthesis_seconds"
+                            ] = round(
+                                segment_metrics[line.line_id].get(
+                                    "retry_synthesis_seconds", 0.0
+                                )
+                                + retry_elapsed,
+                                6,
+                            )
                         if not self._valid_audio(attempt_path):
                             raise RuntimeError("Retry produced no valid audio artifact")
                         attempt_files[line.line_id] = attempt_path
@@ -1335,6 +1399,81 @@ class ValidationLoop:
             os.replace(source_embedding, destination_embedding)
         else:
             destination_embedding.unlink(missing_ok=True)
+
+    @staticmethod
+    def _merge_engine_generation_metrics(
+        target: dict[str, Any],
+        source: dict[str, Any] | None,
+    ) -> None:
+        """Accumulate output-neutral TTS substage measurements."""
+        if not isinstance(source, dict) or not source:
+            return
+        timing_keys = (
+            "model_load_seconds",
+            "reference_prompt_seconds",
+            "autoregressive_generation_seconds",
+            "audio_decode_seconds",
+            "audio_concatenation_seconds",
+            "post_processing_seconds",
+            "wav_write_seconds",
+            "total_seconds",
+        )
+        count_keys = (
+            "reference_prompt_cache_hits",
+            "reference_prompt_cache_misses",
+            "text_parts",
+        )
+        for key in timing_keys:
+            try:
+                value = float(source.get(key, 0.0) or 0.0)
+            except (TypeError, ValueError):
+                continue
+            target[key] = float(target.get(key, 0.0) or 0.0) + value
+        for key in count_keys:
+            try:
+                value = int(source.get(key, 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            target[key] = int(target.get(key, 0) or 0) + value
+        if source.get("cold_model_load") is True:
+            target["cold_model_loads"] = int(
+                target.get("cold_model_loads", 0) or 0
+            ) + 1
+        if source.get("attention_implementation"):
+            target["attention_implementation"] = str(
+                source["attention_implementation"]
+            )
+        try:
+            schema_version = int(source.get("schema_version", 0) or 0)
+        except (TypeError, ValueError):
+            schema_version = 0
+        if schema_version:
+            target["metrics_schema_version"] = max(
+                int(target.get("metrics_schema_version", 0) or 0),
+                schema_version,
+            )
+
+    @staticmethod
+    def _write_engine_generation_metrics(
+        segment_metric: dict[str, Any],
+        aggregate: dict[str, Any],
+        *,
+        prefix: str,
+    ) -> None:
+        """Write accumulated engine measurements as stable flat metric fields."""
+        for key, value in aggregate.items():
+            output_key = f"{prefix}{key}"
+            if isinstance(value, float):
+                segment_metric[output_key] = round(
+                    float(segment_metric.get(output_key, 0.0) or 0.0) + value,
+                    6,
+                )
+            elif isinstance(value, int):
+                segment_metric[output_key] = int(
+                    segment_metric.get(output_key, 0) or 0
+                ) + value
+            else:
+                segment_metric[output_key] = value
 
     @staticmethod
     def _valid_audio(path: Path) -> bool:

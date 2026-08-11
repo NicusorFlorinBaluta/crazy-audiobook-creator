@@ -100,7 +100,11 @@ Pipeline state also carries a versioned progress snapshot alongside temporary
 legacy fields. The snapshot names the stage/phase, stable line ID and ordinal,
 cache state, elapsed time, server-derived ETA/confidence, and update timestamp.
 Performance JSONL records use schema version 2 and are summarized by selecting
-the latest successful record for each chapter.
+the latest successful record for each chapter. TTS segment measurements include
+model load, reference-prompt/cache work, autoregressive generation, decoding,
+concatenation, post-processing, WAV writing, and total time. Summaries expose
+p50/p90/p95 synthesis latency and real-time factor by cache state, text length,
+speaker role, and cold/warm model state without storing source prose.
 
 Human join-review dispositions live in the state database and never mutate
 source or audio artifacts. Cleanup is similarly constrained: the API returns

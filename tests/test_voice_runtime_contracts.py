@@ -89,6 +89,10 @@ class CleanAudioPolicyTests(unittest.TestCase):
 
         engine.fx.apply.assert_not_called()
         np.testing.assert_array_equal(result, clean)
+        self.assertEqual(engine.last_generation_metrics["schema_version"], 1)
+        self.assertEqual(engine.last_generation_metrics["text_parts"], 1)
+        self.assertIn("autoregressive_generation_seconds", engine.last_generation_metrics)
+        self.assertGreaterEqual(engine.last_generation_metrics["total_seconds"], 0.0)
 
     def test_generation_post_fx_requires_explicit_opt_in(self) -> None:
         engine = Qwen3TTSEngine(
@@ -111,6 +115,26 @@ class CleanAudioPolicyTests(unittest.TestCase):
 
         engine.fx.apply.assert_called_once()
         np.testing.assert_array_equal(result, processed)
+
+    def test_failed_generation_retains_partial_timing_metrics(self) -> None:
+        engine = Qwen3TTSEngine(device="cpu")
+        engine._is_loaded = True
+        engine._generate = Mock(side_effect=RuntimeError("synthetic failure"))
+
+        with self.assertRaisesRegex(RuntimeError, "synthetic failure"):
+            engine.generate_speech(
+                "A line that fails during synthesis.",
+                voice_reference_path="reference.wav",
+                ref_text="Reference words.",
+            )
+
+        self.assertGreaterEqual(
+            engine.last_generation_metrics[
+                "autoregressive_generation_seconds"
+            ],
+            0.0,
+        )
+        self.assertGreaterEqual(engine.last_generation_metrics["total_seconds"], 0.0)
 
     def test_phase_vocoder_is_not_an_implicit_fallback(self) -> None:
         processor = AudioPostProcessor()

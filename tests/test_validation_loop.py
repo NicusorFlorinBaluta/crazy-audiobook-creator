@@ -23,6 +23,7 @@ class FakeEngine:
         self.fail_text = fail_text
         self.is_loaded = True
         self.calls: list[str] = []
+        self.last_generation_metrics: dict = {}
         self.similarity_calls = 0
         self.load_calls = 0
         self.unload_calls = 0
@@ -37,6 +38,22 @@ class FakeEngine:
 
     def generate_speech(self, *, text: str, output_path: Path, **kwargs):
         self.calls.append(text)
+        self.last_generation_metrics = {
+            "schema_version": 1,
+            "model_load_seconds": 0.0,
+            "reference_prompt_seconds": 0.01,
+            "autoregressive_generation_seconds": 0.05,
+            "audio_decode_seconds": 0.002,
+            "audio_concatenation_seconds": 0.001,
+            "post_processing_seconds": 0.001,
+            "wav_write_seconds": 0.003,
+            "total_seconds": 0.067,
+            "reference_prompt_cache_hits": 1,
+            "reference_prompt_cache_misses": 0,
+            "text_parts": 1,
+            "cold_model_load": False,
+            "attention_implementation": "fake",
+        }
         if text == self.fail_text:
             raise RuntimeError("synthetic failure")
         audio = np.ones(2400, dtype=np.float32) * 0.01
@@ -228,6 +245,33 @@ class ValidationLoopTests(unittest.TestCase):
 
         self.assertEqual(response.status, "success")
         self.assertEqual(response.failed_line_ids, [])
+
+    def test_tts_substage_metrics_are_exposed_per_segment(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            loop, _ = self.make_loop(root)
+            response = loop.process_chapter(
+                project_id="book",
+                chapter_number=1,
+                lines=[
+                    ScriptLine(
+                        line_id="ch01_0000",
+                        speaker="narrator",
+                        text="hello",
+                    )
+                ],
+                workspace=root,
+            )
+
+        metric = response.segment_metrics[0]
+        self.assertEqual(metric["tts_metrics_schema_version"], 1)
+        self.assertEqual(metric["tts_attention_implementation"], "fake")
+        self.assertEqual(metric["tts_reference_prompt_cache_hits"], 1)
+        self.assertEqual(metric["tts_text_parts"], 1)
+        self.assertAlmostEqual(
+            metric["tts_autoregressive_generation_seconds"],
+            0.05,
+        )
 
     def test_risk_aware_short_shout_prefers_clear_emphatic_delivery(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -658,6 +702,14 @@ class ValidationLoopTests(unittest.TestCase):
             self.assertEqual(response.status, "failed")
             self.assertEqual(response.generated, 0)
             self.assertEqual(response.failed_line_ids, ["ch01_0000"])
+            metric = response.segment_metrics[0]
+            self.assertTrue(metric["generation_failed"])
+            self.assertGreater(metric["synthesis_seconds"], 0.0)
+            self.assertEqual(metric["tts_text_parts"], 2)
+            self.assertAlmostEqual(
+                metric["tts_autoregressive_generation_seconds"],
+                0.10,
+            )
 
     def test_cache_skip_does_not_shift_progress_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -10,6 +10,137 @@ from typing import Any, Iterable
 METRICS_SCHEMA_VERSION = 2
 
 
+def _percentile(values: list[float], quantile: float) -> float:
+    """Return a deterministic linearly interpolated percentile."""
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return round(ordered[0], 6)
+    position = (len(ordered) - 1) * quantile
+    lower = int(position)
+    upper = min(lower + 1, len(ordered) - 1)
+    fraction = position - lower
+    return round(
+        ordered[lower] + (ordered[upper] - ordered[lower]) * fraction,
+        6,
+    )
+
+
+def _segment_latency_summary(
+    segments: Iterable[dict[str, Any]],
+) -> dict[str, Any]:
+    items = list(segments)
+    synthesis = [
+        float(item["synthesis_seconds"])
+        for item in items
+        if isinstance(item.get("synthesis_seconds"), (int, float))
+    ]
+    rtfs = [
+        float(item["synthesis_audio_rtf"])
+        for item in items
+        if isinstance(item.get("synthesis_audio_rtf"), (int, float))
+    ]
+    return {
+        "segments": len(items),
+        "synthesis_seconds": {
+            "p50": _percentile(synthesis, 0.50),
+            "p90": _percentile(synthesis, 0.90),
+            "p95": _percentile(synthesis, 0.95),
+        },
+        "synthesis_audio_rtf": {
+            "p50": _percentile(rtfs, 0.50),
+            "p90": _percentile(rtfs, 0.90),
+            "p95": _percentile(rtfs, 0.95),
+        },
+    }
+
+
+def _safe_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _tts_segment_summary(
+    generation: Iterable[dict[str, Any]],
+) -> dict[str, Any]:
+    segments = [
+        item
+        for record in generation
+        for item in (record.get("segment_metrics") or [])
+        if isinstance(item, dict)
+    ]
+    if not segments:
+        return {}
+
+    fresh = [item for item in segments if not item.get("synthesis_cache_hit")]
+    cached = [item for item in segments if item.get("synthesis_cache_hit")]
+    length_groups = {
+        "short_0_80": [
+            item
+            for item in fresh
+            if _safe_int(item.get("text_characters")) <= 80
+        ],
+        "medium_81_260": [
+            item
+            for item in fresh
+            if 80 < _safe_int(item.get("text_characters")) <= 260
+        ],
+        "long_261_plus": [
+            item
+            for item in fresh
+            if _safe_int(item.get("text_characters")) > 260
+        ],
+    }
+    roles = sorted(
+        {
+            str(item.get("speaker_role"))
+            for item in fresh
+            if item.get("speaker_role")
+        }
+    )
+    substage_totals: defaultdict[str, float] = defaultdict(float)
+    for item in fresh:
+        for key, value in item.items():
+            if (
+                key.endswith("_seconds")
+                and key.startswith(("tts_", "retry_tts_"))
+                and isinstance(value, (int, float))
+            ):
+                substage_totals[key] += float(value)
+
+    return {
+        "all": _segment_latency_summary(segments),
+        "fresh": _segment_latency_summary(fresh),
+        "cached": _segment_latency_summary(cached),
+        "by_text_length": {
+            key: _segment_latency_summary(value)
+            for key, value in length_groups.items()
+        },
+        "by_speaker_role": {
+            role: _segment_latency_summary(
+                item for item in fresh if item.get("speaker_role") == role
+            )
+            for role in roles
+        },
+        "by_model_state": {
+            "cold": _segment_latency_summary(
+                item
+                for item in fresh
+                if _safe_int(item.get("tts_cold_model_loads")) > 0
+            ),
+            "warm": _segment_latency_summary(
+                item
+                for item in fresh
+                if _safe_int(item.get("tts_cold_model_loads")) == 0
+            ),
+        },
+        "substage_totals_seconds": dict(sorted(substage_totals.items())),
+    }
+
+
 def read_metrics(path: str | Path) -> list[dict[str, Any]]:
     """Read valid JSONL metrics while tolerating a truncated final line."""
     records: list[dict[str, Any]] = []
@@ -77,5 +208,6 @@ def summarize_metrics(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
         "mastered_chapters": len(mastering),
         "generation_totals": dict(sorted(totals.items())),
         "timing_totals_seconds": dict(sorted(timing_totals.items())),
+        "tts_segments": _tts_segment_summary(generation),
         "chapters": generation,
     }
