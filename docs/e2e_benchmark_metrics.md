@@ -8,6 +8,25 @@ optimization is gated by before/after measurements and has an explicit rollback
 condition. The preserved `sample_book` and `sample_book-v32b-prod-e2e`
 projects remain evidence and must not be modified.
 
+## Full-book release evidence — 2026-08-11
+
+The clean `sample_book-14` release candidate completed all eight chapters and
+605 segments under audio candidate `7e46a00` (with UI-only hotfix `4d14810`).
+Generation/validation took 9,231.1 seconds for 4,132.6 seconds of generated
+speech, a 2.234× real-time factor. TTS consumed 8,083.5 seconds (87.6%), so it
+remains the dominant performance target.
+
+Objective quality improved directionally from the 2026-08-09 full-book run:
+average WER fell from 3.89% to 2.06%, accepted warnings from 36 to 10, retries
+from 14 to 4, and report-only join warnings from 63 to 14. There were no failed
+or flagged segments. All 605 segment hashes, eight master hashes, manifest
+links, the chapterized M4B, and post-run service release were verified.
+
+These results do not close the perceptual gate. The final output is the first
+full book after the echo-path fix, and its 14 join warnings remain unreviewed.
+See [the complete run report](e2e-run-2026-08-11.md) for the artifact hash,
+stage breakdown, warning distribution, and required listening audit.
+
 ## Current measured baseline
 
 - Prologue: 519.2 seconds mastered from 1,629.9 seconds of chapter generation

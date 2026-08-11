@@ -92,7 +92,8 @@ cd ..
 - [Voice design](docs/voice-design.md)
 - [Prompt and source-fidelity rules](docs/prompts.md)
 - [Production-readiness changes and next E2E gates](docs/production-readiness-2026-08-02.md)
-- [Full-book E2E run and metrics (2026-08-09)](docs/e2e-run-2026-08-09.md)
+- [Full-book release validation and metrics (2026-08-11)](docs/e2e-run-2026-08-11.md)
+- [Earlier full-book E2E and echo incident baseline (2026-08-09)](docs/e2e-run-2026-08-09.md)
 - [Post-E2E prioritized improvement plan (2026-08-09)](docs/improvement-plan-post-e2e-2026-08-09.md)
 - [Deferred model/GPU/listening validation plan (2026-08-10)](docs/live-validation-plan-2026-08-10.md)
 
