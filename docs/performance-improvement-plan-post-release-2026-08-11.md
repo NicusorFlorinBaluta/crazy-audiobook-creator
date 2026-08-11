@@ -99,6 +99,57 @@ prompt preparation consumed less than one second per mode. Future TTS work
 should therefore target the autoregressive model/runtime itself, not prompt
 I/O, WAV writing, export, or dashboard polling.
 
+### Same-speaker grouping headroom screen
+
+- Exact commit: `3b45c9c`.
+- Protocol: model-free replay of the production grouping rules over all 605
+  retained release-script calls, preserving source ranges and fragment IDs.
+- Candidate `300:50` ordinary / `400:68` narrator reduced calls by 34 (5.62%).
+- Candidate `340:58` ordinary / `460:78` narrator reduced calls by 45 (7.44%).
+- Every additional merge was narrator-only. Neither candidate eliminated a
+  character call, introduced a source/fragment mismatch, or created a new line
+  over the 500-character engine boundary.
+- Decision: no live audio benchmark and no promotion. The best possible call
+  reduction is below the 10% performance gate, while measured reference-prompt
+  and per-call non-autoregressive overhead is below 0.5% of synthesis time.
+  Longer narrator utterances would therefore add cadence risk without a
+  credible route to a material wall-time win.
+- One existing `mother_frond` control line is 502 characters. This predates the
+  candidates and is handled by the engine's bounded text splitting; the
+  analyzer records it separately from candidate-introduced violations.
+- Report:
+  `brain/projects/sample_book-14/benchmarks/grouping-headroom-3b45c9c.json`,
+  SHA-256
+  `a8a089129f42420f3a3f9da5d9a900906d7bcbbbc0e217ea894a80056550dcecb`.
+
+### Compile/runtime compatibility and dtype screen
+
+The installed stack exposes `torch.compile`, but the Qwen talker explicitly
+declares `_supports_static_cache=False` and `_can_compile_fullgraph=False`.
+The Qwen wrapper also does not expose a supported compile configuration to its
+custom talker generation call. Directly wrapping third-party autoregressive
+internals is outside the supported application contract, so compile remains
+dependency-blocked until Qwen/Transformers exposes a compatible path.
+
+The RX 7900 XTX does report native bfloat16 capability, so dtype was screened
+as the remaining supported one-factor runtime candidate:
+
+- Exact commit: `5df0f04`.
+- Protocol: one approved narrator, three fixtures, two independent sessions
+  per dtype in ABBA order, a warm-up after every model load, paired seeds, 12
+  measured generations, raw-audio Whisper validation, and speaker similarity.
+- Float16: median RTF `4.5747`, p95 `5.3284`, measured wall time `154.99 s`.
+- Bfloat16: median RTF `13.1680`, p95 `16.0323`, measured wall time `369.24 s`.
+- Quality was effectively equal: average WER `0.02564` for both; average
+  speaker similarity `0.99166` float16 versus `0.99023` bfloat16. Peak allocated
+  GPU memory was identical at `5.253 GiB`.
+- Decision: reject bfloat16. Median RTF regressed 187.84% with no memory or
+  quality benefit. Do not run the full multi-voice corpus; retain float16.
+- Report:
+  `brain/projects/sample_book-14/benchmarks/tts-dtype-screen-5df0f04.json`,
+  SHA-256
+  `52e75b0337f81b71b81c58484b93309665c0e6c9dd8325f0eef8b09093ff590c`.
+
 ## Measured baseline
 
 | Area | `sample_book-14` result | Planning consequence |
@@ -126,6 +177,8 @@ Do not spend another test cycle rediscovering these results unless the runtime
 or dependency stack materially changes:
 
 - Keep SDPA. It already beat eager attention in the local TTS smoke benchmark.
+- Keep float16. Bfloat16 regressed median RTF by 187.84% on the balanced local
+  screen and did not reduce peak allocated memory.
 - Keep TTS and Whisper sequential during initial chapter synthesis.
   Co-residency regressed TTS RTF from 1.615x to 4.878x in the controlled test.
 - Keep Whisper `large-v3` on raw audio. VAD damaged valid short and repeated
@@ -369,8 +422,9 @@ Update the current benchmark report with one row per candidate:
 | Deterministic local attribution repair | Implemented and live-screened | Exact repairs occurred with no redundant full request; all invariants passed |
 | Fragment-focused semantic retry | Implemented; no ambiguous live case triggered | Offline fixtures passed; retain observability and exercise when a natural case appears |
 | 550-word/60-fragment scripting | Rejected | 9.18% slower normalized median; no chunk-count reduction on the screened excerpts |
-| Larger same-speaker TTS groups | Pending benchmark | Fixed TTS corpus and listening-approved chapter |
-| TTS compile/inference setting | Pending compatibility check | Warm alternating benchmark |
+| Larger same-speaker TTS groups | Rejected after full-script headroom analysis | Maximum 7.44% call reduction, narrator-only; measured fixed overhead is immaterial |
+| TTS compile setting | Dependency-blocked | Installed Qwen talker declares no static-cache/fullgraph support and exposes no supported compile path |
+| Bfloat16 inference | Rejected after balanced screen | Median RTF 187.84% slower; equal quality and memory |
 | Adaptive token caps | Rejected after balanced multi-voice screen | Median RTF 1.43% slower; quality equal; no promotion-grade run warranted |
 | Initial TTS/Whisper co-residency | Rejected | Do not retest without a material runtime change |
 | Parallel GPU TTS workers | Deferred | Separate stability and throughput research gate |
