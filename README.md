@@ -95,6 +95,7 @@ cd ..
 - [Full-book release validation and metrics (2026-08-11)](docs/e2e-run-2026-08-11.md)
 - [Earlier full-book E2E and echo incident baseline (2026-08-09)](docs/e2e-run-2026-08-09.md)
 - [Post-E2E prioritized improvement plan (2026-08-09)](docs/improvement-plan-post-e2e-2026-08-09.md)
+- [Post-release performance results and supported benchmarks (2026-08-11)](docs/performance-improvement-plan-post-release-2026-08-11.md)
 - [Deferred model/GPU/listening validation plan (2026-08-10)](docs/live-validation-plan-2026-08-10.md)
 
 `implementation_plan*.md` and the `*chat*history*.md` conversation dumps are historical records, not current specifications. Current behavior is defined by this README, `docs/`, models, and executable tests.
@@ -118,3 +119,18 @@ Low-resource verification and environment inspection can be run separately:
 Model-backed verification tiers require an explicit `--allow-models` opt-in.
 The dashboard's **Runtime & storage** panel exposes the same preflight, a safe
 cleanup preview, and a redacted support bundle without including book audio.
+
+Supported performance tools are deliberately gated and reproducible:
+
+- `scripts/benchmark_script_chunks.py` compares scripting chunk bounds.
+- `scripts/benchmark_tts_fixture.py` runs the promotion-grade multi-voice TTS
+  corpus.
+- `scripts/benchmark_tts_dtype.py` screens supported numeric dtypes before a
+  full corpus is considered.
+- `scripts/analyze_grouping_candidates.py` performs model-free grouping
+  headroom analysis.
+
+Shared fingerprinting, ordering, dependency, and summary behavior lives in
+`scripts/benchmark_support.py`. Removed ad-hoc benchmark runners must not be
+restored as release evidence; new experiments should extend the supported
+harnesses and retain their quality and promotion gates.

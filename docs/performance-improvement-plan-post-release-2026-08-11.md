@@ -456,6 +456,15 @@ run requires 12-24 voice/fixture combinations, including a narrator and at
 least three other voice IDs, with the configured repeated ABBA/BAAB protocol.
 Both scripts refuse to load models without the explicit `--allow-models` flag.
 
+The supported screening companions are `scripts/benchmark_tts_dtype.py` for
+balanced numeric-dtype sessions and `scripts/analyze_grouping_candidates.py`
+for model-free full-script grouping headroom. Common fingerprints, dependency
+versions, balanced ordering, percentiles, and TTS summaries are centralized in
+`scripts/benchmark_support.py`. The obsolete ad-hoc inference, inference-
+settings, and generation-config runners were removed after the controlled
+screens closed their candidate settings; they did not satisfy the current
+warm-up, order, corpus, artifact, or promotion contracts.
+
 ## Completion criteria
 
 This plan is complete when:
