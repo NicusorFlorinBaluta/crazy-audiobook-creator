@@ -205,6 +205,9 @@ class ValidationLoop:
                 synthesis_cache_misses += 1
                 synthesis_elapsed = 0.0
                 last_error: Exception | None = None
+                # A missing/replaced WAV must never inherit a speaker
+                # embedding calculated for its previous contents.
+                output_path.with_suffix(".pt").unlink(missing_ok=True)
                 for generation_attempt in range(1, retry_limit + 1):
                     self._raise_if_cancelled(cancel_check)
                     try:
@@ -229,7 +232,7 @@ class ValidationLoop:
                         break
                     except Exception as exc:
                         last_error = exc
-                        output_path.unlink(missing_ok=True)
+                        self._unlink_audio_artifacts(output_path)
                         logger.error(
                             "Generation failed for %s (attempt %d/%d): %s",
                             line.line_id,
@@ -488,6 +491,7 @@ class ValidationLoop:
                     attempt_path = (
                         segments_dir / f".{line.line_id}.attempt-{attempt}.wav"
                     )
+                    self._unlink_audio_artifacts(attempt_path)
                     retry_emotion, retry_speed, retry_fx = (
                         self._retry_delivery(line, attempt)
                     )
@@ -549,7 +553,7 @@ class ValidationLoop:
                             attempt_similarity[line.line_id] = None
                         retried += 1
                     except Exception as exc:
-                        attempt_path.unlink(missing_ok=True)
+                        self._unlink_audio_artifacts(attempt_path)
                         logger.error(
                             "Retry generation failed for %s (attempt %d): %s",
                             line.line_id,
@@ -597,14 +601,14 @@ class ValidationLoop:
                     quality_attempts.append(candidate_result)
                     current_result = quality_by_id[line.line_id]
                     if self._is_better(candidate_result, current_result):
-                        os.replace(
+                        self._replace_audio_artifacts(
                             attempt_path,
                             segments_dir / f"{line.line_id}.wav",
                         )
                         quality_by_id[line.line_id] = candidate_result
                         current_result = candidate_result
                     else:
-                        attempt_path.unlink(missing_ok=True)
+                        self._unlink_audio_artifacts(attempt_path)
                     if not self._is_accepted(current_result.status):
                         next_candidates.append(line)
                     else:
@@ -1314,6 +1318,23 @@ class ValidationLoop:
         return bool(getattr(self.engine, "post_processing_enabled", False)) and (
             mood_tier_for(emotion) != "neutral"
         )
+
+    @staticmethod
+    def _unlink_audio_artifacts(audio_path: Path) -> None:
+        """Remove audio and its content-derived speaker embedding together."""
+        audio_path.unlink(missing_ok=True)
+        audio_path.with_suffix(".pt").unlink(missing_ok=True)
+
+    @staticmethod
+    def _replace_audio_artifacts(source: Path, destination: Path) -> None:
+        """Promote a retry WAV and its matching embedding atomically by file."""
+        os.replace(source, destination)
+        source_embedding = source.with_suffix(".pt")
+        destination_embedding = destination.with_suffix(".pt")
+        if source_embedding.is_file():
+            os.replace(source_embedding, destination_embedding)
+        else:
+            destination_embedding.unlink(missing_ok=True)
 
     @staticmethod
     def _valid_audio(path: Path) -> bool:

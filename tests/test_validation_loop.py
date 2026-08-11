@@ -303,6 +303,37 @@ class ValidationLoopTests(unittest.TestCase):
             loop, _ = self.make_loop(Path(directory))
             self.assertEqual(loop._retry_synthesis_text(line, 3), "oh mirris")
 
+    def test_retry_artifact_promotion_replaces_matching_embedding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / ".line.attempt-2.wav"
+            destination = root / "line.wav"
+            source.write_bytes(b"new audio")
+            source.with_suffix(".pt").write_bytes(b"new embedding")
+            destination.write_bytes(b"old audio")
+            destination.with_suffix(".pt").write_bytes(b"old embedding")
+
+            ValidationLoop._replace_audio_artifacts(source, destination)
+
+            self.assertEqual(destination.read_bytes(), b"new audio")
+            self.assertEqual(
+                destination.with_suffix(".pt").read_bytes(),
+                b"new embedding",
+            )
+            self.assertFalse(source.exists())
+            self.assertFalse(source.with_suffix(".pt").exists())
+
+    def test_retry_artifact_cleanup_removes_embedding_sidecar(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            audio = Path(directory) / ".line.attempt-2.wav"
+            audio.write_bytes(b"audio")
+            audio.with_suffix(".pt").write_bytes(b"embedding")
+
+            ValidationLoop._unlink_audio_artifacts(audio)
+
+            self.assertFalse(audio.exists())
+            self.assertFalse(audio.with_suffix(".pt").exists())
+
     def test_zero_for_authored_oh_fails_even_when_normalized_wer_is_zero(self) -> None:
         class ZeroWhisper(FakeWhisper):
             def transcribe(self, audio_file: str) -> str:
