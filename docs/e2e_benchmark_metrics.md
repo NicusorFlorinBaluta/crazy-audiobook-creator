@@ -35,6 +35,10 @@ maintains WAV/embedding sidecar identity, and admits unique mid-sentence proper
 names to book-local fuzzy ASR matching. The repaired full M4B hash and exact
 evidence are recorded in the run report.
 
+The user subsequently approved the repaired `ch07_0223` clip. Together with
+the 14 accepted join dispositions, this closes the run's human listening gate;
+no additional full-book or model-backed rerun is required for this candidate.
+
 ## Current measured baseline
 
 - Prologue: 519.2 seconds mastered from 1,629.9 seconds of chapter generation
