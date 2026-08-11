@@ -2184,18 +2184,25 @@ class Pipeline:
         if script_path.exists():
             script_payload = json.loads(script_path.read_text(encoding="utf-8"))
             candidate_counts: dict[str, int] = {}
+            mid_sentence_candidates: set[str] = set()
 
             def collect_text(node: Any) -> None:
                 if isinstance(node, dict):
                     text = node.get("text")
                     if isinstance(text, str):
-                        for candidate in re.findall(
+                        for match in re.finditer(
                             r"\b[A-Z][A-Za-z'’-]{3,}\b",
                             text,
                         ):
+                            candidate = match.group(0)
                             candidate_counts[candidate] = (
                                 candidate_counts.get(candidate, 0) + 1
                             )
+                            prefix = text[:match.start()].rstrip()
+                            while prefix and prefix[-1] in '"\'“”‘’([{':
+                                prefix = prefix[:-1].rstrip()
+                            if prefix and prefix[-1] not in ".!?":
+                                mid_sentence_candidates.add(candidate)
                     for value in node.values():
                         collect_text(value)
                 elif isinstance(node, list):
@@ -2214,7 +2221,9 @@ class Pipeline:
             terms.update(
                 candidate
                 for candidate, count in candidate_counts.items()
-                if count >= 2 and candidate not in sentence_words
+                if (
+                    count >= 2 or candidate in mid_sentence_candidates
+                ) and candidate not in sentence_words
             )
         return sorted(term for term in terms if term.strip())
 

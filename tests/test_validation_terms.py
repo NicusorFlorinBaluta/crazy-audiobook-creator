@@ -208,6 +208,29 @@ class ValidationTermsTests(unittest.TestCase):
         self.assertIn("Eelakin", terms)
         self.assertNotIn("They", terms)
 
+    def test_unique_mid_sentence_name_is_included_for_asr_matching(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project_dir = Path(directory)
+            (project_dir / "book_script.json").write_text(
+                json.dumps(
+                    {
+                        "chapters": [
+                            {
+                                "utterances": [
+                                    {"text": '"Oh, Mirris," Vathi said.'},
+                                ]
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            terms = Pipeline._validation_terms(project_dir)
+
+        self.assertIn("Mirris", terms)
+        self.assertNotIn("Oh", terms)
+
     def test_performance_metric_is_durable_jsonl(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             project_dir = Path(directory)
