@@ -46,7 +46,12 @@ For every input ID, the LLM may return only:
 The source `text`, fragment ID, and source span are restored from the immutable input. LLM-returned prose is never trusted as audiobook text.
 
 ### Smart Hybrid Dialogue Attribution (Option D)
-- **Dialogue Fragment Rule**: Quoted text (`"..."`) is guaranteed character attribution. If the LLM returns `narrator` for a dialogue fragment (e.g. `"No,"`), automatic fallback resolution (`_resolve_dialogue_speaker`) infers the character speaker from adjacent tags or context.
+- **Dialogue Fragment Rule**: Quoted text (`"..."`) is treated as spoken
+  dialogue unless the source establishes that it is a document, sign, or other
+  unspoken quotation. Explicit named tags and unique generic roles such as
+  `the boy` are repaired locally from source evidence. Ambiguous contradictions
+  receive one bounded fragment-only correction request; they do not regenerate
+  an otherwise structurally valid metadata chunk.
 - **Dialogue Tag Grouping**: Spoken dialogue and an immediately attached short
   narrator tag remain separate synthesis lines and retain their correct voices.
   Both lines receive one `utterance_group_id`, so mastering joins them with no
@@ -68,7 +73,11 @@ A metadata response is accepted only when:
   and an explicitly named tag does not name a different registered character
 - numeric values can be parsed and clamped to model bounds
 
-The generator retries an invalid metadata response. Repeated incompleteness fails the chapter instead of accepting partial output.
+Malformed JSON, incomplete/duplicate IDs, and other structural corruption use
+bounded full-chunk retries. Semantic attribution failures use deterministic
+repair or a bounded fragment-only retry. If that focused retry remains
+ambiguous, only the affected fragment receives the conservative fallback and
+the decision is recorded in scripting metrics.
 
 ## Dialogue recognition
 

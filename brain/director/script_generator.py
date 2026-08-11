@@ -42,6 +42,28 @@ class SourceFragment:
     start: int
     end: int
 
+
+@dataclass(frozen=True)
+class AttributionIssue:
+    """One source-grounded problem with dialogue metadata."""
+
+    kind: str
+    fragment_index: int
+    fragment_id: int
+    submitted_speaker: str
+    message: str
+    exact_speaker: str | None = None
+
+
+class MetadataAttributionError(ValueError):
+    """Structured semantic failure retained as a ValueError for callers."""
+
+    def __init__(self, issues: list[AttributionIssue]):
+        if not issues:
+            raise ValueError("MetadataAttributionError requires at least one issue")
+        self.issues = tuple(issues)
+        super().__init__("; ".join(issue.message for issue in issues))
+
 _PROMPT_DIR = Path(__file__).parent / "prompts"
 
 _SYSTEM_PROMPT = """You are a STRICT AUDIOBOOK SCRIPT METADATA ANNOTATOR. Your ONLY job is to assign the correct speaker, emotion, and reading speed to an array of pre-extracted text fragments.
@@ -192,6 +214,7 @@ class ScriptGenerator:
                 _SYSTEM_PROMPT
                 + _USER_PROMPT
                 + "\nGROUPING_POLICY=narrator-tag-utterance-groups-v3"
+                + "\nATTRIBUTION_REPAIR_POLICY=focused-exact-evidence-v1"
             ),
             chunk_size_words=self.chunk_size_words,
             group_utterances=self.group_utterances,
@@ -446,7 +469,15 @@ class ScriptGenerator:
         last_error: Exception | None = None
         used_fallback = False
         allowed_speakers = set(registry.characters)
+        full_attempts = 0
+        structural_failures = 0
+        focused_retries = 0
+        local_repairs = 0
+        fragment_fallbacks = 0
+        issue_counts: dict[str, int] = {}
+        request_metrics: list[dict[str, Any]] = []
         for attempt in range(1, 4):
+            full_attempts = attempt
             try:
                 request_prompt = prompt
                 if last_error is not None:
@@ -461,13 +492,42 @@ class ScriptGenerator:
                         "quoted material that no character actually speaks. "
                         "Do not invent generic speaker labels."
                     )
-                candidate = self.ollama.generate_json(
-                    request_prompt,
-                    temperature=self.temperature if attempt == 1 else 0.1,
-                    system=system_prompt,
-                )
+                request_started = _time.perf_counter()
+                request_succeeded = False
+                try:
+                    candidate = self.ollama.generate_json(
+                        request_prompt,
+                        temperature=self.temperature if attempt == 1 else 0.1,
+                        system=system_prompt,
+                    )
+                    request_succeeded = True
+                finally:
+                    request_metrics.append(
+                        {
+                            "request_kind": "full_chunk",
+                            "attempt": attempt,
+                            "wall_seconds": round(
+                                _time.perf_counter() - request_started,
+                                6,
+                            ),
+                            "success": request_succeeded,
+                            "ollama": (
+                                dict(
+                                    getattr(
+                                        self.ollama,
+                                        "last_generation_metrics",
+                                        {},
+                                    )
+                                    or {}
+                                )
+                                if request_succeeded
+                                else {}
+                            ),
+                        }
+                    )
                 self._validate_metadata_ids(candidate, len(fragments))
-                self._validate_metadata_speakers(
+
+                issues = self._collect_metadata_speaker_issues(
                     candidate,
                     fragments,
                     allowed_speakers,
@@ -475,38 +535,110 @@ class ScriptGenerator:
                     id_offset=id_offset,
                     confidence_threshold=self.speaker_confidence_threshold,
                 )
+                self._record_issue_counts(issue_counts, issues)
+                local_repairs += self._apply_deterministic_attribution_repairs(
+                    candidate,
+                    issues,
+                )
+
+                issues = self._collect_metadata_speaker_issues(
+                    candidate,
+                    fragments,
+                    allowed_speakers,
+                    registry=registry,
+                    id_offset=id_offset,
+                    confidence_threshold=self.speaker_confidence_threshold,
+                )
+                for issue in issues:
+                    focused_retries += 1
+                    try:
+                        replacement = self._retry_fragment_metadata(
+                            issue,
+                            candidate,
+                            fragments,
+                            allowed_speakers,
+                            registry,
+                            char_summary,
+                            request_metrics,
+                            id_offset=id_offset,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "Focused attribution retry failed for chapter %d "
+                            "fragment %d: %s",
+                            chapter_number,
+                            issue.fragment_id,
+                            exc,
+                        )
+                        continue
+                    self._replace_metadata_line(
+                        candidate,
+                        issue.fragment_index,
+                        replacement,
+                    )
+
+                remaining_issues = self._collect_metadata_speaker_issues(
+                    candidate,
+                    fragments,
+                    allowed_speakers,
+                    registry=registry,
+                    id_offset=id_offset,
+                    confidence_threshold=self.speaker_confidence_threshold,
+                )
+                if remaining_issues:
+                    used_fallback = True
+                    for issue in remaining_issues:
+                        fallback = self._fallback_fragment_metadata(
+                            issue.fragment_index,
+                            candidate,
+                            fragments,
+                            allowed_speakers,
+                            registry,
+                        )
+                        self._replace_metadata_line(
+                            candidate,
+                            issue.fragment_index,
+                            fallback,
+                        )
+                        fragment_fallbacks += 1
+                    logger.warning(
+                        "Chapter %d used conservative metadata fallback for %d "
+                        "fragment(s) after focused attribution retry",
+                        chapter_number,
+                        len(remaining_issues),
+                    )
+
+                self._validate_metadata_ids(candidate, len(fragments))
                 raw = candidate
                 break
             except Exception as exc:
                 last_error = exc
+                structural_failures += 1
                 logger.warning(
-                    "Metadata annotation attempt %d failed for chapter %d: %s",
+                    "Full metadata annotation attempt %d failed for chapter %d: %s",
                     attempt,
                     chapter_number,
                     exc,
                 )
         if raw is None:
             used_fallback = True
+            fragment_fallbacks = len(fragments)
             logger.warning(
                 "LLM metadata annotation failed for chapter %d after retries. "
                 "Using conservative exact-evidence fallback metadata.",
                 chapter_number,
             )
             fallback_lines = []
-            dummy_meta: dict[int, dict] = {}
             for i, fragment in enumerate(fragments):
-                speaker = "narrator"
-                if self._is_dialogue_fragment(fragment.text):
-                    speaker = self._resolve_dialogue_speaker(i, fragments, dummy_meta, allowed_speakers) or "narrator"
-                fallback_lines.append({
-                    "id": i,
-                    "speaker": speaker,
-                    "speaker_confidence": 0.90,
-                    "emotion": "neutral",
-                    "speed": 1.0,
-                    "pause_before_ms": 0,
-                    "pause_after_ms": 400 if speaker != "narrator" else 380,
-                })
+                fallback_lines.append(
+                    self._fallback_fragment_metadata(
+                        i,
+                        {"lines": []},
+                        fragments,
+                        allowed_speakers,
+                        registry,
+                    )
+                )
             raw = {
                 "chapter_number": chapter_number,
                 "chapter_title": chapter_title,
@@ -538,7 +670,16 @@ class ScriptGenerator:
                 "source_words": sum(len(item.text.split()) for item in fragments),
                 "prompt_characters": len(system_prompt) + len(prompt),
                 "wall_seconds": round(elapsed, 6),
-                "attempts": attempt if raw is not None else 3,
+                "attempts": full_attempts,
+                "full_attempts": full_attempts,
+                "structural_failures": structural_failures,
+                "structural_retries": max(0, full_attempts - 1),
+                "full_semantic_retries": 0,
+                "focused_retries": focused_retries,
+                "local_repairs": local_repairs,
+                "fragment_fallbacks": fragment_fallbacks,
+                "attribution_issue_counts": issue_counts,
+                "requests": request_metrics,
                 "used_fallback": used_fallback,
                 "ollama": dict(
                     getattr(self.ollama, "last_generation_metrics", {}) or {}
@@ -546,6 +687,252 @@ class ScriptGenerator:
             }
         )
         return result
+
+    @staticmethod
+    def _record_issue_counts(
+        counts: dict[str, int],
+        issues: list[AttributionIssue],
+    ) -> None:
+        for issue in issues:
+            counts[issue.kind] = counts.get(issue.kind, 0) + 1
+
+    @staticmethod
+    def _metadata_line_map(raw: dict[str, Any]) -> dict[int, dict[str, Any]]:
+        result: dict[int, dict[str, Any]] = {}
+        for item in raw.get("lines", []):
+            if not isinstance(item, dict) or "id" not in item:
+                continue
+            try:
+                result[int(item["id"])] = item
+            except (TypeError, ValueError):
+                continue
+        return result
+
+    @staticmethod
+    def _replace_metadata_line(
+        raw: dict[str, Any],
+        fragment_index: int,
+        replacement: dict[str, Any],
+    ) -> None:
+        for index, item in enumerate(raw.get("lines", [])):
+            if not isinstance(item, dict):
+                continue
+            try:
+                item_id = int(item.get("id"))
+            except (TypeError, ValueError):
+                continue
+            if item_id == fragment_index:
+                updated = dict(item)
+                updated.update(replacement)
+                updated["id"] = fragment_index
+                raw["lines"][index] = updated
+                return
+        raise ValueError(f"No metadata row exists for fragment {fragment_index}")
+
+    @staticmethod
+    def _apply_deterministic_attribution_repairs(
+        raw: dict[str, Any],
+        issues: list[AttributionIssue],
+    ) -> int:
+        repairs = 0
+        repaired_fragments: set[int] = set()
+        for issue in issues:
+            if issue.exact_speaker is None:
+                continue
+            if issue.fragment_index in repaired_fragments:
+                continue
+            ScriptGenerator._replace_metadata_line(
+                raw,
+                issue.fragment_index,
+                {
+                    "speaker": issue.exact_speaker,
+                    "speaker_confidence": 0.99,
+                    "speaker_evidence": (
+                        "Deterministic correction from the attached source "
+                        f"dialogue tag ({issue.kind})."
+                    ),
+                },
+            )
+            repaired_fragments.add(issue.fragment_index)
+            repairs += 1
+        return repairs
+
+    def _retry_fragment_metadata(
+        self,
+        issue: AttributionIssue,
+        raw: dict[str, Any],
+        fragments: list[SourceFragment],
+        allowed_speakers: set[str],
+        registry: CharacterRegistry,
+        character_summary: str,
+        request_metrics: list[dict[str, Any]],
+        *,
+        id_offset: int,
+    ) -> dict[str, Any]:
+        """Request one bounded semantic correction instead of a whole chunk."""
+        start = max(0, issue.fragment_index - 2)
+        end = min(len(fragments), issue.fragment_index + 3)
+        context = [
+            {
+                "id": index,
+                "text": fragments[index].text,
+                "dialogue": self._is_dialogue_fragment(fragments[index].text),
+            }
+            for index in range(start, end)
+        ]
+        current = self._metadata_line_map(raw).get(issue.fragment_index, {})
+        focused_prompt = (
+            "Correct the speaker metadata for exactly one audiobook source "
+            "fragment. Return JSON with a `lines` array containing exactly one "
+            f"row whose id is {issue.fragment_index}. Preserve that id.\n\n"
+            f"Allowed speaker IDs: {', '.join(sorted(allowed_speakers))}\n"
+            f"Rejected metadata reason: {issue.message}\n"
+            "Use explicit dialogue tags, aliases, and the bounded conversation "
+            "context. Never select from gender or proximity alone. Include "
+            "only id, speaker, speaker_confidence, and speaker_evidence. The "
+            "existing delivery metadata will be preserved.\n\n"
+            f"Context fragments:\n{json.dumps(context, indent=2)}\n\n"
+            f"Current metadata:\n{json.dumps(current, indent=2)}"
+        )
+        focused_system = (
+            "You are a strict audiobook speaker-attribution corrector. Output "
+            "only JSON. Do not rewrite source text or invent speakers.\n\n"
+            f"Character registry:\n{character_summary}"
+        )
+        request_started = time.perf_counter()
+        request_succeeded = False
+        try:
+            response = self.ollama.generate_json(
+                focused_prompt,
+                temperature=0.1,
+                system=focused_system,
+            )
+            request_succeeded = True
+        finally:
+            request_metrics.append(
+                {
+                    "request_kind": "focused_fragment",
+                    "fragment_id": issue.fragment_id,
+                    "wall_seconds": round(
+                        time.perf_counter() - request_started,
+                        6,
+                    ),
+                    "success": request_succeeded,
+                    "ollama": (
+                        dict(
+                            getattr(
+                                self.ollama,
+                                "last_generation_metrics",
+                                {},
+                            )
+                            or {}
+                        )
+                        if request_succeeded
+                        else {}
+                    ),
+                }
+            )
+        response_lines = response.get("lines") if isinstance(response, dict) else None
+        if not isinstance(response_lines, list) or len(response_lines) != 1:
+            raise ValueError("Focused attribution response must contain exactly one line")
+        replacement = response_lines[0]
+        if not isinstance(replacement, dict):
+            raise ValueError("Focused attribution response line is invalid")
+        try:
+            replacement_id = int(replacement.get("id"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Focused attribution response has an invalid id") from exc
+        if replacement_id != issue.fragment_index:
+            raise ValueError(
+                "Focused attribution response changed fragment id "
+                f"{issue.fragment_index} to {replacement_id}"
+            )
+        replacement = {
+            key: replacement[key]
+            for key in (
+                "id",
+                "speaker",
+                "speaker_confidence",
+                "speaker_evidence",
+            )
+            if key in replacement
+        }
+
+        trial = dict(raw)
+        trial["lines"] = [
+            dict(item) if isinstance(item, dict) else item
+            for item in raw.get("lines", [])
+        ]
+        self._replace_metadata_line(trial, issue.fragment_index, replacement)
+        remaining = self._collect_metadata_speaker_issues(
+            trial,
+            fragments,
+            allowed_speakers,
+            registry=registry,
+            id_offset=id_offset,
+            confidence_threshold=self.speaker_confidence_threshold,
+        )
+        if any(item.fragment_index == issue.fragment_index for item in remaining):
+            raise MetadataAttributionError(
+                [
+                    item
+                    for item in remaining
+                    if item.fragment_index == issue.fragment_index
+                ]
+            )
+        return dict(replacement)
+
+    @staticmethod
+    def _fallback_fragment_metadata(
+        fragment_index: int,
+        raw: dict[str, Any],
+        fragments: list[SourceFragment],
+        allowed_speakers: set[str],
+        registry: CharacterRegistry,
+    ) -> dict[str, Any]:
+        """Build conservative metadata for one unresolved source fragment."""
+        fragment = fragments[fragment_index]
+        speaker = "narrator"
+        evidence = "Conservative narration fallback."
+        confidence = 0.0
+        if ScriptGenerator._is_dialogue_fragment(fragment.text):
+            next_text = (
+                fragments[fragment_index + 1].text
+                if fragment_index + 1 < len(fragments)
+                else ""
+            )
+            exact_speaker, evidence_kind, _ = ScriptGenerator._dialogue_tag_evidence(
+                next_text,
+                registry,
+            )
+            if exact_speaker in allowed_speakers:
+                speaker = exact_speaker
+                confidence = 0.99
+                evidence = f"Exact attached dialogue-tag fallback ({evidence_kind})."
+            else:
+                speaker = ScriptGenerator._resolve_dialogue_speaker(
+                    fragment_index,
+                    fragments,
+                    ScriptGenerator._metadata_line_map(raw),
+                    allowed_speakers,
+                )
+                confidence = 0.50 if speaker != "narrator" else 0.0
+                evidence = "Conservative unresolved-dialogue fallback."
+
+        existing = ScriptGenerator._metadata_line_map(raw).get(fragment_index, {})
+        return {
+            "id": fragment_index,
+            "speaker": speaker,
+            "speaker_confidence": confidence,
+            "speaker_evidence": evidence,
+            "emotion": existing.get("emotion", "neutral"),
+            "speed": existing.get("speed", 1.0),
+            "pause_before_ms": existing.get("pause_before_ms", 0),
+            "pause_after_ms": existing.get(
+                "pause_after_ms",
+                400 if speaker != "narrator" else 380,
+            ),
+        }
 
     def _process_chunked(
         self,
@@ -774,92 +1161,196 @@ class ScriptGenerator:
         id_offset: int = 0,
         confidence_threshold: float = 0.55,
     ) -> None:
-        """Reject invented dialogue speakers while the LLM retry is still available."""
+        """Reject invalid dialogue metadata with structured source evidence."""
+        issues = ScriptGenerator._collect_metadata_speaker_issues(
+            raw,
+            fragments,
+            allowed_speakers,
+            registry=registry,
+            id_offset=id_offset,
+            confidence_threshold=confidence_threshold,
+        )
+        if issues:
+            raise MetadataAttributionError(issues)
+
+    @staticmethod
+    def _collect_metadata_speaker_issues(
+        raw: dict[str, Any],
+        fragments: list[SourceFragment],
+        allowed_speakers: set[str],
+        *,
+        registry: CharacterRegistry | None = None,
+        id_offset: int = 0,
+        confidence_threshold: float = 0.55,
+    ) -> list[AttributionIssue]:
+        """Return at most one highest-priority attribution issue per dialogue."""
         metadata_map = {
             int(item["id"]): item
             for item in raw.get("lines", [])
             if isinstance(item, dict) and "id" in item
         }
+        issues: list[AttributionIssue] = []
         for i, fragment in enumerate(fragments):
             if not ScriptGenerator._is_dialogue_fragment(fragment.text):
                 continue
             speaker = ScriptGenerator._normalize_speaker_id(
                 metadata_map.get(i, {}).get("speaker", "narrator")
             )
-            if speaker not in allowed_speakers:
-                raise ValueError(
-                    f"Fragment {id_offset + i} uses unknown speaker '{speaker}'"
-                )
+            fragment_id = id_offset + i
             next_text = fragments[i + 1].text if i + 1 < len(fragments) else ""
+            exact_speaker: str | None = None
+            evidence_kind: str | None = None
+            evidence_gender: Gender | None = None
             if ScriptGenerator._is_pure_dialogue_tag(next_text):
-                if speaker == "narrator":
-                    raise ValueError(
-                        f"Fragment {id_offset + i} is spoken dialogue followed by "
-                        "a dialogue tag but is assigned to narrator"
-                    )
-                ScriptGenerator._validate_dialogue_tag_attribution(
-                    speaker,
-                    next_text,
-                    registry,
-                    id_offset + i,
+                exact_speaker, evidence_kind, evidence_gender = (
+                    ScriptGenerator._dialogue_tag_evidence(next_text, registry)
                 )
+
+            if speaker not in allowed_speakers:
+                issues.append(
+                    AttributionIssue(
+                        kind="unknown_speaker",
+                        fragment_index=i,
+                        fragment_id=fragment_id,
+                        submitted_speaker=speaker,
+                        exact_speaker=exact_speaker,
+                        message=(
+                            f"Fragment {fragment_id} uses unknown speaker "
+                            f"'{speaker}'"
+                        ),
+                    )
+                )
+                continue
+
+            if ScriptGenerator._is_pure_dialogue_tag(next_text):
+                if exact_speaker is not None and speaker != exact_speaker:
+                    label = (
+                        "names"
+                        if evidence_kind == "named_tag"
+                        else "identifies"
+                    )
+                    issues.append(
+                        AttributionIssue(
+                            kind=evidence_kind or "exact_tag_contradiction",
+                            fragment_index=i,
+                            fragment_id=fragment_id,
+                            submitted_speaker=speaker,
+                            exact_speaker=exact_speaker,
+                            message=(
+                                f"Fragment {fragment_id} assigns '{speaker}', but "
+                                f"its attached dialogue tag {label} "
+                                f"'{exact_speaker}'"
+                            ),
+                        )
+                    )
+                    continue
+                if speaker == "narrator":
+                    issues.append(
+                        AttributionIssue(
+                            kind="narrator_dialogue_tag",
+                            fragment_index=i,
+                            fragment_id=fragment_id,
+                            submitted_speaker=speaker,
+                            exact_speaker=exact_speaker,
+                            message=(
+                                f"Fragment {fragment_id} is spoken dialogue followed "
+                                "by a dialogue tag but is assigned to narrator"
+                            ),
+                        )
+                    )
+                    continue
+                if evidence_gender is not None and registry is not None:
+                    character = registry.characters.get(speaker)
+                    if (
+                        character is not None
+                        and character.gender in (Gender.MALE, Gender.FEMALE)
+                        and character.gender != evidence_gender
+                    ):
+                        gender_source = (
+                            "pronouns"
+                            if evidence_kind == "pronoun_gender"
+                            else "speaker description"
+                        )
+                        issues.append(
+                            AttributionIssue(
+                                kind="gender_contradiction",
+                                fragment_index=i,
+                                fragment_id=fragment_id,
+                                submitted_speaker=speaker,
+                                message=(
+                                    f"Fragment {fragment_id} assigns '{speaker}', but "
+                                    f"its attached dialogue tag identifies a "
+                                    f"{evidence_gender.value} speaker through "
+                                    f"{gender_source}"
+                                ),
+                            )
+                        )
+                        continue
+
             confidence = metadata_map.get(i, {}).get("speaker_confidence")
             if confidence is None:
-                raise ValueError(
-                    f"Fragment {id_offset + i} has no speaker confidence"
+                issues.append(
+                    AttributionIssue(
+                        kind="missing_confidence",
+                        fragment_index=i,
+                        fragment_id=fragment_id,
+                        submitted_speaker=speaker,
+                        exact_speaker=(
+                            exact_speaker if exact_speaker == speaker else None
+                        ),
+                        message=f"Fragment {fragment_id} has no speaker confidence",
+                    )
                 )
+                continue
             if confidence is not None:
                 try:
                     parsed_confidence = float(confidence)
-                except (TypeError, ValueError) as exc:
-                    raise ValueError(
-                        f"Fragment {id_offset + i} has invalid speaker confidence"
-                    ) from exc
-                if parsed_confidence < confidence_threshold:
-                    raise ValueError(
-                        f"Fragment {id_offset + i} assigns '{speaker}' with "
-                        f"low confidence ({parsed_confidence:.2f}); re-evaluate "
-                        "the dialogue using source evidence"
+                except (TypeError, ValueError):
+                    issues.append(
+                        AttributionIssue(
+                            kind="invalid_confidence",
+                            fragment_index=i,
+                            fragment_id=fragment_id,
+                            submitted_speaker=speaker,
+                            exact_speaker=(
+                                exact_speaker if exact_speaker == speaker else None
+                            ),
+                            message=(
+                                f"Fragment {fragment_id} has invalid speaker "
+                                "confidence"
+                            ),
+                        )
                     )
+                    continue
+                if parsed_confidence < confidence_threshold:
+                    issues.append(
+                        AttributionIssue(
+                            kind="low_confidence",
+                            fragment_index=i,
+                            fragment_id=fragment_id,
+                            submitted_speaker=speaker,
+                            exact_speaker=(
+                                exact_speaker if exact_speaker == speaker else None
+                            ),
+                            message=(
+                                f"Fragment {fragment_id} assigns '{speaker}' with "
+                                f"low confidence ({parsed_confidence:.2f}); "
+                                "re-evaluate the dialogue using source evidence"
+                            ),
+                        )
+                    )
+        return issues
 
     @staticmethod
-    def _validate_dialogue_tag_attribution(
-        speaker: str,
+    def _dialogue_tag_evidence(
         tag_text: str,
         registry: CharacterRegistry | None,
-        fragment_id: int,
-    ) -> None:
-        """Reject tag evidence that deterministically contradicts a speaker."""
+    ) -> tuple[str | None, str | None, Gender | None]:
+        """Resolve only explicit, unique speaker evidence from a dialogue tag."""
         if registry is None:
-            return
-        character = registry.characters.get(speaker)
-        if character is None:
-            return
+            return None, None, None
 
         tag = tag_text.casefold()
-        pronoun_gender = None
-        gender_evidence = "speaker description"
-        if re.search(r"\bshe\b", tag):
-            pronoun_gender = Gender.FEMALE
-            gender_evidence = "pronouns"
-        elif re.search(r"\bhe\b", tag):
-            pronoun_gender = Gender.MALE
-            gender_evidence = "pronouns"
-        elif re.search(r"\b(?:the|a)\s+(?:girl|woman)\b", tag):
-            pronoun_gender = Gender.FEMALE
-        elif re.search(r"\b(?:the|a)\s+(?:boy|man)\b", tag):
-            pronoun_gender = Gender.MALE
-        if (
-            pronoun_gender is not None
-            and character.gender in (Gender.MALE, Gender.FEMALE)
-            and character.gender != pronoun_gender
-        ):
-            raise ValueError(
-                f"Fragment {fragment_id} assigns '{speaker}', but its attached "
-                f"dialogue tag identifies a {pronoun_gender.value} speaker "
-                f"through {gender_evidence}"
-            )
-
         speech_verbs = (
             r"said|asked|replied|whispered|shouted|murmured|exclaimed|"
             r"continued|agreed|added|called|demanded|warned|answered|cried"
@@ -874,13 +1365,12 @@ class ScriptGenerator:
                 if value.strip()
             }
             for name in names:
-                named_tag = re.search(
+                if re.search(
                     r"\b" + re.escape(name) + r"\b(?:\s+\w+){0,2}\s+(?:"
                     + speech_verbs
                     + r")\b",
                     tag,
-                )
-                if named_tag:
+                ):
                     named_matches.append((len(name), character_id))
 
         if named_matches:
@@ -890,12 +1380,80 @@ class ScriptGenerator:
                 for length, character_id in named_matches
                 if length == longest
             }
-            if len(named_speakers) == 1 and speaker not in named_speakers:
-                named_speaker = next(iter(named_speakers))
-                raise ValueError(
-                    f"Fragment {fragment_id} assigns '{speaker}', but its attached "
-                    f"dialogue tag names '{named_speaker}'"
-                )
+            if len(named_speakers) == 1:
+                return next(iter(named_speakers)), "named_tag", None
+
+        generic_match = re.search(
+            r"\b(?:the|a)\s+(boy|girl|man|woman)\b(?:\s+\w+){0,2}\s+(?:"
+            + speech_verbs
+            + r")\b",
+            tag,
+        )
+        if generic_match:
+            noun = generic_match.group(1)
+            role_specs = {
+                "boy": ("child_male", Gender.MALE),
+                "girl": ("child_female", Gender.FEMALE),
+                "man": ("minor_male", Gender.MALE),
+                "woman": ("minor_female", Gender.FEMALE),
+            }
+            preferred_id, gender = role_specs[noun]
+            if preferred_id in registry.characters:
+                return preferred_id, "generic_role_tag", gender
+            matching_roles = []
+            for character_id, character in registry.characters.items():
+                role_names = {
+                    character_id.casefold().replace("_", " "),
+                    character.name.casefold(),
+                    *(alias.casefold() for alias in character.aliases),
+                }
+                if noun in role_names and character.gender == gender:
+                    matching_roles.append(character_id)
+            if len(matching_roles) == 1:
+                return matching_roles[0], "generic_role_tag", gender
+            return None, "generic_gender", gender
+
+        if re.search(r"\bshe\b", tag):
+            return None, "pronoun_gender", Gender.FEMALE
+        if re.search(r"\bhe\b", tag):
+            return None, "pronoun_gender", Gender.MALE
+        return None, None, None
+
+    @staticmethod
+    def _validate_dialogue_tag_attribution(
+        speaker: str,
+        tag_text: str,
+        registry: CharacterRegistry | None,
+        fragment_id: int,
+    ) -> None:
+        """Reject tag evidence that deterministically contradicts a speaker."""
+        if registry is None:
+            return
+        character = registry.characters.get(speaker)
+        if character is None:
+            return
+        exact_speaker, evidence_kind, evidence_gender = (
+            ScriptGenerator._dialogue_tag_evidence(tag_text, registry)
+        )
+        if exact_speaker is not None and speaker != exact_speaker:
+            label = "names" if evidence_kind == "named_tag" else "identifies"
+            raise ValueError(
+                f"Fragment {fragment_id} assigns '{speaker}', but its attached "
+                f"dialogue tag {label} '{exact_speaker}'"
+            )
+        if (
+            evidence_gender is not None
+            and character.gender in (Gender.MALE, Gender.FEMALE)
+            and character.gender != evidence_gender
+        ):
+            gender_evidence = (
+                "pronouns" if evidence_kind == "pronoun_gender" else "speaker description"
+            )
+            raise ValueError(
+                f"Fragment {fragment_id} assigns '{speaker}', but its attached "
+                f"dialogue tag identifies a {evidence_gender.value} speaker "
+                f"through {gender_evidence}"
+            )
 
     @staticmethod
     def _is_pure_dialogue_tag(text: str) -> bool:

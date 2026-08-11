@@ -67,6 +67,24 @@ class FakeIdentityOllama:
         }
 
 
+class FakeScriptOllama:
+    model = "fake-script"
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls: list[tuple[str, dict]] = []
+        self.last_generation_metrics = {}
+
+    def generate_json(self, prompt, **kwargs):
+        self.calls.append((prompt, kwargs))
+        if not self.responses:
+            raise AssertionError("Unexpected script model request")
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
 class ScriptFidelityTests(unittest.TestCase):
     def test_character_suffixes_are_not_merged_without_explicit_alias(self) -> None:
         characters = {
@@ -400,6 +418,223 @@ class ScriptFidelityTests(unittest.TestCase):
                 registry,
                 54,
             )
+
+    @staticmethod
+    def _attribution_registry() -> CharacterRegistry:
+        return CharacterRegistry(
+            book_title="Test",
+            book_author="Author",
+            characters={
+                "narrator": Character(
+                    id="narrator",
+                    name="Narrator",
+                    gender=Gender.OTHER,
+                    age_range="adult",
+                    voice_description="neutral voice",
+                ),
+                "dusk": Character(
+                    id="dusk",
+                    name="Dusk",
+                    gender=Gender.MALE,
+                    age_range="adult",
+                    voice_description="low voice",
+                ),
+                "vathi": Character(
+                    id="vathi",
+                    name="Vathi",
+                    gender=Gender.FEMALE,
+                    age_range="adult",
+                    voice_description="clear voice",
+                ),
+                "child_male": Character(
+                    id="child_male",
+                    name="Boy",
+                    gender=Gender.MALE,
+                    age_range="child",
+                    voice_description="young male voice",
+                ),
+                "child_female": Character(
+                    id="child_female",
+                    name="Girl",
+                    gender=Gender.FEMALE,
+                    age_range="child",
+                    voice_description="young female voice",
+                ),
+            },
+        )
+
+    @staticmethod
+    def _metadata_response(
+        fragments: list[SourceFragment],
+        dialogue_speaker: str,
+        *,
+        confidence: float = 0.95,
+    ) -> dict:
+        return {
+            "chapter_number": 1,
+            "chapter_title": "One",
+            "chapter_summary": "A short exchange.",
+            "lines": [
+                {
+                    "id": index,
+                    "speaker": (
+                        dialogue_speaker
+                        if ScriptGenerator._is_dialogue_fragment(fragment.text)
+                        else "narrator"
+                    ),
+                    "speaker_confidence": confidence,
+                    "speaker_evidence": "test evidence",
+                    "emotion": "neutral",
+                    "speed": 1.0,
+                    "pause_before_ms": 0,
+                    "pause_after_ms": 300,
+                }
+                for index, fragment in enumerate(fragments)
+            ],
+        }
+
+    def test_named_tag_is_repaired_without_another_full_model_call(self) -> None:
+        source = '"Wait," Vathi quietly said.'
+        fragments = ScriptGenerator._split_into_fragment_spans(source)
+        initial = self._metadata_response(fragments, "dusk")
+        ollama = FakeScriptOllama([initial])
+        generator = ScriptGenerator(ollama=ollama, group_utterances=False)
+
+        script = generator._process_fragments(
+            fragments,
+            1,
+            "One",
+            self._attribution_registry(),
+            "",
+            0,
+        )
+
+        self.assertEqual(script.lines[0].speaker, "vathi")
+        self.assertEqual(len(ollama.calls), 1)
+        self.assertEqual(generator.call_metrics[-1]["full_attempts"], 1)
+        self.assertEqual(generator.call_metrics[-1]["local_repairs"], 1)
+        self.assertEqual(generator.call_metrics[-1]["focused_retries"], 0)
+        self.assertEqual(generator.call_metrics[-1]["full_semantic_retries"], 0)
+        self.assertEqual(
+            [
+                item["request_kind"]
+                for item in generator.call_metrics[-1]["requests"]
+            ],
+            ["full_chunk"],
+        )
+        assert_script_covers_source(script, source)
+
+    def test_generic_boy_tag_repairs_child_female_to_child_male(self) -> None:
+        source = '"I followed the star," the boy said, folding his arms.'
+        fragments = ScriptGenerator._split_into_fragment_spans(source)
+        initial = self._metadata_response(fragments, "child_female")
+        ollama = FakeScriptOllama([initial])
+        generator = ScriptGenerator(ollama=ollama, group_utterances=False)
+
+        script = generator._process_fragments(
+            fragments,
+            1,
+            "One",
+            self._attribution_registry(),
+            "",
+            0,
+        )
+
+        self.assertEqual(script.lines[0].speaker, "child_male")
+        self.assertEqual(len(ollama.calls), 1)
+        self.assertEqual(generator.call_metrics[-1]["local_repairs"], 1)
+
+    def test_ambiguous_pronoun_uses_one_fragment_focused_retry(self) -> None:
+        source = '"Wait," she said.'
+        fragments = ScriptGenerator._split_into_fragment_spans(source)
+        initial = self._metadata_response(fragments, "dusk")
+        corrected = {
+            "lines": [
+                {
+                    "id": 0,
+                    "speaker": "vathi",
+                    "speaker_confidence": 0.95,
+                    "speaker_evidence": "Local conversation establishes Vathi.",
+                    "emotion": "angry demand",
+                    "speed": 1.25,
+                }
+            ]
+        }
+        ollama = FakeScriptOllama([initial, corrected])
+        generator = ScriptGenerator(ollama=ollama, group_utterances=False)
+
+        script = generator._process_fragments(
+            fragments,
+            1,
+            "One",
+            self._attribution_registry(),
+            "",
+            0,
+        )
+
+        self.assertEqual(script.lines[0].speaker, "vathi")
+        self.assertEqual(script.lines[0].emotion, "neutral")
+        self.assertEqual(script.lines[0].speed, 1.0)
+        self.assertEqual(len(ollama.calls), 2)
+        self.assertIn("exactly one", ollama.calls[1][0])
+        metric = generator.call_metrics[-1]
+        self.assertEqual(metric["full_attempts"], 1)
+        self.assertEqual(metric["focused_retries"], 1)
+        self.assertEqual(metric["fragment_fallbacks"], 0)
+        self.assertEqual(
+            [item["request_kind"] for item in metric["requests"]],
+            ["full_chunk", "focused_fragment"],
+        )
+
+    def test_failed_focused_retry_falls_back_only_affected_fragment(self) -> None:
+        source = '"Wait," she said. The room fell silent.'
+        fragments = ScriptGenerator._split_into_fragment_spans(source)
+        initial = self._metadata_response(fragments, "dusk")
+        invalid_focused = {"lines": [{"id": 99, "speaker": "vathi"}]}
+        ollama = FakeScriptOllama([initial, invalid_focused])
+        generator = ScriptGenerator(ollama=ollama, group_utterances=False)
+
+        script = generator._process_fragments(
+            fragments,
+            1,
+            "One",
+            self._attribution_registry(),
+            "",
+            0,
+        )
+
+        self.assertEqual(script.lines[0].speaker, "narrator")
+        self.assertEqual(script.lines[-1].speaker, "narrator")
+        self.assertEqual(len(ollama.calls), 2)
+        metric = generator.call_metrics[-1]
+        self.assertEqual(metric["full_attempts"], 1)
+        self.assertEqual(metric["fragment_fallbacks"], 1)
+        self.assertTrue(metric["used_fallback"])
+
+    def test_structural_metadata_failure_still_retries_full_chunk(self) -> None:
+        source = '"Wait," Vathi said.'
+        fragments = ScriptGenerator._split_into_fragment_spans(source)
+        invalid = self._metadata_response(fragments, "vathi")
+        invalid["lines"] = [invalid["lines"][0], invalid["lines"][0]]
+        valid = self._metadata_response(fragments, "vathi")
+        ollama = FakeScriptOllama([invalid, valid])
+        generator = ScriptGenerator(ollama=ollama, group_utterances=False)
+
+        script = generator._process_fragments(
+            fragments,
+            1,
+            "One",
+            self._attribution_registry(),
+            "",
+            0,
+        )
+
+        self.assertEqual(script.lines[0].speaker, "vathi")
+        self.assertEqual(len(ollama.calls), 2)
+        metric = generator.call_metrics[-1]
+        self.assertEqual(metric["full_attempts"], 2)
+        self.assertEqual(metric["structural_failures"], 1)
+        self.assertEqual(metric["structural_retries"], 1)
 
     def test_explicit_boy_tag_adds_missing_male_child_role(self) -> None:
         source = '"I followed the star," the boy said, folding his arms.'
