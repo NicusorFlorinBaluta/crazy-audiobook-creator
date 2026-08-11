@@ -17,7 +17,7 @@ speech, a 2.234× real-time factor. TTS consumed 8,083.5 seconds (87.6%), so it
 remains the dominant performance target.
 
 Objective quality improved directionally from the 2026-08-09 full-book run:
-average WER fell from 3.89% to 2.06%, accepted warnings from 36 to 10, retries
+average WER fell from 3.89% to 2.14%, accepted warnings from 36 to 10, retries
 from 14 to 4, and report-only join warnings from 63 to 14. There were no failed
 or flagged segments. All 605 segment hashes, eight master hashes, manifest
 links, the chapterized M4B, and post-run service release were verified.
@@ -26,6 +26,14 @@ These results do not close the perceptual gate. The final output is the first
 full book after the echo-path fix, and its 14 join warnings remain unreviewed.
 See [the complete run report](e2e-run-2026-08-11.md) for the artifact hash,
 stage breakdown, warning distribution, and required listening audit.
+
+The subsequent listening audit marked all 14 join warnings acceptable. It also
+found one non-join defect: a retry normalized authored `Oh` into synthesized
+`zero` while normalized WER incorrectly remained zero. The targeted repair now
+keeps scoring normalization out of TTS input, blocks that semantic substitution,
+maintains WAV/embedding sidecar identity, and admits unique mid-sentence proper
+names to book-local fuzzy ASR matching. The repaired full M4B hash and exact
+evidence are recorded in the run report.
 
 ## Current measured baseline
 
