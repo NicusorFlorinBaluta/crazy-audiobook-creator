@@ -20,8 +20,24 @@ window.ScriptViewer = (() => {
         scriptViewer: document.getElementById('script-viewer'),
         chapterSelect: document.getElementById('script-chapter-select'),
         scriptLegend: document.getElementById('script-legend'),
-        qualityOverview: document.getElementById('quality-overview')
+        qualityOverview: document.getElementById('quality-overview'),
+        castingSearch: document.getElementById('casting-search'),
+        castingFilter: document.getElementById('casting-filter'),
+        scriptSearch: document.getElementById('script-search'),
+        scriptSpeakerFilter: document.getElementById('script-speaker-filter'),
+        scriptDialogueOnly: document.getElementById('script-dialogue-only'),
+        scriptQuotedNarrator: document.getElementById('script-quoted-narrator'),
+        scriptResultCount: document.getElementById('script-result-count')
     };
+
+    let currentScriptChapter = 0;
+
+    els.castingSearch?.addEventListener('input', filterVoiceCards);
+    els.castingFilter?.addEventListener('change', filterVoiceCards);
+    els.scriptSearch?.addEventListener('input', () => renderScriptLines(currentScriptChapter));
+    els.scriptSpeakerFilter?.addEventListener('change', () => renderScriptLines(currentScriptChapter));
+    els.scriptDialogueOnly?.addEventListener('change', () => renderScriptLines(currentScriptChapter));
+    els.scriptQuotedNarrator?.addEventListener('change', () => renderScriptLines(currentScriptChapter));
 
     // Called by app.js when opening a project
     async function loadData(projectId) {
@@ -164,6 +180,19 @@ window.ScriptViewer = (() => {
             }
             groupedVoices.get(ownerId).push(voice);
         });
+        const assignedVoiceByCharacter = new Map();
+        voices.forEach(voice => {
+            (voice.assigned_characters || []).forEach(characterId => {
+                assignedVoiceByCharacter.set(characterId, voice.voice_id);
+            });
+        });
+        const voiceOptionLabel = voice => {
+            const owner = speakerById.get(voice.owner_character_id);
+            const ownerName = owner?.name || voice.owner_character_id || voice.name;
+            return /^Candidate\s+\d+$/i.test(voice.name || '')
+                ? `${ownerName} — ${voice.name}`
+                : voice.name;
+        };
 
         els.charGrid.innerHTML = '';
         let idx = 0;
@@ -190,7 +219,7 @@ window.ScriptViewer = (() => {
                     <div class="voice-candidates">
                         <strong>Voice Comparison</strong>
                         <div class="voice-comparison-player" style="margin: 10px 0; background: var(--bg-elevated); padding: 10px; border-radius: var(--radius-md);">
-                            <audio class="voice-preview-player" style="width: 100%; margin-bottom: 10px;" controls preload="none" src="${escapeHtml(mainVoice.preview_url)}"></audio>
+                            <audio class="voice-preview-player" aria-label="Preview ${escapeHtml(cardDisplayName)}, option ${mainOptionLabel}" style="width: 100%; margin-bottom: 10px;" controls preload="metadata" src="${escapeHtml(mainVoice.preview_url)}"></audio>
                             <a class="btn btn-ghost btn-sm voice-download-link" href="${escapeHtml(mainVoice.download_url || '#')}">Download voice sample</a>
                             <div class="voice-candidates-toggles" style="display: flex; gap: 8px;">
                                 ${candidates.map((candidate, idx) => `
@@ -210,7 +239,7 @@ window.ScriptViewer = (() => {
                 `;
             } else {
                 candidatesHtml = mainVoice.ready
-                    ? `<div class="char-voice-preview"><audio class="voice-preview-player" controls preload="none" src="${escapeHtml(mainVoice.preview_url)}"></audio><a class="btn btn-ghost btn-sm voice-download-link" href="${escapeHtml(mainVoice.download_url || '#')}">Download voice sample</a></div>`
+                    ? `<div class="char-voice-preview"><audio class="voice-preview-player" aria-label="Preview ${escapeHtml(cardDisplayName)}" controls preload="metadata" src="${escapeHtml(mainVoice.preview_url)}"></audio><a class="btn btn-ghost btn-sm voice-download-link" href="${escapeHtml(mainVoice.download_url || '#')}">Download voice sample</a></div>`
                     : `<div class="voice-preview-loading">
                          <div class="voice-pulse-wave"><span></span><span></span><span></span><span></span></div>
                          <span class="voice-loading-text">Synthesizing voice audio preview...</span>
@@ -226,11 +255,11 @@ window.ScriptViewer = (() => {
             const assignmentRows = assigned.map(character => `
                 <div class="voice-assignment-row" data-character-id="${escapeHtml(character.character_id)}">
                     <span class="voice-speaker-name">${escapeHtml(character.name)}</span>
-                    <select class="char-voice-select" ${voiceState.editable ? '' : 'disabled'}>
+                    <select class="char-voice-select" aria-label="Voice assigned to ${escapeHtml(character.name)}" ${voiceState.editable ? '' : 'disabled'}>
                         ${voices.map(candidate => `
                             <option value="${escapeHtml(candidate.voice_id)}"
-                                ${candidate.voice_id === character.voice_id ? 'selected' : ''}>
-                                ${escapeHtml(candidate.name)}
+                                ${candidate.voice_id === assignedVoiceByCharacter.get(character.character_id) ? 'selected' : ''}>
+                                ${escapeHtml(voiceOptionLabel(candidate))}
                             </option>
                         `).join('')}
                     </select>
@@ -242,6 +271,11 @@ window.ScriptViewer = (() => {
             const card = document.createElement('article');
             card.className = 'character-card voice-profile-card';
             card.dataset.voiceId = mainVoice.voice_id;
+            card.dataset.search = `${cardDisplayName} ${mainVoice.name || ''} ${mainVoice.description || ''}`.toLowerCase();
+            card.dataset.assigned = String(assigned.length > 0);
+            card.dataset.alternatives = String(candidates.length > 1);
+            card.dataset.warnings = String((mainVoice.warnings || []).length > 0);
+            card.dataset.ready = String(Boolean(mainVoice.ready));
             card.style.setProperty('--char-color', colorVar);
             card.innerHTML = `
                 <div class="char-header voice-profile-header">
@@ -260,10 +294,10 @@ window.ScriptViewer = (() => {
                 <div class="voice-assigned-pills">
                     ${assigned.map(character => `<span>${escapeHtml(character.name)}</span>`).join('')}
                 </div>
-                <div class="char-voice">
-                    <strong>Design direction</strong>
+                <details class="char-voice voice-design">
+                    <summary>Design direction</summary>
                     <p>${escapeHtml(mainVoice.description || 'No design direction available.')}</p>
-                </div>
+                </details>
                 ${warningHtml}
                 ${candidatesHtml}
                 <details class="voice-assignments">
@@ -272,7 +306,7 @@ window.ScriptViewer = (() => {
                 </details>
                 <details class="voice-redesign">
                     <summary>Redesign with text</summary>
-                    <textarea class="voice-description-input" rows="4"
+                    <textarea class="voice-description-input" rows="4" aria-label="Voice design text for ${escapeHtml(cardDisplayName)}"
                               ${voiceState.editable ? '' : 'disabled'}>${escapeHtml(mainVoice.source_description || mainVoice.description || '')}</textarea>
                     <button class="btn btn-secondary voice-regenerate"
                             ${voiceState.editable ? '' : 'disabled'}>${candidates.length > 1 ? `Regenerate option ${mainOptionLabel} (replaces option ${mainOptionLabel})` : 'Generate new preview'}</button>
@@ -371,6 +405,7 @@ window.ScriptViewer = (() => {
                     if (newSrc && newSrc !== 'undefined') {
                         player.pause();
                         player.src = newSrc;
+                        player.setAttribute('aria-label', `Preview ${cardDisplayName}, option ${optionLabel}`);
                         player.load();
                         player.currentTime = 0;
                         if (download && selectedVoice?.download_url) {
@@ -420,6 +455,20 @@ window.ScriptViewer = (() => {
 
             els.charGrid.appendChild(card);
         });
+        filterVoiceCards();
+    }
+
+    function filterVoiceCards() {
+        const search = (els.castingSearch?.value || '').trim().toLowerCase();
+        const filter = els.castingFilter?.value || 'all';
+        let visible = 0;
+        els.charGrid?.querySelectorAll('.voice-profile-card').forEach(card => {
+            const searchMatch = !search || card.dataset.search.includes(search);
+            const filterMatch = filter === 'all' || card.dataset[filter] === 'true';
+            card.hidden = !(searchMatch && filterMatch);
+            if (!card.hidden) visible += 1;
+        });
+        document.getElementById('casting-toolbar')?.classList.toggle('no-results', visible === 0);
     }
 
     async function uploadVoiceSample(voiceId, file, transcript) {
@@ -545,7 +594,7 @@ window.ScriptViewer = (() => {
                                 <small>${option.voice_id === narratorChoice.selected_voice_id ? 'Selected' : 'Available'}</small>
                             </span>
                             ${option.ready
-                                ? `<audio controls preload="none" src="${escapeHtml(option.preview_url)}"></audio>`
+                                ? `<audio aria-label="Preview ${escapeHtml(option.gender === 'male' ? 'male narrator' : 'female narrator')}" controls preload="metadata" src="${escapeHtml(option.preview_url)}"></audio>`
                                 : '<span class="narrator-choice-pending">Preparing preview…</span>'}
                         </label>
                     `).join('')}
@@ -618,7 +667,7 @@ window.ScriptViewer = (() => {
                 </option>
             `).join('');
             const previewHtml = assignedVoice?.ready
-                ? `<audio class="voice-preview-player" controls preload="none"
+                ? `<audio class="voice-preview-player" aria-label="Preview ${escapeHtml(char.name)}" controls preload="metadata"
                        src="${escapeHtml(assignedVoice.preview_url)}"></audio>
                    <a class="btn btn-ghost btn-sm voice-download-link" href="${escapeHtml(assignedVoice.download_url || '#')}">Download voice sample</a>`
                 : '<span class="voice-preview-pending">Preview available after voice preparation.</span>';
@@ -668,7 +717,7 @@ window.ScriptViewer = (() => {
             select?.addEventListener('change', () => {
                 const voice = voicesById.get(select.value);
                 preview.innerHTML = voice?.ready
-                    ? `<audio class="voice-preview-player" controls preload="none"
+                    ? `<audio class="voice-preview-player" aria-label="Preview ${escapeHtml(char.name)}" controls preload="metadata"
                            src="${escapeHtml(voice.preview_url)}"></audio>
                        <a class="btn btn-ghost btn-sm voice-download-link" href="${escapeHtml(voice.download_url || '#')}">Download voice sample</a>`
                     : '<span class="voice-preview-pending">Preview available after voice preparation.</span>';
@@ -889,16 +938,18 @@ window.ScriptViewer = (() => {
         els.chapterSelect.value = 0;
         renderScriptLines(0);
         
-        els.chapterSelect.addEventListener('change', (e) => {
+        els.chapterSelect.onchange = (e) => {
             if (e.target.value !== "") {
-                renderScriptLines(parseInt(e.target.value));
+                currentScriptChapter = parseInt(e.target.value);
+                renderScriptLines(currentScriptChapter);
             }
-        });
+        };
     }
 
     function renderScriptLines(chapterIndex) {
         if (!currentData.script || !currentData.script.chapters[chapterIndex]) return;
         
+        currentScriptChapter = chapterIndex;
         const lines = currentData.script.chapters[chapterIndex].lines || [];
         els.scriptViewer.innerHTML = '';
         
@@ -909,25 +960,58 @@ window.ScriptViewer = (() => {
         
         // Map character IDs to colors
         const charColorMap = {};
+        const charNameMap = {};
         if (currentData.characters) {
             const charDict = currentData.characters.characters || currentData.characters;
             Object.keys(charDict).forEach((id, idx) => {
                 charColorMap[id.toLowerCase()] = id.toLowerCase() === 'narrator' ? 'var(--speaker-narrator)' : `var(--speaker-${(idx % 10) + 1})`;
+                charNameMap[id.toLowerCase()] = charDict[id].name || id;
             });
         }
 
-        lines.forEach(line => {
+        const speakerIds = [...new Set(lines.map(line => (line.speaker || 'narrator').toLowerCase()))];
+        const currentSpeaker = els.scriptSpeakerFilter?.value || 'all';
+        if (els.scriptSpeakerFilter) {
+            els.scriptSpeakerFilter.innerHTML = '<option value="all">All speakers</option>' + speakerIds.map(id =>
+                `<option value="${escapeHtml(id)}" ${id === currentSpeaker ? 'selected' : ''}>${escapeHtml(charNameMap[id] || id)}</option>`
+            ).join('');
+        }
+        const search = (els.scriptSearch?.value || '').trim().toLowerCase();
+        const speakerFilter = els.scriptSpeakerFilter?.value || 'all';
+        const dialogueOnly = Boolean(els.scriptDialogueOnly?.checked);
+        const quotedNarratorOnly = Boolean(els.scriptQuotedNarrator?.checked);
+        const visibleLines = lines.filter(line => {
+            const speakerId = (line.speaker || 'narrator').toLowerCase();
+            const lineId = String(line.line_id || line.id || '');
+            const searchMatch = !search || `${lineId} ${line.text || ''} ${charNameMap[speakerId] || speakerId}`.toLowerCase().includes(search);
+            return searchMatch
+                && (speakerFilter === 'all' || speakerId === speakerFilter)
+                && (!dialogueOnly || speakerId !== 'narrator')
+                && (!quotedNarratorOnly || (speakerId === 'narrator' && /[“”"']/.test(line.text || '')));
+        });
+        if (els.scriptResultCount) {
+            els.scriptResultCount.textContent = `${visibleLines.length} of ${lines.length} lines`;
+        }
+        if (!visibleLines.length) {
+            els.scriptViewer.innerHTML = '<div class="empty-state small"><p>No script lines match these filters.</p></div>';
+            return;
+        }
+
+        visibleLines.forEach(line => {
             const speakerId = (line.speaker || 'narrator').toLowerCase();
             const isNarrator = speakerId === 'narrator';
             const color = charColorMap[speakerId] || 'var(--text-muted)';
-            
+
             const div = document.createElement('div');
             div.className = `script-line ${isNarrator ? 'line-narrator' : ''}`;
+            div.dataset.lineId = String(line.line_id || line.id || '');
+            div.tabIndex = -1;
             div.style.borderLeft = `3px solid ${color}`;
             
             div.innerHTML = `
                 <div class="line-speaker" style="color: ${color}">
-                    ${escapeHtml(line.speaker || 'Narrator')}
+                    ${escapeHtml(charNameMap[speakerId] || line.speaker || 'Narrator')}
+                    <small>${escapeHtml(String(line.line_id || line.id || ''))}</small>
                 </div>
                 <div class="line-text">
                     ${escapeHtml(line.text)}
@@ -941,9 +1025,53 @@ window.ScriptViewer = (() => {
         });
     }
 
+    function jumpToScriptLine(chapterNumber, lineId) {
+        const chapters = currentData.script?.chapters || [];
+        const index = chapters.findIndex((chapter, chapterIndex) =>
+            Number(chapter.chapter_number || chapter.number || chapterIndex + 1) === Number(chapterNumber)
+        );
+        if (index < 0) return;
+        if (typeof window.activateDetailTab === 'function') {
+            window.activateDetailTab('tab-script', true);
+        } else {
+            document.querySelector('.tab[data-tab="tab-script"]')?.click();
+        }
+        els.chapterSelect.value = String(index);
+        if (els.scriptSearch) els.scriptSearch.value = lineId;
+        currentScriptChapter = index;
+        renderScriptLines(index);
+        requestAnimationFrame(() => {
+            const line = els.scriptViewer.querySelector(`[data-line-id="${CSS.escape(lineId)}"]`);
+            line?.classList.add('script-line-highlight');
+            line?.scrollIntoView({behavior: 'smooth', block: 'center'});
+            line?.focus({preventScroll: true});
+        });
+    }
+
     // ============================================================================
     // Quality Tab
     // ============================================================================
+
+    function humanizeToken(value) {
+        return String(value || 'unspecified')
+            .replaceAll('_', ' ')
+            .replace(/\b\w/g, character => character.toUpperCase());
+    }
+
+    function speakerDisplayName(speakerId) {
+        const characters = currentData.characters?.characters || currentData.characters || {};
+        return characters[speakerId]?.name || humanizeToken(speakerId);
+    }
+
+    function humanizeJoinReason(reason) {
+        const labels = {
+            segment_loudness_delta: 'Noticeable level difference between adjacent lines',
+            short_gap: 'Very short pause between adjacent lines',
+            long_gap: 'Long pause between adjacent lines',
+            speaker_change: 'Speaker transition needs listening review'
+        };
+        return labels[reason] || humanizeToken(reason);
+    }
 
     function renderQuality() {
         const hasQuality = currentData.quality && Object.keys(currentData.quality).length > 0;
@@ -959,35 +1087,36 @@ window.ScriptViewer = (() => {
 
         if (hasQuality) {
             // Segments Total
-            addQualityStat('Total Segments', q.total_segments || 0, 'neutral');
+            addQualityStat('Total Segments', q.total_segments || 0, 'neutral', 'All scripted utterances evaluated in the final run.');
         
         // Pass Rate
         const acceptedSegments = (q.passed_segments || 0) + (q.accepted_with_warning_segments || 0);
         const passRate = q.total_segments > 0 ? Math.round((acceptedSegments / q.total_segments) * 100) : 0;
         const passStatus = passRate > 95 ? 'good' : (passRate > 85 ? 'warn' : 'bad');
-        addQualityStat('Accepted Rate', `${passRate}%`, passStatus);
+        addQualityStat('Accepted Rate', `${passRate}%`, passStatus, 'Segments accepted automatically plus segments accepted with a documented soft warning.');
 
         addQualityStat(
             'Accepted Warnings',
             q.accepted_with_warning_segments || 0,
-            (q.accepted_with_warning_segments || 0) > 0 ? 'warn' : 'good'
+            (q.accepted_with_warning_segments || 0) > 0 ? 'warn' : 'good',
+            'Accepted audio that passed hard safety checks but retained a non-blocking diagnostic warning.'
         );
         
         // Retries
-        addQualityStat('Retries Triggered', q.retries_triggered || 0, q.retries_triggered > 0 ? 'warn' : 'good');
+        addQualityStat('Retries Triggered', q.retries_triggered || 0, q.retries_triggered > 0 ? 'warn' : 'good', 'Additional TTS attempts requested after an earlier candidate failed validation.');
         
         // WER (Word Error Rate)
         if (q.average_wer !== undefined) {
             const wer = (q.average_wer * 100).toFixed(1);
             const werStatus = q.average_wer < 0.02 ? 'good' : (q.average_wer < 0.05 ? 'warn' : 'bad');
-            addQualityStat('Avg WER', `${wer}%`, werStatus);
+            addQualityStat('Avg WER', `${wer}%`, werStatus, 'Average word error rate measured by transcription validation; lower is better. Approved pronunciation mappings may allow an otherwise high line-level value.');
         }
         
         // Silence Drops
-        addQualityStat('Silence Errors', q.failed_silence || 0, q.failed_silence > 0 ? 'bad' : 'good');
+        addQualityStat('Silence Errors', q.failed_silence || 0, q.failed_silence > 0 ? 'bad' : 'good', 'Segments rejected for excessive or invalid silence.');
         
         // Clipping
-        addQualityStat('Clipping Errors', q.failed_clipping || 0, q.failed_clipping > 0 ? 'bad' : 'good');
+        addQualityStat('Clipping Errors', q.failed_clipping || 0, q.failed_clipping > 0 ? 'bad' : 'good', 'Segments rejected because the waveform clipped.');
 
         const noteworthy = (q.final_attempts || []).filter(
             item => item.status !== 'pass' || item.attempt > 1
@@ -1003,17 +1132,23 @@ window.ScriptViewer = (() => {
                 <div class="quality-attempts-list">
                     ${noteworthy.map(item => `
                         <div class="quality-attempt-row">
-                            <span>Ch ${item.chapter_number} · ${escapeHtml(item.line_id)}</span>
-                            <strong class="quality-attempt-status quality-status-${escapeHtml(item.status)}">${escapeHtml(item.status)}</strong>
+                            <button type="button" class="quality-line-link" data-chapter="${item.chapter_number}" data-line-id="${escapeHtml(item.line_id)}">Ch ${item.chapter_number} · ${escapeHtml(item.line_id)}</button>
+                            <strong class="quality-attempt-status quality-status-${escapeHtml(item.status)}">${escapeHtml(humanizeToken(item.status))}</strong>
                             <span>Attempt ${item.attempt}</span>
                             <span>WER ${((item.wer || 0) * 100).toFixed(1)}%</span>
-                            <span title="${escapeHtml(item.transcribed_text || '')}">${escapeHtml((item.acceptance_reason || 'unspecified').replaceAll('_', ' '))}</span>
-                            <audio class="quality-attempt-audio" controls preload="none" src="${escapeHtml(item.audio_url || '')}"></audio>
+                            <span class="quality-reason" title="Transcript: ${escapeHtml(item.transcribed_text || 'not available')}">${escapeHtml(humanizeToken(item.acceptance_reason))}</span>
+                            <audio class="quality-attempt-audio" aria-label="Listen to ${escapeHtml(item.line_id)}, final attempt ${item.attempt}" controls preload="metadata" src="${escapeHtml(item.audio_url || '')}"></audio>
                         </div>
                     `).join('')}
                 </div>
             `;
             els.qualityOverview.appendChild(details);
+            details.querySelectorAll('.quality-line-link').forEach(button => {
+                button.addEventListener('click', () => jumpToScriptLine(
+                    button.dataset.chapter,
+                    button.dataset.lineId
+                ));
+            });
         }
         const attemptHistory = q.attempts || [];
         const retriedIds = new Set(
@@ -1051,6 +1186,39 @@ window.ScriptViewer = (() => {
         const section = document.createElement('section');
         section.className = 'join-review';
         const counts = review.review_counts || {};
+        const unreviewed = joins.filter(item => (item.disposition || 'unreviewed') === 'unreviewed');
+        const reviewed = joins.filter(item => (item.disposition || 'unreviewed') !== 'unreviewed');
+        const cardsHtml = items => items.map(item => `
+            <article class="join-review-item" data-item-id="${escapeHtml(item.item_id)}"
+                     data-initial-disposition="${escapeHtml(item.disposition || 'unreviewed')}"
+                     data-initial-note="${escapeHtml(item.review_note || '')}"
+                     data-disposition="${escapeHtml(item.disposition || 'unreviewed')}"
+                     data-chapter="${item.chapter_number}"
+                     data-speakers="${escapeHtml(`${item.previous_line?.speaker || ''} ${item.current_line?.speaker || ''}`.toLowerCase())}"
+                     data-severity="${Number(item.severity || 0)}">
+                <div class="join-review-summary">
+                    <strong>Chapter ${item.chapter_number} · ${escapeHtml(item.previous_line_id)} → ${escapeHtml(item.current_line_id)}</strong>
+                    <span>Level Δ ${Number(item.loudness_delta_db || 0).toFixed(1)} dB · gap ${item.gap_ms || 0} ms · severity ${Number(item.severity || 0).toFixed(2)}</span>
+                </div>
+                <div class="join-review-lines">
+                    <div><small>${escapeHtml(speakerDisplayName(item.previous_line?.speaker || ''))}</small><p>${escapeHtml(item.previous_line?.text || '')}</p><audio aria-label="Previous line, ${escapeHtml(item.previous_line_id)}" controls preload="none" src="${escapeHtml(item.previous_audio_url)}"></audio></div>
+                    <div><small>${escapeHtml(speakerDisplayName(item.current_line?.speaker || ''))}</small><p>${escapeHtml(item.current_line?.text || '')}</p><audio aria-label="Current line, ${escapeHtml(item.current_line_id)}" controls preload="none" src="${escapeHtml(item.current_audio_url)}"></audio></div>
+                </div>
+                <div class="join-review-controls">
+                    <label><span>Disposition</span><select class="join-disposition input-sm">
+                        ${[
+                            ['unreviewed', 'Unreviewed'],
+                            ['acceptable', 'Acceptable'],
+                            ['needs_remaster', 'Needs remaster'],
+                            ['source_tts_issue', 'Source / TTS issue']
+                        ].map(([value, label]) => `<option value="${value}" ${item.disposition === value ? 'selected' : ''}>${label}</option>`).join('')}
+                    </select></label>
+                    <label class="join-note-label"><span>Listening note</span><input class="join-note input-sm" maxlength="2000" value="${escapeHtml(item.review_note || '')}" placeholder="Optional note"></label>
+                    <button type="button" class="btn btn-secondary btn-sm join-review-save" disabled>Saved</button>
+                </div>
+                <small title="Diagnostic signals that placed this transition in the listening queue">Why flagged: ${escapeHtml((item.reasons || []).map(humanizeJoinReason).join(' · ') || 'Diagnostic threshold')}</small>
+            </article>
+        `).join('');
         section.innerHTML = `
             <div class="join-review-heading">
                 <div>
@@ -1059,34 +1227,90 @@ window.ScriptViewer = (() => {
                 </div>
                 <span>${counts.unreviewed || 0} unreviewed</span>
             </div>
+            <div class="join-review-filter-bar">
+                <label><span>Disposition</span><select class="input-sm join-filter-disposition">
+                    <option value="all">All</option><option value="unreviewed" selected>Unreviewed</option><option value="acceptable">Acceptable</option><option value="needs_remaster">Needs remaster</option><option value="source_tts_issue">Source / TTS issue</option>
+                </select></label>
+                <label><span>Chapter</span><select class="input-sm join-filter-chapter"><option value="all">All chapters</option>${[...new Set(joins.map(item => item.chapter_number))].sort((a, b) => a - b).map(chapter => `<option value="${chapter}">Chapter ${chapter}</option>`).join('')}</select></label>
+                <label><span>Speaker</span><select class="input-sm join-filter-speaker"><option value="all">All speakers</option>${[...new Set(joins.flatMap(item => [item.previous_line?.speaker, item.current_line?.speaker]).filter(Boolean))].sort().map(speaker => `<option value="${escapeHtml(speaker.toLowerCase())}">${escapeHtml(speakerDisplayName(speaker))}</option>`).join('')}</select></label>
+                <label><span>Severity</span><select class="input-sm join-filter-severity"><option value="all">All severities</option><option value="0.7">High (0.70+)</option><option value="0.4">Medium+ (0.40+)</option></select></label>
+                <button type="button" class="btn btn-ghost btn-sm join-bulk-acceptable">Mark visible acceptable</button>
+            </div>
             <div class="join-review-list">
-                ${joins.map(item => `
-                    <article class="join-review-item" data-item-id="${escapeHtml(item.item_id)}">
-                        <div class="join-review-summary">
-                            <strong>Chapter ${item.chapter_number} · ${escapeHtml(item.previous_line_id)} → ${escapeHtml(item.current_line_id)}</strong>
-                            <span>Δ ${Number(item.loudness_delta_db || 0).toFixed(1)} dB · gap ${item.gap_ms || 0} ms · severity ${Number(item.severity || 0).toFixed(2)}</span>
-                        </div>
-                        <div class="join-review-lines">
-                            <div><small>${escapeHtml(item.previous_line?.speaker || '')}</small><p>${escapeHtml(item.previous_line?.text || '')}</p><audio controls preload="none" src="${escapeHtml(item.previous_audio_url)}"></audio></div>
-                            <div><small>${escapeHtml(item.current_line?.speaker || '')}</small><p>${escapeHtml(item.current_line?.text || '')}</p><audio controls preload="none" src="${escapeHtml(item.current_audio_url)}"></audio></div>
-                        </div>
-                        <div class="join-review-controls">
-                            <select class="join-disposition input-sm" aria-label="Review disposition">
-                                ${[
-                                    ['unreviewed', 'Unreviewed'],
-                                    ['acceptable', 'Acceptable'],
-                                    ['needs_remaster', 'Needs remaster'],
-                                    ['source_tts_issue', 'Source / TTS issue']
-                                ].map(([value, label]) => `<option value="${value}" ${item.disposition === value ? 'selected' : ''}>${label}</option>`).join('')}
-                            </select>
-                            <input class="join-note input-sm" maxlength="2000" value="${escapeHtml(item.review_note || '')}" placeholder="Optional listening note">
-                            <button type="button" class="btn btn-secondary btn-sm join-review-save">Save review</button>
-                        </div>
-                        <small>Reasons: ${escapeHtml((item.reasons || []).join(', ') || 'diagnostic threshold')}</small>
-                    </article>
-                `).join('')}
+                ${unreviewed.length ? cardsHtml(unreviewed) : '<div class="review-complete-message">All join warnings have been reviewed.</div>'}
+                ${reviewed.length ? `<details class="reviewed-joins"><summary>Show reviewed (${reviewed.length})</summary>${cardsHtml(reviewed)}</details>` : ''}
             </div>
         `;
+        section.querySelectorAll('.join-review-item').forEach(row => {
+            const updateDirtyState = () => {
+                const disposition = row.querySelector('.join-disposition')?.value || 'unreviewed';
+                const note = row.querySelector('.join-note')?.value || '';
+                const dirty = disposition !== row.dataset.initialDisposition || note !== row.dataset.initialNote;
+                const button = row.querySelector('.join-review-save');
+                button.disabled = !dirty;
+                button.textContent = dirty ? 'Save review' : 'Saved';
+            };
+            row.querySelector('.join-disposition')?.addEventListener('change', updateDirtyState);
+            row.querySelector('.join-note')?.addEventListener('input', updateDirtyState);
+        });
+        const applyJoinFilters = () => {
+            const disposition = section.querySelector('.join-filter-disposition').value;
+            const chapter = section.querySelector('.join-filter-chapter').value;
+            const speaker = section.querySelector('.join-filter-speaker').value;
+            const severity = section.querySelector('.join-filter-severity').value;
+            let visibleCount = 0;
+            section.querySelectorAll('.join-review-item').forEach(row => {
+                row.hidden = !(
+                    (disposition === 'all' || row.dataset.disposition === disposition)
+                    && (chapter === 'all' || row.dataset.chapter === chapter)
+                    && (speaker === 'all' || row.dataset.speakers.split(' ').includes(speaker))
+                    && (severity === 'all' || Number(row.dataset.severity) >= Number(severity))
+                );
+                if (!row.hidden) visibleCount += 1;
+            });
+            section.querySelector('.join-bulk-acceptable').disabled = visibleCount === 0;
+            const reviewedDetails = section.querySelector('.reviewed-joins');
+            if (reviewedDetails && disposition !== 'unreviewed') reviewedDetails.open = true;
+        };
+        section.querySelectorAll('.join-review-filter-bar select').forEach(select => {
+            select.addEventListener('change', applyJoinFilters);
+        });
+        section.querySelector('.join-bulk-acceptable')?.addEventListener('click', async event => {
+            const visibleRows = [...section.querySelectorAll('.join-review-item:not([hidden])')];
+            if (!visibleRows.length) {
+                showToast('No visible join warnings to update', 'info');
+                return;
+            }
+            if (!confirm(`Mark ${visibleRows.length} visible join warning${visibleRows.length === 1 ? '' : 's'} as acceptable?`)) return;
+            const button = event.currentTarget;
+            button.disabled = true;
+            button.textContent = 'Saving…';
+            try {
+                const projectId = window.state?.currentProjectId;
+                const responses = await Promise.all(visibleRows.map(row => fetch(
+                    `api/projects/${encodeURIComponent(projectId)}/quality/review`,
+                    {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({
+                            item_type: 'join',
+                            item_id: row.dataset.itemId,
+                            disposition: 'acceptable',
+                            note: row.querySelector('.join-note')?.value.trim() || ''
+                        })
+                    }
+                )));
+                if (responses.some(response => !response.ok)) throw new Error('One or more reviews could not be saved');
+                showToast(`${visibleRows.length} join review${visibleRows.length === 1 ? '' : 's'} marked acceptable`, 'success');
+                await fetchQualityReview(projectId);
+                renderQuality();
+            } catch (error) {
+                showToast(error.message, 'error');
+                button.disabled = false;
+                button.textContent = 'Try bulk update again';
+            }
+        });
+        applyJoinFilters();
         section.querySelectorAll('.join-review-save').forEach(button => {
             button.addEventListener('click', async () => {
                 const row = button.closest('.join-review-item');
@@ -1105,6 +1329,7 @@ window.ScriptViewer = (() => {
         const projectId = window.state?.currentProjectId;
         if (!projectId || !itemId) return;
         button.disabled = true;
+        button.textContent = 'Saving…';
         try {
             const response = await fetch(
                 `api/projects/${encodeURIComponent(projectId)}/quality/review`,
@@ -1127,6 +1352,7 @@ window.ScriptViewer = (() => {
         } catch (error) {
             showToast(error.message, 'error');
             button.disabled = false;
+            button.textContent = 'Try again';
         }
     }
 
@@ -1203,9 +1429,15 @@ window.ScriptViewer = (() => {
         }
     }
 
-    function addQualityStat(label, value, statusClass) {
+    function addQualityStat(label, value, statusClass, description = '') {
         const div = document.createElement('div');
         div.className = 'quality-stat';
+        if (description) {
+            div.title = description;
+            div.dataset.tooltip = description;
+            div.tabIndex = 0;
+            div.setAttribute('aria-label', `${label}: ${value}. ${description}`);
+        }
         
         let valClass = '';
         if (statusClass === 'good') valClass = 'stat-good';
@@ -1214,7 +1446,7 @@ window.ScriptViewer = (() => {
         
         div.innerHTML = `
             <div class="stat-value ${valClass}">${value}</div>
-            <div class="stat-label">${label}</div>
+            <div class="stat-label">${label}${description ? ' <span aria-hidden="true">ⓘ</span>' : ''}</div>
         `;
         
         els.qualityOverview.appendChild(div);

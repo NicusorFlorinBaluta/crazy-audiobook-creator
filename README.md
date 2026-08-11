@@ -89,6 +89,7 @@ cd ..
 - [Configuration](docs/configuration.md)
 - [API reference](docs/api-reference.md)
 - [Quality assurance](docs/quality-assurance.md)
+- [Dashboard guide](docs/dashboard-guide.md)
 - [Voice design](docs/voice-design.md)
 - [Prompt and source-fidelity rules](docs/prompts.md)
 - [Production-readiness changes and next E2E gates](docs/production-readiness-2026-08-02.md)

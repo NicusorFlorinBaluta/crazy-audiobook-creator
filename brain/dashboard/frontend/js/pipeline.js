@@ -206,10 +206,15 @@ window.PipelineManager = (() => {
         const btnResetStage = document.getElementById('btn-reset-stage');
         const selectResetStage = document.getElementById('select-reset-stage');
         const btnDownloadAudiobook = document.getElementById('btn-download-audiobook');
+        const pipelineDetails = document.getElementById('pipeline-details');
+        const advancedActions = document.getElementById('advanced-actions');
 
         const statusLower = (status || '').toLowerCase();
         const isDone = ['complete', 'completed', 'selection_complete'].includes(statusLower);
         const hasMastered = data && data.mastered_chapters && data.mastered_chapters.length > 0;
+
+        if (pipelineDetails) pipelineDetails.open = !isDone || isRunning;
+        if (advancedActions && isRunning) advancedActions.open = false;
 
         if (btnDownloadAudiobook) {
             if (isDone || hasMastered) {
@@ -230,11 +235,14 @@ window.PipelineManager = (() => {
             if (selectResetStage) selectResetStage.classList.remove('hidden');
             
             if (isDone) {
-                els.btnStart.textContent = '▶ Run Again / Selection';
+                els.btnStart.textContent = '▶ Generate selected chapters again';
+                els.btnStart.title = 'Uses the chapter selection below and preserves the current completed audiobook until new output is ready';
             } else if (['error', 'paused', 'paused_scheduled', 'deploy_paused', 'voice_review'].includes(statusLower)) {
                 els.btnStart.textContent = '▶ Resume Pipeline';
+                els.btnStart.removeAttribute('title');
             } else {
                 els.btnStart.textContent = '▶ Start Pipeline';
+                els.btnStart.removeAttribute('title');
             }
         }
     }

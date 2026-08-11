@@ -10,10 +10,15 @@ window.LogConsole = (() => {
     let currentProjectId = null;
     let eventSource = null;
     let lineCount = 0;
+    let projectRunning = false;
     const MAX_LINES = 500;
 
     // DOM refs (populated after DOMContentLoaded)
     let console$, statusEl, autoscrollCheck, clearBtn, copyBtn;
+    let searchInput, levelFilter, hideNoiseCheck, wrapCheck, downloadBtn;
+    let filterFrame = null;
+
+    const ROUTINE_LINE = /health|validation cache hit|GET \/api\/.*\/status|GET \/api\/voice\/health/i;
 
     // ─── Log level → CSS class ───────────────────────────────────────────────
     function classifyLine(text) {
@@ -57,9 +62,13 @@ window.LogConsole = (() => {
 
         const div = document.createElement('div');
         div.className = `log-line ${classifyLine(text)}`;
+        div.dataset.raw = text;
+        div.dataset.level = div.className.replace('log-line ', '').replace('log-', '');
+        div.dataset.routine = String(ROUTINE_LINE.test(text));
         div.innerHTML = highlightLine(text);
         console$.appendChild(div);
         lineCount++;
+        scheduleFilters();
 
         if (autoscrollCheck && autoscrollCheck.checked) {
             requestAnimationFrame(() => {
@@ -96,7 +105,10 @@ window.LogConsole = (() => {
         const es = new EventSource(`api/projects/${projectId}/logs/stream`);
         eventSource = es;
 
-        es.onopen = () => setStatus('live', '● Live');
+        es.onopen = () => setStatus(
+            projectRunning ? 'live' : 'connected',
+            projectRunning ? '● Live updates' : '● Historical log'
+        );
 
         es.onmessage = (e) => {
             const text = e.data;
@@ -105,6 +117,10 @@ window.LogConsole = (() => {
                 setStatus('done', '◼ Run complete');
             } else {
                 appendLine(text);
+                setStatus(
+                    projectRunning ? 'live' : 'connected',
+                    projectRunning ? '● Live updates' : '● Historical log'
+                );
             }
         };
 
@@ -127,10 +143,49 @@ window.LogConsole = (() => {
         if (!statusEl) return;
         statusEl.textContent = label;
         statusEl.className = `log-status log-status-${state}`;
+        statusEl.dataset.projectRunning = String(projectRunning);
+    }
+
+    function applyFilters() {
+        if (!console$) return;
+        const search = (searchInput?.value || '').trim().toLowerCase();
+        const level = levelFilter?.value || 'all';
+        const hideRoutine = Boolean(hideNoiseCheck?.checked);
+        let hiddenRoutineCount = 0;
+        console$.classList.toggle('wrap', Boolean(wrapCheck?.checked));
+        console$.querySelectorAll('.log-line').forEach(line => {
+            const raw = line.dataset.raw || line.textContent || '';
+            const matchesSearch = !search || raw.toLowerCase().includes(search);
+            const matchesLevel = level === 'all'
+                || line.dataset.level === level
+                || (level === 'warning' && line.dataset.level === 'warn');
+            const matchesNoise = !hideRoutine || line.dataset.routine !== 'true';
+            if (hideRoutine && line.dataset.routine === 'true') hiddenRoutineCount += 1;
+            line.hidden = !(matchesSearch && matchesLevel && matchesNoise);
+        });
+        const summary = document.getElementById('log-noise-summary');
+        if (summary) summary.textContent = hiddenRoutineCount
+            ? `${hiddenRoutineCount} routine line${hiddenRoutineCount === 1 ? '' : 's'} hidden`
+            : '';
+    }
+
+    function scheduleFilters() {
+        if (filterFrame !== null) return;
+        filterFrame = requestAnimationFrame(() => {
+            filterFrame = null;
+            applyFilters();
+        });
+    }
+
+    function visibleLogText() {
+        return [...console$.querySelectorAll('.log-line:not([hidden])')]
+            .map(element => element.dataset.raw || element.textContent)
+            .join('\n');
     }
 
     // ─── Public API ───────────────────────────────────────────────────────────
-    function openForProject(projectId) {
+    function openForProject(projectId, running = null) {
+        if (running !== null) projectRunning = Boolean(running);
         if (projectId === currentProjectId && eventSource) return; // already connected
         connect(projectId);
     }
@@ -140,6 +195,16 @@ window.LogConsole = (() => {
         currentProjectId = null;
     }
 
+    function setProjectRunning(running) {
+        projectRunning = Boolean(running);
+        if (eventSource) {
+            setStatus(
+                projectRunning ? 'live' : 'connected',
+                projectRunning ? '● Live updates' : '● Historical log'
+            );
+        }
+    }
+
     // ─── Init ─────────────────────────────────────────────────────────────────
     document.addEventListener('DOMContentLoaded', () => {
         console$       = document.getElementById('log-console');
@@ -147,6 +212,11 @@ window.LogConsole = (() => {
         autoscrollCheck = document.getElementById('log-autoscroll');
         clearBtn       = document.getElementById('log-clear');
         copyBtn        = document.getElementById('log-copy');
+        searchInput    = document.getElementById('log-search');
+        levelFilter    = document.getElementById('log-level-filter');
+        hideNoiseCheck = document.getElementById('log-hide-noise');
+        wrapCheck      = document.getElementById('log-wrap');
+        downloadBtn    = document.getElementById('log-download');
 
         if (!console$) return;
 
@@ -158,9 +228,7 @@ window.LogConsole = (() => {
 
         // Copy button
         copyBtn?.addEventListener('click', async () => {
-            const text = [...console$.querySelectorAll('.log-line')]
-                .map(el => el.textContent)
-                .join('\n');
+            const text = visibleLogText();
             try {
                 await navigator.clipboard.writeText(text);
                 copyBtn.textContent = 'Copied!';
@@ -169,6 +237,18 @@ window.LogConsole = (() => {
                 copyBtn.textContent = 'Failed';
                 setTimeout(() => { copyBtn.textContent = 'Copy All'; }, 1500);
             }
+        });
+        [searchInput, levelFilter, hideNoiseCheck, wrapCheck].forEach(control => {
+            control?.addEventListener(control === searchInput ? 'input' : 'change', applyFilters);
+        });
+        downloadBtn?.addEventListener('click', () => {
+            const blob = new Blob([visibleLogText()], {type: 'text/plain;charset=utf-8'});
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = `${currentProjectId || 'project'}-dashboard-log.txt`;
+            link.click();
+            URL.revokeObjectURL(url);
         });
 
         // Auto-scroll: when user scrolls up, uncheck; when they scroll to bottom, re-check
@@ -191,5 +271,5 @@ window.LogConsole = (() => {
         });
     });
 
-    return { openForProject, closeForProject, appendLine };
+    return { openForProject, closeForProject, appendLine, setProjectRunning };
 })();

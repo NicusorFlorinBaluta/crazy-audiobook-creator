@@ -10,7 +10,8 @@ const state = window.state = {
     ws: null,
     voiceServerOnline: false,
     schedule: null,
-    lastScheduleRefresh: 0
+    lastScheduleRefresh: 0,
+    lastModalTrigger: null
 };
 
 // DOM Elements
@@ -19,6 +20,9 @@ const els = {
     viewDetail: document.getElementById('view-detail'),
     projectsGrid: document.getElementById('projects-grid'),
     projectsEmpty: document.getElementById('projects-empty'),
+    projectSearch: document.getElementById('project-search'),
+    projectStatusFilter: document.getElementById('project-status-filter'),
+    projectSort: document.getElementById('project-sort'),
     btnNewProject: document.getElementById('btn-new-project'),
     btnEmptyNew: document.getElementById('btn-empty-new'),
     btnBack: document.getElementById('btn-back'),
@@ -81,6 +85,9 @@ function setupEventListeners() {
     els.btnEmptyNew.addEventListener('click', openUploadModal);
     els.btnBack.addEventListener('click', showProjectsView);
     document.getElementById('nav-home-btn').addEventListener('click', showProjectsView);
+    els.projectSearch?.addEventListener('input', renderProjectsList);
+    els.projectStatusFilter?.addEventListener('change', renderProjectsList);
+    els.projectSort?.addEventListener('change', renderProjectsList);
     
     const STAGE_TOOLTIPS = {
         extracting: 'Rebuild book text from the preserved source EPUB, then clear scripts, cast, segments, and mastered audio. Older projects without source.epub are left unchanged.',
@@ -99,7 +106,7 @@ function setupEventListeners() {
         if (val) {
             els.btnResetStage.classList.remove('hidden');
             const desc = STAGE_TOOLTIPS[val] || '';
-            els.selectResetStage.title = `${val.toUpperCase()}: ${desc}`;
+            document.getElementById('reset-stage-help').textContent = desc;
         }
     });
     
@@ -138,6 +145,10 @@ function setupEventListeners() {
     // Modal
     els.modalClose.addEventListener('click', closeUploadModal);
     els.modalCancel.addEventListener('click', closeUploadModal);
+    els.uploadModal.addEventListener('click', event => {
+        if (event.target === els.uploadModal) closeUploadModal();
+    });
+    document.addEventListener('keydown', handleGlobalKeydown);
     
     // Drag and Drop Upload
     els.uploadZone.addEventListener('click', () => els.epubInput.click());
@@ -150,17 +161,8 @@ function setupEventListeners() {
 
     // Tabs
     document.querySelectorAll('.tab').forEach(tab => {
-        tab.addEventListener('click', (e) => {
-            const targetId = e.target.dataset.tab;
-            
-            // Update buttons
-            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-            e.target.classList.add('active');
-            
-            // Update content
-            document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-            document.getElementById(targetId).classList.add('active');
-        });
+        tab.addEventListener('click', () => activateDetailTab(tab.dataset.tab, true));
+        tab.addEventListener('keydown', handleTabKeydown);
     });
 
     // Detail Actions
@@ -268,8 +270,9 @@ function setupEventListeners() {
             chapterBodyContainer.classList.toggle('hidden', chapterPaginationState.isCollapsed);
             const count = document.querySelectorAll('.chapter-cell').length;
             btnToggleChapters.textContent = chapterPaginationState.isCollapsed 
-                ? `🔽 Expand (${count} chapters)` 
-                : '🔼 Collapse';
+                ? `Expand (${count})`
+                : 'Collapse';
+            btnToggleChapters.setAttribute('aria-expanded', String(!chapterPaginationState.isCollapsed));
         });
     }
 
@@ -309,6 +312,60 @@ function setupEventListeners() {
     });
 }
 
+function activateDetailTab(targetId, remember = false) {
+    const target = document.querySelector(`.tab[data-tab="${targetId}"]`);
+    if (!target) return;
+    document.querySelectorAll('.tab').forEach(tab => {
+        const active = tab === target;
+        tab.classList.toggle('active', active);
+        tab.setAttribute('aria-selected', String(active));
+        tab.tabIndex = active ? 0 : -1;
+    });
+    document.querySelectorAll('.tab-content').forEach(content => {
+        const active = content.id === targetId;
+        content.classList.toggle('active', active);
+        content.hidden = !active;
+    });
+    if (remember) localStorage.setItem('projectDetailTab', targetId);
+}
+
+function handleTabKeydown(event) {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    const tabs = [...document.querySelectorAll('.tab')];
+    const current = tabs.indexOf(event.currentTarget);
+    let next = current;
+    if (event.key === 'ArrowLeft') next = (current - 1 + tabs.length) % tabs.length;
+    if (event.key === 'ArrowRight') next = (current + 1) % tabs.length;
+    if (event.key === 'Home') next = 0;
+    if (event.key === 'End') next = tabs.length - 1;
+    tabs[next].focus();
+    activateDetailTab(tabs[next].dataset.tab, true);
+}
+
+function handleGlobalKeydown(event) {
+    if (els.uploadModal.classList.contains('hidden')) return;
+    if (event.key === 'Escape') {
+        event.preventDefault();
+        closeUploadModal();
+        return;
+    }
+    if (event.key !== 'Tab') return;
+    const focusable = [...els.uploadModal.querySelectorAll(
+        'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+    )].filter(element => !element.hidden && element.offsetParent !== null);
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+    }
+}
+
 // ============================================================================
 // Navigation
 // ============================================================================
@@ -341,10 +398,16 @@ async function showDetailView(projectId, isHashLoad = false) {
     els.viewProjects.classList.add('hidden');
     els.viewDetail.classList.remove('hidden');
     
-    // Switch to Characters tab by default
-    document.querySelector('.tab[data-tab="tab-characters"]').click();
-    
-    await fetchProjectDetails(projectId);
+    const project = await fetchProjectDetails(projectId);
+    const rememberedTab = localStorage.getItem('projectDetailTab');
+    const defaultTab = ['complete', 'completed', 'selection_complete'].includes(
+        String(project?.status || '').toLowerCase()
+    ) ? 'tab-quality' : 'tab-characters';
+    activateDetailTab(
+        document.querySelector(`.tab[data-tab="${rememberedTab}"]`)
+            ? rememberedTab
+            : defaultTab
+    );
 
     if (detailPollTimer) clearInterval(detailPollTimer);
     detailPollTimer = setInterval(() => {
@@ -355,7 +418,10 @@ async function showDetailView(projectId, isHashLoad = false) {
 
     // Connect log console in background (non-blocking)
     if (window.LogConsole) {
-        window.LogConsole.openForProject(projectId);
+        const terminal = ['complete', 'completed', 'selection_complete', 'paused', 'error'];
+        const running = project?.running === true
+            && !terminal.includes(String(project?.status || '').toLowerCase());
+        window.LogConsole.openForProject(projectId, running);
     }
 }
 
@@ -414,6 +480,7 @@ async function fetchProjectDetails(projectId, isPoll = false) {
             const isDoneStage = ['complete', 'completed', 'selection_complete', 'paused', 'error'].includes(stage);
             const isRunning = (data.running === true || activeStages.includes(stage)) && !isDoneStage;
             const coarseStatus = isRunning ? 'running' : stage;
+            window.LogConsole?.setProjectRunning(isRunning);
             
             window.PipelineManager.updateTracker(data.active_stage || data.status, isRunning ? 'running' : coarseStatus, data);
             window.PipelineManager.toggleControls(data.status, isRunning, data);
@@ -422,12 +489,14 @@ async function fetchProjectDetails(projectId, isPoll = false) {
         if (window.ScriptViewer && !isPoll) {
             window.ScriptViewer.loadData(projectId);
         }
+        return data;
         
     } catch (error) {
         if (!isPoll) {
             showToast(`Error loading project details: ${error.message}`, 'error');
             showProjectsView();
         }
+        return null;
     }
 }
 
@@ -438,13 +507,17 @@ async function fetchProjectDetails(projectId, isPoll = false) {
 let currentFile = null;
 
 function openUploadModal() {
+    state.lastModalTrigger = document.activeElement;
     clearUpload();
     els.uploadModal.classList.remove('hidden');
+    requestAnimationFrame(() => els.uploadZone.focus());
 }
 
 function closeUploadModal() {
     els.uploadModal.classList.add('hidden');
     clearUpload();
+    if (state.lastModalTrigger?.focus) state.lastModalTrigger.focus();
+    state.lastModalTrigger = null;
 }
 
 function handleDragOver(e) {
@@ -645,12 +718,40 @@ function renderProjectsList() {
     els.projectsGrid.classList.remove('hidden');
     
     els.projectsGrid.innerHTML = '';
-    
-    state.projects.forEach(project => {
+
+    const search = (els.projectSearch?.value || '').trim().toLowerCase();
+    const statusFilter = els.projectStatusFilter?.value || 'all';
+    const sort = els.projectSort?.value || 'newest';
+    const terminal = new Set(['complete', 'completed', 'paused', 'error', 'selection_complete']);
+    const projects = state.projects.filter(project => {
+        const status = String(project.status || 'created').toLowerCase();
+        const searchText = `${project.title || ''} ${project.author || ''} ${project.project_id || ''}`.toLowerCase();
+        const statusMatch = statusFilter === 'all'
+            || status === statusFilter
+            || (statusFilter === 'complete' && ['complete', 'completed', 'selection_complete'].includes(status))
+            || (statusFilter === 'active' && !terminal.has(status));
+        return (!search || searchText.includes(search)) && statusMatch;
+    }).sort((left, right) => {
+        if (sort === 'oldest') return new Date(left.created_at) - new Date(right.created_at);
+        if (sort === 'title') return String(left.title || '').localeCompare(String(right.title || ''));
+        return new Date(right.created_at) - new Date(left.created_at);
+    });
+
+    if (!projects.length) {
+        els.projectsGrid.innerHTML = '<div class="empty-state small project-filter-empty"><p>No projects match these filters.</p></div>';
+        return;
+    }
+
+    projects.forEach(project => {
         const status = String(project.status || 'created').toLowerCase();
         const statusToken = status.replace(/[^a-z_]/g, '');
-        const card = document.createElement('div');
+        const card = document.createElement('button');
+        card.type = 'button';
         card.className = 'project-card';
+        card.setAttribute(
+            'aria-label',
+            `Open ${project.title && project.title !== 'Unknown' ? project.title : 'untitled project'}, ${formatProjectStatus(status)}`
+        );
         card.innerHTML = `
             <div class="card-header">
                 <div class="card-emoji">📖</div>
@@ -667,9 +768,10 @@ function renderProjectsList() {
                     <span class="card-stat-value">${formatDate(project.created_at)}</span>
                 </div>
             </div>
+            <div class="card-project-id">${escapeHtml(project.project_id || '')}</div>
             <div class="card-stage" style="background: var(--stage-${statusToken}-bg, var(--bg-elevated)); color: var(--stage-${statusToken}, var(--text-primary))">
                 ${['error', 'paused', 'complete'].includes(status) ? (status === 'complete' ? '✅ ' : '⚠️ ') : '⏳ '}
-                ${escapeHtml(status.replaceAll('_', ' '))}
+                ${escapeHtml(formatProjectStatus(status))}
             </div>
         `;
         
@@ -697,10 +799,14 @@ function renderProjectHeader(project) {
     
     const stageColor = `var(--stage-${statusToken}, var(--text-primary))`;
     const coarseStatus = project.running === true ? 'running' : status;
-    const displayStatus = coarseStatus.replaceAll('_', ' ');
+    const displayStatus = formatProjectStatus(coarseStatus);
+    const activeStage = String(project.active_stage || '').replaceAll('_', ' ');
+    const statusDetail = project.running && activeStage && activeStage !== displayStatus
+        ? ` · ${activeStage}`
+        : '';
     document.getElementById('project-stage').innerHTML = `
         <span class="card-stage" style="border: 1px solid ${stageColor}; color: ${stageColor}">
-            Status: ${displayStatus.toUpperCase()} | Stage: ${escapeHtml(status.replaceAll('_', ' ').toUpperCase())}
+            ${escapeHtml(displayStatus)}${escapeHtml(statusDetail)}
         </span>
     `;
 }
@@ -711,6 +817,22 @@ function renderChapterList(project) {
     grid.innerHTML = '';
 
     const total = project.total_chapters || 0;
+    if (chapterPaginationState.projectId !== project.project_id) {
+        chapterPaginationState.projectId = project.project_id;
+        chapterPaginationState.isCollapsed = ['complete', 'completed'].includes(
+            String(project.status || '').toLowerCase()
+        );
+    }
+    document.getElementById('chapter-body-container')?.classList.toggle(
+        'hidden', chapterPaginationState.isCollapsed
+    );
+    const toggleChapters = document.getElementById('btn-toggle-chapters');
+    if (toggleChapters) {
+        toggleChapters.textContent = chapterPaginationState.isCollapsed
+            ? `Expand (${total})`
+            : 'Collapse';
+        toggleChapters.setAttribute('aria-expanded', String(!chapterPaginationState.isCollapsed));
+    }
     const scripted = new Set(project.scripted_chapters || []);
     const generated = new Set(project.generated_chapters || []);
     const mastered = new Set(project.mastered_chapters || []);
@@ -748,7 +870,7 @@ function renderChapterList(project) {
             statusBackground = 'rgba(16, 185, 129, 0.15)';
             statusColor = '#34d399';
             percent = 100;
-            download = `<a class="chapter-download" href="api/projects/${encodeURIComponent(project.project_id)}/download/chapter/${chapter}" target="_blank" title="Download mastered chapter WAV">↓</a>`;
+            download = `<a class="chapter-download" href="api/projects/${encodeURIComponent(project.project_id)}/download/chapter/${chapter}" target="_blank" aria-label="Download chapter ${chapter} mastered WAV" title="Download mastered chapter WAV">↓</a>`;
         } else if (generated.has(chapter)) {
             statusKey = 'generated';
             statusText = 'Generated';
@@ -801,6 +923,7 @@ function renderChapterList(project) {
         row.innerHTML = `
             <input type="checkbox" class="chapter-select-cb" data-ch="${chapter}"
                 ${isChecked ? 'checked' : ''} ${selectionLocked ? 'disabled' : ''}
+                aria-label="Include chapter ${chapter}, ${escapeHtml(title)}, in the next audio batch"
                 title="${selectionLocked ? 'The active batch is locked while the pipeline runs' : 'Include this chapter in the next audio batch'}">
             <div class="chapter-title-wrap">
                 <span class="chapter-number">${chapter}</span>
@@ -853,7 +976,8 @@ function parseChapterRange(value) {
 const chapterPaginationState = {
     currentPage: 1,
     pageSize: '15',
-    isCollapsed: false
+    isCollapsed: false,
+    projectId: null
 };
 
 function filterChapterRows() {
@@ -893,6 +1017,7 @@ function filterChapterRows() {
     const pageNum = document.getElementById('pagination-page-num');
     const prevBtn = document.getElementById('btn-prev-page');
     const nextBtn = document.getElementById('btn-next-page');
+    const pagination = document.getElementById('chapter-pagination-toolbar');
 
     if (info) {
         if (matchingRows.length === 0) {
@@ -908,6 +1033,7 @@ function filterChapterRows() {
     }
     if (prevBtn) prevBtn.disabled = currentPage <= 1 || isAll;
     if (nextBtn) nextBtn.disabled = currentPage >= totalPages || isAll;
+    if (pagination) pagination.classList.toggle('hidden', matchingRows.length <= pageSize || isAll);
 }
 
 function updateSelectionSummary(project = null) {
@@ -1100,7 +1226,16 @@ function renderWorkStatus(project) {
     document.getElementById('work-eta-label').textContent = progress?.eta_confidence
         ? `ETA · ${progress.eta_confidence} confidence`
         : 'Estimated remaining';
-    document.getElementById('work-status-freshness').textContent = freshness;
+    const isComplete = ['complete', 'completed'].includes(stage);
+    const workPanel = document.getElementById('work-status-panel');
+    workPanel.classList.toggle('terminal', isComplete);
+    document.getElementById('work-status-freshness').textContent = isComplete
+        ? 'No pipeline work is active.'
+        : freshness;
+    const pipelineSummary = document.getElementById('pipeline-summary');
+    if (pipelineSummary) pipelineSummary.textContent = isComplete
+        ? `${mastered.size} of ${project.total_chapters || 0} chapters mastered`
+        : activity;
 }
 
 // Retained temporarily for compatibility with older embedded shells. New
@@ -1491,7 +1626,7 @@ async function loadOperations() {
             ['Notices', notices.length ? notices.join(' · ') : 'None']
         ].map(([label, value]) => `<div class="operations-row"><span>${escapeHtml(label)}</span><strong>${escapeHtml(String(value))}</strong></div>`).join('');
         storageEl.innerHTML = Object.entries(storage.categories || {}).map(([name, item]) =>
-            `<div class="operations-row"><span>${escapeHtml(name.replaceAll('_', ' '))}</span><strong>${formatBytes(item.bytes || 0)} · ${item.files || 0} files</strong></div>`
+            `<div class="operations-row"><span>${escapeHtml(name.replaceAll('_', ' '))}</span><strong>${formatBytes(item.bytes || 0)} · ${item.files || 0} file${item.files === 1 ? '' : 's'}</strong></div>`
         ).join('') + `<div class="operations-row"><span>Total</span><strong>${formatBytes(storage.total_bytes || 0)}</strong></div>`;
         const preview = storage.cleanup_preview || {};
         cleanupEl.innerHTML = `<span>Safe cleanup preview: ${preview.files?.length || 0} temporary files · ${formatBytes(preview.bytes || 0)}</span>`;
@@ -1566,6 +1701,20 @@ function formatDate(isoString) {
     if (!isoString) return '';
     const date = new Date(isoString);
     return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+function formatProjectStatus(status) {
+    const labels = {
+        created: 'Ready to configure',
+        selection_complete: 'Selected batch complete',
+        voice_review: 'Voice approval required',
+        paused_scheduled: 'Waiting for working hours',
+        deploy_paused: 'Parked safely',
+        complete: 'Complete',
+        completed: 'Complete'
+    };
+    const token = String(status || 'created').toLowerCase();
+    return labels[token] || token.replaceAll('_', ' ').replace(/\b\w/g, letter => letter.toUpperCase());
 }
 
 function escapeHtml(unsafe) {
