@@ -1004,11 +1004,11 @@ window.ScriptViewer = (() => {
                     ${noteworthy.map(item => `
                         <div class="quality-attempt-row">
                             <span>Ch ${item.chapter_number} · ${escapeHtml(item.line_id)}</span>
-                            <strong class="quality-status-${escapeHtml(item.status)}">${escapeHtml(item.status)}</strong>
+                            <strong class="quality-attempt-status quality-status-${escapeHtml(item.status)}">${escapeHtml(item.status)}</strong>
                             <span>Attempt ${item.attempt}</span>
                             <span>WER ${((item.wer || 0) * 100).toFixed(1)}%</span>
                             <span title="${escapeHtml(item.transcribed_text || '')}">${escapeHtml((item.acceptance_reason || 'unspecified').replaceAll('_', ' '))}</span>
-                            <audio controls preload="none" src="${escapeHtml(item.audio_url || '')}"></audio>
+                            <audio class="quality-attempt-audio" controls preload="none" src="${escapeHtml(item.audio_url || '')}"></audio>
                         </div>
                     `).join('')}
                 </div>

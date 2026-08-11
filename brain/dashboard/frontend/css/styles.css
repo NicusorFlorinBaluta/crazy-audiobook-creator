@@ -1097,23 +1097,25 @@ audio:hover {
 .quality-attempts-list { max-height: 320px; overflow-y: auto; }
 .quality-attempt-row {
     display: grid;
-    grid-template-columns: minmax(150px, 1fr) 72px 78px 72px minmax(170px, 1fr);
+    grid-template-columns: minmax(145px, 1fr) minmax(140px, auto) 78px 72px minmax(170px, 1fr) minmax(180px, 260px);
+    align-items: center;
     gap: 10px;
     padding: 8px 12px;
     border-top: 1px solid rgba(255,255,255,.045);
     color: var(--text-muted);
     font-size: .7rem;
 }
-.quality-attempt-row > span:last-child {
+.quality-attempt-row > span:nth-child(5) {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
+.quality-attempt-status { min-width: 0; }
 .quality-status-pass { color: #34d399; }
 .quality-status-flagged { color: #fbbf24; }
 .quality-status-fail { color: #fb7185; }
 
-.quality-attempt-row audio { width: min(260px, 100%); height: 30px; }
+.quality-attempt-row audio { width: 100%; height: 30px; }
 .quality-attempt-history { grid-column: 1 / -1; margin-top: 12px; }
 .quality-attempt-history > summary { cursor: pointer; color: var(--text-secondary); }
 .quality-attempt-row.selected { border-color: rgba(52, 211, 153, .35); background: rgba(52, 211, 153, .06); }
@@ -1164,7 +1166,8 @@ audio:hover {
     .schedule-window { grid-template-columns: 1fr 1fr 20px 1fr 34px; }
     .schedule-days { grid-column: 1 / -1; }
     .quality-attempt-row { grid-template-columns: 1fr auto auto; }
-    .quality-attempt-row > span:last-child { grid-column: 1 / -1; }
+    .quality-attempt-row > span:nth-child(5) { grid-column: 2 / -1; }
+    .quality-attempt-audio { grid-column: 1 / -1; }
 }
 
 /* ------------------------------------------------------------ */
