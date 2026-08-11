@@ -210,6 +210,13 @@ The shutdown control requires confirmation.
 
 - when healthy: full-panel iframe whose URL comes from
   `input_text.audiobook_url`;
+- the iframe aspect ratio is computed from the portrait viewport (with a 75%
+  landscape/desktop fallback) so the Companion App does not render it as a
+  short half-screen card;
+- on an embedded coarse-pointer/mobile client, attachment links open in a new
+  browser context because the Companion App WebView does not consistently hand
+  downloads to the operating system. If that context is blocked, the dashboard
+  copies the direct URL and explains that it must be opened in the browser;
 - when unavailable: offline explanation and Start button instead of a browser
   connection error.
 
@@ -258,6 +265,8 @@ location.
 
 - root-local static assets and API URLs still work;
 - prefixed iframe assets, API, SSE, downloads, and WebSocket work;
+- embedded mobile download clicks use the external-context handoff while
+  desktop and standalone download behavior remains unchanged;
 - `/health` responds without loading a project;
 - loopback API works without a token;
 - configured trusted-LAN API works without a token;
@@ -269,6 +278,8 @@ location.
 
 - `python tools/validate_yaml.py`;
 - dashboard JSON parses;
+- portrait iframe sizing uses the available mobile viewport rather than a fixed
+  desktop ratio;
 - all new YAML keys map to expected entity IDs;
 - read-only live entity queries confirm the HASS.Agent command and sensors;
 - no real IP, token, domain, or MAC is committed.

@@ -47,6 +47,41 @@ const els = {
     voiceStatusText: document.getElementById('voice-status-text')
 };
 
+function usesEmbeddedMobileWebView() {
+    return window.self !== window.top && (
+        window.matchMedia('(pointer: coarse)').matches || window.innerWidth <= 768
+    );
+}
+
+async function copyDownloadFallback(url) {
+    const absoluteUrl = new URL(url, document.baseURI).href;
+    try {
+        await navigator.clipboard.writeText(absoluteUrl);
+        showToast('The mobile app blocked the download window. Link copied; open it in your browser.', 'warning');
+    } catch (_) {
+        showToast('The mobile app blocked the download window. Open this dashboard in your browser to download.', 'warning');
+    }
+}
+
+function startServerDownload(url) {
+    if (!usesEmbeddedMobileWebView()) {
+        window.location.href = url;
+        return;
+    }
+
+    const opened = window.open(url, '_blank');
+    if (opened) {
+        try {
+            opened.opener = null;
+        } catch (_) {
+            // Cross-origin mobile WebViews may make the returned handle opaque.
+        }
+        showToast('Download opened outside the embedded Home Assistant page.', 'info');
+    } else {
+        void copyDownloadFallback(url);
+    }
+}
+
 // ============================================================================
 // Initialization
 // ============================================================================
@@ -88,6 +123,12 @@ function setupEventListeners() {
     els.projectSearch?.addEventListener('input', renderProjectsList);
     els.projectStatusFilter?.addEventListener('change', renderProjectsList);
     els.projectSort?.addEventListener('change', renderProjectsList);
+    document.addEventListener('click', event => {
+        const downloadLink = event.target.closest('a[data-server-download]');
+        if (!downloadLink || !usesEmbeddedMobileWebView()) return;
+        event.preventDefault();
+        startServerDownload(downloadLink.href);
+    });
     
     const STAGE_TOOLTIPS = {
         extracting: 'Rebuild book text from the preserved source EPUB, then clear scripts, cast, segments, and mastered audio. Older projects without source.epub are left unchanged.',
@@ -139,7 +180,9 @@ function setupEventListeners() {
     
     els.btnDownloadAudiobook.addEventListener('click', () => {
         if (!state.currentProjectId) return;
-        window.location.href = `api/projects/${state.currentProjectId}/download`;
+        startServerDownload(
+            `api/projects/${encodeURIComponent(state.currentProjectId)}/download`
+        );
     });
 
     // Modal
@@ -307,7 +350,9 @@ function setupEventListeners() {
     document.getElementById('btn-refresh-operations')?.addEventListener('click', loadOperations);
     document.getElementById('btn-download-support')?.addEventListener('click', () => {
         if (state.currentProjectId) {
-            window.location.href = `api/projects/${encodeURIComponent(state.currentProjectId)}/support-bundle`;
+            startServerDownload(
+                `api/projects/${encodeURIComponent(state.currentProjectId)}/support-bundle`
+            );
         }
     });
 }
@@ -870,7 +915,7 @@ function renderChapterList(project) {
             statusBackground = 'rgba(16, 185, 129, 0.15)';
             statusColor = '#34d399';
             percent = 100;
-            download = `<a class="chapter-download" href="api/projects/${encodeURIComponent(project.project_id)}/download/chapter/${chapter}" target="_blank" aria-label="Download chapter ${chapter} mastered WAV" title="Download mastered chapter WAV">↓</a>`;
+            download = `<a class="chapter-download" data-server-download href="api/projects/${encodeURIComponent(project.project_id)}/download/chapter/${chapter}" target="_blank" rel="noopener" aria-label="Download chapter ${chapter} mastered WAV" title="Download mastered chapter WAV">↓</a>`;
         } else if (generated.has(chapter)) {
             statusKey = 'generated';
             statusText = 'Generated';
@@ -1302,7 +1347,7 @@ function renderChapterGridLegacy(project) {
             statusBg = 'rgba(16, 185, 129, 0.15)';
             statusColor = '#34d399';
             pct = 100;
-            downloadBtn = `<a href="api/projects/${encodeURIComponent(project.project_id)}/download/chapter/${i}" target="_blank" title="Download Mastered Chapter WAV" style="color: #34d399; text-decoration: none; font-size: 1.1em; margin-left: 6px; transition: transform 0.2s ease;">⬇</a>`;
+            downloadBtn = `<a data-server-download href="api/projects/${encodeURIComponent(project.project_id)}/download/chapter/${i}" target="_blank" rel="noopener" title="Download Mastered Chapter WAV" style="color: #34d399; text-decoration: none; font-size: 1.1em; margin-left: 6px; transition: transform 0.2s ease;">⬇</a>`;
         } else if (generated.has(i)) {
             statusText = '🟣 Generated';
             statusBg = 'rgba(168, 85, 247, 0.15)';

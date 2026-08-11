@@ -1215,6 +1215,7 @@ audio:hover {
 .character-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+    align-items: start;
     gap: var(--space-md);
 }
 
@@ -1459,11 +1460,72 @@ audio:hover {
     margin: 5px 0 0;
 }
 
-.voice-profile-card .char-voice-preview {
-    /* Cards in a grid row share the height of the tallest description.
-       Consume the remaining space above the player so every preview and the
-       controls beneath it begin on the same visual baseline. */
-    margin-top: auto;
+.voice-section-heading {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.voice-section-heading strong {
+    color: var(--text-primary);
+    font-size: .9rem;
+}
+
+.voice-section-heading span {
+    color: var(--text-muted);
+    font-size: .65rem;
+    text-align: right;
+}
+
+.voice-comparison-player {
+    display: grid;
+    gap: 8px;
+    margin-top: 7px;
+    padding: 10px;
+    border: 1px solid rgba(255, 255, 255, .025);
+    border-radius: var(--radius-md);
+    background: var(--bg-elevated);
+}
+
+.voice-preview-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.voice-candidates-toggles {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(52px, 1fr));
+    flex: 1;
+    gap: 6px;
+    min-width: 0;
+}
+
+.voice-candidates-toggles .btn {
+    justify-content: center;
+    min-width: 0;
+    padding-inline: 8px;
+    cursor: pointer;
+}
+
+.voice-selection-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-top: 8px;
+}
+
+.selected-candidate-status {
+    min-width: 0;
+    color: var(--text-secondary);
+    font-size: .76rem;
+    font-weight: 650;
+}
+
+.apply-candidate {
+    flex: 0 0 auto;
 }
 
 .voice-profile-warning {
@@ -1605,6 +1667,16 @@ audio:hover {
     display: inline-flex;
     margin-top: 7px;
     text-decoration: none;
+}
+
+.voice-preview-toolbar .voice-download-link {
+    flex: 0 0 auto;
+    margin-top: 0;
+    white-space: nowrap;
+}
+
+.voice-preview-toolbar-single {
+    justify-content: flex-end;
 }
 
 .voice-preview-pending {
@@ -2571,7 +2643,8 @@ audio:hover {
     .casting-toolbar > * { width: 100%; }
     .character-grid { grid-template-columns: minmax(0, 1fr); }
     .voice-profile-card { min-width: 0; }
-    .voice-candidates-toggles { flex-wrap: wrap; }
+    .voice-preview-toolbar { align-items: stretch; flex-direction: column; }
+    .voice-preview-toolbar .voice-download-link { align-self: flex-start; }
 
     .script-controls > * { flex: 1 1 100%; width: 100%; }
     .script-result-count { margin-left: 0; }

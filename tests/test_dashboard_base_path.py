@@ -89,6 +89,33 @@ class DashboardBasePathTests(unittest.TestCase):
         self.assertIn("const cardDisplayName = cardCharacter?.name", viewer)
         self.assertIn('<div class="char-name">${escapeHtml(cardDisplayName)}</div>', viewer)
 
+    def test_mobile_ha_downloads_use_an_external_webview_handoff(self):
+        app_js = (FRONTEND / "js/app.js").read_text(encoding="utf-8")
+        viewer = (FRONTEND / "js/script-viewer.js").read_text(encoding="utf-8")
+        self.assertIn("function usesEmbeddedMobileWebView()", app_js)
+        self.assertIn("function startServerDownload(url)", app_js)
+        self.assertIn("window.open(url, '_blank')", app_js)
+        self.assertIn("a[data-server-download]", app_js)
+        self.assertIn("Link copied; open it in your browser", app_js)
+        self.assertEqual(app_js.count("data-server-download"), 3)
+        self.assertEqual(viewer.count("data-server-download"), 4)
+
+    def test_voice_cards_do_not_stretch_or_restyle_download_controls(self):
+        styles = (FRONTEND / "css/styles.css").read_text(encoding="utf-8")
+        viewer = (FRONTEND / "js/script-viewer.js").read_text(encoding="utf-8")
+        self.assertRegex(
+            styles,
+            r"\.character-grid\s*\{[^}]*align-items:\s*start;",
+        )
+        self.assertNotIn(".voice-profile-card .char-voice-preview", styles)
+        self.assertIn(".voice-preview-toolbar", styles)
+        self.assertIn(
+            "container.querySelectorAll('.voice-candidates-toggles .btn')",
+            viewer,
+        )
+        self.assertNotIn("container.querySelectorAll('.btn')", viewer)
+        self.assertIn("voice-selection-row", viewer)
+
 
 if __name__ == "__main__":
     unittest.main()

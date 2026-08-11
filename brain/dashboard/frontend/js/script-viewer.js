@@ -217,13 +217,16 @@ window.ScriptViewer = (() => {
             if (candidates.length > 1) {
                 candidatesHtml = `
                     <div class="voice-candidates">
-                        <strong>Voice Comparison</strong>
-                        <div class="voice-comparison-player" style="margin: 10px 0; background: var(--bg-elevated); padding: 10px; border-radius: var(--radius-md);">
-                            <audio class="voice-preview-player" aria-label="Preview ${escapeHtml(cardDisplayName)}, option ${mainOptionLabel}" style="width: 100%; margin-bottom: 10px;" controls preload="metadata" src="${escapeHtml(mainVoice.preview_url)}"></audio>
-                            <a class="btn btn-ghost btn-sm voice-download-link" href="${escapeHtml(mainVoice.download_url || '#')}">Download voice sample</a>
-                            <div class="voice-candidates-toggles" style="display: flex; gap: 8px;">
+                        <div class="voice-section-heading">
+                            <strong>Voice options</strong>
+                            <span>Preview, compare, then apply</span>
+                        </div>
+                        <div class="voice-comparison-player">
+                            <audio class="voice-preview-player" aria-label="Preview ${escapeHtml(cardDisplayName)}, option ${mainOptionLabel}" controls preload="metadata" src="${escapeHtml(mainVoice.preview_url)}"></audio>
+                            <div class="voice-preview-toolbar">
+                                <div class="voice-candidates-toggles" aria-label="Voice options for ${escapeHtml(cardDisplayName)}">
                                 ${candidates.map((candidate, idx) => `
-                                    <label class="btn btn-sm ${candidate.voice_id === mainVoice.voice_id ? 'btn-primary' : 'btn-outline'}" style="flex: 1; text-align: center; cursor: pointer;">
+                                    <label class="btn btn-sm ${candidate.voice_id === mainVoice.voice_id ? 'btn-primary' : 'btn-outline'}">
                                         <input type="radio" class="visually-hidden" name="candidate-${ownerId}" value="${escapeHtml(candidate.voice_id)}"
                                             data-preview-url="${escapeHtml(candidate.preview_url || '')}"
                                             ${candidate.voice_id === mainVoice.voice_id ? 'checked' : ''}
@@ -231,15 +234,27 @@ window.ScriptViewer = (() => {
                                         ${String.fromCharCode(65 + idx)} ${candidate.ready ? '' : '(prep)'}
                                     </label>
                                 `).join('')}
+                                </div>
+                                <a class="btn btn-ghost btn-sm voice-download-link" data-server-download href="${escapeHtml(mainVoice.download_url || '#')}">Download sample</a>
                             </div>
                         </div>
-                        <div class="selected-candidate-status" aria-live="polite">Option ${mainOptionLabel} is currently applied</div>
-                        <button class="btn btn-secondary apply-candidate" data-owner-id="${ownerId}" disabled>Option ${mainOptionLabel} is applied</button>
+                        <div class="voice-selection-row">
+                            <div class="selected-candidate-status" aria-live="polite">Option ${mainOptionLabel} applied</div>
+                            <button class="btn btn-secondary apply-candidate" data-owner-id="${ownerId}" disabled>Applied</button>
+                        </div>
                     </div>
                 `;
             } else {
                 candidatesHtml = mainVoice.ready
-                    ? `<div class="char-voice-preview"><audio class="voice-preview-player" aria-label="Preview ${escapeHtml(cardDisplayName)}" controls preload="metadata" src="${escapeHtml(mainVoice.preview_url)}"></audio><a class="btn btn-ghost btn-sm voice-download-link" href="${escapeHtml(mainVoice.download_url || '#')}">Download voice sample</a></div>`
+                    ? `<div class="voice-candidates voice-single-preview">
+                           <div class="voice-section-heading"><strong>Voice sample</strong></div>
+                           <div class="voice-comparison-player">
+                               <audio class="voice-preview-player" aria-label="Preview ${escapeHtml(cardDisplayName)}" controls preload="metadata" src="${escapeHtml(mainVoice.preview_url)}"></audio>
+                               <div class="voice-preview-toolbar voice-preview-toolbar-single">
+                                   <a class="btn btn-ghost btn-sm voice-download-link" data-server-download href="${escapeHtml(mainVoice.download_url || '#')}">Download sample</a>
+                               </div>
+                           </div>
+                       </div>`
                     : `<div class="voice-preview-loading">
                          <div class="voice-pulse-wave"><span></span><span></span><span></span><span></span></div>
                          <span class="voice-loading-text">Synthesizing voice audio preview...</span>
@@ -365,7 +380,7 @@ window.ScriptViewer = (() => {
                     const download = container.querySelector('.voice-download-link');
                     
                     // Update button UI styles
-                    container.querySelectorAll('.btn').forEach(btn => {
+                    container.querySelectorAll('.voice-candidates-toggles .btn').forEach(btn => {
                         btn.classList.remove('btn-primary');
                         btn.classList.add('btn-outline');
                     });
@@ -383,13 +398,13 @@ window.ScriptViewer = (() => {
                     const regenerate = card.querySelector('.voice-regenerate');
                     if (status) {
                         status.textContent = selectedVoice.voice_id === mainVoice.voice_id
-                            ? `Option ${optionLabel} is currently applied`
-                            : `Option ${optionLabel} selected; not yet applied`;
+                            ? `Option ${optionLabel} applied`
+                            : `Option ${optionLabel} selected`;
                     }
                     if (apply) {
                         apply.disabled = !voiceState.editable || selectedVoice.voice_id === mainVoice.voice_id;
                         apply.textContent = selectedVoice.voice_id === mainVoice.voice_id
-                            ? `Option ${optionLabel} is applied`
+                            ? 'Applied'
                             : `Apply option ${optionLabel}`;
                     }
                     if (description) {
@@ -669,7 +684,7 @@ window.ScriptViewer = (() => {
             const previewHtml = assignedVoice?.ready
                 ? `<audio class="voice-preview-player" aria-label="Preview ${escapeHtml(char.name)}" controls preload="metadata"
                        src="${escapeHtml(assignedVoice.preview_url)}"></audio>
-                   <a class="btn btn-ghost btn-sm voice-download-link" href="${escapeHtml(assignedVoice.download_url || '#')}">Download voice sample</a>`
+                   <a class="btn btn-ghost btn-sm voice-download-link" data-server-download href="${escapeHtml(assignedVoice.download_url || '#')}">Download voice sample</a>`
                 : '<span class="voice-preview-pending">Preview available after voice preparation.</span>';
             const editNote = voiceState.editable
                 ? 'A change marks only affected chapters for regeneration.'
@@ -719,7 +734,7 @@ window.ScriptViewer = (() => {
                 preview.innerHTML = voice?.ready
                     ? `<audio class="voice-preview-player" aria-label="Preview ${escapeHtml(char.name)}" controls preload="metadata"
                            src="${escapeHtml(voice.preview_url)}"></audio>
-                       <a class="btn btn-ghost btn-sm voice-download-link" href="${escapeHtml(voice.download_url || '#')}">Download voice sample</a>`
+                       <a class="btn btn-ghost btn-sm voice-download-link" data-server-download href="${escapeHtml(voice.download_url || '#')}">Download voice sample</a>`
                     : '<span class="voice-preview-pending">Preview available after voice preparation.</span>';
                 const description = card.querySelector('.voice-description-input');
                 if (description) description.value = voice?.description || '';
