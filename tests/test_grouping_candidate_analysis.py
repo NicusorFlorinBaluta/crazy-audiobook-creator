@@ -63,10 +63,36 @@ class GroupingCandidateAnalysisTests(unittest.TestCase):
         self.assertTrue(result["fragment_trace_preserved"])
         self.assertTrue(result["unique_fragment_trace"])
         self.assertEqual(result["source_mismatches"], [])
+        self.assertFalse(result["introduced_over_engine_ceiling"])
         self.assertEqual(result["added_merges"][0]["constituent_line_ids"], [
             "ch01_0000",
             "ch01_0001",
         ])
+
+    def test_preexisting_oversize_line_does_not_fail_candidate_ceiling(self) -> None:
+        source = "A" * 501
+        chapter = ScriptChapter(
+            chapter_number=1,
+            chapter_title="Existing",
+            lines=[
+                ScriptLine(
+                    line_id="ch01_0000",
+                    speaker="narrator",
+                    text=source,
+                    source_fragment_id=0,
+                    source_fragment_ids=[0],
+                    source_start=0,
+                    source_end=len(source),
+                )
+            ],
+        )
+        result = analyze_chapter(
+            chapter,
+            source,
+            GroupingBounds("candidate", 300, 50, 400, 68),
+        )
+        self.assertTrue(result["preexisting_over_engine_ceiling"])
+        self.assertFalse(result["introduced_over_engine_ceiling"])
 
 
 if __name__ == "__main__":

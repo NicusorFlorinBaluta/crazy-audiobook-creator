@@ -131,7 +131,11 @@ def analyze_chapter(
     candidate_fragments = _fragment_ids(candidate)
     control_narrator = sum(line.speaker == "narrator" for line in control.lines)
     candidate_narrator = sum(line.speaker == "narrator" for line in candidate.lines)
+    control_max_characters = max((len(line.text) for line in control.lines), default=0)
     max_characters = max((len(line.text) for line in candidate.lines), default=0)
+    introduced_over_engine_ceiling = any(
+        merge["characters"] > 500 for merge in added_merges
+    )
     return {
         "chapter": control.chapter_number,
         "control_calls": len(control.lines),
@@ -142,8 +146,10 @@ def analyze_chapter(
             (len(control.lines) - control_narrator)
             - (len(candidate.lines) - candidate_narrator)
         ),
+        "control_max_characters": control_max_characters,
         "max_characters": max_characters,
-        "over_engine_ceiling": max_characters > 500,
+        "preexisting_over_engine_ceiling": control_max_characters > 500,
+        "introduced_over_engine_ceiling": introduced_over_engine_ceiling,
         "fragment_trace_preserved": control_fragments == candidate_fragments,
         "unique_fragment_trace": len(candidate_fragments) == len(set(candidate_fragments)),
         "source_mismatches": _source_mismatches(candidate, source_text),
@@ -205,7 +211,7 @@ def analyze_project(project_dir: Path, candidates: list[GroupingBounds]) -> dict
             chapter["fragment_trace_preserved"]
             and chapter["unique_fragment_trace"]
             and not chapter["source_mismatches"]
-            and not chapter["over_engine_ceiling"]
+            and not chapter["introduced_over_engine_ceiling"]
             for chapter in chapters
         )
         report["candidates"].append(
@@ -231,6 +237,12 @@ def analyze_project(project_dir: Path, candidates: list[GroupingBounds]) -> dict
                 ),
                 "max_characters": max(
                     (chapter["max_characters"] for chapter in chapters), default=0
+                ),
+                "preexisting_over_engine_ceiling": any(
+                    chapter["preexisting_over_engine_ceiling"] for chapter in chapters
+                ),
+                "introduced_over_engine_ceiling": any(
+                    chapter["introduced_over_engine_ceiling"] for chapter in chapters
                 ),
                 "invariants_passed": invariants_passed,
                 "added_merge_count": len(all_merges),
