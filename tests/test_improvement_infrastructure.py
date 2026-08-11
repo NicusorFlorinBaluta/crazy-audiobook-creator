@@ -176,6 +176,8 @@ class TTSBenchmarkHarnessTests(unittest.TestCase):
         self.assertEqual(order.count("A"), 5)
         self.assertEqual(order.count("B"), 5)
         self.assertEqual(order[:4], list("ABBA"))
+        self.assertEqual(_balanced_order(1, "ABBA"), ["A", "B"])
+        self.assertEqual(_balanced_order(1, "BAAB"), ["B", "A"])
 
     def test_generation_patch_merges_nested_values_without_mutating_control(self) -> None:
         control = {

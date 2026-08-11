@@ -264,6 +264,7 @@ def main() -> int:
         "protocol": {
             "warmup": "one unmeasured control generation",
             "order": args.order,
+            "alternate_order_by_combination": True,
             "repetitions_per_mode": args.repetitions,
             "seed": args.seed,
             "validation_enabled": not args.skip_validation,
@@ -353,9 +354,14 @@ def main() -> int:
         for voice_id, voice in voices.items():
             for fixture_id in fixture_ids:
                 combo_index += 1
+                combination_pattern = (
+                    args.order
+                    if combo_index % 2
+                    else ("BAAB" if args.order == "ABBA" else "ABBA")
+                )
                 occurrence = {"A": 0, "B": 0}
                 for slot, mode_label in enumerate(
-                    _balanced_order(args.repetitions, args.order),
+                    _balanced_order(args.repetitions, combination_pattern),
                     1,
                 ):
                     occurrence[mode_label] += 1
@@ -391,6 +397,7 @@ def main() -> int:
                         "voice": voice_id,
                         "fixture": fixture_id,
                         "slot": slot,
+                        "order_pattern": combination_pattern,
                         "mode_label": mode_label,
                         "mode": mode_name,
                         "repetition": repetition,
