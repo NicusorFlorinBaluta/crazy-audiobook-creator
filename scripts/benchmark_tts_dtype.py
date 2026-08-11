@@ -19,16 +19,16 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.benchmark_tts_fixture import (
-    FIXTURES,
-    _balanced_order,
-    _dependency_versions,
-    _git_identity,
-    _json_fingerprint,
-    _percentile,
-    _sha256,
-    _summarize_mode,
+from scripts.benchmark_support import (
+    balanced_order,
+    dependency_versions,
+    git_identity,
+    json_fingerprint,
+    percentile,
+    sha256_file,
+    summarize_tts_runs,
 )
+from scripts.benchmark_tts_fixture import FIXTURES
 from shared.artifacts import atomic_write_json
 from shared.live_test_guard import add_model_opt_in
 from voice.tts_server.qwen3_engine import Qwen3TTSEngine
@@ -43,16 +43,16 @@ CANDIDATE_DTYPE = "bfloat16"
 def _session_order(repetitions: int, pattern: str) -> list[str]:
     if repetitions < 2:
         raise ValueError("dtype screening requires at least two sessions per mode")
-    return _balanced_order(repetitions, pattern)
+    return balanced_order(repetitions, pattern)
 
 
 def _mode_summary(runs: list[dict[str, Any]], loads: list[float]) -> dict[str, Any]:
-    summary = _summarize_mode(runs)
+    summary = summarize_tts_runs(runs)
     summary.update(
         {
             "sessions": len(loads),
-            "load_seconds_p50": _percentile(loads, 0.50),
-            "load_seconds_p95": _percentile(loads, 0.95),
+            "load_seconds_p50": percentile(loads, 0.50),
+            "load_seconds_p95": percentile(loads, 0.95),
             "total_measured_wall_seconds": sum(
                 float(run["wall_seconds"]) for run in runs
             ),
@@ -117,10 +117,10 @@ def main() -> int:
         "schema_version": 1,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "project": args.project,
-        "source_control": _git_identity(),
-        "dependencies": _dependency_versions(),
-        "config_sha256": _sha256(config_path),
-        "fixture_manifest_sha256": _json_fingerprint(
+        "source_control": git_identity(ROOT),
+        "dependencies": dependency_versions(),
+        "config_sha256": sha256_file(config_path),
+        "fixture_manifest_sha256": json_fingerprint(
             {name: FIXTURES[name] for name in fixture_ids}
         ),
         "protocol": {
@@ -142,7 +142,7 @@ def main() -> int:
         },
         "voice": {
             "id": args.voice,
-            "reference_sha256": _sha256(reference),
+            "reference_sha256": sha256_file(reference),
             "reference_text_sha256": hashlib.sha256(
                 ref_text.encode("utf-8")
             ).hexdigest(),
@@ -253,7 +253,7 @@ def main() -> int:
                             engine.speaker_similarity(output_path, reference)
                         ),
                         "peak_memory_bytes": peak_memory_bytes,
-                        "audio_sha256": _sha256(output_path),
+                        "audio_sha256": sha256_file(output_path),
                         "relative_path": str(output_path.relative_to(args.output_dir)),
                         "engine_metrics": dict(engine.last_generation_metrics),
                     }

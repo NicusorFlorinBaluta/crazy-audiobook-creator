@@ -6,7 +6,6 @@ import argparse
 import hashlib
 import json
 import statistics
-import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -18,6 +17,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from brain.orchestrator.pipeline import Pipeline
+from scripts.benchmark_support import git_identity
 from shared.artifacts import atomic_write_json, normalize_for_coverage
 from shared.live_test_guard import add_model_opt_in
 from shared.models import CharacterRegistry, ExtractedChapter
@@ -46,26 +46,6 @@ def _parse_configs(value: str) -> list[dict[str, int | str]]:
     if len(configs) != 2:
         raise ValueError("exactly two script chunk configurations are required")
     return configs
-
-
-def _git_identity() -> dict[str, Any]:
-    def run(*args: str) -> str | None:
-        result = subprocess.run(
-            ["git", *args],
-            cwd=ROOT,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        return result.stdout.strip() if result.returncode == 0 else None
-
-    status = run("status", "--porcelain", "--untracked-files=normal")
-    return {
-        "commit": run("rev-parse", "HEAD"),
-        "branch": run("branch", "--show-current"),
-        "dirty": bool(status),
-        "status": status.splitlines() if status else [],
-    }
 
 
 def _excerpt_hash(fragments) -> str:
@@ -228,7 +208,7 @@ def main() -> int:
         "created_at": datetime.now(timezone.utc).isoformat(),
         "project": args.project,
         "chapter": args.chapter,
-        "source_control": _git_identity(),
+        "source_control": git_identity(ROOT),
         "python_version": sys.version.split()[0],
         "brain_config_sha256": hashlib.sha256(
             config_path.read_bytes()

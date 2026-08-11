@@ -5,11 +5,8 @@ from __future__ import annotations
 import argparse
 import copy
 import hashlib
-import importlib.metadata
 import json
 import re
-import statistics
-import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -25,6 +22,14 @@ if str(ROOT) not in sys.path:
 
 from shared.artifacts import atomic_write_json
 from shared.live_test_guard import add_model_opt_in
+from scripts.benchmark_support import (
+    balanced_order,
+    dependency_versions,
+    git_identity,
+    json_fingerprint,
+    sha256_file,
+    summarize_tts_runs,
+)
 from voice.tts_server.qwen3_engine import Qwen3TTSEngine
 from voice.tts_server.voice_library import VoiceLibraryManager
 from voice.validator.whisper_validator import WhisperValidator
@@ -48,54 +53,6 @@ FIXTURES = {
 }
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
-def _json_fingerprint(value: Any) -> str:
-    encoded = json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
-
-
-def _git_identity() -> dict[str, Any]:
-    def run(*args: str) -> str | None:
-        result = subprocess.run(
-            ["git", *args],
-            cwd=ROOT,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        return result.stdout.strip() if result.returncode == 0 else None
-
-    status = run("status", "--porcelain", "--untracked-files=normal")
-    return {
-        "commit": run("rev-parse", "HEAD"),
-        "branch": run("branch", "--show-current"),
-        "dirty": bool(status),
-        "status": status.splitlines() if status else [],
-    }
-
-
-def _dependency_versions() -> dict[str, str | None]:
-    result: dict[str, str | None] = {"python": sys.version.split()[0]}
-    for package in ("torch", "qwen-tts", "soundfile", "openai-whisper"):
-        try:
-            result[package] = importlib.metadata.version(package)
-        except importlib.metadata.PackageNotFoundError:
-            result[package] = None
-    return result
-
-
 def _deep_update(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
     result = copy.deepcopy(base)
     for key, value in patch.items():
@@ -104,67 +61,6 @@ def _deep_update(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
         else:
             result[key] = copy.deepcopy(value)
     return result
-
-
-def _balanced_order(repetitions: int, pattern: str) -> list[str]:
-    """Return equal A/B counts while retaining an ABBA or BAAB order."""
-    if repetitions < 1:
-        raise ValueError("repetitions must be positive")
-    pattern = pattern.upper()
-    if pattern not in {"ABBA", "BAAB"}:
-        raise ValueError("pattern must be ABBA or BAAB")
-    target = {"A": repetitions, "B": repetitions}
-    counts = {"A": 0, "B": 0}
-    result: list[str] = []
-    while counts != target:
-        for item in pattern:
-            if counts[item] >= target[item]:
-                continue
-            result.append(item)
-            counts[item] += 1
-    return result
-
-
-def _percentile(values: list[float], quantile: float) -> float:
-    if not values:
-        return 0.0
-    ordered = sorted(values)
-    if len(ordered) == 1:
-        return ordered[0]
-    position = (len(ordered) - 1) * quantile
-    lower = int(position)
-    upper = min(lower + 1, len(ordered) - 1)
-    fraction = position - lower
-    return ordered[lower] + (ordered[upper] - ordered[lower]) * fraction
-
-
-def _summarize_mode(runs: list[dict[str, Any]]) -> dict[str, Any]:
-    rtfs = [float(run["realtime_factor"]) for run in runs]
-    walls = [float(run["wall_seconds"]) for run in runs]
-    similarities = [
-        float(run["speaker_similarity"])
-        for run in runs
-        if isinstance(run.get("speaker_similarity"), (int, float))
-    ]
-    wers = [
-        float(run["wer"])
-        for run in runs
-        if isinstance(run.get("wer"), (int, float))
-    ]
-    return {
-        "runs": len(runs),
-        "rtf_p50": _percentile(rtfs, 0.50),
-        "rtf_p90": _percentile(rtfs, 0.90),
-        "rtf_p95": _percentile(rtfs, 0.95),
-        "wall_seconds_p50": _percentile(walls, 0.50),
-        "wall_seconds_p95": _percentile(walls, 0.95),
-        "average_wer": statistics.fmean(wers) if wers else None,
-        "maximum_wer": max(wers) if wers else None,
-        "average_speaker_similarity": (
-            statistics.fmean(similarities) if similarities else None
-        ),
-        "minimum_speaker_similarity": min(similarities) if similarities else None,
-    }
 
 
 def _candidate_patch(path: Path | None) -> dict[str, Any]:
@@ -255,10 +151,10 @@ def main() -> int:
         "schema_version": 2,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "project": args.project,
-        "source_control": _git_identity(),
-        "dependencies": _dependency_versions(),
-        "config_sha256": _sha256(config_path),
-        "fixture_manifest_sha256": _json_fingerprint(
+        "source_control": git_identity(ROOT),
+        "dependencies": dependency_versions(),
+        "config_sha256": sha256_file(config_path),
+        "fixture_manifest_sha256": json_fingerprint(
             {name: FIXTURES[name] for name in fixture_ids}
         ),
         "protocol": {
@@ -286,7 +182,7 @@ def main() -> int:
             label: {
                 "name": name,
                 "generation_config": generation,
-                "generation_config_sha256": _json_fingerprint(generation),
+                "generation_config_sha256": json_fingerprint(generation),
             }
             for label, (name, generation) in modes.items()
         },
@@ -304,7 +200,7 @@ def main() -> int:
         "voices": [
             {
                 "id": voice_id,
-                "reference_sha256": _sha256(values["reference"]),
+                "reference_sha256": sha256_file(values["reference"]),
                 "reference_text_sha256": hashlib.sha256(
                     values["ref_text"].encode("utf-8")
                 ).hexdigest(),
@@ -361,7 +257,7 @@ def main() -> int:
                 )
                 occurrence = {"A": 0, "B": 0}
                 for slot, mode_label in enumerate(
-                    _balanced_order(args.repetitions, combination_pattern),
+                    balanced_order(args.repetitions, combination_pattern),
                     1,
                 ):
                     occurrence[mode_label] += 1
@@ -411,7 +307,7 @@ def main() -> int:
                                 voice["reference"],
                             )
                         ),
-                        "audio_sha256": _sha256(output_path),
+                        "audio_sha256": sha256_file(output_path),
                         "relative_path": str(
                             output_path.relative_to(args.output_dir)
                         ),
@@ -450,7 +346,7 @@ def main() -> int:
             validator.unload()
 
     report["summary"] = {
-        modes[label][0]: _summarize_mode(
+        modes[label][0]: summarize_tts_runs(
             [run for run in report["runs"] if run["mode_label"] == label]
         )
         for label in ("A", "B")

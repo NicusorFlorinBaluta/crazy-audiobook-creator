@@ -12,11 +12,8 @@ from shared.performance import read_metrics, summarize_metrics
 from shared.progress import ProgressEstimator
 from shared.reference_selection import reference_line_score, select_reference_text
 from shared.logging_utils import rotate_file
-from scripts.benchmark_tts_fixture import (
-    _balanced_order,
-    _deep_update,
-    _summarize_mode,
-)
+from scripts.benchmark_support import balanced_order, summarize_tts_runs
+from scripts.benchmark_tts_fixture import _deep_update
 from scripts.benchmark_script_chunks import _parse_configs
 
 
@@ -172,12 +169,12 @@ class PerformanceSummaryTests(unittest.TestCase):
 
 class TTSBenchmarkHarnessTests(unittest.TestCase):
     def test_balanced_order_preserves_equal_repetition_counts(self) -> None:
-        order = _balanced_order(5, "ABBA")
+        order = balanced_order(5, "ABBA")
         self.assertEqual(order.count("A"), 5)
         self.assertEqual(order.count("B"), 5)
         self.assertEqual(order[:4], list("ABBA"))
-        self.assertEqual(_balanced_order(1, "ABBA"), ["A", "B"])
-        self.assertEqual(_balanced_order(1, "BAAB"), ["B", "A"])
+        self.assertEqual(balanced_order(1, "ABBA"), ["A", "B"])
+        self.assertEqual(balanced_order(1, "BAAB"), ["B", "A"])
 
     def test_generation_patch_merges_nested_values_without_mutating_control(self) -> None:
         control = {
@@ -193,7 +190,7 @@ class TTSBenchmarkHarnessTests(unittest.TestCase):
         self.assertEqual(candidate["adaptive_max_new_tokens"]["minimum_tokens"], 512)
 
     def test_mode_summary_reports_median_and_tail(self) -> None:
-        summary = _summarize_mode(
+        summary = summarize_tts_runs(
             [
                 {
                     "realtime_factor": value,
