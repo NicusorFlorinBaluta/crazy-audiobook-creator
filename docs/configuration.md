@@ -71,7 +71,25 @@ or a reverse proxy and protected by firewall rules.
 
 ### `metadata`
 
-`auto_fetch_external: false` is the privacy-preserving default. Enabling it sends book title/author queries to Google Books after project creation. The dashboard’s manual metadata button always performs the requested external lookup.
+`auto_fetch_external: false` is the privacy-preserving default. Enabling it
+sends book title/author queries to Google Books after project creation. The
+automatic path fills only missing description, ISBN, genre, and year fields and
+never replaces an embedded cover. The dashboard's **Find book details** action
+shows a candidate and confidence before applying it; the EPUB title and author
+remain authoritative, and replacing an existing cover requires an explicit
+checkbox. Provider failures and no-match results are reported distinctly.
+
+`cache_hours: 24` keeps a query-specific candidate in the project directory so
+repeat reviews and duplicate clicks do not make another provider request. Use
+the API's `refresh` option to bypass a still-valid candidate. Cover downloads
+are restricted to Google image hosts, HTTPS, supported image signatures,
+bounded dimensions, and 8 MB.
+
+Set `GOOGLE_BOOKS_API_KEY` in `.env` to identify requests and receive the
+Google Cloud project's dedicated Books API quota. The key remains server-side,
+is never returned to the dashboard, and should be restricted to the Books API.
+When Google returns `429`, the lookup does not amplify it with immediate
+retries and reports any numeric `Retry-After` value to the user.
 
 ### `pipeline`
 
@@ -91,7 +109,16 @@ schedule:
       days: [Monday, Tuesday, Wednesday, Thursday, Friday]
 ```
 
-Cross-midnight windows belong to the weekday on which they start. The worker parks only at safe stage/chapter boundaries, releases a managed Voice process during long waits, and resumes when a configured window opens. A dashboard restart preserves scheduled jobs as resumable instead of claiming their old worker is still running.
+Scheduling is global: every queued audiobook project uses these windows. Each
+window must select at least one weekday and its start/end times must differ.
+Windows include the start minute and exclude the end minute, so adjacent
+windows do not both claim the same boundary.
+Cross-midnight windows belong to the weekday on which they start. The worker
+parks only at safe stage/chapter boundaries, releases a managed Voice process
+during long waits, and resumes when a configured window opens. A dashboard
+restart preserves scheduled jobs as resumable instead of claiming their old
+worker is still running. Disabling scheduling opens work immediately, including
+jobs that were left in `paused_scheduled` by a restart.
 
 ## `voice/config.yaml`
 

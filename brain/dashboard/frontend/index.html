@@ -9,7 +9,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="static/css/styles.css?v=20260811.6">
+    <link rel="stylesheet" href="static/css/styles.css?v=20260811.7">
     <script>
         if ('serviceWorker' in navigator) {
             navigator.serviceWorker.getRegistrations().then(function(registrations) {
@@ -112,7 +112,7 @@
                     ← Back to Projects
                 </button>
                 <div class="detail-actions">
-                    <button class="btn btn-ghost hidden" id="btn-fetch-metadata">🔍 Fetch Artwork</button>
+                    <button class="btn btn-ghost" id="btn-fetch-metadata" title="Find a close Google Books match and review it before applying">🔍 Find book details</button>
                     <button class="btn btn-success" id="btn-start-pipeline">
                         ▶ Start Pipeline
                     </button>
@@ -252,6 +252,7 @@
                     <div class="schedule-body">
                         <div class="schedule-intro">
                             <label class="toggle-row"><input type="checkbox" id="schedule-enabled"><span>Automatically work only during these windows</span></label>
+                            <p class="schedule-scope"><strong>Global setting:</strong> these working hours apply to every queued audiobook project.</p>
                             <label>Timezone <input type="text" id="schedule-timezone" class="input-sm" value="Europe/Bucharest"></label>
                         </div>
                         <div id="schedule-windows" class="schedule-windows"></div>
@@ -259,7 +260,7 @@
                             <button class="btn btn-ghost btn-sm" id="btn-add-schedule-window">Add window</button>
                             <button class="btn btn-primary btn-sm" id="btn-save-schedule">Save working hours</button>
                         </div>
-                        <p class="schedule-help">The pipeline parks at a safe boundary and resumes automatically when a working window opens. Overnight windows are supported.</p>
+                        <p class="schedule-help">Select at least one weekday per window. The pipeline parks at a safe boundary and resumes automatically when a working window opens. Overnight windows belong to the day on which they start.</p>
                     </div>
                 </details>
 
@@ -419,15 +420,54 @@
         </div>
     </div>
 
+    <!-- Metadata review modal -->
+    <div class="modal-overlay hidden" id="metadata-modal" role="presentation">
+        <div class="modal metadata-modal" role="dialog" aria-modal="true" aria-labelledby="metadata-modal-title" tabindex="-1">
+            <div class="modal-header">
+                <div>
+                    <h2 id="metadata-modal-title">Review matched book details</h2>
+                    <p class="metadata-subtitle" id="metadata-match-summary"></p>
+                </div>
+                <button class="modal-close" id="metadata-modal-close" type="button" aria-label="Close metadata review">&times;</button>
+            </div>
+            <div class="modal-body metadata-review">
+                <div class="metadata-cover-wrap">
+                    <img id="metadata-cover-preview" alt="Matched book cover" hidden>
+                    <div class="metadata-cover-empty" id="metadata-cover-empty">No cover available</div>
+                </div>
+                <div class="metadata-fields">
+                    <dl>
+                        <div><dt>Matched title</dt><dd id="metadata-title"></dd></div>
+                        <div><dt>Author</dt><dd id="metadata-author"></dd></div>
+                        <div><dt>Year</dt><dd id="metadata-year"></dd></div>
+                        <div><dt>Genre</dt><dd id="metadata-genre"></dd></div>
+                        <div><dt>ISBN</dt><dd id="metadata-isbn"></dd></div>
+                    </dl>
+                    <p class="metadata-description" id="metadata-description"></p>
+                    <p class="metadata-note">Your EPUB title and author remain unchanged. Applying fills available description, genre, year, ISBN, and provenance.</p>
+                    <label class="metadata-replace-cover hidden" id="metadata-replace-cover-row">
+                        <input type="checkbox" id="metadata-replace-cover">
+                        Replace the cover already embedded in this EPUB
+                    </label>
+                    <div class="metadata-warnings hidden" id="metadata-warnings" role="status"></div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-ghost" id="metadata-cancel">Cancel</button>
+                <button class="btn btn-primary" id="metadata-apply">Apply matched details</button>
+            </div>
+        </div>
+    </div>
+
     <!-- ============================================ -->
     <!-- Toast notifications                          -->
     <!-- ============================================ -->
     <div class="toast-container" id="toast-container" role="status" aria-live="polite"></div>
 
     <!-- Scripts -->
-    <script src="static/js/app.js?v=20260811.6"></script>
-    <script src="static/js/pipeline.js?v=20260811.6"></script>
-    <script src="static/js/script-viewer.js?v=20260811.6"></script>
-    <script src="static/js/log-console.js?v=20260811.6"></script>
+    <script src="static/js/app.js?v=20260811.7"></script>
+    <script src="static/js/pipeline.js?v=20260811.7"></script>
+    <script src="static/js/script-viewer.js?v=20260811.7"></script>
+    <script src="static/js/log-console.js?v=20260811.7"></script>
 </body>
 </html>

@@ -96,8 +96,17 @@ Analysis and scripting remain book-wide. Selection controls generation, masterin
 | `GET` | `/api/projects/{project_id}/logs` | Recent project log lines |
 | `GET` | `/api/projects/{project_id}/logs/stream` | SSE project log stream |
 | `POST` | `/api/projects/{project_id}/fetch-metadata` | Explicit Google Books lookup |
+| `GET` | `/api/projects/{project_id}/metadata-candidate/cover` | Preview the cached matched cover |
+| `GET` | `/api/projects/{project_id}/cover` | Display the project's current cover |
 
 Project IDs and all resolved files are constrained beneath the project/workspace roots.
+
+Metadata lookup accepts JSON. `{"apply": false}` returns a ranked, validated
+candidate without changing the book; `{"apply": true, "replace_cover": false}`
+merges the reviewed description, ISBN, genre, year, and provider provenance.
+EPUB title/author are not replaced. An existing cover is preserved unless
+`replace_cover` is explicitly true. `refresh` bypasses the query-specific
+cache. No match returns `404`; provider/network failure returns `502`.
 
 `GET /voices` returns a speaking-only cast. Non-speaking registry entries are
 reported only as an excluded count and cannot receive voice assignments. Voice

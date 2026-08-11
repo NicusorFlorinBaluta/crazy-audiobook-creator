@@ -44,7 +44,20 @@ def validate_brain_config(config: dict[str, Any]) -> dict[str, Any]:
     _number(errors, script, "chunk_size_words", minimum=50)
     _number(errors, script, "max_fragments_per_chunk", minimum=1)
     _number(errors, script, "speaker_confidence_threshold", minimum=0, maximum=1)
+    metadata = config.get("metadata", {})
+    if not isinstance(metadata, dict):
+        errors.append("metadata must be an object")
+    else:
+        if (
+            "auto_fetch_external" in metadata
+            and not isinstance(metadata["auto_fetch_external"], bool)
+        ):
+            errors.append("metadata.auto_fetch_external must be boolean")
+        _number(errors, metadata, "cache_hours", minimum=0, maximum=720)
     schedule = config.get("schedule", {})
+    if not isinstance(schedule, dict):
+        errors.append("schedule must be an object")
+        schedule = {}
     timezone_name = str(schedule.get("timezone", "UTC"))
     try:
         ZoneInfo(timezone_name)
@@ -68,8 +81,16 @@ def validate_brain_config(config: dict[str, Any]) -> dict[str, Any]:
                 except ValueError:
                     errors.append(f"schedule window {index} {field} must use HH:MM")
             days = window.get("days", [])
-            if not isinstance(days, list) or any(day not in valid_days for day in days):
+            if (
+                not isinstance(days, list)
+                or not days
+                or any(day not in valid_days for day in days)
+            ):
                 errors.append(f"schedule window {index} has invalid days")
+            if window.get("start") == window.get("end"):
+                errors.append(
+                    f"schedule window {index} start and end must differ"
+                )
     if schedule.get("enabled") and not windows:
         errors.append("enabled schedule requires at least one window")
     if errors:

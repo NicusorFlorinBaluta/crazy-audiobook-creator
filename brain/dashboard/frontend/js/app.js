@@ -11,7 +11,8 @@ const state = window.state = {
     voiceServerOnline: false,
     schedule: null,
     lastScheduleRefresh: 0,
-    lastModalTrigger: null
+    lastModalTrigger: null,
+    metadataCandidate: null
 };
 
 // DOM Elements
@@ -42,6 +43,10 @@ const els = {
     uploadProgress: document.getElementById('upload-progress'),
     uploadProgressFill: document.getElementById('upload-progress-fill'),
     uploadProgressText: document.getElementById('upload-progress-text'),
+    metadataModal: document.getElementById('metadata-modal'),
+    metadataModalClose: document.getElementById('metadata-modal-close'),
+    metadataCancel: document.getElementById('metadata-cancel'),
+    metadataApply: document.getElementById('metadata-apply'),
     toastContainer: document.getElementById('toast-container'),
     voiceStatusDot: document.getElementById('voice-status-dot'),
     voiceStatusText: document.getElementById('voice-status-text')
@@ -192,6 +197,12 @@ function setupEventListeners() {
         if (event.target === els.uploadModal) closeUploadModal();
     });
     document.addEventListener('keydown', handleGlobalKeydown);
+    els.metadataModalClose.addEventListener('click', closeMetadataModal);
+    els.metadataCancel.addEventListener('click', closeMetadataModal);
+    els.metadataApply.addEventListener('click', applyMetadataCandidate);
+    els.metadataModal.addEventListener('click', event => {
+        if (event.target === els.metadataModal) closeMetadataModal();
+    });
     
     // Drag and Drop Upload
     els.uploadZone.addEventListener('click', () => els.epubInput.click());
@@ -216,19 +227,7 @@ function setupEventListeners() {
     // Feature Expansion Handlers
     const btnFetchMeta = document.getElementById('btn-fetch-metadata');
     if (btnFetchMeta) {
-        btnFetchMeta.addEventListener('click', async () => {
-            if (!state.currentProjectId) return;
-            showToast('Fetching artwork and info...', 'info');
-            try {
-                const res = await fetch(`api/projects/${state.currentProjectId}/fetch-metadata`, { method: 'POST' });
-                if (!res.ok) throw new Error('Metadata fetch failed');
-                const data = await res.json();
-                showToast('Artwork & metadata updated!', 'success');
-                fetchProjectDetails(state.currentProjectId);
-            } catch (e) {
-                showToast(e.message, 'error');
-            }
-        });
+        btnFetchMeta.addEventListener('click', previewMetadataCandidate);
     }
 
     const btnReqDeploy = document.getElementById('btn-request-deploy');
@@ -389,14 +388,18 @@ function handleTabKeydown(event) {
 }
 
 function handleGlobalKeydown(event) {
-    if (els.uploadModal.classList.contains('hidden')) return;
+    const activeModal = [els.uploadModal, els.metadataModal].find(
+        modal => modal && !modal.classList.contains('hidden')
+    );
+    if (!activeModal) return;
     if (event.key === 'Escape') {
         event.preventDefault();
-        closeUploadModal();
+        if (activeModal === els.uploadModal) closeUploadModal();
+        else closeMetadataModal();
         return;
     }
     if (event.key !== 'Tab') return;
-    const focusable = [...els.uploadModal.querySelectorAll(
+    const focusable = [...activeModal.querySelectorAll(
         'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
     )].filter(element => !element.hidden && element.offsetParent !== null);
     if (!focusable.length) return;
@@ -833,6 +836,16 @@ function renderProjectDetails(project) {
 function renderProjectHeader(project) {
     document.getElementById('project-title').textContent = (project.title && project.title !== 'Unknown') ? project.title : 'Untitled';
     document.getElementById('project-author').textContent = (project.author && project.author !== 'Unknown') ? project.author : 'Unknown Author';
+    const cover = document.getElementById('project-cover');
+    cover.replaceChildren();
+    if (project.cover_url) {
+        const image = document.createElement('img');
+        image.src = project.cover_url;
+        image.alt = `Cover of ${project.title || 'audiobook'}`;
+        cover.appendChild(image);
+    } else {
+        cover.textContent = '📖';
+    }
     
     const status = String(project.status || 'created').toLowerCase();
     const statusToken = status.replace(/[^a-z_]/g, '');
@@ -854,6 +867,125 @@ function renderProjectHeader(project) {
             ${escapeHtml(displayStatus)}${escapeHtml(statusDetail)}
         </span>
     `;
+}
+
+async function apiErrorMessage(response, fallback) {
+    try {
+        const payload = await response.json();
+        return payload.detail || fallback;
+    } catch (_) {
+        return fallback;
+    }
+}
+
+function closeMetadataModal() {
+    els.metadataModal.classList.add('hidden');
+    state.metadataCandidate = null;
+    document.getElementById('metadata-cover-preview').removeAttribute('src');
+    if (state.lastModalTrigger?.focus) state.lastModalTrigger.focus();
+    state.lastModalTrigger = null;
+}
+
+function showMetadataCandidate(candidate) {
+    state.metadataCandidate = candidate;
+    const percent = Math.round(Number(candidate.confidence || 0) * 100);
+    document.getElementById('metadata-match-summary').textContent =
+        `${percent}% match from Google Books${candidate.cached ? ' · cached result' : ''}`;
+    for (const [id, value] of Object.entries({
+        'metadata-title': candidate.title,
+        'metadata-author': candidate.author,
+        'metadata-year': candidate.year,
+        'metadata-genre': candidate.genre,
+        'metadata-isbn': candidate.isbn
+    })) {
+        document.getElementById(id).textContent = value || 'Not provided';
+    }
+    document.getElementById('metadata-description').textContent =
+        candidate.description || 'No description was provided by this match.';
+
+    const cover = document.getElementById('metadata-cover-preview');
+    const empty = document.getElementById('metadata-cover-empty');
+    if (candidate.cover_preview_url) {
+        cover.src = `${candidate.cover_preview_url}?v=${encodeURIComponent(candidate.fetched_at || Date.now())}`;
+        cover.hidden = false;
+        empty.hidden = true;
+    } else {
+        cover.hidden = true;
+        empty.hidden = false;
+    }
+    const replaceRow = document.getElementById('metadata-replace-cover-row');
+    const replaceInput = document.getElementById('metadata-replace-cover');
+    replaceInput.checked = false;
+    replaceRow.classList.toggle(
+        'hidden',
+        !(candidate.existing_cover && candidate.cover_preview_url)
+    );
+    const warnings = document.getElementById('metadata-warnings');
+    const warningItems = candidate.warnings || [];
+    warnings.textContent = warningItems.join(' ');
+    warnings.classList.toggle('hidden', warningItems.length === 0);
+
+    state.lastModalTrigger = document.activeElement;
+    els.metadataModal.classList.remove('hidden');
+    requestAnimationFrame(() => els.metadataApply.focus());
+}
+
+async function previewMetadataCandidate() {
+    if (!state.currentProjectId) return;
+    const button = document.getElementById('btn-fetch-metadata');
+    const originalText = button.textContent;
+    button.disabled = true;
+    button.textContent = 'Checking…';
+    try {
+        const response = await fetch(
+            `api/projects/${encodeURIComponent(state.currentProjectId)}/fetch-metadata`,
+            {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ apply: false })
+            }
+        );
+        if (!response.ok) {
+            throw new Error(await apiErrorMessage(response, 'Could not find book details'));
+        }
+        showMetadataCandidate(await response.json());
+    } catch (error) {
+        showToast(error.message, 'error');
+    } finally {
+        button.disabled = false;
+        button.textContent = originalText;
+    }
+}
+
+async function applyMetadataCandidate() {
+    if (!state.currentProjectId || !state.metadataCandidate) return;
+    const originalText = els.metadataApply.textContent;
+    els.metadataApply.disabled = true;
+    els.metadataApply.textContent = 'Applying…';
+    try {
+        const response = await fetch(
+            `api/projects/${encodeURIComponent(state.currentProjectId)}/fetch-metadata`,
+            {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    apply: true,
+                    replace_cover: document.getElementById('metadata-replace-cover').checked
+                })
+            }
+        );
+        if (!response.ok) {
+            throw new Error(await apiErrorMessage(response, 'Could not apply book details'));
+        }
+        closeMetadataModal();
+        showToast('Matched book details applied', 'success');
+        await fetchProjectDetails(state.currentProjectId);
+    } catch (error) {
+        showToast(error.message, 'error');
+    } finally {
+        els.metadataApply.disabled = false;
+        els.metadataApply.textContent = originalText;
+    }
 }
 
 function renderChapterList(project) {
@@ -1626,6 +1758,16 @@ async function saveSchedule() {
         timezone: document.getElementById('schedule-timezone').value.trim(),
         windows
     };
+    const invalidWindowIndex = windows.findIndex(window =>
+        !window.days.length || !window.start || !window.end || window.start === window.end
+    );
+    if (invalidWindowIndex >= 0) {
+        showToast(
+            `Window ${invalidWindowIndex + 1} needs a weekday and different start/end times`,
+            'warning'
+        );
+        return;
+    }
     button.disabled = true;
     try {
         const response = await fetch('api/schedule', {

@@ -196,18 +196,20 @@ class Pipeline:
         now_time = now.time()
         anchor = now
 
-        if start_time <= end_time:
-            in_time = start_time <= now_time <= end_time
+        if start_time == end_time:
+            return False
+        if start_time < end_time:
+            in_time = start_time <= now_time < end_time
         elif now_time >= start_time:
             in_time = True
-        elif now_time <= end_time:
+        elif now_time < end_time:
             in_time = True
             anchor = now - timedelta(days=1)
         else:
             in_time = False
 
         days = win.get("days", [])
-        return in_time and (not days or anchor.strftime("%A") in days)
+        return in_time and bool(days) and anchor.strftime("%A") in days
 
     def _pause_at_boundary(
         self,
@@ -1997,7 +1999,7 @@ class Pipeline:
             metadata=AudiobookMetadata(
                 title=book.metadata.title,
                 author=book.metadata.author,
-                genre=book.metadata.genre or "Fantasy",
+                genre=book.metadata.genre,
                 year=book.metadata.year,
                 description=book.metadata.description,
             ),

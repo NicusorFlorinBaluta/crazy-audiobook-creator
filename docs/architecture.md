@@ -196,6 +196,12 @@ without a token only when the actual TCP peer belongs to
 `dashboard.trusted_lan_cidrs` or loopback; forwarded headers never grant trust.
 Google Books metadata lookup is off by default and only occurs after an
 explicit dashboard action or when `metadata.auto_fetch_external` is enabled.
+Up to ten candidates are ranked by normalized title and author similarity; a
+minimum-confidence match is persisted as a query-keyed review artifact. Cover
+bytes are host, protocol, size, type, and dimension checked before atomic
+storage. Manual application keeps EPUB title/author authoritative and requires
+explicit consent to replace embedded cover art. Automatic enrichment fills
+only missing fields and preserves the cover.
 
 ## Feature Maintenance & Impact Guidelines
 

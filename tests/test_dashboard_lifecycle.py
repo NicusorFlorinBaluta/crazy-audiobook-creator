@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import brain.dashboard.api.main as dashboard
+from brain.extractor.metadata_fetcher import FetchedMetadata, MetadataFetcher
 from shared.constants import PipelineStage
 
 
@@ -38,6 +39,101 @@ class DashboardLifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(dashboard._dashboard_shutdown_task)
             blocker.set()
             await dashboard._dashboard_shutdown_task
+
+    async def test_metadata_preview_is_cached_and_apply_preserves_epub_identity(self) -> None:
+        png = b"\x89PNG\r\n\x1a\n" + b"\0" * 8 + (320).to_bytes(4, "big") + (480).to_bytes(4, "big")
+        fetched = FetchedMetadata(
+            status="matched",
+            query_title="Original Title",
+            query_author="Original Author",
+            title="Provider Title",
+            authors=["Provider Author"],
+            description="Provider description",
+            isbn="9780000000001",
+            genre="Mystery",
+            year="2024",
+            provider_id="volume-1",
+            confidence=0.98,
+            cover_image_bytes=png,
+            cover_mime_type="image/png",
+            cover_width=320,
+            cover_height=480,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            project_dir = Path(directory)
+            embedded_cover = project_dir / "embedded.jpg"
+            embedded_cover.write_bytes(b"embedded")
+            book_path = project_dir / "book.json"
+            book_path.write_text(json.dumps({
+                "metadata": {
+                    "title": "Original Title",
+                    "author": "Original Author",
+                    "language": "en",
+                    "description": "Embedded EPUB description",
+                    "cover_image_path": str(embedded_cover),
+                },
+                "chapters": [],
+            }), encoding="utf-8")
+
+            with (
+                patch.object(dashboard, "_project_dir", return_value=project_dir),
+                patch.object(MetadataFetcher, "fetch", return_value=fetched) as fetch,
+            ):
+                preview = dashboard._fetch_metadata_sync("sample")
+                automatic = dashboard._fetch_metadata_sync(
+                    "sample", apply=True, only_missing=True
+                )
+                automatically_saved = json.loads(
+                    book_path.read_text(encoding="utf-8")
+                )["metadata"]
+                applied = dashboard._fetch_metadata_sync("sample", apply=True)
+
+            self.assertFalse(preview["cached"])
+            self.assertTrue(automatic["applied"])
+            self.assertTrue(applied["applied"])
+            fetch.assert_called_once()
+            saved = json.loads(book_path.read_text(encoding="utf-8"))["metadata"]
+            self.assertEqual(saved["title"], "Original Title")
+            self.assertEqual(saved["author"], "Original Author")
+            self.assertEqual(saved["cover_image_path"], str(embedded_cover))
+            self.assertEqual(
+                automatically_saved["description"], "Embedded EPUB description"
+            )
+            self.assertEqual(saved["description"], "Provider description")
+            self.assertEqual(saved["genre"], "Mystery")
+            self.assertEqual(saved["metadata_provider_id"], "volume-1")
+
+    async def test_schedule_api_rejects_empty_days_and_normalizes_order(self) -> None:
+        invalid_request = AsyncMock()
+        invalid_request.json.return_value = {
+            "enabled": True,
+            "timezone": "Europe/Bucharest",
+            "windows": [{"days": [], "start": "08:00", "end": "18:00"}],
+        }
+        with self.assertRaises(dashboard.HTTPException) as raised:
+            await dashboard.update_schedule(invalid_request)
+        self.assertEqual(raised.exception.status_code, 422)
+
+        request = AsyncMock()
+        request.json.return_value = {
+            "enabled": True,
+            "timezone": "Europe/Bucharest",
+            "windows": [{
+                "days": ["Sunday", "Monday"],
+                "start": "08:00",
+                "end": "18:00",
+            }],
+        }
+        with (
+            patch.object(dashboard, "_replace_yaml_section") as replace,
+            patch.object(dashboard, "pipeline", None),
+        ):
+            response = await dashboard.update_schedule(request)
+        self.assertEqual(
+            response["schedule"]["windows"][0]["days"],
+            ["Monday", "Sunday"],
+        )
+        replace.assert_called_once()
 
     async def test_shutdown_helper_releases_resources_before_exit(self) -> None:
         released = AsyncMock()

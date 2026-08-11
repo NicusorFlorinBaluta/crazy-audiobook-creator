@@ -468,6 +468,14 @@ over a cell can show the chapter title.
 
 ## Section 8 — Book Metadata & Cover Artwork
 
+> **Implemented refinement (2026-08-11):** The final implementation is more
+> conservative than this original plan. It ranks up to ten results, rejects
+> low-confidence title/author matches, distinguishes no-match from provider
+> failure, validates cover origin/type/size/dimensions, and caches a review
+> candidate. Manual lookup previews before applying and never silently changes
+> EPUB title/author or replaces an embedded cover. Automatic lookup remains
+> opt-in and fills only missing fields.
+
 ### 8.1 Metadata fetcher utility
 
 **New file:** `brain/extractor/metadata_fetcher.py`

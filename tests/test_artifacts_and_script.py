@@ -1100,6 +1100,24 @@ class PartialGenerationTests(unittest.TestCase):
             )
         )
 
+    def test_empty_days_and_zero_duration_fail_closed(self) -> None:
+        monday = datetime(2026, 7, 20, 12, 0)
+        self.assertFalse(Pipeline._window_contains(
+            {"days": [], "start": "08:00", "end": "18:00"}, monday
+        ))
+        self.assertFalse(Pipeline._window_contains(
+            {"days": ["Monday"], "start": "12:00", "end": "12:00"}, monday
+        ))
+
+    def test_schedule_end_boundary_is_exclusive(self) -> None:
+        window = {"days": ["Monday"], "start": "08:00", "end": "12:00"}
+        self.assertTrue(Pipeline._window_contains(
+            window, datetime(2026, 7, 20, 8, 0)
+        ))
+        self.assertFalse(Pipeline._window_contains(
+            window, datetime(2026, 7, 20, 12, 0)
+        ))
+
 
 if __name__ == "__main__":
     unittest.main()

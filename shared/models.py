@@ -31,11 +31,16 @@ class BookMetadata(BaseModel):
     author: str
     language: str = "en"
     description: str = ""
+    isbn: str = ""
     genre: str = ""
     year: str = ""
     total_chapters: int = 0
     total_words: int = 0
     cover_image_path: str | None = None
+    metadata_provider: str = ""
+    metadata_provider_id: str = ""
+    metadata_confidence: float | None = None
+    metadata_fetched_at: str = ""
 
 
 class ExtractedChapter(BaseModel):

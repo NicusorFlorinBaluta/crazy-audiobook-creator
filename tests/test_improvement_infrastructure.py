@@ -39,6 +39,26 @@ class ConfigurationValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "requires at least one window"):
             validate_brain_config({"schedule": {"enabled": True, "windows": []}})
 
+    def test_schedule_window_requires_an_explicit_weekday(self) -> None:
+        with self.assertRaisesRegex(ValueError, "days"):
+            validate_brain_config({
+                "schedule": {
+                    "enabled": True,
+                    "windows": [{"days": [], "start": "08:00", "end": "18:00"}],
+                }
+            })
+
+    def test_schedule_window_must_have_nonzero_duration(self) -> None:
+        with self.assertRaisesRegex(ValueError, "must differ"):
+            validate_brain_config({
+                "schedule": {
+                    "enabled": True,
+                    "windows": [{
+                        "days": ["Monday"], "start": "08:00", "end": "08:00"
+                    }],
+                }
+            })
+
 
 class ProgressEstimatorTests(unittest.TestCase):
     def test_eta_uses_a_bounded_median_and_reports_confidence(self) -> None:

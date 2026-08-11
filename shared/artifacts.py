@@ -71,6 +71,29 @@ def atomic_write_text(path: str | Path, text: str) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def atomic_write_bytes(path: str | Path, content: bytes) -> None:
+    """Replace a binary file atomically within its destination directory."""
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=f".{destination.name}.",
+        suffix=".tmp",
+        dir=str(destination.parent),
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.replace(temporary, destination)
+        except PermissionError:
+            shutil.copyfile(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def atomic_write_json(path: str | Path, value: Any) -> None:
     atomic_write_text(path, json.dumps(value, ensure_ascii=False, indent=2, default=str))
 

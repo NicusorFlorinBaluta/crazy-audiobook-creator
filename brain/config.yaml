@@ -95,6 +95,7 @@ dashboard:
 # External metadata lookup is opt-in
 metadata:
   auto_fetch_external: false
+  cache_hours: 24
 # Pipeline state and artifact behavior
 pipeline:
   auto_start_tts: true

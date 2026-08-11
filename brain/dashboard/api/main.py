@@ -28,6 +28,7 @@ import shutil
 import sqlite3
 import subprocess
 import time
+import threading
 import unicodedata
 import uuid
 import wave
@@ -41,7 +42,7 @@ from zoneinfo import ZoneInfo
 import yaml
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -57,6 +58,7 @@ from brain.dashboard.api.security import (
 from brain.orchestrator.job_queue import JobQueue
 from shared.constants import PipelineStage, VOICE_CAST_SCHEMA_VERSION
 from shared.artifacts import (
+    atomic_write_bytes,
     atomic_write_json,
     atomic_write_text,
     fingerprint,
@@ -74,7 +76,7 @@ from voice.tts_server.voice_library import VoiceLibraryManager
 
 logger = logging.getLogger(__name__)
 
-FRONTEND_BUILD = "2026.08.10.3"
+FRONTEND_BUILD = "2026.08.11.7"
 
 
 class AsyncioConnectionResetFilter(logging.Filter):
@@ -93,6 +95,8 @@ job_queue: JobQueue | None = None
 ws_connections: list[WebSocket] = []
 running_tasks: dict[str, asyncio.Task] = {}
 _dashboard_shutdown_task: asyncio.Task | None = None
+_metadata_locks: dict[str, threading.Lock] = {}
+_metadata_locks_guard = threading.Lock()
 
 _VOICE_STAGES = {
     PipelineStage.BOOTSTRAPPING.value,
@@ -199,6 +203,12 @@ class ReviewItemRequest(BaseModel):
 
 class CleanupRequest(BaseModel):
     confirmation_token: str = Field(min_length=64, max_length=64)
+
+
+class MetadataFetchRequest(BaseModel):
+    apply: bool = False
+    refresh: bool = False
+    replace_cover: bool = False
 
 
 def _require_job(project_id: str) -> dict[str, Any]:
@@ -892,11 +902,10 @@ async def lifespan(app: FastAPI):
             await asyncio.sleep(15)
             if not pipeline or not job_queue:
                 continue
-            schedule_config = load_config().get("schedule", {})
-            if (
-                not schedule_config.get("enabled", False)
-                or not pipeline.schedule_is_open()
-            ):
+            # ``schedule_is_open`` deliberately returns True when scheduling
+            # is disabled. This also releases jobs that were persisted as
+            # paused_scheduled before a dashboard restart.
+            if not pipeline.schedule_is_open():
                 continue
             if any(not task.done() for task in running_tasks.values()):
                 continue
@@ -1625,6 +1634,16 @@ async def get_pipeline_status(project_id: str):
                 if not state.get("author") or state.get("author") == "Unknown":
                     state["author"] = meta.get("author") or "Unknown Author"
 
+                state["description"] = meta.get("description") or ""
+                state["genre"] = meta.get("genre") or ""
+                state["year"] = meta.get("year") or ""
+                state["isbn"] = meta.get("isbn") or ""
+                cover = _existing_project_cover(project_dir, meta)
+                if cover:
+                    state["cover_url"] = (
+                        f"api/projects/{project_id}/cover?v={cover.stat().st_mtime_ns}"
+                    )
+
                 calc_total = len(b_chaps) or meta.get("total_chapters", 0)
                 if total_chapters == 0 and calc_total > 0:
                     total_chapters = calc_total
@@ -1738,7 +1757,9 @@ async def update_schedule(request: Request):
     """Update schedule config in brain/config.yaml."""
     data = await request.json()
     enabled = bool(data.get("enabled", False))
-    timezone_name = str(data.get("timezone", "Europe/Bucharest"))
+    timezone_name = str(
+        data.get("timezone", "Europe/Bucharest")
+    ).strip()
     try:
         ZoneInfo(timezone_name)
     except Exception as exc:
@@ -1746,10 +1767,11 @@ async def update_schedule(request: Request):
             status_code=422,
             detail=f"Unknown timezone: {timezone_name}",
         ) from exc
-    valid_days = {
+    valid_day_order = (
         "Monday", "Tuesday", "Wednesday", "Thursday",
         "Friday", "Saturday", "Sunday",
-    }
+    )
+    valid_days = set(valid_day_order)
     windows = data.get("windows", [])
     if not isinstance(windows, list):
         raise HTTPException(status_code=422, detail="windows must be a list")
@@ -1758,8 +1780,8 @@ async def update_schedule(request: Request):
         try:
             start = str(window["start"])
             end = str(window["end"])
-            datetime.strptime(start, "%H:%M")
-            datetime.strptime(end, "%H:%M")
+            parsed_start = datetime.strptime(start, "%H:%M")
+            parsed_end = datetime.strptime(end, "%H:%M")
         except Exception as exc:
             raise HTTPException(
                 status_code=422,
@@ -1768,14 +1790,29 @@ async def update_schedule(request: Request):
         days = window.get("days", [])
         if (
             not isinstance(days, list)
+            or not days
             or any(day not in valid_days for day in days)
         ):
             raise HTTPException(
                 status_code=422,
-                detail=f"Window {index + 1} contains an invalid weekday",
+                detail=(
+                    f"Window {index + 1} must select at least one valid "
+                    "weekday"
+                ),
+            )
+        start = parsed_start.strftime("%H:%M")
+        end = parsed_end.strftime("%H:%M")
+        if start == end:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Window {index + 1} start and end must differ",
             )
         normalized_windows.append(
-            {"days": days, "start": start, "end": end}
+            {
+                "days": [day for day in valid_day_order if day in set(days)],
+                "start": start,
+                "end": end,
+            }
         )
     if enabled and not normalized_windows:
         raise HTTPException(
@@ -1874,68 +1911,265 @@ async def get_voice_health():
         return {"online": False, "status": "offline"}
 
 
-def _auto_fetch_metadata_sync(project_id: str) -> None:
-    """Helper to automatically fetch artwork and description in background."""
+def _metadata_lock(project_id: str) -> threading.Lock:
+    with _metadata_locks_guard:
+        return _metadata_locks.setdefault(project_id, threading.Lock())
+
+
+def _metadata_cache_key(metadata: dict[str, Any]) -> str:
+    return fingerprint(
+        {
+            "title": str(metadata.get("title") or "").strip().casefold(),
+            "author": str(metadata.get("author") or "").strip().casefold(),
+            "language": str(metadata.get("language") or "").strip().casefold(),
+        }
+    )
+
+
+def _metadata_candidate_cover(project_dir: Path) -> Path | None:
+    for suffix in (".jpg", ".png"):
+        candidate = project_dir / f"metadata_candidate{suffix}"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _read_metadata_candidate(
+    project_dir: Path,
+    cache_key: str,
+) -> dict[str, Any] | None:
+    candidate_path = project_dir / "metadata_candidate.json"
+    if not candidate_path.is_file():
+        return None
     try:
-        project_dir = _project_dir(project_id)
-        book_json = project_dir / "book.json"
-        if not book_json.exists():
-            return
-        import json
-        from brain.extractor.metadata_fetcher import MetadataFetcher
+        candidate = json.loads(candidate_path.read_text(encoding="utf-8"))
+        fetched_at = datetime.fromisoformat(candidate["fetched_at"])
+        cache_hours = float(
+            load_config().get("metadata", {}).get("cache_hours", 24)
+        )
+        age_seconds = (datetime.now(timezone.utc) - fetched_at).total_seconds()
+        if (
+            candidate.get("status") != "matched"
+            or candidate.get("cache_key") != cache_key
+            or cache_hours <= 0
+            or age_seconds > cache_hours * 3600
+        ):
+            return None
+        if candidate.get("has_cover") and not _metadata_candidate_cover(project_dir):
+            candidate["has_cover"] = False
+        candidate["cached"] = True
+        return candidate
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        logger.warning("Ignoring invalid metadata candidate in %s", project_dir)
+        return None
+
+
+def _persist_metadata_candidate(
+    project_dir: Path,
+    fetched: Any,
+    cache_key: str,
+) -> dict[str, Any]:
+    candidate = fetched.serializable()
+    candidate.update(
+        {
+            "cache_key": cache_key,
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+            "cached": False,
+        }
+    )
+    if fetched.cover_image_bytes:
+        extension = ".png" if fetched.cover_mime_type == "image/png" else ".jpg"
+        atomic_write_bytes(
+            project_dir / f"metadata_candidate{extension}",
+            fetched.cover_image_bytes,
+        )
+        other_extension = ".jpg" if extension == ".png" else ".png"
+        (project_dir / f"metadata_candidate{other_extension}").unlink(missing_ok=True)
+    else:
+        for stale_suffix in (".jpg", ".png"):
+            (project_dir / f"metadata_candidate{stale_suffix}").unlink(missing_ok=True)
+    atomic_write_json(project_dir / "metadata_candidate.json", candidate)
+    return candidate
+
+
+def _existing_project_cover(project_dir: Path, metadata: dict[str, Any]) -> Path | None:
+    raw_path = metadata.get("cover_image_path")
+    if raw_path:
+        configured = Path(str(raw_path))
+        candidates = [configured]
+        if not configured.is_absolute():
+            candidates.extend((project_dir / configured, project_dir / configured.name))
+        for candidate in candidates:
+            try:
+                resolved = candidate.resolve()
+                if resolved.is_relative_to(project_dir.resolve()) and resolved.is_file():
+                    return resolved
+            except OSError:
+                continue
+    for name in ("cover.jpg", "cover.png"):
+        candidate = project_dir / name
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _metadata_response(
+    project_id: str,
+    candidate: dict[str, Any],
+    metadata: dict[str, Any],
+    *,
+    applied: bool = False,
+) -> dict[str, Any]:
+    payload = dict(candidate)
+    payload.pop("cache_key", None)
+    payload["applied"] = applied
+    payload["existing_cover"] = _existing_project_cover(
+        _project_dir(project_id), metadata
+    ) is not None
+    payload["cover_preview_url"] = (
+        f"api/projects/{project_id}/metadata-candidate/cover"
+        if candidate.get("has_cover")
+        else None
+    )
+    return payload
+
+
+def _fetch_metadata_sync(
+    project_id: str,
+    *,
+    refresh: bool = False,
+    apply: bool = False,
+    replace_cover: bool = False,
+    only_missing: bool = False,
+) -> dict[str, Any]:
+    """Fetch/cache a candidate and optionally merge it into book.json."""
+    from brain.extractor.metadata_fetcher import MetadataFetcher
+
+    project_dir = _project_dir(project_id)
+    book_json = project_dir / "book.json"
+    if not book_json.is_file():
+        raise FileNotFoundError("Project book.json not found")
+
+    with _metadata_lock(project_id):
         book_data = json.loads(book_json.read_text(encoding="utf-8"))
-        meta = book_data.get("metadata", {})
-        fetched = MetadataFetcher.fetch(meta.get("title", ""), meta.get("author", ""))
+        metadata = book_data.setdefault("metadata", {})
+        cache_key = _metadata_cache_key(metadata)
+        candidate = None if refresh else _read_metadata_candidate(project_dir, cache_key)
+        if candidate is None:
+            fetched = MetadataFetcher.fetch(
+                metadata.get("title", ""),
+                metadata.get("author", ""),
+                metadata.get("language", ""),
+            )
+            if fetched.status != "matched":
+                return fetched.serializable()
+            candidate = _persist_metadata_candidate(project_dir, fetched, cache_key)
 
-        if fetched.cover_image_bytes:
-            cover_file = project_dir / "cover.jpg"
-            cover_file.write_bytes(fetched.cover_image_bytes)
-            book_data["metadata"]["cover_image_path"] = str(cover_file)
+        if not apply:
+            return _metadata_response(project_id, candidate, metadata)
 
-        if fetched.description:
-            book_data["metadata"]["description"] = fetched.description
-
+        # The EPUB remains authoritative for title and author. External values
+        # are shown during review but never silently rename the book.
+        for key in ("description", "isbn", "genre", "year"):
+            if candidate.get(key) and (not only_missing or not metadata.get(key)):
+                metadata[key] = candidate[key]
+        metadata.update(
+            {
+                "metadata_provider": candidate.get("provider", ""),
+                "metadata_provider_id": candidate.get("provider_id", ""),
+                "metadata_confidence": candidate.get("confidence"),
+                "metadata_fetched_at": candidate.get("fetched_at", ""),
+            }
+        )
+        candidate_cover = _metadata_candidate_cover(project_dir)
+        current_cover = _existing_project_cover(project_dir, metadata)
+        if candidate_cover and (replace_cover or current_cover is None):
+            destination = project_dir / f"cover{candidate_cover.suffix.lower()}"
+            atomic_write_bytes(destination, candidate_cover.read_bytes())
+            other = project_dir / ("cover.png" if destination.suffix == ".jpg" else "cover.jpg")
+            if other != current_cover:
+                other.unlink(missing_ok=True)
+            metadata["cover_image_path"] = str(destination)
         atomic_write_json(book_json, book_data)
-        logger.info("Auto-fetched artwork/metadata for project %s", project_id)
-    except Exception as e:
-        logger.warning("Auto metadata fetch failed for %s: %s", project_id, e)
+        return _metadata_response(project_id, candidate, metadata, applied=True)
+
+
+def _auto_fetch_metadata_sync(project_id: str) -> None:
+    """Best-effort metadata enrichment that preserves embedded cover art."""
+    try:
+        result = _fetch_metadata_sync(
+            project_id,
+            apply=True,
+            replace_cover=False,
+            only_missing=True,
+        )
+        if result.get("status") == "matched":
+            logger.info("Auto-fetched metadata for project %s", project_id)
+        else:
+            logger.warning(
+                "Auto metadata lookup for %s returned %s: %s",
+                project_id,
+                result.get("status"),
+                result.get("error"),
+            )
+    except Exception as exc:
+        logger.warning("Auto metadata fetch failed for %s: %s", project_id, exc)
 
 
 @app.post("/api/projects/{project_id}/fetch-metadata")
-async def fetch_project_metadata(project_id: str):
-    """Fetch cover image and metadata from Google Books API."""
+async def fetch_project_metadata(
+    project_id: str,
+    request: MetadataFetchRequest,
+):
+    """Preview or apply a validated external metadata candidate."""
     if not job_queue:
         raise HTTPException(status_code=503, detail="Server not initialized")
+    try:
+        result = await asyncio.to_thread(
+            _fetch_metadata_sync,
+            project_id,
+            refresh=request.refresh,
+            apply=request.apply,
+            replace_cover=request.replace_cover,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if result.get("status") == "provider_error":
+        raise HTTPException(
+            status_code=502,
+            detail=f"Metadata provider unavailable: {result.get('error') or 'unknown error'}",
+        )
+    if result.get("status") == "no_match":
+        raise HTTPException(
+            status_code=404,
+            detail=result.get("error") or "No close metadata match was found",
+        )
+    return result
+
+
+@app.get("/api/projects/{project_id}/metadata-candidate/cover")
+async def get_metadata_candidate_cover(project_id: str):
+    project_dir = _project_dir(project_id)
+    with _metadata_lock(project_id):
+        cover = _metadata_candidate_cover(project_dir)
+        if not cover:
+            raise HTTPException(status_code=404, detail="Metadata candidate has no cover")
+        media_type = "image/png" if cover.suffix.lower() == ".png" else "image/jpeg"
+        return Response(content=cover.read_bytes(), media_type=media_type)
+
+
+@app.get("/api/projects/{project_id}/cover")
+async def get_project_cover(project_id: str):
     project_dir = _project_dir(project_id)
     book_json = project_dir / "book.json"
-    if not book_json.exists():
+    if not book_json.is_file():
         raise HTTPException(status_code=404, detail="Project book.json not found")
-
-    import json
-    from brain.extractor.metadata_fetcher import MetadataFetcher
     book_data = json.loads(book_json.read_text(encoding="utf-8"))
-    meta = book_data.get("metadata", {})
-    fetched = await asyncio.to_thread(MetadataFetcher.fetch, meta.get("title", ""), meta.get("author", ""))
-
-    cover_path = None
-    if fetched.cover_image_bytes:
-        cover_file = project_dir / "cover.jpg"
-        cover_file.write_bytes(fetched.cover_image_bytes)
-        cover_path = str(cover_file)
-        book_data["metadata"]["cover_image_path"] = cover_path
-
-    if fetched.description:
-        book_data["metadata"]["description"] = fetched.description
-
-    atomic_write_json(book_json, book_data)
-
-    return {
-        "status": "success",
-        "title": fetched.title,
-        "author": fetched.author,
-        "description": fetched.description,
-        "cover_path": cover_path,
-    }
+    cover = _existing_project_cover(project_dir, book_data.get("metadata", {}))
+    if not cover:
+        raise HTTPException(status_code=404, detail="Project has no cover")
+    media_type = "image/png" if cover.suffix.lower() == ".png" else "image/jpeg"
+    return FileResponse(cover, media_type=media_type)
 
 
 @app.post("/api/projects/{project_id}/request-deploy")
