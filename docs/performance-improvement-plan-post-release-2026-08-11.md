@@ -42,8 +42,62 @@ pipeline run after this change will therefore refresh cached scripts rather
 than silently reusing metadata produced under the older retry policy.
 
 No production chunk, grouping, token, attention, residency, validation, or
-audio-processing default has changed. The controlled model runs and any
-resulting promotion remain pending.
+audio-processing default has changed. The controlled model screens below did
+not meet their promotion gates.
+
+## Controlled model results - 2026-08-11
+
+Both screens ran from clean exact commits, retained their raw artifacts, and
+released the managed model processes and ports after completion.
+
+### Scripting chunk screen
+
+- Exact commit: `d80b95b`.
+- Protocol: chapter 7, two same-source excerpts (683 and 559 words), one
+  measured repetition, alternating `350:40` and `550:60` order, plus an
+  unmeasured warm-up.
+- Control `350:40`: median normalized wall time `0.5922 s/source-word`, p95
+  `0.6358`.
+- Candidate `550:60`: median normalized wall time `0.6465 s/source-word`, p95
+  `0.7394`.
+- Decision: reject the larger bound. It was 9.18% slower by the primary
+  normalized median gate. Both bounds still produced two chunks on both dense
+  excerpts, so the candidate did not reduce request count here.
+- Quality: all source coverage, ID, and speaker invariants passed. Each mode
+  exercised one exact local attribution repair with zero structural retries,
+  focused retries, or fragment fallbacks. This is direct live evidence that an
+  exact contradiction no longer causes another full model request.
+- Report:
+  `brain/projects/sample_book-14/benchmarks/script-chunks-d80b95b-20260811.json`,
+  SHA-256
+  `783b32bbe243c5471b9724154a158e626d8e28659cd577e8bfa369703b0d619d`.
+
+### Adaptive TTS token-cap screen
+
+- Exact commit: `60d631a`.
+- Protocol: narrator plus three approved character voices, three immutable
+  fixtures per voice, paired seeds, one repetition per mode, unmeasured
+  warm-up, and combination-level alternating ABBA/BAAB order (12 combinations,
+  24 measured generations).
+- Control: RTF p50 `1.2454`, p90 `4.2341`, p95 `4.4694`; total measured
+  synthesis wall time `184.49 s`.
+- Adaptive cap: RTF p50 `1.2632`, p90 `3.9386`, p95 `4.0429`; total measured
+  synthesis wall time `175.39 s`.
+- Quality: both modes had average and maximum WER `0.0`; average speaker
+  similarity was identical at `0.98731`, with identical minimum `0.97351`.
+- Decision: do not promote. The candidate improved tail and aggregate wall
+  time in this small screen but made the primary median RTF 1.43% slower. That
+  is neither the required 10% median win nor enough evidence to justify the
+  five-repetition promotion run. Production adaptive caps remain disabled.
+- Report:
+  `brain/projects/sample_book-14/benchmarks/tts-screen-60d631a.json`, SHA-256
+  `ae6048753416d47e30904b83b4287d26a74f5762fd5f07a1cc19091c8bcb1bd8`.
+
+The screen also confirms that autoregressive generation is the dominant TTS
+substage (`183.62/184.49 s` control and `174.64/175.39 s` candidate). Reference
+prompt preparation consumed less than one second per mode. Future TTS work
+should therefore target the autoregressive model/runtime itself, not prompt
+I/O, WAV writing, export, or dashboard polling.
 
 ## Measured baseline
 
@@ -61,10 +115,10 @@ A genuine 10% TTS improvement would save about 808 seconds (13.5 minutes) on
 this book and reduce generation/validation wall time by about 8.8%. A 20% TTS
 improvement would save about 27 minutes.
 
-The earlier 550-word/60-fragment scripting fixture improved normalized wall
-time per source word by about 22.5% over the smaller fixture. If that result
-generalized to the release corpus, the theoretical saving would be about 33
-minutes. That is an experiment target, not an accepted forecast.
+An earlier narrow 550-word/60-fragment fixture appeared to improve normalized
+wall time per source word by about 22.5%. The broader controlled screen above
+reversed that result, so the forecast based on it is retired and the existing
+`350:40` production bounds remain in place.
 
 ## Decisions that remain closed
 
@@ -312,12 +366,12 @@ Update the current benchmark report with one row per candidate:
 
 | Candidate | Status | Evidence required |
 | --- | --- | --- |
-| Deterministic local attribution repair | Implemented; benchmark pending | Offline request-count and correctness fixtures passed |
-| Fragment-focused semantic retry | Implemented; live comparison pending | Offline fixtures passed; representative scripting comparison required |
-| 550-word/60-fragment scripting | Pending broader validation | Multi-excerpt coverage/attribution and timing comparison |
+| Deterministic local attribution repair | Implemented and live-screened | Exact repairs occurred with no redundant full request; all invariants passed |
+| Fragment-focused semantic retry | Implemented; no ambiguous live case triggered | Offline fixtures passed; retain observability and exercise when a natural case appears |
+| 550-word/60-fragment scripting | Rejected | 9.18% slower normalized median; no chunk-count reduction on the screened excerpts |
 | Larger same-speaker TTS groups | Pending benchmark | Fixed TTS corpus and listening-approved chapter |
 | TTS compile/inference setting | Pending compatibility check | Warm alternating benchmark |
-| Adaptive token caps | Rejected for now | New controlled evidence must overturn the run-order result |
+| Adaptive token caps | Rejected after balanced multi-voice screen | Median RTF 1.43% slower; quality equal; no promotion-grade run warranted |
 | Initial TTS/Whisper co-residency | Rejected | Do not retest without a material runtime change |
 | Parallel GPU TTS workers | Deferred | Separate stability and throughput research gate |
 | Native Qwen batching | Unavailable in current wrapper | Revisit only after dependency support changes |
@@ -335,12 +389,11 @@ The five deliverables and their current status are:
    including stable percentile summaries.
 3. **Implemented:** reproducible scripting/TTS microbenchmark harnesses and
    immutable fixture identities.
-4. **Pending controlled model window:** run the small scripting and TTS
-   experiments; promote only candidates that meet their quality and speed
-   gates.
-5. **In progress:** the implementation state and existing rejected/deferred
-   decisions are documented; measured candidate rows remain pending the
-   controlled experiments.
+4. **Completed:** the small scripting and TTS screens ran; neither candidate
+   met its speed gate, so no output-changing default was promoted and no
+   representative chapter or full-book rerun was warranted.
+5. **Completed:** exact commits, protocols, hashes, speed/quality metrics,
+   decisions, and rollback positions are documented above.
 
 The scripting harness is `scripts/benchmark_script_chunks.py`. It defaults to
 three same-source excerpts and alternates which of `350:40` and `550:60` runs
