@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import time
+import unicodedata
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Callable
@@ -819,7 +820,7 @@ class ValidationLoop:
         )
         if expressive_short:
             return (
-                normalized or synthesis_text,
+                self._plain_synthesis_text(synthesis_text),
                 "clear emphatic delivery",
                 1.0,
                 None,
@@ -955,6 +956,14 @@ class ValidationLoop:
             )
             
         word_count = len(self.whisper._normalize_text(validation_text).split())
+        semantic_text_mismatch = self._has_disallowed_semantic_substitution(
+            validation_text,
+            transcribed,
+        )
+        semantic_error_rate = (
+            1.0 / max(word_count, 1) if semantic_text_mismatch else 0.0
+        )
+        reported_wer = max(wer, semantic_error_rate)
         normalized_expected = self.whisper._normalize_text(validation_text)
         eligible_glossary_match = any(
             normalized_term
@@ -981,33 +990,36 @@ class ValidationLoop:
             and glossary_adjusted_wer < wer
             and glossary_adjusted_wer <= effective_wer_threshold
         )
-        effective_text_error = (
-            0.0
-            if orthographic_segmentation_match
-            else (
-                min(wer, compact_error_rate, glossary_adjusted_wer)
-                if spelling_variant_match or glossary_phonetic_match
-                else wer
-            )
+        effective_text_error = max(
+            semantic_error_rate,
+            (
+                0.0
+                if orthographic_segmentation_match
+                else (
+                    min(wer, compact_error_rate, glossary_adjusted_wer)
+                    if spelling_variant_match or glossary_phonetic_match
+                    else wer
+                )
+            ),
         )
         quality_score = (
             (1 - effective_text_error) * QUALITY_WEIGHT_WER
             + analysis["artifact_score"] * QUALITY_WEIGHT_ARTIFACT
             + analysis["duration_score"] * QUALITY_WEIGHT_DURATION
         )
-        estimated_word_errors = wer * max(word_count, 1)
+        estimated_word_errors = reported_wer * max(word_count, 1)
         # For one- and two-word clips, one wrong word means the utterance is
         # materially wrong. Longer clips follow the configured WER threshold;
         # the former 6-15 word special case silently rejected lines that were
         # already below that configured threshold.
-        length_sensitive_wer_failure = (
+        length_sensitive_wer_failure = semantic_text_mismatch or ((
             (word_count <= 2 and estimated_word_errors > 0.05)
             or (word_count > 2 and wer > effective_wer_threshold)
         ) and not (
             spelling_variant_match
             or glossary_phonetic_match
             or orthographic_segmentation_match
-        )
+        ))
 
         hard_audio_failure = (
             analysis["clipping_detected"]
@@ -1024,7 +1036,9 @@ class ValidationLoop:
         if length_sensitive_wer_failure or hard_audio_failure:
             status = ValidationStatus.FAIL
             acceptance_reason = (
-                "transcription_mismatch"
+                "semantic_transcription_mismatch"
+                if semantic_text_mismatch
+                else "transcription_mismatch"
                 if length_sensitive_wer_failure
                 else "hard_audio_check"
             )
@@ -1062,14 +1076,14 @@ class ValidationLoop:
             line_id,
             attempt,
             status.value,
-            wer,
+            reported_wer,
             text_similarity,
             quality_score,
         )
         res = QualityResult(
             line_id=line_id,
             status=status,
-            wer=wer,
+            wer=reported_wer,
             transcribed_text=transcribed,
             duration_seconds=analysis["duration_seconds"],
             expected_duration_seconds=analysis["expected_duration_seconds"],
@@ -1218,8 +1232,43 @@ class ValidationLoop:
         )
         if attempt <= 2:
             return synthesis_text
-        normalized = self.whisper._normalize_text(synthesis_text)
-        return normalized or synthesis_text
+        return self._plain_synthesis_text(synthesis_text)
+
+    @staticmethod
+    def _plain_synthesis_text(text: str) -> str:
+        """Remove expressive punctuation without rewriting spoken words.
+
+        Whisper's English normalizer is appropriate for scoring equivalent
+        transcripts, but it is not safe as TTS input: it maps the interjection
+        ``oh`` to ``zero``. Retry synthesis must preserve lexical meaning.
+        """
+        normalized = unicodedata.normalize("NFKC", text or "").casefold()
+        normalized = re.sub(r"[^\w\s'’-]", " ", normalized)
+        return re.sub(r"\s+", " ", normalized).strip() or text
+
+    @staticmethod
+    def _has_disallowed_semantic_substitution(
+        expected_text: str,
+        transcribed_text: str,
+    ) -> bool:
+        """Catch semantic rewrites hidden by ASR scoring normalization.
+
+        OpenAI's English normalizer intentionally treats ``oh`` and ``zero``
+        as equivalent for number transcription. In prose, an authored ``oh``
+        is an interjection and synthesized ``zero`` is materially wrong.
+        """
+
+        def tokens(value: str) -> list[str]:
+            folded = unicodedata.normalize("NFKC", value or "").casefold()
+            return re.findall(r"[\w]+", folded)
+
+        return any(
+            expected == "oh" and observed in {"zero", "0"}
+            for expected, observed in zip(
+                tokens(expected_text),
+                tokens(transcribed_text),
+            )
+        )
 
     @staticmethod
     def _prepare_synthesis_text(text: str) -> str:

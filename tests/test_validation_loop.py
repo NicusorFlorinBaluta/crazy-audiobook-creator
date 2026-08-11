@@ -242,7 +242,7 @@ class ValidationLoopTests(unittest.TestCase):
             )
             text, emotion, speed, fx, reason = loop._initial_delivery(line, set())
 
-        self.assertEqual(text, "uncle!")
+        self.assertEqual(text, "uncle")
         self.assertEqual(emotion, "clear emphatic delivery")
         self.assertEqual(speed, 1.0)
         self.assertIsNone(fx)
@@ -269,7 +269,7 @@ class ValidationLoopTests(unittest.TestCase):
         self.assertEqual(speed, 1.0)
         self.assertIsNone(reason)
 
-    def test_final_retry_uses_plain_normalized_synthesis_text(self) -> None:
+    def test_final_retry_uses_plain_lexically_preserved_synthesis_text(self) -> None:
         class PlainTextWhisper(FakeWhisper):
             @staticmethod
             def _normalize_text(text: str) -> str:
@@ -291,6 +291,54 @@ class ValidationLoopTests(unittest.TestCase):
                 loop._retry_synthesis_text(line, 3),
                 "uncle she shouted",
             )
+
+    def test_final_retry_does_not_rewrite_oh_as_zero(self) -> None:
+        line = ScriptLine(
+            line_id="ch07_0223",
+            speaker="vathi",
+            text='"Oh, Mirris,"',
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            loop, _ = self.make_loop(Path(directory))
+            self.assertEqual(loop._retry_synthesis_text(line, 3), "oh mirris")
+
+    def test_zero_for_authored_oh_fails_even_when_normalized_wer_is_zero(self) -> None:
+        class ZeroWhisper(FakeWhisper):
+            def transcribe(self, audio_file: str) -> str:
+                return "Zero Mirris."
+
+            def calculate_wer(self, reference: str, hypothesis: str) -> float:
+                return 0.0
+
+            def calculate_text_similarity(
+                self,
+                reference: str,
+                hypothesis: str,
+            ) -> float:
+                return 1.0
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            loop, _ = self.make_loop(root)
+            loop.whisper = ZeroWhisper()
+            audio = root / "line.wav"
+            sf.write(audio, np.ones(2400, dtype=np.float32) * 0.01, 24000)
+            result = loop._validate_segment(
+                str(audio),
+                '"Oh, Mirris,"',
+                "ch07_0223",
+                1.0,
+                validation_terms={"Mirris"},
+            )
+
+        self.assertEqual(result.status, ValidationStatus.FAIL)
+        self.assertEqual(
+            result.acceptance_reason,
+            "semantic_transcription_mismatch",
+        )
+        self.assertEqual(result.wer, 0.5)
+        self.assertFalse(result.passed_hard_gates)
 
     def test_concatenated_repetitions_are_separated_for_synthesis(self) -> None:
         self.assertEqual(
