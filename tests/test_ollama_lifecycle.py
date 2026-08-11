@@ -133,6 +133,48 @@ class OllamaLifecycleTests(unittest.TestCase):
         self.assertTrue(pipeline.ollama.cancelled)
         self.assertTrue(pipeline.ollama.forced)
 
+    def test_managed_voice_server_launches_then_waits_for_readiness(self) -> None:
+        class FakeVoiceClient:
+            waited = False
+
+            def health_check_once(self):
+                raise ConnectionError("not started")
+
+            def wait_for_server(self, max_wait_seconds=120):
+                self.waited = True
+                self.max_wait_seconds = max_wait_seconds
+                return True
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            python_exe = root / "python.exe"
+            python_exe.touch()
+            pipeline = object.__new__(Pipeline)
+            pipeline.config = {
+                "voice_server": {
+                    "auto_start": True,
+                    "python_executable": str(python_exe),
+                    "venv": str(root),
+                    "startup_timeout_seconds": 37,
+                }
+            }
+            pipeline.projects_dir = root
+            pipeline.voice_client = FakeVoiceClient()
+
+            with (
+                patch("subprocess.run") as run,
+                patch("subprocess.Popen", return_value=_FakeProcess()) as popen,
+            ):
+                run.return_value.returncode = 0
+                pipeline._start_voice_server()
+
+            popen.assert_called_once()
+            self.assertTrue(pipeline.voice_client.waited)
+            self.assertEqual(pipeline.voice_client.max_wait_seconds, 37)
+            pipeline._voice_server_log_handle.close()
+            pipeline._voice_server_log_handle = None
+            pipeline._voice_server_proc = None
+
     def test_managed_ollama_receives_discrete_vulkan_selection(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             executable = Path(directory) / "ollama.exe"

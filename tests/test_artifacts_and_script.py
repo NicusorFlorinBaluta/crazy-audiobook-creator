@@ -6,7 +6,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from brain.director.character_analyzer import CharacterAnalyzer
-from brain.director.script_generator import ScriptGenerator, SourceFragment
+from brain.director.script_generator import (
+    MetadataAttributionError,
+    ScriptGenerator,
+    SourceFragment,
+)
 from brain.orchestrator.pipeline import Pipeline
 from shared.constants import Gender
 from shared.artifacts import (
@@ -484,6 +488,11 @@ class ScriptFidelityTests(unittest.TestCase):
                     ),
                     "speaker_confidence": confidence,
                     "speaker_evidence": "test evidence",
+                    "dialogue_kind": (
+                        "spoken"
+                        if ScriptGenerator._is_dialogue_fragment(fragment.text)
+                        else None
+                    ),
                     "emotion": "neutral",
                     "speed": 1.0,
                     "pause_before_ms": 0,
@@ -576,7 +585,7 @@ class ScriptFidelityTests(unittest.TestCase):
         self.assertEqual(script.lines[0].emotion, "neutral")
         self.assertEqual(script.lines[0].speed, 1.0)
         self.assertEqual(len(ollama.calls), 2)
-        self.assertIn("exactly one", ollama.calls[1][0])
+        self.assertIn("listed suspect audiobook fragments", ollama.calls[1][0])
         metric = generator.call_metrics[-1]
         self.assertEqual(metric["full_attempts"], 1)
         self.assertEqual(metric["focused_retries"], 1)
@@ -586,12 +595,124 @@ class ScriptFidelityTests(unittest.TestCase):
             ["full_chunk", "focused_fragment"],
         )
 
-    def test_failed_focused_retry_falls_back_only_affected_fragment(self) -> None:
+    def test_failed_focused_retry_blocks_unresolved_spoken_fragment(self) -> None:
         source = '"Wait," she said. The room fell silent.'
         fragments = ScriptGenerator._split_into_fragment_spans(source)
         initial = self._metadata_response(fragments, "dusk")
         invalid_focused = {"lines": [{"id": 99, "speaker": "vathi"}]}
         ollama = FakeScriptOllama([initial, invalid_focused])
+        generator = ScriptGenerator(ollama=ollama, group_utterances=False)
+
+        with self.assertRaises(MetadataAttributionError) as raised:
+            generator._process_fragments(
+                fragments,
+                1,
+                "One",
+                self._attribution_registry(),
+                "",
+                0,
+            )
+
+        self.assertTrue(
+            any(
+                issue.kind == "gender_contradiction"
+                for issue in raised.exception.issues
+            )
+        )
+        self.assertEqual(len(ollama.calls), 2)
+
+    def test_selective_repair_batches_untagged_conversation_turns(self) -> None:
+        source = '"Wait," she said. "Go," he replied.'
+        fragments = ScriptGenerator._split_into_fragment_spans(source)
+        dialogue_indexes = [
+            index
+            for index, fragment in enumerate(fragments)
+            if ScriptGenerator._is_dialogue_fragment(fragment.text)
+        ]
+        old_script = ScriptChapter(
+            chapter_number=1,
+            chapter_title="One",
+            lines=[
+                ScriptLine(
+                    line_id=f"ch01_{index:04d}",
+                    speaker="narrator",
+                    speaker_confidence=0.95,
+                    speaker_evidence="Legacy fallback metadata.",
+                    text=fragment.text,
+                    source_fragment_id=index,
+                    source_fragment_ids=[index],
+                    source_start=fragment.start,
+                    source_end=fragment.end,
+                )
+                for index, fragment in enumerate(fragments)
+            ],
+        )
+        response = {
+            "lines": [
+                {
+                    "id": dialogue_indexes[0],
+                    "speaker": "vathi",
+                    "speaker_confidence": 0.98,
+                    "speaker_evidence": "The attached she-said tag identifies Vathi.",
+                    "dialogue_kind": "spoken",
+                },
+                {
+                    "id": dialogue_indexes[1],
+                    "speaker": "dusk",
+                    "speaker_confidence": 0.98,
+                    "speaker_evidence": "The alternating reply and he-replied tag identify Dusk.",
+                    "dialogue_kind": "spoken",
+                },
+            ]
+        }
+        ollama = FakeScriptOllama([response])
+        generator = ScriptGenerator(ollama=ollama, group_utterances=False)
+        chapter = ExtractedChapter(
+            number=1,
+            title="One",
+            text=source,
+            word_count=len(source.split()),
+        )
+
+        repaired, metrics = generator.repair_chapter_attribution(
+            chapter,
+            old_script,
+            self._attribution_registry(),
+        )
+
+        speakers = {
+            line.source_fragment_id: line.speaker for line in repaired.lines
+        }
+        self.assertEqual(speakers[dialogue_indexes[0]], "vathi")
+        self.assertEqual(speakers[dialogue_indexes[1]], "dusk")
+        self.assertEqual(metrics["changed_fragments"], dialogue_indexes)
+        self.assertEqual(len(ollama.calls), 1)
+        self.assertEqual(
+            metrics["requests"][0]["request_kind"],
+            "focused_attribution_batch",
+        )
+
+    def test_action_only_beat_is_not_treated_as_a_dialogue_tag(self) -> None:
+        self.assertFalse(ScriptGenerator._is_pure_dialogue_tag("He nodded slowly."))
+        self.assertFalse(ScriptGenerator._is_pure_dialogue_tag("Vathi smiled."))
+        self.assertTrue(
+            ScriptGenerator._is_pure_dialogue_tag(
+                "the boy said, folding his arms."
+            )
+        )
+
+    def test_collective_reported_speech_is_repaired_without_model_retry(self) -> None:
+        source = 'They asked, "Why?" They said, "We should explain it."'
+        fragments = ScriptGenerator._split_into_fragment_spans(source)
+        dialogue_indexes = [
+            index
+            for index, fragment in enumerate(fragments)
+            if ScriptGenerator._is_dialogue_fragment(fragment.text)
+        ]
+        initial = self._metadata_response(fragments, "dusk")
+        initial["lines"][dialogue_indexes[0]]["speaker"] = "narrator"
+        initial["lines"][dialogue_indexes[0]]["dialogue_kind"] = "spoken"
+        ollama = FakeScriptOllama([initial])
         generator = ScriptGenerator(ollama=ollama, group_utterances=False)
 
         script = generator._process_fragments(
@@ -603,13 +724,50 @@ class ScriptFidelityTests(unittest.TestCase):
             0,
         )
 
-        self.assertEqual(script.lines[0].speaker, "narrator")
-        self.assertEqual(script.lines[-1].speaker, "narrator")
-        self.assertEqual(len(ollama.calls), 2)
-        metric = generator.call_metrics[-1]
-        self.assertEqual(metric["full_attempts"], 1)
-        self.assertEqual(metric["fragment_fallbacks"], 1)
-        self.assertTrue(metric["used_fallback"])
+        repaired = [script.lines[index] for index in dialogue_indexes]
+        self.assertTrue(all(line.speaker == "narrator" for line in repaired))
+        self.assertTrue(
+            all(
+                line.dialogue_kind == "reported_collective_speech"
+                for line in repaired
+            )
+        )
+        self.assertEqual(len(ollama.calls), 1)
+        self.assertEqual(generator.call_metrics[-1]["local_repairs"], 2)
+
+    def test_narrator_quote_requires_explicit_non_spoken_classification(self) -> None:
+        fragments = ScriptGenerator._split_into_fragment_spans('The sign read "STOP".')
+        raw = self._metadata_response(fragments, "narrator")
+        quote_index = next(
+            index
+            for index, fragment in enumerate(fragments)
+            if ScriptGenerator._is_dialogue_fragment(fragment.text)
+        )
+        issues = ScriptGenerator._collect_metadata_speaker_issues(
+            raw,
+            fragments,
+            set(self._attribution_registry().characters),
+            registry=self._attribution_registry(),
+        )
+        self.assertEqual(issues[0].kind, "narrator_spoken_dialogue")
+
+        raw["lines"][quote_index].update(
+            {
+                "dialogue_kind": "non_spoken_quote",
+                "speaker_evidence": (
+                    "The source explicitly says the word is written on a sign."
+                ),
+            }
+        )
+        self.assertEqual(
+            ScriptGenerator._collect_metadata_speaker_issues(
+                raw,
+                fragments,
+                set(self._attribution_registry().characters),
+                registry=self._attribution_registry(),
+            ),
+            [],
+        )
 
     def test_structural_metadata_failure_still_retries_full_chunk(self) -> None:
         source = '"Wait," Vathi said.'
@@ -1008,6 +1166,48 @@ class ScriptFidelityTests(unittest.TestCase):
         self.assertEqual(len(grouped.lines), 2)
         self.assertEqual(grouped.lines[0].emotion, "calm reflective narration")
         self.assertEqual(grouped.lines[1].emotion, "urgent panicked shout")
+        assert_script_covers_source(grouped, source)
+
+    def test_grouping_preserves_quote_classification_boundaries(self) -> None:
+        source = 'The sign read "STOP". Then he left.'
+        fragments = ScriptGenerator._split_into_fragment_spans(source)
+        lines = []
+        for index, fragment in enumerate(fragments):
+            is_quote = ScriptGenerator._is_dialogue_fragment(fragment.text)
+            lines.append(
+                ScriptLine(
+                    line_id=f"ch01_{index:04d}",
+                    speaker="narrator",
+                    speaker_confidence=0.99 if is_quote else None,
+                    speaker_evidence=(
+                        "The source presents STOP as text written on a sign."
+                        if is_quote else ""
+                    ),
+                    dialogue_kind="non_spoken_quote" if is_quote else None,
+                    text=fragment.text,
+                    source_fragment_id=index,
+                    source_fragment_ids=[index],
+                    source_start=fragment.start,
+                    source_end=fragment.end,
+                )
+            )
+        generator = ScriptGenerator(
+            ollama=FakeScriptOllama([]),
+            group_utterances=True,
+        )
+        grouped = generator._group_adjacent_utterances(
+            ScriptChapter(chapter_number=1, chapter_title="One", lines=lines),
+            source,
+        )
+        quote_line = next(
+            line
+            for line in grouped.lines
+            if any(
+                ScriptGenerator._is_dialogue_fragment(fragments[index].text)
+                for index in line.source_fragment_ids
+            )
+        )
+        self.assertEqual(quote_line.dialogue_kind, "non_spoken_quote")
         assert_script_covers_source(grouped, source)
 
     def test_large_single_chapter_is_analyzed_in_multiple_units(self) -> None:

@@ -28,6 +28,7 @@ from brain.director.character_analyzer import (
     _SYSTEM_PROMPT as CHARACTER_SYSTEM_PROMPT,
 )
 from brain.director.ollama_client import OllamaClient
+from brain.director.attribution_audit import audit_book_attribution
 from brain.director.script_generator import ScriptGenerator
 from brain.extractor.epub_parser import EpubParser
 from brain.orchestrator.job_queue import JobQueue
@@ -526,6 +527,7 @@ class Pipeline:
             encoding="utf-8",
             buffering=1,
         )
+
         logger.info("Managed Voice Server output: %s", log_path)
         try:
             self._voice_server_proc = subprocess.Popen(
@@ -544,6 +546,36 @@ class Pipeline:
         if not self.voice_client.wait_for_server(max_wait_seconds=timeout):
             self._stop_voice_server()
             raise RuntimeError(f"Voice server subprocess failed to start within {timeout}s")
+
+    def _assert_attribution_audit(self, project_dir: Path) -> dict[str, Any]:
+        """Persist and enforce the source-grounded speaker release gate."""
+        from shared.models import CharacterRegistry, ExtractedBook, ScriptChapter
+
+        book = ExtractedBook.model_validate_json(
+            (project_dir / "book.json").read_text(encoding="utf-8")
+        )
+        registry = CharacterRegistry.model_validate_json(
+            (project_dir / "characters.json").read_text(encoding="utf-8")
+        )
+        scripts = [
+            ScriptChapter.model_validate_json(path.read_text(encoding="utf-8"))
+            for path in self._script_files(project_dir / "script")
+        ]
+        report = audit_book_attribution(
+            book,
+            registry,
+            scripts,
+            confidence_threshold=self.script_generator.speaker_confidence_threshold,
+        )
+        report_path = project_dir / "attribution_audit.json"
+        atomic_write_json(report_path, report)
+        if not report["passed"]:
+            count = int(report["summary"]["blocking_issues"])
+            raise RuntimeError(
+                f"Speaker attribution release gate failed with {count} "
+                f"blocking issue(s); inspect {report_path}"
+            )
+        return report
 
     def _stop_voice_server(self) -> None:
         """Stop Voice Server subprocess if managed by this pipeline."""
@@ -1195,6 +1227,8 @@ class Pipeline:
             atomic_write_text(script_path, script.model_dump_json(indent=2))
             total_lines += script.total_lines
 
+        self._assert_attribution_audit(project_dir)
+
         book_script = BookScript(
             metadata=book.metadata,
             character_registry=registry,
@@ -1465,6 +1499,7 @@ class Pipeline:
 
     def _run_generation(self, project_id: str, project_dir: Path) -> None:
         """Run Stages ④-⑤: TTS generation with quality validation."""
+        self._assert_attribution_audit(project_dir)
         self._update_stage(project_id, PipelineStage.GENERATING)
 
         scripts_dir = project_dir / "script"
@@ -1909,6 +1944,7 @@ class Pipeline:
         chapter_selection: set[int] | None = None,
     ) -> None:
         """Run Stage ⑦: M4B export."""
+        self._assert_attribution_audit(project_dir)
         self._update_stage(project_id, PipelineStage.EXPORTING)
         self._progress_estimator.reset(f"{project_id}:export")
         self.job_queue.update_progress(

@@ -209,6 +209,12 @@ def build_segment_manifest(
     for line_payload in chapter_payload.get("lines", []):
         if line_payload.get("spoken_text") is None:
             line_payload.pop("spoken_text", None)
+        # dialogue_kind is source-audit metadata, not a synthesis input. Keep
+        # legacy scripts/manifests stable when the optional field is absent;
+        # explicit classifications remain in the script hash so repaired
+        # chapters are regenerated.
+        if line_payload.get("dialogue_kind") is None:
+            line_payload.pop("dialogue_kind", None)
     payload = {
         "schema": GENERATION_SCHEMA_VERSION,
         "project_id": project_id,

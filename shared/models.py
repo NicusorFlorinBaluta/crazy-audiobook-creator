@@ -188,6 +188,17 @@ class ScriptLine(BaseModel):
         le=5000,
         description="Silence after this segment (ms)",
     )
+    dialogue_kind: Literal[
+        "spoken", "non_spoken_quote", "reported_collective_speech"
+    ] | None = Field(
+        default=None,
+        description=(
+            "Classification for quoted source fragments. Spoken quotations "
+            "must use a character speaker; narrator quotations require an "
+            "explicit non_spoken_quote or source-tagged anonymous collective "
+            "speech classification and evidence."
+        ),
+    )
     utterance_group_id: str | None = Field(
         default=None,
         pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
