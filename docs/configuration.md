@@ -76,8 +76,17 @@ sends book title/author queries to Google Books after project creation. The
 automatic path fills only missing description, ISBN, genre, and year fields and
 never replaces an embedded cover. The dashboard's **Find book details** action
 shows a candidate and confidence before applying it; the EPUB title and author
-remain authoritative, and replacing an existing cover requires an explicit
-checkbox. Provider failures and no-match results are reported distinctly.
+remain authoritative only for automatic enrichment. Explicit human approval
+adopts the reviewed identity and retains the EPUB values as provenance.
+Replacing an existing cover requires an explicit checkbox. If automatic
+matching finds no sufficiently close candidate, the
+same dialog opens a manual title/author search. It returns up to ten editions
+with author, year, and ISBN so the user can select the exact Google Books
+volume for review. Explicit application uses the reviewed title and author,
+while retaining the EPUB values internally as source provenance. Existing M4B
+exports are atomically remuxed with the new tags and selected cover without
+re-encoding audio. Provider failures and no-match results are reported
+distinctly.
 
 `cache_hours: 24` keeps a query-specific candidate in the project directory so
 repeat reviews and duplicate clicks do not make another provider request. Use

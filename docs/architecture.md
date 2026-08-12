@@ -199,9 +199,14 @@ explicit dashboard action or when `metadata.auto_fetch_external` is enabled.
 Up to ten candidates are ranked by normalized title and author similarity; a
 minimum-confidence match is persisted as a query-keyed review artifact. Cover
 bytes are host, protocol, size, type, and dimension checked before atomic
-storage. Manual application keeps EPUB title/author authoritative and requires
-explicit consent to replace embedded cover art. Automatic enrichment fills
-only missing fields and preserves the cover.
+storage. When the automatic confidence gate rejects the best result, the
+dashboard can expose all ranked search candidates for human selection. The
+selected provider volume ID is validated and fetched exactly before it becomes
+the review artifact. Explicit manual application adopts the reviewed identity,
+retains EPUB identity as provenance, and requires explicit consent to replace
+embedded cover art. Existing exports are atomically metadata-remuxed with
+stream copying. Automatic enrichment still fills only missing fields and
+preserves EPUB identity and cover.
 
 ## Feature Maintenance & Impact Guidelines
 

@@ -15,6 +15,8 @@ Crazy Audiobook Creator turns an EPUB into a multi-speaker, chaptered M4B on one
 - Narrated chapter-title announcements, chapter WAV mastering, and full or partial M4B export
 - Immediate lossy pause/cancel, scheduled chapter-boundary parking, and a global GPU lease
 - Local dashboard with scalable chapter search/filtering, explicit current-work progress, editable working hours, script, character, quality, and log views
+- Reviewed Google Books matching with manual edition search and metadata-only refresh of completed M4B packages
+- Individually named reusable voice-reference downloads plus a complete cast ZIP
 
 ## Partial-book workflow
 
@@ -73,7 +75,7 @@ cd ..
 
 - Qwen3-TTS Base voice cloning does not expose a natural-language per-utterance instruction parameter. The project therefore applies requested speed plus restrained pitch/tone post-processing for emotion cues; it does not claim native clone-mode emotion control.
 - Mastered output targets internal listening quality. It is not an ACX submission validator or an ACX MP3 export pipeline.
-- External metadata lookup is opt-in and contacts Google Books only when requested or explicitly enabled. Manual matches are ranked and reviewed before application; embedded identity and cover art are preserved unless replacement is explicitly approved.
+- External metadata lookup is opt-in and contacts Google Books only when requested or explicitly enabled. Manual matches are ranked and reviewed before application. Explicit approval adopts the reviewed title and author while retaining the EPUB identity as provenance; embedded cover art is preserved unless replacement is explicitly approved.
 - Ollama and Voice bind to loopback. The dashboard may bind to the LAN;
   loopback and `dashboard.trusted_lan_cidrs` are allowed without a token.
 - **Pause** immediately interrupts active work and releases app-owned GPU models;
@@ -108,6 +110,11 @@ cd ..
 ```
 
 The unit suite does not load the production TTS models. A real end-to-end smoke test still requires the configured Ollama, GPU models, and FFmpeg.
+
+The 2026-08-12 low-resource release check passed 227 tests with 2 intentional
+skips on Windows. The same suite also passed with the optional `whisper`
+package hidden, matching GitHub Actions. Python compilation, JavaScript syntax,
+local documentation links, and `git diff --check` also passed.
 
 Low-resource verification and environment inspection can be run separately:
 

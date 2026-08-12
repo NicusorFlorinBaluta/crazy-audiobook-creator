@@ -597,6 +597,7 @@ class AudiobookMetadata(BaseModel):
     genre: str = "Fantasy"
     year: str = ""
     description: str = ""
+    isbn: str = ""
 
 
 class ExportChapterInfo(BaseModel):

@@ -87,6 +87,7 @@ Analysis and scripting remain book-wide. Selection controls generation, masterin
 | `GET` | `/api/projects/{project_id}/script` | Get the book script |
 | `GET` | `/api/projects/{project_id}/characters` | Get the character registry |
 | `GET` | `/api/projects/{project_id}/voices` | List assignable voices and preview readiness |
+| `GET` | `/api/projects/{project_id}/voices/download-all` | Download all prepared character and narrator references as a ZIP |
 | `GET` | `/api/projects/{project_id}/voices/{voice_id}/preview` | Stream a reference-voice WAV |
 | `PATCH` | `/api/projects/{project_id}/characters/{character_id}/voice` | Reassign a character to a voice |
 | `POST` | `/api/projects/{project_id}/voices/{voice_id}/regenerate` | Redesign and validate one reference voice |
@@ -96,6 +97,7 @@ Analysis and scripting remain book-wide. Selection controls generation, masterin
 | `GET` | `/api/projects/{project_id}/logs` | Recent project log lines |
 | `GET` | `/api/projects/{project_id}/logs/stream` | SSE project log stream |
 | `POST` | `/api/projects/{project_id}/fetch-metadata` | Explicit Google Books lookup |
+| `POST` | `/api/projects/{project_id}/search-metadata` | Ranked manual Google Books title/author search |
 | `GET` | `/api/projects/{project_id}/metadata-candidate/cover` | Preview the cached matched cover |
 | `GET` | `/api/projects/{project_id}/cover` | Display the project's current cover |
 
@@ -104,9 +106,22 @@ Project IDs and all resolved files are constrained beneath the project/workspace
 Metadata lookup accepts JSON. `{"apply": false}` returns a ranked, validated
 candidate without changing the book; `{"apply": true, "replace_cover": false}`
 merges the reviewed description, ISBN, genre, year, and provider provenance.
-EPUB title/author are not replaced. An existing cover is preserved unless
-`replace_cover` is explicitly true. `refresh` bypasses the query-specific
-cache. No match returns `404`; provider/network failure returns `502`.
+Manual search accepts `{"title": "...", "author": "..."}`. Passing the
+selected `provider_id` plus the search query back to `fetch-metadata` loads
+that exact volume for review rather than re-running automatic selection.
+Explicit apply also adopts the reviewed title/author and remuxes existing M4B
+packages with current tags and cover; audio and chapter streams are copied.
+Automatic enrichment does not replace EPUB title/author. Explicit human apply
+uses the reviewed identity and stores the source title/author as provenance.
+An existing cover is preserved unless `replace_cover` is explicitly true.
+`refresh` bypasses the query-specific cache. No match returns `404`;
+provider/network failure returns `502`.
+
+`GET /api/projects/{project_id}/download` names the attachment from the current
+book title. Applying details to a completed project atomically stream-copies
+each existing M4B with refreshed title, artist, album, genre, year,
+description, ISBN grouping, and cover while preserving chapter and audio
+streams. The response includes `refreshed_exports`.
 
 `GET /voices` returns a speaking-only cast. Non-speaking registry entries are
 reported only as an excluded count and cannot receive voice assignments. Voice

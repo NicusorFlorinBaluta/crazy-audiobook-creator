@@ -60,6 +60,24 @@ class FetchedMetadata:
         return payload
 
 
+@dataclass
+class MetadataSearchResults:
+    status: Literal["matched", "no_match", "provider_error"]
+    query_title: str
+    query_author: str
+    results: list[FetchedMetadata] = field(default_factory=list)
+    error: str = ""
+
+    def serializable(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "query_title": self.query_title,
+            "query_author": self.query_author,
+            "results": [result.serializable() for result in self.results],
+            "error": self.error,
+        }
+
+
 def _normalize(value: str) -> str:
     value = unicodedata.normalize("NFKD", str(value or ""))
     value = "".join(char for char in value if not unicodedata.combining(char))
@@ -215,6 +233,108 @@ def _request_search(client: httpx.Client, params: dict[str, str | int]) -> httpx
     raise last_error
 
 
+def _search_params(
+    title: str,
+    author: str,
+    language: str,
+) -> dict[str, str | int]:
+    query = f'intitle:"{title}"'
+    if author:
+        query += f' inauthor:"{author}"'
+    params: dict[str, str | int] = {
+        "q": query,
+        "maxResults": _MAX_RESULTS,
+        "printType": "books",
+        "orderBy": "relevance",
+        "fields": (
+            "items(id,volumeInfo(title,subtitle,authors,description,"
+            "industryIdentifiers,categories,publishedDate,language,imageLinks))"
+        ),
+    }
+    api_key = os.environ.get("GOOGLE_BOOKS_API_KEY", "").strip()
+    if api_key:
+        params["key"] = api_key
+    normalized_language = str(language or "").strip().lower()
+    if re.fullmatch(r"[a-z]{2}", normalized_language):
+        params["langRestrict"] = normalized_language
+    return params
+
+
+def _metadata_from_item(
+    item: dict[str, Any],
+    query_title: str,
+    query_author: str,
+    *,
+    confidence: float,
+) -> FetchedMetadata:
+    info = item.get("volumeInfo") or {}
+    if not isinstance(info, dict):
+        info = {}
+    raw_identifiers = info.get("industryIdentifiers") or []
+    if not isinstance(raw_identifiers, list):
+        raw_identifiers = []
+    identifiers = {
+        str(identifier.get("type", "")): str(identifier.get("identifier", ""))
+        for identifier in raw_identifiers
+        if isinstance(identifier, dict)
+    }
+    categories = info.get("categories") or []
+    if not isinstance(categories, list):
+        categories = []
+    authors = info.get("authors") or []
+    if not isinstance(authors, list):
+        authors = []
+    published_date = str(info.get("publishedDate") or "")
+    year_match = re.match(r"\d{4}", published_date)
+    return FetchedMetadata(
+        status="matched",
+        query_title=query_title,
+        query_author=query_author,
+        title=str(info.get("title") or query_title),
+        authors=[str(value) for value in authors],
+        description=str(info.get("description") or ""),
+        isbn=identifiers.get("ISBN_13") or identifiers.get("ISBN_10") or "",
+        genre=str(categories[0]) if categories else "",
+        year=year_match.group(0) if year_match else "",
+        language=str(info.get("language") or ""),
+        provider_id=str(item.get("id") or ""),
+        confidence=round(confidence, 4),
+    )
+
+
+def _attach_cover(
+    result: FetchedMetadata,
+    item: dict[str, Any],
+    client: httpx.Client,
+) -> None:
+    info = item.get("volumeInfo") or {}
+    image_links = (info.get("imageLinks") or {}) if isinstance(info, dict) else {}
+    if not isinstance(image_links, dict):
+        image_links = {}
+    image_url = next(
+        (
+            image_links.get(key)
+            for key in ("extraLarge", "large", "medium", "thumbnail", "smallThumbnail")
+            if image_links.get(key)
+        ),
+        None,
+    )
+    if not image_url:
+        return
+    try:
+        image_url = str(image_url).replace("http://", "https://", 1)
+        image_url = image_url.replace("zoom=1", "zoom=3")
+        (
+            result.cover_image_bytes,
+            result.cover_mime_type,
+            result.cover_width,
+            result.cover_height,
+        ) = _download_cover(client, image_url)
+    except Exception as exc:
+        result.warnings.append(f"Cover was rejected: {exc}")
+        logger.warning("Rejected Google Books cover: %s", exc)
+
+
 def _provider_error_message(exc: Exception) -> str:
     """Return an actionable message without leaking request internals."""
     if isinstance(exc, httpx.HTTPStatusError):
@@ -258,23 +378,8 @@ class MetadataFetcher:
                 error="A title is required for metadata lookup.",
             )
 
-        query = f'intitle:"{query_title}"'
-        if query_author:
-            query += f' inauthor:"{query_author}"'
-        params: dict[str, str | int] = {
-            "q": query,
-            "maxResults": _MAX_RESULTS,
-            "printType": "books",
-            "orderBy": "relevance",
-            "fields": (
-                "items(id,volumeInfo(title,subtitle,authors,description,"
-                "industryIdentifiers,categories,publishedDate,language,imageLinks))"
-            ),
-        }
-        api_key = os.environ.get("GOOGLE_BOOKS_API_KEY", "").strip()
-        if api_key:
-            params["key"] = api_key
-        elif transport is None:
+        params = _search_params(query_title, query_author, language)
+        if "key" not in params and transport is None:
             logger.warning(
                 "GOOGLE_BOOKS_API_KEY is not configured; lookup may use a "
                 "shared anonymous quota"
@@ -320,70 +425,145 @@ class MetadataFetcher:
                     )
 
                 confidence, item = ranked[0]
-                info = item.get("volumeInfo") or {}
-                raw_identifiers = info.get("industryIdentifiers") or []
-                if not isinstance(raw_identifiers, list):
-                    raw_identifiers = []
-                identifiers = {
-                    str(identifier.get("type", "")): str(identifier.get("identifier", ""))
-                    for identifier in raw_identifiers
-                    if isinstance(identifier, dict)
-                }
-                isbn = identifiers.get("ISBN_13") or identifiers.get("ISBN_10") or ""
-                categories = info.get("categories") or []
-                if not isinstance(categories, list):
-                    categories = []
-                authors = info.get("authors") or []
-                if not isinstance(authors, list):
-                    authors = []
-                published_date = str(info.get("publishedDate") or "")
-                year_match = re.match(r"\d{4}", published_date)
-                result = FetchedMetadata(
-                    status="matched",
-                    query_title=query_title,
-                    query_author=query_author,
-                    title=str(info.get("title") or query_title),
-                    authors=[str(value) for value in authors],
-                    description=str(info.get("description") or ""),
-                    isbn=isbn,
-                    genre=str(categories[0]) if categories else "",
-                    year=year_match.group(0) if year_match else "",
-                    language=str(info.get("language") or ""),
-                    provider_id=str(item.get("id") or ""),
-                    confidence=round(confidence, 4),
+                result = _metadata_from_item(
+                    item,
+                    query_title,
+                    query_author,
+                    confidence=confidence,
                 )
-                image_links = info.get("imageLinks") or {}
-                if not isinstance(image_links, dict):
-                    image_links = {}
-                image_url = next(
-                    (
-                        image_links.get(key)
-                        for key in (
-                            "extraLarge", "large", "medium", "thumbnail",
-                            "smallThumbnail",
-                        )
-                        if image_links.get(key)
-                    ),
-                    None,
-                )
-                if image_url:
-                    try:
-                        image_url = str(image_url).replace("http://", "https://", 1)
-                        image_url = image_url.replace("zoom=1", "zoom=3")
-                        (
-                            result.cover_image_bytes,
-                            result.cover_mime_type,
-                            result.cover_width,
-                            result.cover_height,
-                        ) = _download_cover(client, image_url)
-                    except Exception as exc:
-                        result.warnings.append(f"Cover was rejected: {exc}")
-                        logger.warning("Rejected Google Books cover: %s", exc)
+                _attach_cover(result, item, client)
                 return result
         except Exception as exc:
             safe_error = _provider_error_message(exc)
             # Never log the raw HTTP exception: its URL may contain the API key.
             logger.warning("Google Books metadata lookup failed: %s", safe_error)
+            return FetchedMetadata(
+                status="provider_error",
+                query_title=query_title,
+                query_author=query_author,
+                error=safe_error,
+            )
+
+    @staticmethod
+    def search(
+        title: str,
+        author: str = "",
+        language: str = "",
+        *,
+        transport: httpx.BaseTransport | None = None,
+    ) -> MetadataSearchResults:
+        """Return ranked candidates for explicit human selection."""
+        query_title = str(title or "").strip()
+        query_author = str(author or "").strip()
+        if not query_title:
+            return MetadataSearchResults(
+                status="no_match",
+                query_title=query_title,
+                query_author=query_author,
+                error="A title is required for metadata lookup.",
+            )
+        try:
+            with httpx.Client(
+                timeout=httpx.Timeout(10.0, connect=5.0),
+                follow_redirects=False,
+                transport=transport,
+                headers={"User-Agent": "CrazyAudiobookCreator/1.0"},
+            ) as client:
+                response = _request_search(
+                    client,
+                    _search_params(query_title, query_author, language),
+                )
+                response.raise_for_status()
+                data = response.json()
+                ranked: list[tuple[float, dict[str, Any]]] = []
+                for item in data.get("items") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    info = item.get("volumeInfo") or {}
+                    if not isinstance(info, dict) or not item.get("id"):
+                        continue
+                    ranked.append(
+                        (_candidate_score(query_title, query_author, info), item)
+                    )
+                ranked.sort(key=lambda pair: pair[0], reverse=True)
+                results = [
+                    _metadata_from_item(
+                        item,
+                        query_title,
+                        query_author,
+                        confidence=confidence,
+                    )
+                    for confidence, item in ranked
+                ]
+                if not results:
+                    return MetadataSearchResults(
+                        status="no_match",
+                        query_title=query_title,
+                        query_author=query_author,
+                        error="Google Books returned no results for this search.",
+                    )
+                return MetadataSearchResults(
+                    status="matched",
+                    query_title=query_title,
+                    query_author=query_author,
+                    results=results,
+                )
+        except Exception as exc:
+            safe_error = _provider_error_message(exc)
+            logger.warning("Google Books manual search failed: %s", safe_error)
+            return MetadataSearchResults(
+                status="provider_error",
+                query_title=query_title,
+                query_author=query_author,
+                error=safe_error,
+            )
+
+    @staticmethod
+    def fetch_volume(
+        provider_id: str,
+        query_title: str = "",
+        query_author: str = "",
+        *,
+        transport: httpx.BaseTransport | None = None,
+    ) -> FetchedMetadata:
+        """Fetch the exact Google Books volume selected by the user."""
+        volume_id = str(provider_id or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", volume_id):
+            return FetchedMetadata(
+                status="no_match",
+                query_title=query_title,
+                query_author=query_author,
+                error="The selected Google Books volume ID is invalid.",
+            )
+        params: dict[str, str] = {}
+        api_key = os.environ.get("GOOGLE_BOOKS_API_KEY", "").strip()
+        if api_key:
+            params["key"] = api_key
+        try:
+            with httpx.Client(
+                timeout=httpx.Timeout(10.0, connect=5.0),
+                follow_redirects=False,
+                transport=transport,
+                headers={"User-Agent": "CrazyAudiobookCreator/1.0"},
+            ) as client:
+                response = client.get(f"{_GOOGLE_BOOKS_URL}/{volume_id}", params=params)
+                response.raise_for_status()
+                item = response.json()
+                if not isinstance(item, dict) or str(item.get("id") or "") != volume_id:
+                    raise ValueError("Google Books returned an invalid volume")
+                info = item.get("volumeInfo") or {}
+                confidence = _candidate_score(query_title, query_author, info)
+                result = _metadata_from_item(
+                    item,
+                    query_title,
+                    query_author,
+                    confidence=confidence,
+                )
+                _attach_cover(result, item, client)
+                return result
+        except Exception as exc:
+            safe_error = _provider_error_message(exc)
+            logger.warning("Google Books selected-volume fetch failed: %s", safe_error)
             return FetchedMetadata(
                 status="provider_error",
                 query_title=query_title,

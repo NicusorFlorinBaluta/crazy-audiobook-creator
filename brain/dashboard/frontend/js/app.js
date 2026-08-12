@@ -7,6 +7,7 @@
 const state = window.state = {
     projects: [],
     currentProjectId: null,
+    currentProject: null,
     ws: null,
     voiceServerOnline: false,
     schedule: null,
@@ -200,6 +201,18 @@ function setupEventListeners() {
     els.metadataModalClose.addEventListener('click', closeMetadataModal);
     els.metadataCancel.addEventListener('click', closeMetadataModal);
     els.metadataApply.addEventListener('click', applyMetadataCandidate);
+    document.getElementById('metadata-search-form')?.addEventListener(
+        'submit', performManualMetadataSearch
+    );
+    document.getElementById('metadata-manual-search')?.addEventListener(
+        'toggle', event => {
+            if (event.target.open) populateMetadataSearchInputs();
+        }
+    );
+    document.getElementById('metadata-search-results')?.addEventListener('click', event => {
+        const result = event.target.closest('[data-metadata-volume-id]');
+        if (result) selectManualMetadataCandidate(result.dataset.metadataVolumeId);
+    });
     els.metadataModal.addEventListener('click', event => {
         if (event.target === els.metadataModal) closeMetadataModal();
     });
@@ -302,21 +315,6 @@ function setupEventListeners() {
         chapterPaginationState.currentPage = 1;
         filterChapterRows();
     });
-
-    // Chapter Collapse Toggle
-    const btnToggleChapters = document.getElementById('btn-toggle-chapters');
-    const chapterBodyContainer = document.getElementById('chapter-body-container');
-    if (btnToggleChapters && chapterBodyContainer) {
-        btnToggleChapters.addEventListener('click', () => {
-            chapterPaginationState.isCollapsed = !chapterPaginationState.isCollapsed;
-            chapterBodyContainer.classList.toggle('hidden', chapterPaginationState.isCollapsed);
-            const count = document.querySelectorAll('.chapter-cell').length;
-            btnToggleChapters.textContent = chapterPaginationState.isCollapsed 
-                ? `Expand (${count})`
-                : 'Collapse';
-            btnToggleChapters.setAttribute('aria-expanded', String(!chapterPaginationState.isCollapsed));
-        });
-    }
 
     // Chapter Pagination Controls
     document.getElementById('select-page-size')?.addEventListener('change', (e) => {
@@ -504,6 +502,7 @@ async function fetchProjectDetails(projectId, isPoll = false) {
         if (!response.ok) throw new Error('Failed to fetch project details');
         
         const data = await response.json();
+        state.currentProject = data;
         if (logsResponse?.ok) {
             const logData = await logsResponse.json();
             data.work_progress = deriveWorkProgress(
@@ -882,12 +881,20 @@ function closeMetadataModal() {
     els.metadataModal.classList.add('hidden');
     state.metadataCandidate = null;
     document.getElementById('metadata-cover-preview').removeAttribute('src');
+    document.getElementById('metadata-search-results').replaceChildren();
+    document.getElementById('metadata-search-status').textContent = '';
+    document.getElementById('metadata-search-title').value = '';
+    document.getElementById('metadata-search-author').value = '';
+    document.getElementById('metadata-manual-search').open = false;
+    document.getElementById('metadata-review').classList.remove('hidden');
+    els.metadataApply.classList.remove('hidden');
     if (state.lastModalTrigger?.focus) state.lastModalTrigger.focus();
     state.lastModalTrigger = null;
 }
 
 function showMetadataCandidate(candidate) {
     state.metadataCandidate = candidate;
+    document.getElementById('metadata-modal-title').textContent = 'Review matched book details';
     const percent = Math.round(Number(candidate.confidence || 0) * 100);
     document.getElementById('metadata-match-summary').textContent =
         `${percent}% match from Google Books${candidate.cached ? ' · cached result' : ''}`;
@@ -925,7 +932,11 @@ function showMetadataCandidate(candidate) {
     warnings.textContent = warningItems.join(' ');
     warnings.classList.toggle('hidden', warningItems.length === 0);
 
-    state.lastModalTrigger = document.activeElement;
+    if (els.metadataModal.classList.contains('hidden')) {
+        state.lastModalTrigger = document.activeElement;
+    }
+    document.getElementById('metadata-review').classList.remove('hidden');
+    els.metadataApply.classList.remove('hidden');
     els.metadataModal.classList.remove('hidden');
     requestAnimationFrame(() => els.metadataApply.focus());
 }
@@ -946,7 +957,12 @@ async function previewMetadataCandidate() {
             }
         );
         if (!response.ok) {
-            throw new Error(await apiErrorMessage(response, 'Could not find book details'));
+            const message = await apiErrorMessage(response, 'Could not find book details');
+            if (response.status === 404) {
+                openManualMetadataSearch(message);
+                return;
+            }
+            throw new Error(message);
         }
         showMetadataCandidate(await response.json());
     } catch (error) {
@@ -954,6 +970,122 @@ async function previewMetadataCandidate() {
     } finally {
         button.disabled = false;
         button.textContent = originalText;
+    }
+}
+
+function populateMetadataSearchInputs() {
+    const project = state.currentProject || {};
+    const title = document.getElementById('metadata-search-title');
+    const author = document.getElementById('metadata-search-author');
+    if (!title.value) title.value = project.title && project.title !== 'Unknown' ? project.title : '';
+    if (!author.value) author.value = project.author && project.author !== 'Unknown' ? project.author : '';
+}
+
+function openManualMetadataSearch(message = '') {
+    state.metadataCandidate = null;
+    state.lastModalTrigger = document.activeElement;
+    document.getElementById('metadata-modal-title').textContent = 'Search for book details';
+    document.getElementById('metadata-match-summary').textContent =
+        'Search by title and optionally narrow the results by author.';
+    populateMetadataSearchInputs();
+    document.getElementById('metadata-manual-search').open = true;
+    document.getElementById('metadata-review').classList.add('hidden');
+    els.metadataApply.classList.add('hidden');
+    document.getElementById('metadata-search-status').textContent =
+        message || 'Adjust the title or author, then choose the correct result.';
+    els.metadataModal.classList.remove('hidden');
+    requestAnimationFrame(() => document.getElementById('metadata-search-title').focus());
+}
+
+function renderMetadataSearchResults(results) {
+    const container = document.getElementById('metadata-search-results');
+    container.replaceChildren();
+    for (const candidate of results) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'metadata-search-result';
+        button.dataset.metadataVolumeId = candidate.provider_id;
+
+        const details = document.createElement('span');
+        const title = document.createElement('strong');
+        title.textContent = candidate.title || 'Untitled';
+        const subtitle = document.createElement('small');
+        subtitle.textContent = [candidate.author, candidate.year, candidate.isbn]
+            .filter(Boolean).join(' · ') || 'No additional details';
+        details.append(title, subtitle);
+
+        const action = document.createElement('span');
+        action.textContent = 'Review';
+        button.append(details, action);
+        container.appendChild(button);
+    }
+}
+
+async function performManualMetadataSearch(event) {
+    event?.preventDefault();
+    if (!state.currentProjectId) return;
+    const title = document.getElementById('metadata-search-title').value.trim();
+    const author = document.getElementById('metadata-search-author').value.trim();
+    const button = document.getElementById('metadata-search-submit');
+    const status = document.getElementById('metadata-search-status');
+    if (!title) {
+        status.textContent = 'Enter a book title.';
+        return;
+    }
+    button.disabled = true;
+    status.textContent = 'Searching Google Books…';
+    document.getElementById('metadata-search-results').replaceChildren();
+    try {
+        const response = await fetch(
+            `api/projects/${encodeURIComponent(state.currentProjectId)}/search-metadata`,
+            {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ title, author })
+            }
+        );
+        if (!response.ok) {
+            throw new Error(await apiErrorMessage(response, 'Metadata search failed'));
+        }
+        const payload = await response.json();
+        const results = payload.results || [];
+        renderMetadataSearchResults(results);
+        status.textContent = results.length
+            ? `${results.length} result${results.length === 1 ? '' : 's'} found. Choose one to review.`
+            : (payload.error || 'No books matched this search.');
+    } catch (error) {
+        status.textContent = error.message;
+    } finally {
+        button.disabled = false;
+    }
+}
+
+async function selectManualMetadataCandidate(providerId) {
+    if (!state.currentProjectId || !providerId) return;
+    const status = document.getElementById('metadata-search-status');
+    status.textContent = 'Loading the selected edition…';
+    try {
+        const response = await fetch(
+            `api/projects/${encodeURIComponent(state.currentProjectId)}/fetch-metadata`,
+            {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    apply: false,
+                    provider_id: providerId,
+                    query_title: document.getElementById('metadata-search-title').value.trim(),
+                    query_author: document.getElementById('metadata-search-author').value.trim()
+                })
+            }
+        );
+        if (!response.ok) {
+            throw new Error(await apiErrorMessage(response, 'Could not load that edition'));
+        }
+        showMetadataCandidate(await response.json());
+        document.getElementById('metadata-manual-search').open = false;
+        status.textContent = '';
+    } catch (error) {
+        status.textContent = error.message;
     }
 }
 
@@ -978,7 +1110,11 @@ async function applyMetadataCandidate() {
             throw new Error(await apiErrorMessage(response, 'Could not apply book details'));
         }
         closeMetadataModal();
-        showToast('Matched book details applied', 'success');
+        const result = await response.json();
+        const exportNote = result.refreshed_exports
+            ? ` and updated ${result.refreshed_exports} audiobook package${result.refreshed_exports === 1 ? '' : 's'}`
+            : '';
+        showToast(`Matched book details applied${exportNote}`, 'success');
         await fetchProjectDetails(state.currentProjectId);
     } catch (error) {
         showToast(error.message, 'error');
@@ -996,19 +1132,12 @@ function renderChapterList(project) {
     const total = project.total_chapters || 0;
     if (chapterPaginationState.projectId !== project.project_id) {
         chapterPaginationState.projectId = project.project_id;
-        chapterPaginationState.isCollapsed = ['complete', 'completed'].includes(
-            String(project.status || '').toLowerCase()
-        );
-    }
-    document.getElementById('chapter-body-container')?.classList.toggle(
-        'hidden', chapterPaginationState.isCollapsed
-    );
-    const toggleChapters = document.getElementById('btn-toggle-chapters');
-    if (toggleChapters) {
-        toggleChapters.textContent = chapterPaginationState.isCollapsed
-            ? `Expand (${total})`
-            : 'Collapse';
-        toggleChapters.setAttribute('aria-expanded', String(!chapterPaginationState.isCollapsed));
+        const chapterDetails = document.getElementById('chapter-progress-section');
+        if (chapterDetails) {
+            chapterDetails.open = !['complete', 'completed'].includes(
+                String(project.status || '').toLowerCase()
+            );
+        }
     }
     const scripted = new Set(project.scripted_chapters || []);
     const generated = new Set(project.generated_chapters || []);
@@ -1153,7 +1282,6 @@ function parseChapterRange(value) {
 const chapterPaginationState = {
     currentPage: 1,
     pageSize: '15',
-    isCollapsed: false,
     projectId: null
 };
 
@@ -1738,7 +1866,7 @@ function addScheduleWindow(windowConfig) {
             `).join('')}
         </div>
         <input class="input-sm schedule-start" type="time" value="${windowConfig.start || '09:00'}" aria-label="Start time">
-        <span>to</span>
+        <span class="schedule-separator">to</span>
         <input class="input-sm schedule-end" type="time" value="${windowConfig.end || '17:00'}" aria-label="End time">
         <button type="button" class="schedule-remove" title="Remove window">×</button>
     `;

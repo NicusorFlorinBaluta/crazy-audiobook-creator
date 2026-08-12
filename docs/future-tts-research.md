@@ -11,15 +11,17 @@
 ## Context
 
 Qwen3-TTS Base clone mode has no per-utterance emotion instruction parameter.
-The pipeline compensates with post-processing (pitch/tone shifts up to ±0.4
-semitones), but this is not equivalent to native expression control. When the
+The pipeline currently keeps automatic pitch/tempo/tone post-processing
+disabled after its phase-vocoder fallback caused echo-like artifacts; script
+emotion remains descriptive metadata. When the
 audience of an audiobook can reliably tell that every voice has the same
 emotional flatness, these alternatives should be evaluated.
 
 Trigger conditions to revisit:
 - Post-processing emotion expansion (Phase 1 of the current improvement plan)
   is implemented and A/B tests still show insufficient dynamic range
-- Qwen3-TTS CustomVoice is never open-sourced
+- A future Qwen checkpoint supports both arbitrary reference cloning and
+  per-utterance instructions
 - A new community benchmark puts one of the models below clearly ahead in
   audiobook-specific quality metrics
 
@@ -168,16 +170,20 @@ long-form); higher than Fish Speech (no Windows blocker).
 
 ---
 
-## Candidate 4 — Qwen3-TTS CustomVoice (Alibaba Cloud)
+## Candidate 4 — Qwen3-TTS CustomVoice
 
-The ideal upgrade path for this project. Same model family as the current
-engine, adds per-utterance instruction following, preserves voice identity
-across VoiceDesign-bootstrapped references.
+Qwen now publishes 1.7B and 0.6B CustomVoice checkpoints. They add instruction
+control over nine built-in timbres, but they do not accept arbitrary
+VoiceDesign or recorded references. They are therefore an alternative preset
+speaker path, not a refinement layer or drop-in replacement for the production
+VoiceDesign → Base Full-ICL clone workflow.
 
-**Current status:** API-only (Alibaba Cloud). No open-source release announced.
+**Current status:** Available, but unsuitable as the default character engine.
 
-**Action:** Monitor the Qwen3-TTS GitHub repository and HuggingFace quarterly.
-If open-sourced, this is a direct drop-in replacement with zero integration cost.
+**Action:** Consider a controlled optional-preset benchmark only if expressive
+minor characters or a preset narrator becomes a product requirement. Compare
+identity diversity, English quality, WER, latency, and listening preference
+against the current clone path before integration.
 
 ---
 
@@ -193,9 +199,9 @@ Priority 2: CosyVoice 2 evaluation
   -> Apache 2.0, PyTorch-based
   -> Check ROCm compatibility first
 
-Priority 3: Monitor Qwen3-TTS CustomVoice open-source release
-  -> Zero-integration-cost upgrade if it happens
-  -> Subscribe to Qwen GitHub releases
+Priority 3: Optional Qwen3-TTS CustomVoice preset benchmark
+  -> Expression control, but only across nine fixed timbres
+  -> Do not replace arbitrary designed/recorded character cloning
 
 Deprioritize: Fish Speech S2 Pro
   -> Windows/AMD barrier is high

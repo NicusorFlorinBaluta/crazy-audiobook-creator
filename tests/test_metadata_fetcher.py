@@ -14,6 +14,85 @@ def _png(width: int = 320, height: int = 480) -> bytes:
 
 
 class MetadataFetcherTests(unittest.TestCase):
+    def test_manual_search_returns_ranked_candidates_below_auto_threshold(self) -> None:
+        transport = httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {
+                            "id": "less-close",
+                            "volumeInfo": {
+                                "title": "A Distant Result",
+                                "authors": ["Another Author"],
+                            },
+                        },
+                        {
+                            "id": "close",
+                            "volumeInfo": {
+                                "title": "Expected Book: A Novel",
+                                "authors": ["Ada Author"],
+                                "publishedDate": "2022",
+                            },
+                        },
+                    ]
+                },
+            )
+        )
+
+        result = MetadataFetcher.search(
+            "Expected Book",
+            "Ada Author",
+            transport=transport,
+        )
+
+        self.assertEqual(result.status, "matched")
+        self.assertEqual([item.provider_id for item in result.results], ["close", "less-close"])
+        self.assertEqual(result.results[0].year, "2022")
+
+    def test_manual_selection_fetches_exact_volume_and_cover(self) -> None:
+        observed_paths: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            observed_paths.append(request.url.path)
+            if request.url.host == "www.googleapis.com":
+                return httpx.Response(
+                    200,
+                    json={
+                        "id": "chosen-volume",
+                        "volumeInfo": {
+                            "title": "Chosen Edition",
+                            "authors": ["Ada Author"],
+                            "imageLinks": {
+                                "thumbnail": "https://books.google.com/cover?zoom=1"
+                            },
+                        },
+                    },
+                )
+            return httpx.Response(
+                200,
+                content=_png(),
+                headers={"content-type": "image/png"},
+            )
+
+        result = MetadataFetcher.fetch_volume(
+            "chosen-volume",
+            "Chosen Edition",
+            "Ada Author",
+            transport=httpx.MockTransport(handler),
+        )
+
+        self.assertEqual(result.status, "matched")
+        self.assertEqual(result.provider_id, "chosen-volume")
+        self.assertEqual(result.title, "Chosen Edition")
+        self.assertEqual(observed_paths, ["/books/v1/volumes/chosen-volume", "/cover"])
+        self.assertIsNotNone(result.cover_image_bytes)
+
+    def test_manual_selection_rejects_unsafe_volume_id(self) -> None:
+        result = MetadataFetcher.fetch_volume("../not-allowed")
+        self.assertEqual(result.status, "no_match")
+        self.assertIn("invalid", result.error)
+
     def test_configured_api_key_is_sent_without_affecting_the_query(self) -> None:
         observed_key = None
 

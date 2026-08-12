@@ -57,3 +57,52 @@ def test_review_and_log_filters_are_present() -> None:
     assert "join-bulk-acceptable" in script
     assert "ROUTINE_LINE" in logs
     assert 'id="log-level-filter"' in page
+
+
+def test_pipeline_disclosure_survives_status_polling() -> None:
+    pipeline = _read("js/pipeline.js")
+
+    assert "pipelineDisclosureInitialized" in pipeline
+    assert "projectId !== pipelineDisclosureProject" in pipeline
+    assert "pipelineDetails.open = !isDone || isRunning" in pipeline
+
+
+def test_chapters_use_the_shared_native_disclosure_pattern() -> None:
+    page = _read("index.html")
+    app = _read("js/app.js")
+
+    assert '<details class="chapter-progress-section schedule-section"' in page
+    assert '<summary class="chapter-section-heading" role="button">' in page
+    assert 'id="btn-toggle-chapters"' not in page
+    assert "btnToggleChapters" not in app
+    assert "chapterDetails.open" in app
+
+
+def test_manual_metadata_search_and_selection_controls_are_present() -> None:
+    page = _read("index.html")
+    app = _read("js/app.js")
+
+    assert 'id="metadata-search-form"' in page
+    assert 'id="metadata-search-results"' in page
+    assert "/search-metadata`" in app
+    assert "provider_id: providerId" in app
+
+
+def test_voice_casting_exposes_the_bulk_sample_download() -> None:
+    page = _read("index.html")
+    script = _read("js/script-viewer.js")
+
+    assert 'id="btn-download-all-voices"' in page
+    assert 'data-server-download href="#"' in page
+    assert "/voices/download-all`" in script
+    assert "readyVoiceCount" in script
+
+
+def test_schedule_time_controls_have_stable_responsive_grid_areas() -> None:
+    app = _read("js/app.js")
+    styles = _read("css/styles.css")
+
+    assert 'class="schedule-separator">to</span>' in app
+    assert 'grid-template-areas: "days start separator end remove";' in styles
+    assert "grid-template-columns: minmax(250px, 1fr) 142px auto 142px 34px;" in styles
+    assert "@media (max-width: 480px)" in styles

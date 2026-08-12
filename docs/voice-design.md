@@ -107,6 +107,19 @@ only chapters that contain narration.
 
 ## Generated and uploaded references
 
+The production pipeline intentionally uses two complementary Qwen checkpoints:
+
+1. `VoiceDesign` turns the compiled character description into a unique,
+   speaker-pure reference recording during bootstrap.
+2. `Base` converts that recording and its exact transcript into a cached
+   Full-ICL clone prompt and generates the character's audiobook lines.
+
+This is Qwen's documented **Voice Design then Clone** workflow. `CustomVoice`
+is not an additional refinement stage: it selects one of Qwen's nine preset
+timbres and cannot consume an arbitrary designed reference. Using it between
+VoiceDesign and Base would reduce the available identity palette rather than
+strengthen the designed identity, so it is not part of the default pipeline.
+
 Each project has `voice_library/<project-id>/voices.json` plus its reference
 WAVs. Registry entries include the path, exact spoken transcript (`ref_text`),
 description, duration, sample rate, identity metadata, source type
@@ -132,6 +145,9 @@ can be imported into a matching character profile in a later book with the
 normal upload action and the exact words spoken in the reference. The filename
 is descriptive only; cloning still depends on the accompanying exact
 transcript.
+
+The dashboard also offers **Download all samples**, which bundles every ready
+character/narrator reference and a transcript-bearing manifest into one ZIP.
 
 Uploads are converted to mono 24 kHz PCM WAV. They must contain one clean,
 non-silent, non-clipped speaker and be 3–30 seconds long. The user supplies the

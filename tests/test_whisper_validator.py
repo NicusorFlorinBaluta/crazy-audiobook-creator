@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import sys
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from voice.validator.whisper_validator import WhisperValidator
 
@@ -46,6 +47,14 @@ class WhisperValidatorTextTests(unittest.TestCase):
             ),
             0.0,
         )
+
+    def test_contraction_normalization_does_not_require_whisper_package(self) -> None:
+        validator = WhisperValidator(model_name="tiny", device="cpu")
+        with patch.dict(sys.modules, {"whisper.normalizers": None}):
+            self.assertEqual(
+                validator.calculate_wer("Let's go!", "Let us go."),
+                0.0,
+            )
 
     def test_word_boundaries_and_punctuation_are_orthographically_equivalent(
         self,

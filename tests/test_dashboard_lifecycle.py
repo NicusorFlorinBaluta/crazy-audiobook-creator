@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
+import os
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -40,7 +43,7 @@ class DashboardLifecycleTests(unittest.IsolatedAsyncioTestCase):
             blocker.set()
             await dashboard._dashboard_shutdown_task
 
-    async def test_metadata_preview_is_cached_and_apply_preserves_epub_identity(self) -> None:
+    async def test_metadata_preview_is_cached_and_explicit_apply_sets_reviewed_identity(self) -> None:
         png = b"\x89PNG\r\n\x1a\n" + b"\0" * 8 + (320).to_bytes(4, "big") + (480).to_bytes(4, "big")
         fetched = FetchedMetadata(
             status="matched",
@@ -93,8 +96,10 @@ class DashboardLifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(applied["applied"])
             fetch.assert_called_once()
             saved = json.loads(book_path.read_text(encoding="utf-8"))["metadata"]
-            self.assertEqual(saved["title"], "Original Title")
-            self.assertEqual(saved["author"], "Original Author")
+            self.assertEqual(saved["title"], "Provider Title")
+            self.assertEqual(saved["author"], "Provider Author")
+            self.assertEqual(saved["source_title"], "Original Title")
+            self.assertEqual(saved["source_author"], "Original Author")
             self.assertEqual(saved["cover_image_path"], str(embedded_cover))
             self.assertEqual(
                 automatically_saved["description"], "Embedded EPUB description"
@@ -102,6 +107,125 @@ class DashboardLifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(saved["description"], "Provider description")
             self.assertEqual(saved["genre"], "Mystery")
             self.assertEqual(saved["metadata_provider_id"], "volume-1")
+
+    async def test_manual_metadata_selection_persists_the_exact_volume(self) -> None:
+        selected = FetchedMetadata(
+            status="matched",
+            query_title="Manual title",
+            query_author="Manual author",
+            title="Chosen edition",
+            authors=["Chosen author"],
+            description="Selected by the user.",
+            provider_id="chosen-volume",
+            confidence=0.61,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            project_dir = Path(directory)
+            book_path = project_dir / "book.json"
+            book_path.write_text(json.dumps({
+                "metadata": {
+                    "title": "EPUB title",
+                    "author": "EPUB author",
+                    "language": "en",
+                },
+                "chapters": [],
+            }), encoding="utf-8")
+
+            with (
+                patch.object(dashboard, "_project_dir", return_value=project_dir),
+                patch.object(
+                    MetadataFetcher,
+                    "fetch_volume",
+                    return_value=selected,
+                ) as fetch_volume,
+            ):
+                preview = dashboard._fetch_metadata_sync(
+                    "sample",
+                    provider_id="chosen-volume",
+                    query_title="Manual title",
+                    query_author="Manual author",
+                )
+                applied = dashboard._fetch_metadata_sync("sample", apply=True)
+
+            fetch_volume.assert_called_once_with(
+                "chosen-volume", "Manual title", "Manual author"
+            )
+            self.assertEqual(preview["provider_id"], "chosen-volume")
+            self.assertTrue(applied["applied"])
+            metadata = json.loads(book_path.read_text(encoding="utf-8"))["metadata"]
+            self.assertEqual(metadata["title"], "Chosen edition")
+            self.assertEqual(metadata["author"], "Chosen author")
+            self.assertEqual(metadata["source_title"], "EPUB title")
+            self.assertEqual(metadata["source_author"], "EPUB author")
+            self.assertEqual(metadata["description"], "Selected by the user.")
+            self.assertEqual(metadata["metadata_provider_id"], "chosen-volume")
+
+    async def test_metadata_refresh_remuxes_existing_export_without_reencoding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project_dir = root / "project"
+            workspace_dir = root / "workspace"
+            project_dir.mkdir()
+            (workspace_dir / "output").mkdir(parents=True)
+            export = project_dir / "book.m4b"
+            export.write_bytes(b"old export")
+
+            def fake_run(command, **kwargs):
+                Path(command[-1]).write_bytes(b"refreshed export")
+                return type("Result", (), {"returncode": 0, "stderr": ""})()
+
+            with (
+                patch.object(dashboard, "_project_dir", return_value=project_dir),
+                patch.object(
+                    dashboard, "_workspace_project_dir", return_value=workspace_dir
+                ),
+                patch.object(dashboard.shutil, "which", return_value="ffmpeg"),
+                patch.object(dashboard.subprocess, "run", side_effect=fake_run) as run,
+            ):
+                refreshed = dashboard._refresh_exported_audiobook_metadata(
+                    "book",
+                    {
+                        "title": "Reviewed title",
+                        "author": "Reviewed author",
+                        "genre": "Fantasy",
+                        "year": "2026",
+                        "description": "Description",
+                        "isbn": "9780000000001",
+                    },
+                )
+
+            self.assertEqual(refreshed, [str(export.resolve())])
+            self.assertEqual(export.read_bytes(), b"refreshed export")
+            command = run.call_args.args[0]
+            self.assertIn("copy", command)
+            self.assertIn("title=Reviewed title", command)
+            self.assertIn("artist=Reviewed author", command)
+            self.assertIn("isbn=9780000000001", command)
+            self.assertIn("grouping=ISBN 9780000000001", command)
+            self.assertIn("+faststart", command)
+            self.assertIn("-map_chapters", command)
+
+    async def test_audiobook_download_uses_current_book_title(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project_dir = Path(directory)
+            export = project_dir / "book.m4b"
+            export.write_bytes(b"audiobook")
+            (project_dir / "book.json").write_text(
+                json.dumps({"metadata": {"title": "Reviewed: Book?"}}),
+                encoding="utf-8",
+            )
+            with (
+                patch.object(dashboard, "_project_dir", return_value=project_dir),
+                patch.object(
+                    dashboard, "_workspace_project_dir", return_value=project_dir
+                ),
+            ):
+                response = await dashboard.download_audiobook("book")
+
+            self.assertIn(
+                "Reviewed_%20Book.m4b",
+                response.headers["content-disposition"],
+            )
 
     async def test_schedule_api_rejects_empty_days_and_normalizes_order(self) -> None:
         invalid_request = AsyncMock()
@@ -289,7 +413,9 @@ class DashboardLifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("attachment", disposition)
             self.assertIn("A%20Book_%20One%20-", disposition)
             self.assertIn("The%20Narrator", disposition)
-            self.assertEqual(Path(response.path), sample)
+            # Windows runners may expose the same temp directory through its
+            # long name in one path and its 8.3 alias (RUNNER~1) in another.
+            self.assertTrue(os.path.samefile(response.path, sample))
 
     async def test_voice_download_rejects_registry_path_escape(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -305,6 +431,65 @@ class DashboardLifecycleTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(dashboard, "_voice_project_dir", return_value=voice_dir):
                 with self.assertRaisesRegex(Exception, "Invalid voice registry path"):
                     dashboard._registered_voice_path("book", "character")
+
+    async def test_all_voice_download_contains_named_samples_and_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            voice_dir = Path(directory)
+            base = voice_dir / "child.wav"
+            candidate = voice_dir / "child-candidate.wav"
+            base.write_bytes(b"RIFF" + b"1" * 1200)
+            candidate.write_bytes(b"RIFF" + b"2" * 1200)
+            (voice_dir / "voices.json").write_text(
+                json.dumps({"voices": {
+                    "child": {"file": str(base), "source_type": "generated"},
+                    "child_cand2": {
+                        "file": str(candidate),
+                        "source_type": "generated",
+                        "ref_text": "A reusable reference.",
+                    },
+                }}),
+                encoding="utf-8",
+            )
+            cast = {"voices": {
+                "child": {
+                    "name": "Child Male",
+                    "owner_character_id": "child",
+                    "assigned_characters": ["child"],
+                },
+                "child_cand2": {
+                    "name": "Candidate 2",
+                    "owner_character_id": "child",
+                    "assigned_characters": [],
+                },
+            }}
+            with (
+                patch.object(dashboard, "_voice_project_dir", return_value=voice_dir),
+                patch.object(
+                    dashboard, "_require_job", return_value={"title": "A Book"}
+                ),
+                patch.object(
+                    dashboard, "_load_or_build_voice_cast", return_value=cast
+                ),
+            ):
+                response = await dashboard.download_all_project_voices("book")
+
+            self.assertEqual(response.media_type, "application/zip")
+            self.assertEqual(response.headers["x-voice-sample-count"], "2")
+            with zipfile.ZipFile(io.BytesIO(response.body)) as bundle:
+                names = set(bundle.namelist())
+                self.assertIn(
+                    "A Book - Child Male - voice-reference.wav", names
+                )
+                self.assertIn(
+                    "A Book - Child Male - Candidate 2 - voice-reference.wav",
+                    names,
+                )
+                manifest = json.loads(bundle.read("voice-samples.json"))
+            self.assertEqual(len(manifest["samples"]), 2)
+            self.assertEqual(
+                manifest["samples"][1]["reference_text"],
+                "A reusable reference.",
+            )
 
     async def test_narrator_voice_regeneration_reaches_voice_client(self) -> None:
         class FakeVoiceClient:

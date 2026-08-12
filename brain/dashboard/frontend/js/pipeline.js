@@ -25,6 +25,9 @@ window.PipelineManager = (() => {
         btnPause: document.getElementById('btn-pause-pipeline'),
     };
 
+    let pipelineDisclosureProject = null;
+    let pipelineDisclosureInitialized = false;
+
     function init() {
         renderTracker();
     }
@@ -213,7 +216,17 @@ window.PipelineManager = (() => {
         const isDone = ['complete', 'completed', 'selection_complete'].includes(statusLower);
         const hasMastered = data && data.mastered_chapters && data.mastered_chapters.length > 0;
 
-        if (pipelineDetails) pipelineDetails.open = !isDone || isRunning;
+        const projectId = data?.project_id || null;
+        if (pipelineDetails && (
+            !pipelineDisclosureInitialized
+            || projectId !== pipelineDisclosureProject
+        )) {
+            // Choose a useful default once per project. Subsequent polling must
+            // preserve the user's disclosure choice instead of snapping it shut.
+            pipelineDetails.open = !isDone || isRunning;
+            pipelineDisclosureProject = projectId;
+            pipelineDisclosureInitialized = true;
+        }
         if (advancedActions && isRunning) advancedActions.open = false;
 
         if (btnDownloadAudiobook) {

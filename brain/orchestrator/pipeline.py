@@ -2038,6 +2038,7 @@ class Pipeline:
                 genre=book.metadata.genre,
                 year=book.metadata.year,
                 description=book.metadata.description,
+                isbn=book.metadata.isbn,
             ),
             chapters=chapters,
             cover_art=cover_path_str,

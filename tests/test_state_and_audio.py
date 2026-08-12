@@ -21,6 +21,8 @@ from shared.artifacts import (
     master_manifest_path,
 )
 from shared.models import (
+    AudiobookMetadata,
+    ExportConfig,
     MasterChapterRequest,
     MasterSegmentInfo,
     ExportChapterInfo,
@@ -722,6 +724,29 @@ class ExportMetadataTests(unittest.TestCase):
     def test_ffmetadata_control_characters_are_escaped(self) -> None:
         escaped = M4BExporter._escape_ffmetadata("A=B;C#D\\E\nF\r")
         self.assertEqual(escaped, "A\\=B\\;C\\#D\\\\E\\\nF")
+
+    def test_export_embeds_reviewed_isbn(self) -> None:
+        exporter = M4BExporter()
+        with patch("voice.mastering.m4b_exporter.subprocess.run") as run:
+            run.return_value.returncode = 0
+            run.return_value.stderr = ""
+            exporter._run_ffmpeg(
+                concat_file=Path("concat.txt"),
+                metadata_file=Path("chapters.txt"),
+                output_file=Path("output.m4b"),
+                book_metadata=AudiobookMetadata(
+                    title="Book",
+                    author="Author",
+                    isbn="9780000000001",
+                ),
+                cover_art=None,
+                config=ExportConfig(),
+            )
+
+        command = run.call_args.args[0]
+        self.assertIn("isbn=9780000000001", command)
+        self.assertIn("grouping=ISBN 9780000000001", command)
+        self.assertIn("+faststart", command)
 
 
 if __name__ == "__main__":

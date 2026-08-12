@@ -9,7 +9,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="static/css/styles.css?v=20260811.7">
+    <link rel="stylesheet" href="static/css/styles.css?v=20260812.2">
     <script>
         if ('serviceWorker' in navigator) {
             navigator.serviceWorker.getRegistrations().then(function(registrations) {
@@ -185,19 +185,18 @@
                 </div>
                 </details>
 
-                <div class="chapter-progress-section" id="chapter-progress-section">
-                    <div class="chapter-section-heading">
-                        <div>
-                            <div class="chapter-heading-line">
-                                <h3>Chapters</h3>
+                <details class="chapter-progress-section schedule-section" id="chapter-progress-section">
+                    <summary class="chapter-section-heading" role="button">
+                        <span>
+                            <span class="chapter-heading-line">
+                                <strong>Chapters</strong>
                                 <span id="chapter-summary-badge">0 / 0 completed</span>
-                                <button class="btn btn-ghost btn-sm" id="btn-toggle-chapters" title="Collapse or expand the chapters table">🔼 Collapse</button>
-                            </div>
-                            <p>Selection applies to the next generation run; the completed audiobook stays unchanged until you start it.</p>
-                        </div>
-                        <div class="chapter-selection-summary" id="chapter-selection-summary">All chapters selected</div>
-                    </div>
-                    <div id="chapter-body-container">
+                            </span>
+                            <small>Selection applies to the next generation run; the completed audiobook stays unchanged until you start it.</small>
+                        </span>
+                        <span class="chapter-selection-summary" id="chapter-selection-summary">All chapters selected</span>
+                    </summary>
+                    <div class="schedule-body chapter-body-container" id="chapter-body-container">
                         <div class="chapter-selection-toolbar">
                             <div class="chapter-toolbar-group">
                                 <button class="btn btn-ghost btn-sm" id="btn-select-all-chapters">Select all</button>
@@ -242,7 +241,7 @@
                             </div>
                         </div>
                     </div>
-                </div>
+                </details>
 
                 <details class="schedule-section" id="schedule-section">
                     <summary role="button">
@@ -307,6 +306,7 @@
                         <option value="warnings">Has warnings</option>
                         <option value="ready">Ready</option>
                     </select>
+                    <a class="btn btn-ghost btn-sm hidden" id="btn-download-all-voices" data-server-download href="#" title="Download every prepared character and narrator reference as a ZIP">Download all samples</a>
                 </div>
                 <div class="character-grid" id="character-grid">
                     <div class="empty-state small">
@@ -430,7 +430,23 @@
                 </div>
                 <button class="modal-close" id="metadata-modal-close" type="button" aria-label="Close metadata review">&times;</button>
             </div>
-            <div class="modal-body metadata-review">
+            <details class="metadata-manual-search" id="metadata-manual-search">
+                <summary>Search for another book or edition</summary>
+                <form id="metadata-search-form">
+                    <label>
+                        Book title
+                        <input class="input" id="metadata-search-title" type="search" maxlength="300" required autocomplete="off">
+                    </label>
+                    <label>
+                        Author <span>(optional)</span>
+                        <input class="input" id="metadata-search-author" type="search" maxlength="300" autocomplete="off">
+                    </label>
+                    <button class="btn btn-primary" id="metadata-search-submit" type="submit">Search Google Books</button>
+                </form>
+                <p class="metadata-search-status" id="metadata-search-status" role="status"></p>
+                <div class="metadata-search-results" id="metadata-search-results"></div>
+            </details>
+            <div class="modal-body metadata-review" id="metadata-review">
                 <div class="metadata-cover-wrap">
                     <img id="metadata-cover-preview" alt="Matched book cover" hidden>
                     <div class="metadata-cover-empty" id="metadata-cover-empty">No cover available</div>
@@ -444,7 +460,7 @@
                         <div><dt>ISBN</dt><dd id="metadata-isbn"></dd></div>
                     </dl>
                     <p class="metadata-description" id="metadata-description"></p>
-                    <p class="metadata-note">Your EPUB title and author remain unchanged. Applying fills available description, genre, year, ISBN, and provenance.</p>
+                    <p class="metadata-note">Applying uses the reviewed title, author, description, genre, year, ISBN, and cover choice. Original EPUB identity is retained internally as provenance. Existing audiobook downloads are repackaged without re-encoding audio.</p>
                     <label class="metadata-replace-cover hidden" id="metadata-replace-cover-row">
                         <input type="checkbox" id="metadata-replace-cover">
                         Replace the cover already embedded in this EPUB
@@ -465,9 +481,9 @@
     <div class="toast-container" id="toast-container" role="status" aria-live="polite"></div>
 
     <!-- Scripts -->
-    <script src="static/js/app.js?v=20260811.7"></script>
-    <script src="static/js/pipeline.js?v=20260811.7"></script>
-    <script src="static/js/script-viewer.js?v=20260811.7"></script>
-    <script src="static/js/log-console.js?v=20260811.7"></script>
+    <script src="static/js/app.js?v=20260812.2"></script>
+    <script src="static/js/pipeline.js?v=20260812.2"></script>
+    <script src="static/js/script-viewer.js?v=20260812.2"></script>
+    <script src="static/js/log-console.js?v=20260812.2"></script>
 </body>
 </html>

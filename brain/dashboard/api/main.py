@@ -37,6 +37,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 import yaml
@@ -76,7 +77,7 @@ from voice.tts_server.voice_library import VoiceLibraryManager
 
 logger = logging.getLogger(__name__)
 
-FRONTEND_BUILD = "2026.08.11.7"
+FRONTEND_BUILD = "2026.08.12.2"
 
 
 class AsyncioConnectionResetFilter(logging.Filter):
@@ -209,6 +210,14 @@ class MetadataFetchRequest(BaseModel):
     apply: bool = False
     refresh: bool = False
     replace_cover: bool = False
+    provider_id: str | None = Field(default=None, max_length=128)
+    query_title: str | None = Field(default=None, max_length=300)
+    query_author: str | None = Field(default=None, max_length=300)
+
+
+class MetadataSearchRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=300)
+    author: str = Field(default="", max_length=300)
 
 
 def _require_job(project_id: str) -> dict[str, Any]:
@@ -450,6 +459,28 @@ def _registered_voice_path(
     if not voice_path.is_file():
         raise HTTPException(status_code=404, detail="Voice sample is not available")
     return voice_path, info
+
+
+def _voice_download_label(
+    cast: dict[str, Any],
+    voice_id: str,
+    info: dict[str, Any],
+) -> str:
+    """Name a profile using its character owner and optional variant."""
+    profiles = cast.get("voices", {})
+    profile = profiles.get(voice_id, {})
+    owner_id = str(profile.get("owner_character_id") or voice_id)
+    owner = profiles.get(owner_id, {})
+    owner_name = str(
+        owner.get("name")
+        or (profile.get("name") if owner_id == voice_id else "")
+        or info.get("name")
+        or ("Narrator" if owner_id == "narrator" else owner_id)
+    )
+    variant_name = str(profile.get("name") or info.get("name") or "").strip()
+    if owner_id != voice_id and variant_name and variant_name.casefold() != owner_name.casefold():
+        return f"{owner_name} - {variant_name}"
+    return owner_name
 
 
 def _load_or_build_voice_cast(
@@ -1565,9 +1596,21 @@ async def download_audiobook(project_id: str):
         else:
             raise HTTPException(status_code=404, detail="Audiobook file not found")
         
+    title = project_id
+    book_json = project_dir / "book.json"
+    if book_json.is_file():
+        try:
+            title = (
+                json.loads(book_json.read_text(encoding="utf-8"))
+                .get("metadata", {})
+                .get("title")
+                or project_id
+            )
+        except (OSError, json.JSONDecodeError):
+            pass
     return FileResponse(
         path=m4b_path,
-        filename=m4b_path.name,
+        filename=f"{_download_name_component(str(title), project_id)}.m4b",
         media_type="audio/mp4"
     )
 
@@ -2034,6 +2077,83 @@ def _metadata_response(
     return payload
 
 
+def _exported_audiobook_paths(project_id: str) -> list[Path]:
+    """Return unique existing full/partial audiobook exports for a project."""
+    candidates = [
+        *_project_dir(project_id).glob("*.m4b"),
+        *(_workspace_project_dir(project_id) / "output").glob("*.m4b"),
+    ]
+    unique: dict[str, Path] = {}
+    for candidate in candidates:
+        if candidate.is_file():
+            unique[str(candidate.resolve()).casefold()] = candidate.resolve()
+    return sorted(unique.values(), key=lambda path: str(path).casefold())
+
+
+def _refresh_exported_audiobook_metadata(
+    project_id: str,
+    metadata: dict[str, Any],
+) -> list[str]:
+    """Atomically remux existing M4Bs with current tags/cover, copying audio."""
+    exports = _exported_audiobook_paths(project_id)
+    if not exports:
+        return []
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError(
+            "Book details were saved, but FFmpeg is unavailable to refresh "
+            "the existing audiobook package"
+        )
+    project_dir = _project_dir(project_id)
+    cover = _existing_project_cover(project_dir, metadata)
+    refreshed: list[str] = []
+    for export in exports:
+        temporary = export.with_name(f".{export.name}.{uuid.uuid4().hex}.metadata.m4b")
+        command = [ffmpeg, "-y", "-i", str(export)]
+        if cover:
+            command.extend(["-i", str(cover), "-map", "0:a", "-map", "1:v:0"])
+            command.extend(["-disposition:v:0", "attached_pic"])
+        else:
+            command.extend(["-map", "0"])
+        command.extend(
+            [
+                "-map_metadata", "0",
+                "-map_chapters", "0",
+                "-c", "copy",
+                "-metadata", f"title={metadata.get('title') or ''}",
+                "-metadata", f"artist={metadata.get('author') or ''}",
+                "-metadata", f"album={metadata.get('title') or ''}",
+                "-metadata", f"genre={metadata.get('genre') or ''}",
+                "-metadata", f"date={metadata.get('year') or ''}",
+                "-metadata", f"comment={metadata.get('description') or ''}",
+            ]
+        )
+        isbn = str(metadata.get("isbn") or "").strip()
+        if isbn:
+            # M4B has no universally supported ISBN atom. The standard
+            # grouping atom survives across players without hiding cover art.
+            command.extend([
+                "-metadata", f"isbn={isbn}",
+                "-metadata", f"grouping=ISBN {isbn}",
+            ])
+        command.extend(["-movflags", "+faststart", str(temporary)])
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+            if result.returncode != 0 or not temporary.is_file() or temporary.stat().st_size == 0:
+                detail = (result.stderr or "FFmpeg produced no output")[-1200:]
+                raise RuntimeError(f"Could not refresh audiobook metadata: {detail}")
+            os.replace(temporary, export)
+            refreshed.append(str(export))
+        finally:
+            temporary.unlink(missing_ok=True)
+    return refreshed
+
+
 def _fetch_metadata_sync(
     project_id: str,
     *,
@@ -2041,6 +2161,9 @@ def _fetch_metadata_sync(
     apply: bool = False,
     replace_cover: bool = False,
     only_missing: bool = False,
+    provider_id: str | None = None,
+    query_title: str | None = None,
+    query_author: str | None = None,
 ) -> dict[str, Any]:
     """Fetch/cache a candidate and optionally merge it into book.json."""
     from brain.extractor.metadata_fetcher import MetadataFetcher
@@ -2054,8 +2177,20 @@ def _fetch_metadata_sync(
         book_data = json.loads(book_json.read_text(encoding="utf-8"))
         metadata = book_data.setdefault("metadata", {})
         cache_key = _metadata_cache_key(metadata)
-        candidate = None if refresh else _read_metadata_candidate(project_dir, cache_key)
-        if candidate is None:
+        candidate = (
+            None if refresh or provider_id
+            else _read_metadata_candidate(project_dir, cache_key)
+        )
+        if provider_id:
+            fetched = MetadataFetcher.fetch_volume(
+                provider_id,
+                str(query_title or metadata.get("title", "")).strip(),
+                str(query_author or metadata.get("author", "")).strip(),
+            )
+            if fetched.status != "matched":
+                return fetched.serializable()
+            candidate = _persist_metadata_candidate(project_dir, fetched, cache_key)
+        elif candidate is None:
             fetched = MetadataFetcher.fetch(
                 metadata.get("title", ""),
                 metadata.get("author", ""),
@@ -2068,8 +2203,16 @@ def _fetch_metadata_sync(
         if not apply:
             return _metadata_response(project_id, candidate, metadata)
 
-        # The EPUB remains authoritative for title and author. External values
-        # are shown during review but never silently rename the book.
+        # Automatic enrichment preserves the EPUB identity. Explicit human
+        # approval applies the reviewed title/author and retains source values
+        # as provenance for support and recovery.
+        if not only_missing:
+            metadata.setdefault("source_title", metadata.get("title", ""))
+            metadata.setdefault("source_author", metadata.get("author", ""))
+            if candidate.get("title"):
+                metadata["title"] = candidate["title"]
+            if candidate.get("author"):
+                metadata["author"] = candidate["author"]
         for key in ("description", "isbn", "genre", "year"):
             if candidate.get(key) and (not only_missing or not metadata.get(key)):
                 metadata[key] = candidate[key]
@@ -2091,7 +2234,55 @@ def _fetch_metadata_sync(
                 other.unlink(missing_ok=True)
             metadata["cover_image_path"] = str(destination)
         atomic_write_json(book_json, book_data)
-        return _metadata_response(project_id, candidate, metadata, applied=True)
+        try:
+            refreshed_exports = _refresh_exported_audiobook_metadata(
+                project_id, metadata
+            )
+        except Exception:
+            if job_queue:
+                try:
+                    job_queue.update_job(
+                        project_id, {"export_metadata_stale": True}
+                    )
+                except KeyError:
+                    pass
+            raise
+        if job_queue:
+            try:
+                job_queue.update_job(
+                    project_id,
+                    {
+                        "title": metadata.get("title", ""),
+                        "author": metadata.get("author", ""),
+                        "export_metadata_stale": False,
+                        "export_metadata_refreshed_at": datetime.now(
+                            timezone.utc
+                        ).isoformat(),
+                    },
+                )
+            except KeyError:
+                pass
+        response = _metadata_response(
+            project_id, candidate, metadata, applied=True
+        )
+        response["refreshed_exports"] = len(refreshed_exports)
+        return response
+
+
+def _search_metadata_sync(
+    project_id: str,
+    title: str,
+    author: str = "",
+) -> dict[str, Any]:
+    """Search external metadata without changing the project's cached match."""
+    from brain.extractor.metadata_fetcher import MetadataFetcher
+
+    book_json = _project_dir(project_id) / "book.json"
+    if not book_json.is_file():
+        raise FileNotFoundError("Project book.json not found")
+    book_data = json.loads(book_json.read_text(encoding="utf-8"))
+    language = str((book_data.get("metadata") or {}).get("language") or "")
+    return MetadataFetcher.search(title, author, language).serializable()
 
 
 def _auto_fetch_metadata_sync(project_id: str) -> None:
@@ -2131,6 +2322,9 @@ async def fetch_project_metadata(
             refresh=request.refresh,
             apply=request.apply,
             replace_cover=request.replace_cover,
+            provider_id=request.provider_id,
+            query_title=request.query_title,
+            query_author=request.query_author,
         )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -2143,6 +2337,31 @@ async def fetch_project_metadata(
         raise HTTPException(
             status_code=404,
             detail=result.get("error") or "No close metadata match was found",
+        )
+    return result
+
+
+@app.post("/api/projects/{project_id}/search-metadata")
+async def search_project_metadata(
+    project_id: str,
+    request: MetadataSearchRequest,
+):
+    """Return ranked Google Books candidates for explicit human selection."""
+    if not job_queue:
+        raise HTTPException(status_code=503, detail="Server not initialized")
+    try:
+        result = await asyncio.to_thread(
+            _search_metadata_sync,
+            project_id,
+            request.title,
+            request.author,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if result.get("status") == "provider_error":
+        raise HTTPException(
+            status_code=502,
+            detail=f"Metadata provider unavailable: {result.get('error') or 'unknown error'}",
         )
     return result
 
@@ -2449,6 +2668,75 @@ async def get_project_voices(project_id: str):
     }
 
 
+@app.get("/api/projects/{project_id}/voices/download-all")
+async def download_all_project_voices(project_id: str):
+    """Download every prepared cast reference as one reusable ZIP bundle."""
+    state = _require_job(project_id)
+    cast = _load_or_build_voice_cast(project_id)
+    book_name = _download_name_component(
+        str(state.get("title") or project_id),
+        "Untitled book",
+    )
+    archive = io.BytesIO()
+    manifest: list[dict[str, Any]] = []
+    used_names: set[str] = set()
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+        for voice_id, profile in sorted(cast.get("voices", {}).items()):
+            try:
+                voice_path, info = _registered_voice_path(project_id, voice_id)
+            except HTTPException as exc:
+                if exc.status_code == 404:
+                    continue
+                raise
+            character_label = _download_name_component(
+                _voice_download_label(cast, voice_id, info),
+                "Narrator" if voice_id.startswith("narrator") else "Character",
+            )
+            archive_name = (
+                f"{book_name} - {character_label} - voice-reference.wav"
+            )
+            if archive_name.casefold() in used_names:
+                safe_voice_id = _download_name_component(voice_id, "voice")
+                archive_name = (
+                    f"{book_name} - {character_label} - {safe_voice_id} "
+                    "- voice-reference.wav"
+                )
+            used_names.add(archive_name.casefold())
+            bundle.write(voice_path, arcname=archive_name)
+            manifest.append(
+                {
+                    "voice_id": voice_id,
+                    "character": character_label,
+                    "filename": archive_name,
+                    "source_type": info.get("source_type", "generated"),
+                    "reference_text": info.get("ref_text", ""),
+                    "assigned_characters": profile.get("assigned_characters", []),
+                }
+            )
+        if not manifest:
+            raise HTTPException(
+                status_code=404,
+                detail="No prepared voice samples are available",
+            )
+        bundle.writestr(
+            "voice-samples.json",
+            json.dumps(
+                {"book": book_name, "samples": manifest},
+                ensure_ascii=False,
+                indent=2,
+            ),
+        )
+    filename = f"{book_name} - voice-samples.zip"
+    return Response(
+        content=archive.getvalue(),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
+            "X-Voice-Sample-Count": str(len(manifest)),
+        },
+    )
+
+
 @app.get("/api/projects/{project_id}/voices/{voice_id}/preview")
 async def preview_project_voice(project_id: str, voice_id: str):
     """Stream an existing voice-reference WAV for dashboard preview."""
@@ -2488,13 +2776,12 @@ async def download_project_voice(project_id: str, voice_id: str):
     state = _require_job(project_id)
     cast = _load_or_build_voice_cast(project_id)
     voice_path, info = _registered_voice_path(project_id, voice_id)
-    profile = cast.get("voices", {}).get(voice_id, {})
     book_name = _download_name_component(
         str(state.get("title") or project_id),
         "Untitled book",
     )
     character_name = _download_name_component(
-        str(profile.get("name") or info.get("name") or voice_id),
+        _voice_download_label(cast, voice_id, info),
         "Narrator" if voice_id.startswith("narrator") else "Character",
     )
     return FileResponse(

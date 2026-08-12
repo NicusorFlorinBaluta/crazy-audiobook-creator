@@ -818,10 +818,10 @@ body {
 .chapter-section-heading {
     justify-content: space-between;
     gap: 16px;
-    margin-bottom: 14px;
+    margin-bottom: 0;
 }
 .chapter-heading-line { gap: 10px; }
-.chapter-heading-line h3 { margin: 0; font-size: 1.12rem; }
+.chapter-heading-line strong { margin: 0; font-size: 1rem; }
 .chapter-heading-line span,
 .chapter-selection-summary {
     padding: 4px 9px;
@@ -936,11 +936,7 @@ audio:hover {
     font-weight: 600;
     padding: 0 4px;
 }
-#btn-toggle-chapters {
-    margin-left: 8px;
-    padding: 2px 8px;
-    font-size: 0.75rem;
-}
+.chapter-body-container { padding-top: 15px; }
     max-height: 560px;
     overflow-y: auto;
     padding-right: 5px;
@@ -1049,14 +1045,15 @@ audio:hover {
 .schedule-windows { display: flex; flex-direction: column; gap: 8px; }
 .schedule-window {
     display: grid;
-    grid-template-columns: minmax(250px, 1fr) 110px 20px 110px 34px;
+    grid-template-areas: "days start separator end remove";
+    grid-template-columns: minmax(250px, 1fr) 142px auto 142px 34px;
     gap: 9px;
     align-items: center;
     padding: 10px;
     background: rgba(255,255,255,.025);
     border-radius: 9px;
 }
-.schedule-days { display: flex; gap: 4px; flex-wrap: wrap; }
+.schedule-days { grid-area: days; display: flex; gap: 4px; flex-wrap: wrap; }
 .schedule-day input {
     position: absolute;
     width: 1px;
@@ -1078,8 +1075,11 @@ audio:hover {
 }
 .schedule-day input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
 .schedule-day input:checked + span { color: white; background: var(--accent); }
-.schedule-window input[type="time"] { width: 100%; }
-.schedule-remove { border: 0; background: transparent; color: var(--danger); cursor: pointer; }
+.schedule-window input[type="time"] { width: 100%; min-width: 0; padding-right: 6px; }
+.schedule-start { grid-area: start; }
+.schedule-separator { grid-area: separator; text-align: center; }
+.schedule-end { grid-area: end; }
+.schedule-remove { grid-area: remove; border: 0; background: transparent; color: var(--danger); cursor: pointer; }
 .schedule-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
 .schedule-help { margin: 10px 0 0; color: var(--text-muted); font-size: .7rem; }
 .schedule-scope {
@@ -1178,11 +1178,28 @@ audio:hover {
     .chapter-cell { grid-template-columns: 28px 1fr auto; }
     .chapter-cell .chapter-status-pill { grid-column: 2; }
     .chapter-cell .chapter-progress-value { grid-column: 2 / -1; }
-    .schedule-window { grid-template-columns: 1fr 1fr 20px 1fr 34px; }
-    .schedule-days { grid-column: 1 / -1; }
+    .schedule-window {
+        grid-template-areas:
+            "days days days days"
+            "start separator end remove";
+        grid-template-columns: minmax(140px, 1fr) auto minmax(140px, 1fr) 34px;
+    }
     .quality-attempt-row { grid-template-columns: 1fr auto auto; }
     .quality-attempt-row > span:nth-child(5) { grid-column: 2 / -1; }
     .quality-attempt-audio { grid-column: 1 / -1; }
+}
+
+@media (max-width: 480px) {
+    .schedule-window {
+        grid-template-areas:
+            "days days"
+            "start start"
+            "separator separator"
+            "end end"
+            "remove remove";
+        grid-template-columns: minmax(0, 1fr) auto;
+    }
+    .schedule-remove { justify-self: end; min-width: 34px; min-height: 30px; }
 }
 
 /* ------------------------------------------------------------ */
@@ -2346,6 +2363,53 @@ audio:hover {
 
 .metadata-modal { max-width: 760px; }
 .metadata-subtitle { margin-top: 3px; color: var(--text-muted); font-size: .75rem; }
+.metadata-manual-search {
+    margin: 0 var(--space-xl) var(--space-md);
+    padding: 10px 12px;
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-md);
+    background: rgba(255,255,255,.02);
+}
+.metadata-manual-search > summary {
+    cursor: pointer;
+    color: var(--accent-light);
+    font-size: .78rem;
+    font-weight: 650;
+}
+.metadata-manual-search form {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, .8fr) auto;
+    gap: 10px;
+    align-items: end;
+    margin-top: 12px;
+}
+.metadata-manual-search label {
+    display: grid;
+    gap: 5px;
+    color: var(--text-secondary);
+    font-size: .7rem;
+}
+.metadata-manual-search label span { color: var(--text-muted); }
+.metadata-search-status { min-height: 1.1em; margin: 10px 0 0; color: var(--text-muted); font-size: .72rem; }
+.metadata-search-results { display: grid; gap: 7px; max-height: 260px; overflow-y: auto; }
+.metadata-search-result {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 12px;
+    align-items: center;
+    width: 100%;
+    padding: 10px 11px;
+    color: var(--text-primary);
+    text-align: left;
+    border: 1px solid var(--glass-border);
+    border-radius: 8px;
+    background: var(--bg-elevated);
+    cursor: pointer;
+}
+.metadata-search-result:hover, .metadata-search-result:focus-visible { border-color: var(--accent-primary); }
+.metadata-search-result strong, .metadata-search-result small { display: block; }
+.metadata-search-result small { margin-top: 3px; color: var(--text-muted); }
+.metadata-search-result > span:last-child { color: var(--accent-light); font-size: .72rem; white-space: nowrap; }
 .metadata-review {
     display: grid;
     grid-template-columns: 150px minmax(0, 1fr);
@@ -2384,6 +2448,8 @@ audio:hover {
 .metadata-warnings { color: #fbbf24; background: rgba(245,158,11,.1); }
 .metadata-replace-cover { display: flex; gap: 8px; align-items: flex-start; margin-top: 13px; color: var(--text-secondary); font-size: .76rem; }
 @media (max-width: 620px) {
+    .metadata-manual-search { margin-inline: var(--space-md); }
+    .metadata-manual-search form { grid-template-columns: 1fr; }
     .metadata-review { grid-template-columns: 1fr; }
     .metadata-cover-wrap { width: 120px; min-height: 170px; }
     .metadata-fields dl { grid-template-columns: 1fr; }
@@ -2684,11 +2750,10 @@ audio:hover {
     .pipeline-details > summary span { text-align: left; }
     .work-status-panel.terminal { grid-template-columns: 1fr; }
 
-    .chapter-progress-section { padding: 14px 12px; overflow: hidden; }
+    .chapter-progress-section { padding: 0; overflow: hidden; }
     .chapter-section-heading { align-items: stretch; flex-direction: column; gap: 8px; }
     .chapter-heading-line { align-items: center; flex-wrap: wrap; }
     .chapter-selection-summary { align-self: flex-start; max-width: 100%; }
-    #btn-toggle-chapters { margin-left: 0; }
     .chapter-toolbar-group,
     .chapter-toolbar-search { width: 100%; }
     #chapter-range-input,

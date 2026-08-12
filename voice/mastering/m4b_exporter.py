@@ -307,6 +307,13 @@ class M4BExporter:
 
         if book_metadata.year:
             cmd.extend(["-metadata", f"date={book_metadata.year}"])
+        if book_metadata.isbn:
+            cmd.extend([
+                "-metadata", f"isbn={book_metadata.isbn}",
+                "-metadata", f"grouping=ISBN {book_metadata.isbn}",
+            ])
+
+        cmd.extend(["-movflags", "+faststart"])
 
         cmd.append(str(output_file))
 

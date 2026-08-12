@@ -287,6 +287,31 @@ class WhisperValidator:
         )
 
     @staticmethod
+    def _expand_english_contractions(text: str) -> str:
+        """Expand common unambiguous contractions without optional packages.
+
+        CI and lightweight installations intentionally omit ``openai-whisper``.
+        Keeping this small pass local makes WER independent of whether its
+        richer English normalizer happens to be installed.
+        """
+        text = (text or "").replace("’", "'").replace("‘", "'")
+        replacements = (
+            (r"\blet's\b", "let us"),
+            (r"\bwon't\b", "will not"),
+            (r"\bshan't\b", "shall not"),
+            (r"\bcan't\b", "can not"),
+            (r"\bcannot\b", "can not"),
+            (r"\b([\w]+)n't\b", r"\1 not"),
+            (r"\bi'm\b", "i am"),
+            (r"\b([\w]+)'re\b", r"\1 are"),
+            (r"\b([\w]+)'ve\b", r"\1 have"),
+            (r"\b([\w]+)'ll\b", r"\1 will"),
+        )
+        for pattern, replacement in replacements:
+            text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+        return text
+
+    @staticmethod
     def _normalize_text(text: str) -> str:
         """Fully generic text normalizer for WER calculation across any book.
 
@@ -297,6 +322,10 @@ class WhisperValidator:
         """
         if not text:
             return ""
+
+        # This deterministic baseline runs even when the optional Whisper
+        # package is absent (as it is in the low-resource CI environment).
+        text = WhisperValidator._expand_english_contractions(text)
 
         # Step 1: Use OpenAI Whisper's official English normalizer if available
         try:

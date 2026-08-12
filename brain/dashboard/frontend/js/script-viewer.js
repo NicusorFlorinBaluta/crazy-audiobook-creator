@@ -23,6 +23,7 @@ window.ScriptViewer = (() => {
         qualityOverview: document.getElementById('quality-overview'),
         castingSearch: document.getElementById('casting-search'),
         castingFilter: document.getElementById('casting-filter'),
+        downloadAllVoices: document.getElementById('btn-download-all-voices'),
         scriptSearch: document.getElementById('script-search'),
         scriptSpeakerFilter: document.getElementById('script-speaker-filter'),
         scriptDialogueOnly: document.getElementById('script-dialogue-only'),
@@ -127,6 +128,19 @@ window.ScriptViewer = (() => {
     function renderCharacters() {
         const voiceState = currentData.voices;
         const voices = voiceState?.voices || [];
+        const readyVoiceCount = voices.filter(voice => voice.ready).length;
+        if (els.downloadAllVoices) {
+            const projectId = window.state?.currentProjectId;
+            els.downloadAllVoices.classList.toggle(
+                'hidden', !projectId || readyVoiceCount === 0
+            );
+            els.downloadAllVoices.href = projectId
+                ? `api/projects/${encodeURIComponent(projectId)}/voices/download-all`
+                : '#';
+            els.downloadAllVoices.textContent = readyVoiceCount
+                ? `Download all samples (${readyVoiceCount})`
+                : 'Download all samples';
+        }
         const speakingCharacters = voiceState?.speaking_characters || [];
         const speakerById = new Map(
             speakingCharacters.map(character => [character.character_id, character])

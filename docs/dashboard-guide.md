@@ -21,6 +21,27 @@ confirmation dialog appears.
 
 Completed projects collapse pipeline progress and chapters by default. Expand
 either section when reviewing history or selecting the next chapter batch.
+Their native disclosure state survives background status polling. Chapter
+controls use the same clickable section-header pattern as the other panels.
+
+**Automatic working hours** is global to the queue. Each window has explicit
+weekday, start, and end controls; overnight windows belong to their start day.
+Time fields retain enough width for native 12-hour AM/PM controls and stack on
+narrow mobile screens.
+
+## Book details
+
+**Find book details** previews the best Google Books match without changing the
+project. If it is wrong or no confident automatic match exists, expand
+**Search for another book or edition**, search by title and optional author,
+and select the exact volume. Applying the reviewed result adopts its title,
+author, description, genre, year, and ISBN. The original EPUB identity remains
+available internally as provenance.
+
+For completed projects, applying details repackages existing M4B files by
+stream-copying the audio and chapters with refreshed tags and cover. It does
+not run models or re-encode speech. The audiobook download filename follows the
+current reviewed title.
 
 ## Voice casting
 
@@ -33,6 +54,12 @@ The assignment selector reflects the voice currently assigned in
 `voice_cast.json`, including narrator alternatives such as `narrator_male` and
 `narrator_female`. Candidate labels include their owning character to avoid
 ambiguous repeated names.
+
+Every ready profile has a named **Download voice sample** action. **Download
+all samples** creates one ZIP containing every prepared character and narrator
+candidate plus a JSON manifest with voice IDs, character labels, source type,
+exact reference transcript, and assignments. Duplicate display names receive
+an ID-qualified filename rather than overwriting one another.
 
 ## Script review
 
