@@ -33,6 +33,9 @@ from brain.director.script_generator import ScriptGenerator
 from brain.extractor.epub_parser import EpubParser
 from brain.orchestrator.delivery_manager import DeliveryManager
 from brain.orchestrator.job_queue import JobQueue
+from brain.orchestrator.review_gate import collect_review_gate, write_release_report
+from brain.orchestrator.audio_candidates import preserve_candidate
+from brain.orchestrator.stage_runner import PipelineResumePlan
 from brain.orchestrator.voice_client import VoiceClient
 from brain.validators.gemini_validation import GeminiValidationService
 from shared.artifacts import (
@@ -84,6 +87,15 @@ class _GracefulDeliveryPause(Exception):
     meaning in Python's iterator and generator protocol) makes the intent clear
     and prevents accidental silencing by comprehensions or generator internals.
     """
+
+
+class _WaitingForReview(Exception):
+    """Park the worker without treating a human release gate as a failure."""
+
+    def __init__(self, item_ids: set[str], reason: str):
+        super().__init__(reason)
+        self.item_ids = sorted(item_ids)
+        self.reason = reason
 
 
 class Pipeline:
@@ -183,6 +195,7 @@ class Pipeline:
         self.external_validator = GeminiValidationService(
             dict(self.config.get("external_validation", {})),
             self.projects_dir,
+            event_sink=self.job_queue.log_external_validation,
         )
 
         self._stop_flags: dict[str, bool] = {}
@@ -865,15 +878,8 @@ class Pipeline:
 
         # When starting or re-running a pipeline:
         # Determine the appropriate stage to resume from based on completed phases.
-        if current_stage in (PipelineStage.COMPLETE, PipelineStage.SELECTION_COMPLETE, PipelineStage.PAUSED, PipelineStage.ERROR, PipelineStage.PAUSED_SCHEDULED, PipelineStage.DEPLOY_PAUSED):
-            if state.get("bootstrapping_completed", False):
-                current_stage = PipelineStage.GENERATING
-            elif state.get("script_completed", False):
-                current_stage = PipelineStage.BOOTSTRAPPING
-            elif state.get("scripted_chapters"):
-                current_stage = PipelineStage.SCRIPTING
-            else:
-                current_stage = PipelineStage.CREATED
+        if current_stage in (PipelineStage.COMPLETE, PipelineStage.SELECTION_COMPLETE, PipelineStage.PAUSED, PipelineStage.ERROR, PipelineStage.PAUSED_SCHEDULED, PipelineStage.DEPLOY_PAUSED, PipelineStage.WAITING_FOR_REVIEW):
+            current_stage = PipelineResumePlan.from_state(state).stage
             self.job_queue.update_job(
                 project_id,
                 {
@@ -1005,6 +1011,12 @@ class Pipeline:
 
             self._check_stop(project_id)
             if current_stage != PipelineStage.EXPORTING:
+                release = write_release_report(project_id, project_dir, self.job_queue)
+                if not release["release_ready"]:
+                    raise _WaitingForReview(
+                        [item["item_id"] for item in release["items"] if item["blocking"]],
+                        f"{release['blocking_count']} item(s) require review before mastering.",
+                    )
                 self._run_mastering(project_id, project_dir)
 
             # Stage ⑦: M4B Export
@@ -1049,6 +1061,27 @@ class Pipeline:
                     elapsed / 60,
                 )
 
+        except _WaitingForReview as review_pause:
+            elapsed = time.time() - start_time
+            logger.info(
+                "Pipeline waiting for review for '%s': %s",
+                project_id,
+                review_pause.item_ids,
+            )
+            self._update_stage(
+                project_id,
+                PipelineStage.WAITING_FOR_REVIEW,
+                elapsed_seconds=elapsed,
+            )
+            self.job_queue.update_job(
+                project_id,
+                {
+                    "pause_reason": review_pause.reason,
+                    "review_blocking_item_ids": review_pause.item_ids,
+                    "error_message": None,
+                },
+            )
+            return ProjectStatus(**self.job_queue.get_job(project_id))
         except _GracefulDeliveryPause as _gdp:
             elapsed = time.time() - start_time
             logger.info(
@@ -1793,7 +1826,19 @@ class Pipeline:
 
     def _run_generation(self, project_id: str, project_dir: Path, chapter_numbers: set[int] | None = None) -> None:
         """Run Stages ④-⑤: TTS generation with quality validation."""
-        self._assert_attribution_audit(project_dir)
+        attribution_audit = self._assert_attribution_audit(project_dir, enforce=False)
+        if not attribution_audit["passed"]:
+            attribution_items = [
+                item.item_id
+                for item in collect_review_gate(
+                    project_id, project_dir, self.job_queue
+                ).blocking_items
+                if item.category == "attribution"
+            ]
+            raise _WaitingForReview(
+                attribution_items,
+                f"{len(attribution_items)} speaker attribution(s) require review before generation.",
+            )
         self._update_stage(project_id, PipelineStage.GENERATING)
 
         scripts_dir = project_dir / "script"
@@ -1989,6 +2034,7 @@ class Pipeline:
                     },
                 )
                 external_audio_retry = 0
+                candidate_pool: dict[str, list[Any]] = {}
                 max_external_audio_retries = max(
                     0,
                     int(
@@ -2007,9 +2053,18 @@ class Pipeline:
                             response=response,
                         )
                     )
+                    segment_dir = Path(response.segment_files_dir)
+                    for candidate_result in response.quality_results:
+                        candidate_audio = segment_dir / f"{candidate_result.line_id}.wav"
+                        if candidate_result.selected and candidate_audio.is_file():
+                            preserved = preserve_candidate(
+                                project_dir, candidate_audio, candidate_result, retain=2
+                            )
+                            pool = candidate_pool.setdefault(candidate_result.line_id, [])
+                            pool.append(preserved)
+                            candidate_pool[candidate_result.line_id] = pool[-2:]
                     if not auto_regenerate_ids or external_audio_retry >= max_external_audio_retries:
                         break
-                    segment_dir = Path(response.segment_files_dir)
                     for line_id in auto_regenerate_ids:
                         audio_path = segment_dir / f"{line_id}.wav"
                         audio_path.unlink(missing_ok=True)
@@ -2026,6 +2081,24 @@ class Pipeline:
                         request,
                         progress_callback=_on_generation_progress,
                     )
+                # Rank all retained attempts using deterministic hard gates plus
+                # Gemini confidence. Restore the strongest artifact before logs
+                # and mastering consume it.
+                for line_id, candidates in candidate_pool.items():
+                    winner = max(candidates, key=lambda candidate: candidate.score)
+                    final_audio = Path(response.segment_files_dir) / f"{line_id}.wav"
+                    current = next(
+                        (item for item in response.quality_results if item.line_id == line_id and item.selected),
+                        None,
+                    )
+                    current_candidate = candidates[-1]
+                    if current is None or winner.score > current_candidate.score:
+                        shutil.copy2(winner.audio_path, final_audio)
+                        for item in response.quality_results:
+                            if item.line_id == line_id:
+                                item.selected = False
+                        winner.result.selected = True
+                        response.quality_results.append(winner.result)
                 review_by_id = {
                     item["item_id"]: item
                     for item in self.job_queue.get_review_items(project_id, "segment")
@@ -2078,10 +2151,19 @@ class Pipeline:
                         response.failed_validation,
                     )
                 if (
+                    external_review_ids
+                ):
+                    raise _WaitingForReview(
+                        external_review_ids,
+                        (
+                            f"{len(external_review_ids)} audio segment(s) require review "
+                            "before mastering."
+                        ),
+                    )
+                if (
                     response.generated != len(request_lines)
                     or generated_ids != expected_ids
                     or failed_ids
-                    or external_review_ids
                 ):
                     raise RuntimeError(
                         f"Chapter {chapter_script.chapter_number} generation incomplete: "

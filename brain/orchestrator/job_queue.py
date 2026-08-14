@@ -85,6 +85,30 @@ class JobQueue:
                 CREATE INDEX IF NOT EXISTS idx_review_project
                 ON review_items(project_id, item_type, disposition)
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS external_validation_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_id TEXT NOT NULL,
+                    item_type TEXT NOT NULL,
+                    item_id TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    model TEXT NOT NULL DEFAULT '',
+                    decision TEXT NOT NULL,
+                    confidence REAL,
+                    reason TEXT NOT NULL DEFAULT '',
+                    latency_ms INTEGER,
+                    details TEXT NOT NULL DEFAULT '{}',
+                    human_disposition TEXT,
+                    human_value TEXT,
+                    human_at TEXT,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (project_id) REFERENCES jobs(project_id)
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_external_validation_project
+                ON external_validation_events(project_id, item_type, item_id)
+            """)
             conn.commit()
 
     @contextmanager
@@ -214,6 +238,7 @@ class JobQueue:
                 raise KeyError(f"Job not found: {project_id}")
             conn.execute("DELETE FROM quality_logs WHERE project_id = ?", (project_id,))
             conn.execute("DELETE FROM review_items WHERE project_id = ?", (project_id,))
+            conn.execute("DELETE FROM external_validation_events WHERE project_id = ?", (project_id,))
             conn.execute("DELETE FROM jobs WHERE project_id = ?", (project_id,))
             conn.commit()
 
@@ -253,6 +278,100 @@ class JobQueue:
             "note": note,
             "updated_at": now,
         }
+
+    def log_external_validation(
+        self, project_id: str, item_type: str, item_id: str, provider: str,
+        model: str, decision: str, confidence: float | None, reason: str,
+        latency_ms: int | None = None, details: dict[str, Any] | None = None,
+    ) -> int:
+        """Append one immutable machine-decision event."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """INSERT INTO external_validation_events
+                (project_id,item_type,item_id,provider,model,decision,confidence,reason,latency_ms,details,created_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                (project_id, item_type, item_id, provider, model, decision,
+                 confidence, reason, latency_ms, json.dumps(details or {}), now),
+            )
+            conn.commit()
+            return int(cursor.lastrowid)
+
+    def reconcile_external_validation(
+        self, project_id: str, item_type: str, item_id: str,
+        human_disposition: str, human_value: str = "",
+    ) -> None:
+        """Attach a human outcome to all prior machine decisions for an item."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """UPDATE external_validation_events
+                SET human_disposition=?, human_value=?, human_at=?
+                WHERE project_id=? AND item_type=? AND item_id=? AND human_at IS NULL""",
+                (human_disposition, human_value, now, project_id, item_type, item_id),
+            )
+            conn.commit()
+
+    def get_external_validation_events(self, project_id: str) -> list[dict[str, Any]]:
+        """Return the external decision ledger newest first."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT id,item_type,item_id,provider,model,decision,confidence,reason,
+                latency_ms,details,human_disposition,human_value,human_at,created_at
+                FROM external_validation_events WHERE project_id=? ORDER BY id DESC""",
+                (project_id,),
+            ).fetchall()
+        keys = ("id","item_type","item_id","provider","model","decision","confidence",
+                "reason","latency_ms","details","human_disposition","human_value","human_at","created_at")
+        result = []
+        for row in rows:
+            item = dict(zip(keys, row))
+            item["details"] = json.loads(item["details"] or "{}")
+            result.append(item)
+        return result
+
+    def external_validation_calibration(self, project_id: str, minimum_samples: int = 25) -> dict[str, Any]:
+        """Compute passive agreement metrics; never mutates configured thresholds."""
+        events = [event for event in self.get_external_validation_events(project_id) if event["human_disposition"]]
+        outcomes: list[tuple[float, bool]] = []
+        seen_items: set[tuple[str, str]] = set()
+        for event in events:
+            item_key = (event["item_type"], event["item_id"])
+            if item_key in seen_items:
+                continue
+            confidence = event.get("confidence")
+            if confidence is None:
+                continue
+            decision = str(event.get("decision", "")).lower()
+            human = str(event.get("human_disposition", "")).lower()
+            agrees = (
+                (decision in {"accept", "accepted", "resolved"} and human in {"acceptable", "resolved"})
+                or (decision in {"reject", "regenerate"} and human in {"regenerate", "source_tts_issue"})
+            )
+            outcomes.append((float(confidence), agrees))
+            seen_items.add(item_key)
+        sample_count = len(outcomes)
+        bins = []
+        for low in (0.0, 0.5, 0.7, 0.85):
+            high = {0.0: 0.5, 0.5: 0.7, 0.7: 0.85, 0.85: 1.01}[low]
+            rows = [agree for confidence, agree in outcomes if low <= confidence < high]
+            bins.append({"low": low, "high": min(high, 1.0), "samples": len(rows),
+                         "agreement": sum(rows) / len(rows) if rows else None})
+        recommended = None
+        if sample_count >= minimum_samples:
+            lowest_observed = min(confidence for confidence, _ in outcomes)
+            for threshold in (0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.95):
+                if threshold < lowest_observed:
+                    continue
+                rows = [agree for confidence, agree in outcomes if confidence >= threshold]
+                if len(rows) >= 10 and sum(rows) / len(rows) >= 0.95:
+                    recommended = threshold
+                    break
+        return {"sample_count": sample_count, "minimum_samples": minimum_samples,
+                "samples_needed": max(0, minimum_samples - sample_count),
+                "ready": sample_count >= minimum_samples, "bins": bins,
+                "recommended_auto_accept_threshold": recommended,
+                "applied_automatically": False}
 
     def get_review_items(
         self,

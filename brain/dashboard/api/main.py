@@ -58,6 +58,9 @@ from brain.dashboard.api.security import (
     is_loopback_client,
 )
 from brain.orchestrator.job_queue import JobQueue
+from brain.orchestrator.review_gate import collect_review_gate
+from brain.orchestrator.audio_candidates import list_candidates
+from brain.orchestrator.stage_runner import PipelineResumePlan
 from shared.constants import PipelineStage, VOICE_CAST_SCHEMA_VERSION
 from shared.artifacts import (
     atomic_write_bytes,
@@ -78,7 +81,7 @@ from voice.tts_server.voice_library import VoiceLibraryManager
 
 logger = logging.getLogger(__name__)
 
-FRONTEND_BUILD = "2026.08.14.2"
+FRONTEND_BUILD = "2026.08.14.3"
 
 
 class AsyncioConnectionResetFilter(logging.Filter):
@@ -1158,7 +1161,14 @@ async def list_projects():
     """List all projects."""
     if not job_queue:
         raise HTTPException(status_code=503, detail="Server not initialized")
-    return job_queue.list_jobs()
+    projects = job_queue.list_jobs()
+    for project in projects:
+        gate = collect_review_gate(
+            project["project_id"], _project_dir(project["project_id"]), job_queue
+        ).to_dict()
+        project["attention_count"] = gate["total_count"]
+        project["blocking_review_count"] = gate["blocking_count"]
+    return projects
 
 
 @app.post("/api/projects")
@@ -1335,6 +1345,15 @@ async def start_pipeline(project_id: str):
         )
 
     current = job_queue.get_job(project_id)
+    gate = collect_review_gate(project_id, _project_dir(project_id), job_queue)
+    if gate.blocking_items:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Resolve {len(gate.blocking_items)} blocking review item(s) "
+                "before resuming the pipeline."
+            ),
+        )
     incremental_settings = current.get("incremental_delivery") or {}
     if (
         isinstance(incremental_settings, dict)
@@ -1361,15 +1380,7 @@ async def start_pipeline(project_id: str):
                 "Review the speaking cast and use Approve voices & continue."
             ),
         )
-    reset_target = current.get("reset_target_stage")
-    if reset_target:
-        resume_stage = PipelineStage(reset_target)
-    elif current.get("bootstrapping_completed", False):
-        resume_stage = PipelineStage.GENERATING
-    elif current.get("script_completed", False):
-        resume_stage = PipelineStage.BOOTSTRAPPING
-    else:
-        resume_stage = PipelineStage.CREATED
+    resume_stage = PipelineResumePlan.from_state(current).stage
 
     # Clear stale terminal state synchronously so status never reports
     # error/paused while the replacement worker is already running.
@@ -1426,6 +1437,27 @@ async def start_pipeline(project_id: str):
     running_tasks[project_id] = task
 
     return {"status": "started", "project_id": project_id}
+
+
+def _schedule_resume_after_reviews(project_id: str) -> bool:
+    """Start a waiting project once its last blocking review is resolved."""
+    if not job_queue:
+        return False
+    state = job_queue.get_job(project_id)
+    if state.get("status") != PipelineStage.WAITING_FOR_REVIEW.value:
+        return False
+    gate = collect_review_gate(project_id, _project_dir(project_id), job_queue)
+    if gate.blocking_items:
+        return False
+
+    async def resume() -> None:
+        try:
+            await start_pipeline(project_id)
+        except HTTPException as exc:
+            logger.warning("Automatic review resume skipped for %s: %s", project_id, exc.detail)
+
+    asyncio.create_task(resume())
+    return True
 
 
 @app.post("/api/projects/{project_id}/stop")
@@ -2822,8 +2854,16 @@ async def update_script_line(
         chapter_number,
         "Speaker attribution changed",
     )
-
-    return {"status": "success", "message": "Script line updated"}
+    (project_dir / "attribution_audit.json").unlink(missing_ok=True)
+    job_queue.reconcile_external_validation(
+        project_id, "attribution", line_id, "resolved", request.speaker
+    )
+    auto_resuming = _schedule_resume_after_reviews(project_id)
+    return {
+        "status": "success",
+        "message": "Script line updated",
+        "auto_resuming": auto_resuming,
+    }
 
 
 @app.post("/api/projects/{project_id}/chapters/{chapter_number}/regenerate")
@@ -3795,6 +3835,36 @@ async def get_segment_audio(project_id: str, line_id: str):
     return FileResponse(path=path, filename=path.name, media_type="audio/wav")
 
 
+@app.get("/api/projects/{project_id}/segments/{line_id}/candidates")
+async def get_segment_candidates(project_id: str, line_id: str):
+    """Return the retained A/B candidates, ranked best first."""
+    _require_job(project_id)
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", line_id):
+        raise HTTPException(status_code=400, detail="Invalid line ID")
+    rows = list_candidates(_project_dir(project_id), line_id)
+    for row in rows:
+        row["audio_url"] = (
+            f"api/projects/{project_id}/segments/{line_id}/candidates/"
+            f"{quote(row.pop('filename'))}"
+        )
+    return {"candidates": rows}
+
+
+@app.get("/api/projects/{project_id}/segments/{line_id}/candidates/{filename}")
+async def get_segment_candidate_audio(project_id: str, line_id: str, filename: str):
+    """Stream one bounded retained candidate."""
+    _require_job(project_id)
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", line_id):
+        raise HTTPException(status_code=400, detail="Invalid line ID")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+\.wav", filename):
+        raise HTTPException(status_code=400, detail="Invalid candidate filename")
+    root = (_project_dir(project_id) / "review_candidates" / line_id).resolve()
+    path = (root / filename).resolve()
+    if path.parent != root or not path.is_file():
+        raise HTTPException(status_code=404, detail="Candidate audio not found")
+    return FileResponse(path=path, filename=path.name, media_type="audio/wav")
+
+
 @app.get("/api/projects/{project_id}/quality/review")
 async def get_quality_review(project_id: str):
     """Return join diagnostics and persisted human review dispositions."""
@@ -3889,13 +3959,50 @@ async def update_quality_review(project_id: str, request: ReviewItemRequest):
             {chapter_number},
             f"Manual regeneration requested for {request.item_id}",
         )
-    return job_queue.set_review_item(
+    result = job_queue.set_review_item(
         project_id,
         request.item_type,
         request.item_id,
         request.disposition,
         request.note.strip(),
     )
+    job_queue.reconcile_external_validation(
+        project_id,
+        request.item_type,
+        request.item_id,
+        request.disposition,
+    )
+    result["auto_resuming"] = _schedule_resume_after_reviews(project_id)
+    return result
+
+
+@app.get("/api/projects/{project_id}/reviews")
+async def get_attention_reviews(project_id: str):
+    """Return the unified, privacy-conscious Attention Required inbox."""
+    _require_job(project_id)
+    result = collect_review_gate(
+        project_id, _project_dir(project_id), job_queue
+    ).to_dict()
+    release_path = _project_dir(project_id) / "pre_master_release.json"
+    if release_path.is_file():
+        try:
+            result["pre_master_release"] = json.loads(
+                release_path.read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError, TypeError):
+            result["pre_master_release"] = None
+    result["calibration"] = job_queue.external_validation_calibration(project_id)
+    return result
+
+
+@app.get("/api/projects/{project_id}/external-validation/events")
+async def get_external_validation_events(project_id: str):
+    """Expose the audit ledger and passive confidence calibration."""
+    _require_job(project_id)
+    return {
+        "events": job_queue.get_external_validation_events(project_id),
+        "calibration": job_queue.external_validation_calibration(project_id),
+    }
 
 
 @app.get("/api/projects/{project_id}/quality")
@@ -4063,6 +4170,10 @@ async def get_external_validation_status(project_id: str):
             "profile_initialized": profile.is_dir() and any(profile.iterdir()),
             "persistent_conversations": purposes,
         },
+        "provider_health": (
+            pipeline.external_validator.health_snapshot() if pipeline else {}
+        ),
+        "calibration": job_queue.external_validation_calibration(project_id),
     }
 
 

@@ -16,6 +16,8 @@ const state = window.state = {
     metadataCandidate: null
 };
 
+const attentionState = {data: null, page: 1, pageSize: 10, projectId: null};
+
 // DOM Elements
 const els = {
     viewProjects: document.getElementById('view-projects'),
@@ -246,6 +248,21 @@ function setupEventListeners() {
     document.getElementById('btn-start-pipeline').addEventListener('click', startPipeline);
     document.getElementById('btn-pause-pipeline').addEventListener('click', pausePipeline);
     document.getElementById('btn-delete-project').addEventListener('click', deleteProject);
+    ['attention-type', 'attention-status', 'attention-confidence'].forEach(id => {
+        document.getElementById(id)?.addEventListener('change', () => {
+            attentionState.page = 1;
+            renderAttentionInbox();
+        });
+    });
+    document.getElementById('attention-prev')?.addEventListener('click', () => {
+        attentionState.page = Math.max(1, attentionState.page - 1);
+        renderAttentionInbox();
+    });
+    document.getElementById('attention-next')?.addEventListener('click', () => {
+        attentionState.page += 1;
+        renderAttentionInbox();
+    });
+    document.getElementById('btn-resume-after-review')?.addEventListener('click', startPipeline);
 
     // Feature Expansion Handlers
     const btnFetchMeta = document.getElementById('btn-fetch-metadata');
@@ -475,7 +492,7 @@ async function showDetailView(projectId, isHashLoad = false) {
 
     // Connect log console in background (non-blocking)
     if (window.LogConsole) {
-        const terminal = ['complete', 'completed', 'selection_complete', 'paused', 'error'];
+        const terminal = ['complete', 'completed', 'selection_complete', 'paused', 'error', 'waiting_for_review'];
         const running = project?.running === true
             && !terminal.includes(String(project?.status || '').toLowerCase());
         window.LogConsole.openForProject(projectId, running);
@@ -522,6 +539,9 @@ async function fetchProjectDetails(projectId, isPoll = false) {
             );
         }
         renderProjectDetails(data);
+        if (!isPoll || Date.now() - (state.lastAttentionRefresh || 0) > 5000) {
+            fetchAndRenderAttention(projectId, data);
+        }
         fetchAndRenderDeliveries(projectId);
 
         const scheduleEditor = document.getElementById('schedule-section');
@@ -800,7 +820,7 @@ function renderProjectsList() {
     const search = (els.projectSearch?.value || '').trim().toLowerCase();
     const statusFilter = els.projectStatusFilter?.value || 'all';
     const sort = els.projectSort?.value || 'newest';
-    const terminal = new Set(['complete', 'completed', 'paused', 'error', 'selection_complete']);
+    const terminal = new Set(['complete', 'completed', 'paused', 'error', 'selection_complete', 'waiting_for_review']);
     const projects = state.projects.filter(project => {
         const status = String(project.status || 'created').toLowerCase();
         const searchText = `${project.title || ''} ${project.author || ''} ${project.project_id || ''}`.toLowerCase();
@@ -847,6 +867,7 @@ function renderProjectsList() {
                 </div>
             </div>
             <div class="card-project-id">${escapeHtml(project.project_id || '')}</div>
+            ${project.attention_count ? `<div class="attention-card-badge">${project.blocking_review_count || 0} blocking · ${project.attention_count} total</div>` : ''}
             <div class="card-stage" style="background: var(--stage-${statusToken}-bg, var(--bg-elevated)); color: var(--stage-${statusToken}, var(--text-primary))">
                 ${['error', 'paused', 'complete'].includes(status) ? (status === 'complete' ? '✅ ' : '⚠️ ') : '⏳ '}
                 ${escapeHtml(formatProjectStatus(status))}
@@ -856,6 +877,90 @@ function renderProjectsList() {
         card.addEventListener('click', () => showDetailView(project.project_id));
         els.projectsGrid.appendChild(card);
     });
+}
+
+function confidenceBand(value) {
+    if (value == null) return {key: 'unknown', label: 'No confidence'};
+    if (value >= 0.9) return {key: 'high', label: `High · ${Math.round(value * 100)}%`};
+    if (value >= 0.75) return {key: 'review', label: `Review · ${Math.round(value * 100)}%`};
+    return {key: 'low', label: `Low · ${Math.round(value * 100)}%`};
+}
+
+async function fetchAndRenderAttention(projectId, project = state.currentProject) {
+    try {
+        const response = await fetch(`api/projects/${encodeURIComponent(projectId)}/reviews`);
+        if (!response.ok || state.currentProjectId !== projectId) return;
+        const newProject = attentionState.projectId !== projectId;
+        attentionState.data = await response.json();
+        attentionState.projectId = projectId;
+        if (newProject) {
+            document.getElementById('attention-status').value =
+                attentionState.data.blocking_count ? 'blocking' : 'all';
+        }
+        state.lastAttentionRefresh = Date.now();
+        renderAttentionInbox(project);
+    } catch (error) {
+        console.warn('Could not refresh attention inbox', error);
+    }
+}
+
+function renderAttentionInbox(project = state.currentProject) {
+    const panel = document.getElementById('attention-panel');
+    const data = attentionState.data;
+    if (!panel || !data || (!data.total_count && project?.status !== 'waiting_for_review')) {
+        panel?.classList.add('hidden');
+        return;
+    }
+    panel.classList.remove('hidden');
+    document.getElementById('attention-summary').textContent = data.blocking_count
+        ? `${data.blocking_count} blocking decision${data.blocking_count === 1 ? '' : 's'}; the pipeline resumes automatically after the last one.`
+        : `${data.total_count} non-blocking or resolved item${data.total_count === 1 ? '' : 's'}.`;
+    const resume = document.getElementById('btn-resume-after-review');
+    resume.classList.toggle('hidden', project?.status !== 'waiting_for_review' || data.blocking_count !== 0);
+    const type = document.getElementById('attention-type').value;
+    const status = document.getElementById('attention-status').value;
+    const confidence = document.getElementById('attention-confidence').value;
+    const filtered = data.items.filter(item => {
+        const band = confidenceBand(item.confidence).key;
+        return (type === 'all' || item.category === type)
+            && (status === 'all' || (status === 'blocking' ? item.blocking : !item.blocking))
+            && (confidence === 'all' || band === confidence);
+    });
+    const pages = Math.max(1, Math.ceil(filtered.length / attentionState.pageSize));
+    attentionState.page = Math.min(attentionState.page, pages);
+    const rows = filtered.slice((attentionState.page - 1) * attentionState.pageSize, attentionState.page * attentionState.pageSize);
+    document.getElementById('attention-list').innerHTML = rows.length ? rows.map(item => {
+        const band = confidenceBand(item.confidence);
+        const trail = item.details?.decision_trail || [];
+        return `<article class="attention-item ${item.blocking ? 'blocking' : ''}" data-line-id="${escapeHtml(item.item_id)}">
+            <div class="attention-item-head"><strong>${escapeHtml(item.title)}</strong><span class="confidence-band confidence-${band.key}">${escapeHtml(band.label)}</span></div>
+            <p>${escapeHtml(item.reason || '')}</p>
+            <div class="attention-item-actions">
+                ${item.category === 'audio' ? `<audio controls preload="none" src="${escapeHtml(item.details?.audio_url || '')}"></audio><button class="btn btn-ghost btn-sm load-candidates">Compare attempts</button>` : ''}
+                ${item.category === 'attribution' ? `<button class="btn btn-ghost btn-sm reveal-context">Reveal in script editor</button>` : ''}
+            </div>
+            <div class="candidate-comparison hidden"></div>
+            ${trail.length ? `<details class="decision-trail"><summary>Decision trail (${trail.length})</summary>${trail.map(step => `<div><strong>${escapeHtml(step.provider || step.resolver || 'validator')}</strong> · ${escapeHtml(step.decision || 'unknown')} · ${step.confidence == null ? 'n/a' : `${Math.round(step.confidence * 100)}%`}<br><small>${escapeHtml(step.reason || '')}</small></div>`).join('')}</details>` : ''}
+        </article>`;
+    }).join('') : '<div class="review-complete-message">No items match these filters.</div>';
+    document.getElementById('attention-page').textContent = `Page ${attentionState.page} of ${pages} · ${filtered.length} items`;
+    document.getElementById('attention-prev').disabled = attentionState.page <= 1;
+    document.getElementById('attention-next').disabled = attentionState.page >= pages;
+    panel.querySelectorAll('.load-candidates').forEach(button => button.addEventListener('click', async () => {
+        const row = button.closest('.attention-item');
+        const target = row.querySelector('.candidate-comparison');
+        button.disabled = true;
+        const response = await fetch(`api/projects/${encodeURIComponent(attentionState.projectId)}/segments/${encodeURIComponent(row.dataset.lineId)}/candidates`);
+        const payload = response.ok ? await response.json() : {candidates: []};
+        target.innerHTML = payload.candidates.length ? payload.candidates.map((candidate, index) => `<div><strong>${index === 0 ? 'Recommended' : 'Alternative'} · score ${Number(candidate.score).toFixed(1)}</strong><audio controls preload="metadata" src="${escapeHtml(candidate.audio_url)}"></audio><details><summary>Metrics and rationale</summary><pre>${escapeHtml(JSON.stringify(candidate.quality, null, 2))}</pre></details></div>`).join('') : '<small>No retained alternative is available yet.</small>';
+        target.classList.remove('hidden');
+        button.remove();
+    }));
+    panel.querySelectorAll('.reveal-context').forEach(button => button.addEventListener('click', () => {
+        activateDetailTab('tab-script');
+        const id = button.closest('.attention-item').dataset.lineId;
+        setTimeout(() => document.querySelector(`[data-line-id="${CSS.escape(id)}"]`)?.scrollIntoView({behavior: 'smooth', block: 'center'}), 50);
+    }));
 }
 
 function renderProjectDetails(project) {
@@ -1396,7 +1501,7 @@ function renderWorkStatus(project) {
     const currentDetail = detailMap.get(currentChapter) || {};
     const status = String(project.status || 'created').toLowerCase();
     const terminalStatuses = new Set([
-        'paused', 'pausing', 'paused_scheduled', 'deploy_paused', 'error',
+        'paused', 'pausing', 'paused_scheduled', 'deploy_paused', 'waiting_for_review', 'error',
         'complete', 'completed', 'selection_complete'
     ]);
     const stage = terminalStatuses.has(status)
@@ -2128,6 +2233,7 @@ function formatProjectStatus(status) {
         voice_review: 'Voice approval required',
         paused_scheduled: 'Waiting for working hours',
         deploy_paused: 'Parked safely',
+        waiting_for_review: 'Waiting for review',
         complete: 'Complete',
         completed: 'Complete'
     };

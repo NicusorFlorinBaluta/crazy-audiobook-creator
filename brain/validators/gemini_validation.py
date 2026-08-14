@@ -15,13 +15,13 @@ import logging
 import os
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
 import httpx
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 
 from shared.artifacts import atomic_write_json
 from shared.models import QualityResult, ScriptChapter
@@ -37,6 +37,63 @@ def _lock_name(prefix: str, path: Path) -> str:
 
 class ExternalValidationError(RuntimeError):
     """Raised when an external validator cannot produce a trustworthy result."""
+
+
+class _ProviderHealth:
+    """Persisted failure counter and cooldown circuit for slow external providers."""
+
+    def __init__(self, path: Path, threshold: int = 3, cooldown_seconds: int = 900):
+        self.path = path
+        self.threshold = max(1, threshold)
+        self.cooldown_seconds = max(30, cooldown_seconds)
+
+    def _read(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.path.read_text(encoding="utf-8"))
+            return value if isinstance(value, dict) else {}
+        except (OSError, ValueError, TypeError):
+            return {}
+
+    def before(self, provider: str) -> None:
+        state = self._read().get(provider, {})
+        open_until = float(state.get("open_until_epoch") or 0)
+        if open_until > time.time():
+            remaining = max(1, round(open_until - time.time()))
+            raise ExternalValidationError(
+                f"{provider} circuit is cooling down for {remaining}s after repeated failures"
+            )
+
+    def record(self, provider: str, *, success: bool, latency_ms: int, error: str = "") -> None:
+        lock = SingleInstanceLock(_lock_name("external-health", self.path))
+        if not lock.acquire():
+            return
+        try:
+            state = self._read()
+            entry = dict(state.get(provider, {}))
+            now = datetime.now(timezone.utc).isoformat()
+            entry["last_latency_ms"] = latency_ms
+            if success:
+                entry.update({"consecutive_failures": 0, "last_success": now,
+                              "last_error": "", "open_until_epoch": 0})
+            else:
+                failures = int(entry.get("consecutive_failures", 0)) + 1
+                entry.update({"consecutive_failures": failures, "last_failure": now,
+                              "last_error": error[:1000]})
+                if failures >= self.threshold:
+                    entry["open_until_epoch"] = time.time() + self.cooldown_seconds
+            state[provider] = entry
+            atomic_write_json(self.path, state)
+        finally:
+            lock.release()
+
+    def snapshot(self) -> dict[str, Any]:
+        now = time.time()
+        state = self._read()
+        for entry in state.values():
+            open_until = float(entry.get("open_until_epoch") or 0)
+            entry["circuit_open"] = open_until > now
+            entry["cooldown_remaining_seconds"] = max(0, round(open_until - now))
+        return state
 
 
 class AttributionDecision(BaseModel):
@@ -363,7 +420,7 @@ class GeminiWebClient:
 class GeminiValidationService:
     """Coordinates API triage, API adjudication, and web Pro fallback."""
 
-    def __init__(self, config: dict[str, Any], projects_dir: Path):
+    def __init__(self, config: dict[str, Any], projects_dir: Path, event_sink: Any = None):
         self.config = config
         self.enabled = bool(config.get("enabled", False))
         self.api = GeminiApiClient(dict(config.get("api", {})), projects_dir)
@@ -373,6 +430,40 @@ class GeminiValidationService:
         self.attribution_batch_size = max(1, int(config.get("attribution_batch_size", 20)))
         self.triage_model = str(config.get("api", {}).get("triage_model", "gemini-3.5-flash-lite"))
         self.adjudication_model = str(config.get("api", {}).get("adjudication_model", "gemini-3.6-flash"))
+        circuit = dict(config.get("circuit_breaker", {}))
+        self.health = _ProviderHealth(
+            projects_dir / ".external_validation_health.json",
+            int(circuit.get("failure_threshold", 3)),
+            int(circuit.get("cooldown_seconds", 900)),
+        )
+        self.event_sink = event_sink
+
+    def health_snapshot(self) -> dict[str, Any]:
+        return self.health.snapshot()
+
+    def _call_stage(self, stage: str, operation: Any) -> tuple[Any, int]:
+        self.health.before(stage)
+        started = time.perf_counter()
+        try:
+            value = operation()
+        except Exception as exc:
+            latency = round((time.perf_counter() - started) * 1000)
+            self.health.record(stage, success=False, latency_ms=latency, error=str(exc))
+            raise
+        latency = round((time.perf_counter() - started) * 1000)
+        self.health.record(stage, success=True, latency_ms=latency)
+        return value, latency
+
+    def _event(self, project_dir: Path, item_type: str, item_id: str, provider: str,
+               model: str, decision: str, confidence: float | None, reason: str,
+               latency_ms: int | None = None, details: dict[str, Any] | None = None) -> None:
+        if self.event_sink is None:
+            return
+        try:
+            self.event_sink(project_dir.name, item_type, item_id, provider, model,
+                            decision, confidence, reason, latency_ms, details)
+        except Exception:
+            logger.warning("Could not append external validation event", exc_info=True)
 
     @staticmethod
     def _attribution_schema() -> dict[str, Any]:
@@ -470,8 +561,11 @@ class GeminiValidationService:
                 batch = stage_cases[start : start + self.attribution_batch_size]
                 stage_prompt = prompt_prefix + json.dumps(batch, ensure_ascii=False)
                 try:
-                    result = self._run_attribution_stage(stage, model, stage_prompt, project_dir)
-                except (ExternalValidationError, ValidationError) as exc:
+                    result, latency_ms = self._call_stage(
+                        stage,
+                        lambda: self._run_attribution_stage(stage, model, stage_prompt, project_dir),
+                    )
+                except (ExternalValidationError, ValueError) as exc:
                     logger.warning("Attribution escalation %s unavailable: %s", stage, exc)
                     trace.append({
                         "stage": stage,
@@ -480,6 +574,8 @@ class GeminiValidationService:
                         "error": str(exc),
                     })
                     for case in batch:
+                        self._event(project_dir, "attribution", case["item_id"], stage,
+                                    model, "unavailable", None, str(exc))
                         by_id[case["item_id"]].attribution_confidence_history.append({
                             "resolver": stage,
                             "model": model,
@@ -503,6 +599,10 @@ class GeminiValidationService:
                     }
                     line.attribution_confidence_history.append(record)
                     trace.append({"item_id": line.line_id, **record})
+                    self._event(project_dir, "attribution", line.line_id, stage, model,
+                                decision.decision, decision.confidence, decision.reason,
+                                latency_ms, {"speaker_id": decision.speaker_id,
+                                             "evidence": decision.evidence})
                     valid = decision.decision == "resolved" and decision.speaker_id in character_ids
                     if valid and decision.confidence >= self.auto_accept:
                         line.speaker = str(decision.speaker_id)
@@ -584,25 +684,20 @@ class GeminiValidationService:
         errors: list[str] = []
         for stage, model in stages:
             try:
-                raw = (
-                    self.web.generate_json(
-                        project_dir,
-                        "audio_qa",
-                        prompt,
-                        audio_path=audio_path,
-                        reference_audio_path=reference_audio_path,
-                    )
-                    if stage == "gemini_web"
-                    else self.api.generate_json(
-                        model=model,
-                        prompt=prompt,
-                        schema=self._audio_schema(),
-                        audio_path=audio_path,
-                        reference_audio_path=reference_audio_path,
-                    )
+                raw, latency_ms = self._call_stage(
+                    stage,
+                    lambda: (
+                        self.web.generate_json(
+                            project_dir, "audio_qa", prompt, audio_path=audio_path,
+                            reference_audio_path=reference_audio_path,
+                        ) if stage == "gemini_web" else self.api.generate_json(
+                            model=model, prompt=prompt, schema=self._audio_schema(),
+                            audio_path=audio_path, reference_audio_path=reference_audio_path,
+                        )
+                    ),
                 )
                 decision = AudioDecision.model_validate(raw)
-            except (ExternalValidationError, ValidationError) as exc:
+            except (ExternalValidationError, ValueError) as exc:
                 errors.append(f"{stage}: {exc}")
                 result.external_validation_history.append({
                     "provider": stage,
@@ -611,6 +706,8 @@ class GeminiValidationService:
                     "confidence": None,
                     "reason": str(exc),
                 })
+                self._event(project_dir, "segment", result.line_id, stage, model,
+                            "unavailable", None, str(exc))
                 continue
             if decision.item_id != result.line_id:
                 errors.append(
@@ -637,6 +734,9 @@ class GeminiValidationService:
                 "reason": decision.reason,
                 "defects": decision.defects,
             })
+            self._event(project_dir, "segment", result.line_id, stage, model,
+                        decision.decision, decision.confidence, decision.reason,
+                        latency_ms, {"defects": decision.defects})
             result.validation_confidence = decision.confidence
             if decision.confidence >= self.auto_accept and decision.decision == "accept":
                 result.manual_review_required = False

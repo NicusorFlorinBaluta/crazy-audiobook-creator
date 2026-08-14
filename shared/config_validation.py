@@ -65,6 +65,12 @@ def validate_brain_config(config: dict[str, Any]) -> dict[str, Any]:
         _number(errors, external, "manual_review_confidence", minimum=0, maximum=1)
         _number(errors, external, "attribution_batch_size", minimum=1, maximum=100)
         _number(errors, external, "max_audio_regenerations", minimum=0, maximum=5)
+        circuit = external.get("circuit_breaker", {})
+        if not isinstance(circuit, dict):
+            errors.append("external_validation.circuit_breaker must be an object")
+        else:
+            _number(errors, circuit, "failure_threshold", minimum=1, maximum=20)
+            _number(errors, circuit, "cooldown_seconds", minimum=30, maximum=86400)
         api = external.get("api", {})
         browser = external.get("browser", {})
         if not isinstance(api, dict):

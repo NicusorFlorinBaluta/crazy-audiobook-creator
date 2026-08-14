@@ -85,6 +85,7 @@ window.PipelineManager = (() => {
                     statusLower === 'running'
                     || statusLower === 'paused'
                     || statusLower === 'voice_review'
+                    || statusLower === 'waiting_for_review'
                 ) {
                     el.classList.add('active');
                     
@@ -250,7 +251,7 @@ window.PipelineManager = (() => {
             if (isDone) {
                 els.btnStart.textContent = '▶ Generate selected chapters again';
                 els.btnStart.title = 'Uses the chapter selection below and preserves the current completed audiobook until new output is ready';
-            } else if (['error', 'paused', 'paused_scheduled', 'deploy_paused', 'voice_review'].includes(statusLower)) {
+            } else if (['error', 'paused', 'paused_scheduled', 'deploy_paused', 'voice_review', 'waiting_for_review'].includes(statusLower)) {
                 els.btnStart.textContent = '▶ Resume Pipeline';
                 els.btnStart.removeAttribute('title');
             } else {

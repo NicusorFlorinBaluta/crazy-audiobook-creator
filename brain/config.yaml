@@ -106,6 +106,9 @@ external_validation:
   manual_review_confidence: 0.75
   attribution_batch_size: 20
   max_audio_regenerations: 1
+  circuit_breaker:
+    failure_threshold: 3
+    cooldown_seconds: 900
   api:
     enabled: true
     api_key_env: GEMINI_API_KEY

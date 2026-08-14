@@ -27,6 +27,7 @@ class PipelineStage(StrEnum):
     PAUSING = "pausing"
     PAUSED_SCHEDULED = "paused_scheduled"
     DEPLOY_PAUSED = "deploy_paused"
+    WAITING_FOR_REVIEW = "waiting_for_review"
     ERROR = "error"
 
 

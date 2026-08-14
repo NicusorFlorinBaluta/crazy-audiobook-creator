@@ -1247,7 +1247,8 @@ window.ScriptViewer = (() => {
                             <span>WER ${((item.wer || 0) * 100).toFixed(1)}%</span>
                             <span title="Final validator confidence">Confidence ${item.validation_confidence == null ? 'n/a' : `${Math.round(item.validation_confidence * 100)}%`}</span>
                             ${item.external_validation_provider ? `<span title="${escapeHtml(item.external_validation_reason || '')}">${escapeHtml(humanizeToken(item.external_validation_provider))} Â· ${escapeHtml(humanizeToken(item.external_validation_decision || 'abstain'))}</span>` : ''}
-                            <span class="quality-reason" title="Transcript: ${escapeHtml(item.transcribed_text || 'not available')}">${escapeHtml(humanizeToken(item.acceptance_reason))}</span>
+                            <span class="quality-reason">${escapeHtml(humanizeToken(item.acceptance_reason))}</span>
+                            <details><summary>Reveal transcript and decisions</summary><p>${escapeHtml(item.transcribed_text || 'Transcript unavailable')}</p>${(item.external_validation_history || []).map(step => `<small>${escapeHtml(step.provider || 'local')} · ${escapeHtml(step.decision || 'unknown')} · ${step.confidence == null ? 'n/a' : `${Math.round(step.confidence * 100)}%`} · ${escapeHtml(step.reason || '')}</small>`).join('<br>')}</details>
                             <audio class="quality-attempt-audio" aria-label="Listen to ${escapeHtml(item.line_id)}, final attempt ${item.attempt}" controls preload="metadata" src="${escapeHtml(item.audio_url || '')}"></audio>
                         </div>
                     `).join('')}
@@ -1344,7 +1345,8 @@ window.ScriptViewer = (() => {
                         })
                     });
                     if (!response.ok) throw new Error(await response.text());
-                    showToast('Audio review saved. Resume the pipeline to apply it.', 'success');
+                    const saved = await response.json();
+                    showToast(saved.auto_resuming ? 'Audio review saved. Pipeline is resuming automatically.' : 'Audio review saved.', 'success');
                     await fetchQualityReview(projectId);
                     renderQuality();
                 } catch (error) {

@@ -9,7 +9,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="static/css/styles.css?v=20260814.2">
+    <link rel="stylesheet" href="static/css/styles.css?v=20260814.3">
     <script>
         if ('serviceWorker' in navigator) {
             navigator.serviceWorker.getRegistrations().then(function(registrations) {
@@ -159,6 +159,20 @@
                     <div class="project-stage" id="project-stage"></div>
                 </div>
             </div>
+
+            <section class="attention-panel hidden" id="attention-panel" aria-live="polite">
+                <div class="attention-heading">
+                    <div><span class="attention-kicker">Attention required</span><h2 id="attention-title">Review inbox</h2><p id="attention-summary"></p></div>
+                    <button class="btn btn-success hidden" id="btn-resume-after-review">Resume pipeline</button>
+                </div>
+                <div class="attention-toolbar">
+                    <label>Type<select class="input-sm" id="attention-type"><option value="all">All</option><option value="audio">Audio</option><option value="attribution">Speaker</option><option value="pronunciation">Pronunciation</option></select></label>
+                    <label>Status<select class="input-sm" id="attention-status"><option value="blocking">Blocking</option><option value="all">All</option><option value="resolved">Resolved</option></select></label>
+                    <label>Confidence<select class="input-sm" id="attention-confidence"><option value="all">All bands</option><option value="low">Low</option><option value="review">Review</option><option value="high">High</option></select></label>
+                </div>
+                <div class="attention-list" id="attention-list"></div>
+                <div class="attention-pagination"><button class="btn btn-ghost btn-sm" id="attention-prev">Previous</button><span id="attention-page"></span><button class="btn btn-ghost btn-sm" id="attention-next">Next</button></div>
+            </section>
 
             <!-- Pipeline progress -->
             <div class="pipeline-section" id="pipeline-section">
@@ -518,9 +532,9 @@
     <div class="toast-container" id="toast-container" role="status" aria-live="polite"></div>
 
     <!-- Scripts -->
-    <script src="static/js/app.js?v=20260814.2"></script>
-    <script src="static/js/pipeline.js?v=20260814.2"></script>
-    <script src="static/js/script-viewer.js?v=20260814.2"></script>
-    <script src="static/js/log-console.js?v=20260814.2"></script>
+    <script src="static/js/app.js?v=20260814.3"></script>
+    <script src="static/js/pipeline.js?v=20260814.3"></script>
+    <script src="static/js/script-viewer.js?v=20260814.3"></script>
+    <script src="static/js/log-console.js?v=20260814.3"></script>
 </body>
 </html>

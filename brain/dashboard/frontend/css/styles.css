@@ -2797,3 +2797,34 @@ audio:hover {
     color: #cbd5e1;
     font-weight: 500;
 }
+
+.attention-card-badge { margin-top: 8px; padding: 5px 8px; border-radius: 999px; color: #fecaca; background: rgba(239,68,68,.14); font-size: .68rem; font-weight: 700; }
+.attention-panel { margin: 18px 0; padding: 18px; border: 1px solid rgba(245,158,11,.45); border-radius: 14px; background: linear-gradient(145deg, rgba(245,158,11,.08), rgba(15,23,42,.92)); }
+.attention-heading, .attention-item-head, .attention-pagination { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.attention-heading h2 { margin: 2px 0; font-size: 1.1rem; }
+.attention-heading p { margin: 0; color: var(--text-secondary); }
+.attention-kicker { color: #fbbf24; font-size: .68rem; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; }
+.attention-toolbar { display: flex; flex-wrap: wrap; gap: 10px; margin: 16px 0; }
+.attention-toolbar label { display: grid; gap: 4px; color: var(--text-muted); font-size: .66rem; }
+.attention-list { display: grid; gap: 10px; }
+.attention-item { padding: 14px; border: 1px solid var(--border-color); border-radius: 10px; background: var(--bg-elevated); }
+.attention-item.blocking { border-left: 4px solid #f59e0b; }
+.attention-item p { margin: 8px 0; color: var(--text-secondary); }
+.attention-item-actions, .candidate-comparison > div { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.attention-item audio { max-width: 100%; height: 34px; }
+.confidence-band { padding: 4px 8px; border-radius: 999px; font-size: .65rem; font-weight: 800; white-space: nowrap; }
+.confidence-high { color: #86efac; background: rgba(34,197,94,.14); }
+.confidence-review { color: #fde68a; background: rgba(245,158,11,.14); }
+.confidence-low { color: #fca5a5; background: rgba(239,68,68,.14); }
+.confidence-unknown { color: var(--text-muted); background: rgba(148,163,184,.12); }
+.decision-trail { margin-top: 10px; color: var(--text-secondary); }
+.decision-trail > div { margin: 8px 0 0; padding: 8px; border-left: 2px solid var(--border-color); }
+.candidate-comparison { display: grid; gap: 10px; margin-top: 10px; }
+.candidate-comparison > div { padding: 10px; border-radius: 8px; background: rgba(15,23,42,.55); }
+.candidate-comparison pre { max-height: 240px; overflow: auto; white-space: pre-wrap; font-size: .68rem; }
+.attention-pagination { margin-top: 12px; justify-content: flex-end; }
+
+@media (max-width: 768px) {
+    .attention-heading { align-items: flex-start; flex-direction: column; }
+    .attention-toolbar label { flex: 1 1 120px; }
+}
