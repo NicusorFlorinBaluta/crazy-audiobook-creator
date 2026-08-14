@@ -35,6 +35,9 @@ voice_server:
   trusted_lan_cidrs:
   - 192.168.50.0/24
   venv: E:\PyTorch env\my_venv
+  # The Windows 3.12 venv launcher misparses its own base path when invoked
+  # through the spaced long form. The stable 8.3 path preserves the ROCm env.
+  python_executable: E:\PYTORC~1\my_venv\Scripts\python.exe
   auto_start: true
   startup_timeout_seconds: 120
   timeout: 30

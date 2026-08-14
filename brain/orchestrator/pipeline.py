@@ -581,6 +581,7 @@ class Pipeline:
         project_dir: Path,
         *,
         enforce: bool = True,
+        chapter_numbers: set[int] | None = None,
     ) -> dict[str, Any]:
         """Persist the source-grounded audit and optionally enforce its gate."""
         from shared.models import CharacterRegistry, ExtractedBook, ScriptChapter
@@ -595,11 +596,25 @@ class Pipeline:
             ScriptChapter.model_validate_json(path.read_text(encoding="utf-8"))
             for path in self._script_files(project_dir / "script")
         ]
+        if chapter_numbers is not None:
+            scripts = [
+                script for script in scripts
+                if script.chapter_number in chapter_numbers
+            ]
+            book = book.model_copy(update={
+                "chapters": [
+                    chapter for chapter in book.chapters
+                    if chapter.number in chapter_numbers
+                ]
+            })
         report = audit_book_attribution(
             book,
             registry,
             scripts,
             confidence_threshold=self.script_generator.speaker_confidence_threshold,
+        )
+        report["chapter_scope"] = (
+            sorted(chapter_numbers) if chapter_numbers is not None else None
         )
         report_path = project_dir / "attribution_audit.json"
         atomic_write_json(report_path, report)
@@ -1357,7 +1372,6 @@ class Pipeline:
             chapter_start_callback=on_chapter_start,
             chunk_progress_callback=on_script_chunk,
         )
-
         escalation = self.external_validator.resolve_attributions(
             project_dir=project_dir,
             chapters=chapter_scripts,
@@ -1826,7 +1840,11 @@ class Pipeline:
 
     def _run_generation(self, project_id: str, project_dir: Path, chapter_numbers: set[int] | None = None) -> None:
         """Run Stages ④-⑤: TTS generation with quality validation."""
-        attribution_audit = self._assert_attribution_audit(project_dir, enforce=False)
+        attribution_audit = self._assert_attribution_audit(
+            project_dir,
+            enforce=False,
+            chapter_numbers=chapter_numbers,
+        )
         if not attribution_audit["passed"]:
             attribution_items = [
                 item.item_id
@@ -2115,7 +2133,13 @@ class Pipeline:
                             "unreviewed",
                             result.manual_review_reason,
                         )
-                    elif human_review and human_review["disposition"] == "regenerate":
+                    elif human_review and human_review["disposition"] in {
+                        "regenerate",
+                        "unreviewed",
+                    }:
+                        # A later automatic pass can resolve an earlier review
+                        # request (for example after a provider recovers). Do
+                        # not leave that stale item blocking the release gate.
                         self.job_queue.delete_review_item(
                             project_id,
                             "segment",
@@ -2410,7 +2434,13 @@ class Pipeline:
                     temp_output=temp_output,
                     acquire_packaging_lock=False,
                 )
-        self._assert_attribution_audit(project_dir)
+        # A partial package is an explicitly selected deliverable and should
+        # only be blocked by attribution issues inside that selection. Full
+        # exports continue to enforce the complete book audit.
+        self._assert_attribution_audit(
+            project_dir,
+            chapter_numbers=chapter_selection if partial else None,
+        )
         self._update_stage(project_id, PipelineStage.EXPORTING)
         self._progress_estimator.reset(f"{project_id}:export")
         self.job_queue.update_progress(

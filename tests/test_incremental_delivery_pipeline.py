@@ -242,6 +242,55 @@ class IncrementalDeliveryPipelineTests(unittest.TestCase):
         self.pipeline._run_generation(self.project_id, self.project_dir, set())
         self.pipeline._run_mastering(self.project_id, self.project_dir, set())
 
+    def test_generation_scopes_attribution_gate_to_selected_chapters(self) -> None:
+        self.pipeline._assert_attribution_audit = MagicMock(return_value={"passed": True})
+
+        # The selected chapter need not exist for this gate-contract test;
+        # keeping it outside the fixture avoids contacting the voice service.
+        self.pipeline._run_generation(self.project_id, self.project_dir, {99})
+
+        self.pipeline._assert_attribution_audit.assert_called_once_with(
+            self.project_dir,
+            enforce=False,
+            chapter_numbers={99},
+        )
+
+    def test_partial_export_scopes_attribution_gate_to_selected_chapters(self) -> None:
+        self.pipeline._assert_attribution_audit = MagicMock(
+            side_effect=RuntimeError("stop after audit")
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "stop after audit"):
+            self.pipeline._run_export(
+                self.project_id,
+                self.project_dir,
+                partial=True,
+                chapter_selection={3},
+                acquire_packaging_lock=False,
+            )
+
+        self.pipeline._assert_attribution_audit.assert_called_once_with(
+            self.project_dir,
+            chapter_numbers={3},
+        )
+
+    def test_full_export_keeps_book_wide_attribution_gate(self) -> None:
+        self.pipeline._assert_attribution_audit = MagicMock(
+            side_effect=RuntimeError("stop after audit")
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "stop after audit"):
+            self.pipeline._run_export(
+                self.project_id,
+                self.project_dir,
+                acquire_packaging_lock=False,
+            )
+
+        self.pipeline._assert_attribution_audit.assert_called_once_with(
+            self.project_dir,
+            chapter_numbers=None,
+        )
+
 
 class IncrementalDeliveryApiTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
