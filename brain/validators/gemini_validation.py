@@ -239,7 +239,12 @@ class GeminiWebClient:
         )
         profile_dir = Path(str(self.config.get("profile_dir", "brain/projects/.gemini-browser-profile")))
         profile_dir.mkdir(parents=True, exist_ok=True)
-        input_selector = str(self.config.get("input_selector", "rich-textarea [contenteditable='true']"))
+        input_selector = str(
+            self.config.get(
+                "input_selector",
+                '[contenteditable="true"][aria-label="Enter a prompt for Gemini"]',
+            )
+        )
         response_selector = str(self.config.get("response_selector", "message-content"))
         timeout_ms = int(float(self.config.get("timeout_seconds", 180)) * 1000)
 
@@ -263,15 +268,17 @@ class GeminiWebClient:
                     model_selector = str(
                         self.config.get(
                             "model_selector",
-                            'button[aria-label*="model" i]',
+                            'button[aria-label*="mode picker" i]',
                         )
                     )
                     model_label = str(self.config.get("model_label", "Pro")).strip()
                     chooser = page.locator(model_selector).last
-                    if chooser.count() == 0:
+                    try:
+                        chooser.wait_for(state="visible", timeout=timeout_ms)
+                    except Exception as exc:
                         raise ExternalValidationError(
                             "Gemini model chooser was not found; update browser.model_selector"
-                        )
+                        ) from exc
                     chooser_label = " ".join(filter(None, [
                         chooser.inner_text(),
                         chooser.get_attribute("aria-label") or "",
@@ -293,16 +300,39 @@ class GeminiWebClient:
                     if uploads:
                         upload = page.locator('input[type="file"]').last
                         if upload.count() == 0:
-                            raise ExternalValidationError(
-                                "Gemini audio upload input was not found; update browser selectors"
-                            )
+                            tools_button = page.get_by_role(
+                                "button",
+                                name=str(
+                                    self.config.get(
+                                        "upload_tools_button_name",
+                                        "Upload & tools",
+                                    )
+                                ),
+                            ).last
+                            try:
+                                tools_button.click(timeout=timeout_ms)
+                                upload.wait_for(state="attached", timeout=timeout_ms)
+                            except Exception as exc:
+                                raise ExternalValidationError(
+                                    "Gemini upload input was not found after opening Upload & tools"
+                                ) from exc
                         upload.set_input_files(uploads)
-                        page.wait_for_timeout(1500)
+                        page.wait_for_timeout(2000)
+                        missing_uploads = [
+                            Path(path).name
+                            for path in uploads
+                            if page.get_by_text(Path(path).name, exact=True).count() == 0
+                        ]
+                        if missing_uploads:
+                            raise ExternalValidationError(
+                                "Gemini did not attach audio files: "
+                                + ", ".join(missing_uploads)
+                            )
                     editor.fill(prompt)
                     editor.press("Enter")
                     page.wait_for_function(
                         "([selector, count]) => document.querySelectorAll(selector).length > count",
-                        [response_selector, before],
+                        arg=[response_selector, before],
                         timeout=timeout_ms,
                     )
                     response = page.locator(response_selector).last

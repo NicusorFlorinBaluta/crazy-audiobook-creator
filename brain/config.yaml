@@ -118,15 +118,16 @@ external_validation:
       gemini-3.5-flash-lite: 450
       gemini-3.6-flash: 18
   browser:
-    enabled: false
+    enabled: true
     profile_dir: brain/projects/.gemini-browser-profile
     channel: chrome
     headless: true
     timeout_seconds: 180
     max_turns_per_conversation: 100
     model_label: Pro
-    model_selector: 'button[aria-label*="model" i]'
-    input_selector: "rich-textarea [contenteditable='true']"
+    model_selector: 'button[aria-label*="mode picker" i]'
+    upload_tools_button_name: Upload & tools
+    input_selector: '[contenteditable="true"][aria-label="Enter a prompt for Gemini"]'
     response_selector: message-content
 # Pipeline state and artifact behavior
 pipeline:
