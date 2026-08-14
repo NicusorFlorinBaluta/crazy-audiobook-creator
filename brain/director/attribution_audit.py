@@ -161,6 +161,20 @@ def audit_book_attribution(
                 )
                 continue
 
+            if owner.attribution_review_required:
+                issues.append(
+                    _issue(
+                        chapter.number,
+                        index,
+                        owner,
+                        "attribution_review_required",
+                        owner.attribution_review_reason
+                        or "Speaker attribution requires human confirmation",
+                        fragment.text,
+                    )
+                )
+                continue
+
             confidence = owner.speaker_confidence
             if confidence is None or confidence < confidence_threshold:
                 issues.append(

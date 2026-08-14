@@ -47,6 +47,7 @@ extraction:
   skip_toc: true
   skip_appendices: true
   skip_front_matter: true
+  skip_preface: true
   min_chapter_words: 100
   max_chapter_words: 20000
   chapter_detection: auto         # auto | heading | pattern | none
@@ -74,7 +75,7 @@ script:
   max_unique_voices: 20
   minor_character_threshold: 3
   group_minor_characters: true
-  chunk_size_words: 350
+  chunk_size_words: 1200
   chunk_overlap_words: 0
 # Local dashboard
 dashboard:
@@ -109,12 +110,4 @@ pipeline:
 schedule:
   enabled: false
   timezone: Europe/Bucharest
-  windows:
-  - days:
-    - Monday
-    - Tuesday
-    - Wednesday
-    - Thursday
-    - Friday
-    start: '10:00'
-    end: 05:00
+  windows: []

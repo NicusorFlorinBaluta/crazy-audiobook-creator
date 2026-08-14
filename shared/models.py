@@ -57,6 +57,10 @@ class ExtractedBook(BaseModel):
 
     metadata: BookMetadata
     chapters: list[ExtractedChapter]
+    reference_material: dict[str, str] = Field(
+        default_factory=dict,
+        description="Extracted reference sections such as Glossary, Dramatis Personae, and Character Lists",
+    )
 
 
 # ===================================================================
@@ -155,6 +159,15 @@ class ScriptLine(BaseModel):
         default="",
         max_length=500,
         description="Short source-context reason for the selected speaker",
+    )
+    attribution_review_required: bool = Field(
+        default=False,
+        description="Whether a human must confirm this speaker before audio generation",
+    )
+    attribution_review_reason: str = Field(
+        default="",
+        max_length=500,
+        description="Why this speaker attribution still needs review",
     )
     voice_id: str | None = Field(
         default=None,
@@ -635,6 +648,15 @@ class ExportM4BResponse(BaseModel):
 # ===================================================================
 
 
+class IncrementalDeliverySettings(BaseModel):
+    """Settings for publishing audiobook parts incrementally."""
+
+    enabled: bool = False
+    batch_size: int = Field(default=5, ge=1, le=20)
+    packaging: Literal["parts"] = "parts"
+    publish_final_full: bool = True
+
+
 class ProgressSnapshot(BaseModel):
     """Versioned, stage-agnostic description of the currently active work."""
 
@@ -697,6 +719,13 @@ class ProjectStatus(BaseModel):
     pause_reason: str | None = None
     progress: ProgressSnapshot | None = None
 
+    # Incremental delivery state
+    incremental_delivery: IncrementalDeliverySettings = Field(default_factory=IncrementalDeliverySettings)
+    active_delivery_id: str | None = None
+    active_delivery_chapters: list[int] = Field(default_factory=list)
+    published_delivery_count: int = 0
+    latest_published_delivery_id: str | None = None
+    pause_after_delivery_requested: bool = False
 
 class ProjectSummary(BaseModel):
     """Brief summary of a project for listing."""

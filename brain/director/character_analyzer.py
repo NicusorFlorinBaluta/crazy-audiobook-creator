@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import json
 import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +28,14 @@ logger = logging.getLogger(__name__)
 
 # Included in project dependency fingerprints. Increment whenever deterministic
 # post-processing changes the contents or meaning of a character registry.
-CHARACTER_ANALYSIS_REVISION = 2
+CHARACTER_ANALYSIS_REVISION = 3
+
+_UNSAFE_CHARACTER_ALIASES = {
+    "a", "an", "and", "the", "of", "narrator", "she", "he", "it",
+    "they", "him", "her", "his", "hers", "them", "male", "female",
+    "character", "unidentified", "man", "woman", "boy", "girl",
+    "person", "someone", "speaker",
+}
 
 # Load prompt template
 _PROMPT_DIR = Path(__file__).parent / "prompts"
@@ -151,7 +159,13 @@ class CharacterAnalyzer:
         self.max_unique_voices = max_unique_voices
         self.single_pass_threshold = single_pass_threshold
 
-    def analyze(self, book: ExtractedBook) -> CharacterRegistry:
+    def analyze(
+        self,
+        book: ExtractedBook,
+        check_callback: Callable[[], None] | None = None,
+        checkpoint_path: Path | str | None = None,
+        checkpoint_fingerprint: str = "",
+    ) -> CharacterRegistry:
         """Analyze a book and produce a character registry, using multi-pass for long books."""
         total_chars = sum(len(ch.text) for ch in book.chapters)
         logger.info(
@@ -165,9 +179,33 @@ class CharacterAnalyzer:
         import time as _time
         t0 = _time.time()
 
+        # Format any author-provided reference material (Glossary, Dramatis Personae, Character Lists)
+        reference_summary = ""
+        if getattr(book, "reference_material", None):
+            guide_parts: list[str] = []
+            remaining_reference_chars = 12_000
+            for title, text in book.reference_material.items():
+                cleaned = text.strip() if text else ""
+                if not cleaned or remaining_reference_chars <= 0:
+                    continue
+                excerpt = cleaned[: min(6000, remaining_reference_chars)]
+                guide_parts.append(f"### {title}\n{excerpt}")
+                remaining_reference_chars -= len(excerpt)
+            if guide_parts:
+                reference_summary = (
+                    "\n\nSupplemental author reference material (use for canonical spellings and roles, but prefer direct narrative evidence when it conflicts):\n"
+                    + "\n\n".join(guide_parts)
+                )
+                logger.info(
+                    "[CharacterAnalyzer] Using %d reference section(s) to seed character analysis",
+                    len(guide_parts),
+                )
+
         if total_chars <= self.single_pass_threshold:
             # Single pass for standard books (fits within Qwen 32k context)
             book_text = self._prepare_book_text(book)
+            if reference_summary:
+                book_text = reference_summary + "\n\n" + book_text
             system_prompt = _SYSTEM_PROMPT.format(genre=self.genre)
             prompt = _USER_PROMPT.format(book_text=book_text)
 
@@ -193,6 +231,31 @@ class CharacterAnalyzer:
             book_title = book.metadata.title
             book_author = book.metadata.author
             tone_desc = ""
+            start_unit_idx = 0
+
+            if checkpoint_path:
+                checkpoint_path = Path(checkpoint_path)
+                if checkpoint_path.exists():
+                    try:
+                        ckpt_data = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+                        if (
+                            not checkpoint_fingerprint
+                            or ckpt_data.get("fingerprint") != checkpoint_fingerprint
+                        ):
+                            raise ValueError("checkpoint dependencies changed")
+                        accumulated_chars = ckpt_data.get("accumulated_chars", {})
+                        tone_desc = ckpt_data.get("tone_desc", "")
+                        start_unit_idx = int(ckpt_data.get("last_completed_unit", -1)) + 1
+                        logger.info(
+                            "[CharacterAnalyzer] Restored checkpoint from %s: resuming at unit %d with %d known characters",
+                            checkpoint_path.name,
+                            start_unit_idx + 1,
+                            len(accumulated_chars),
+                        )
+                    except Exception as exc:
+                        logger.warning("[CharacterAnalyzer] Could not load checkpoint %s: %s", checkpoint_path, exc)
+                        accumulated_chars = {}
+                        start_unit_idx = 0
 
             analysis_units = [
                 (ch, part_index, part)
@@ -203,6 +266,10 @@ class CharacterAnalyzer:
                 )
             ]
             for idx, (ch, part_index, part) in enumerate(analysis_units):
+                if idx < start_unit_idx:
+                    continue
+                if check_callback:
+                    check_callback()
                 # Format current accumulated characters for context
                 existing_summary = ""
                 if accumulated_chars:
@@ -212,9 +279,13 @@ class CharacterAnalyzer:
                         for cid, info in accumulated_chars.items()
                     )
 
+                ref_block = ""
+                if idx == 0 and reference_summary:
+                    ref_block = f"{reference_summary}\n\n"
+
                 ch_prompt = (
                     f"Chapter {ch.number}: {ch.title} "
-                    f"(part {part_index})\n{existing_summary}\n\n"
+                    f"(part {part_index})\n{ref_block}{existing_summary}\n\n"
                     f"Chapter Text:\n{part}"
                 )
                 system_prompt = _SYSTEM_PROMPT.format(genre=self.genre)
@@ -285,6 +356,21 @@ class CharacterAnalyzer:
                                 accumulated_chars[canonical_id][
                                     "personality_traits"
                                 ] = preserved_traits
+
+                    if checkpoint_path:
+                        try:
+                            from shared.artifacts import atomic_write_json
+                            atomic_write_json(
+                                checkpoint_path,
+                                {
+                                    "fingerprint": checkpoint_fingerprint,
+                                    "last_completed_unit": idx,
+                                    "accumulated_chars": accumulated_chars,
+                                    "tone_desc": tone_desc,
+                                },
+                            )
+                        except Exception as ckpt_err:
+                            logger.debug("[CharacterAnalyzer] Checkpoint save failed: %s", ckpt_err)
                 except Exception as e:
                     raise RuntimeError(
                         f"Character analysis failed for chapter {ch.number}, "
@@ -309,6 +395,12 @@ class CharacterAnalyzer:
                 "characters": accumulated_chars,
             }
             registry = self._parse_registry(final_raw, book_title, book_author)
+
+            if checkpoint_path and checkpoint_path.exists():
+                try:
+                    checkpoint_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
 
         registry = self._ensure_explicit_unnamed_speakers(registry, book)
         self._assign_voice_ids(registry.characters)
@@ -400,6 +492,70 @@ class CharacterAnalyzer:
                 start += 1
         return chunks
 
+    @staticmethod
+    def _derive_character_aliases(
+        char_id: str,
+        name: str,
+        raw_aliases: list[str],
+    ) -> list[str]:
+        """Derive standard aliases and nicknames from ID, name, and raw aliases."""
+        aliases: list[str] = []
+        seen: set[str] = set()
+
+        def add_alias(candidate: str) -> None:
+            c = candidate.strip().strip("\"'").strip()
+            c_norm = c.lower().replace("_", " ").strip()
+            if not c or len(c) < 2 or c_norm in seen:
+                return
+            if c_norm in _UNSAFE_CHARACTER_ALIASES or c_norm in {
+                "mr", "mrs", "ms", "dr"
+            }:
+                return
+            seen.add(c_norm)
+            aliases.append(c)
+
+        for a in raw_aliases:
+            if isinstance(a, str):
+                add_alias(a)
+
+        name_clean = re.sub(r"\s+", " ", name).strip()
+        add_alias(name_clean)
+
+        title_stripped = re.sub(
+            r"^(?:President|Senator|Lord|Lady|Mother|Father|Brother|Sister|Captain|Doctor|Dr\.|Officer|Priest|Master|King|Queen|Prince|Princess)\s+",
+            "",
+            name_clean,
+            flags=re.IGNORECASE,
+        ).strip()
+        if title_stripped and title_stripped != name_clean:
+            add_alias(title_stripped)
+
+        of_match = re.search(r"\bof\s+(?:the\s+)?([A-Za-z]+)\b", name_clean, flags=re.IGNORECASE)
+        if of_match:
+            add_alias(of_match.group(1))
+
+        words = [
+            w for w in re.split(r"[\s_]+", name_clean)
+            if len(w) >= 3
+            and w.lower() not in _UNSAFE_CHARACTER_ALIASES
+            and w.lower() not in {"for", "with", "from", "into"}
+        ]
+        if len(words) > 1:
+            add_alias(words[0])
+            add_alias(words[-1])
+
+        id_words = [
+            w for w in char_id.split("_")
+            if len(w) >= 3
+            and w.lower() not in _UNSAFE_CHARACTER_ALIASES
+            and w.lower() not in {"for", "with", "from", "into"}
+        ]
+        for w in id_words:
+            if len(w) >= 4 or w.lower() in ("dusk", "soil", "sak", "vathi", "koker"):
+                add_alias(w.title())
+
+        return aliases
+
     def _parse_registry(
         self,
         raw: dict,
@@ -444,21 +600,32 @@ class CharacterAnalyzer:
             except (TypeError, ValueError):
                 dialogue_count = 0
 
+            raw_aliases = char_data.get("aliases", [])
+            if isinstance(raw_aliases, str):
+                raw_aliases = [raw_aliases]
+            elif not isinstance(raw_aliases, list):
+                raw_aliases = []
+
+            char_name = char_data.get("name", normalized_id.replace("_", " ").title())
+            derived_aliases = self._derive_character_aliases(normalized_id, char_name, raw_aliases)
+
             characters[normalized_id] = Character(
                 id=normalized_id,
-                name=char_data.get("name", normalized_id.replace("_", " ").title()),
+                name=char_name,
                 gender=gender,
                 age_range=str(char_data.get("age_range", "unknown")),
                 personality_traits=char_data.get("personality_traits", []),
+                aliases=derived_aliases,
                 voice_description=str(char_data.get("voice_description", "")),
                 speaking_style=str(char_data.get("speaking_style", "")),
                 test_sentence=char_data.get("test_sentence"),
                 dialogue_count=dialogue_count,
             )
             logger.info(
-                "[CharacterAnalyzer]   + '%s' (%s) | %s | voice: %s",
+                "[CharacterAnalyzer]   + '%s' (%s) | aliases: %s | %s | voice: %s",
                 characters[normalized_id].name,
                 normalized_id,
+                derived_aliases,
                 gender_str,
                 str(char_data.get("voice_description", ""))[:60],
             )

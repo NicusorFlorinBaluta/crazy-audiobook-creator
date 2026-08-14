@@ -1,31 +1,33 @@
-"""Constants and enumerations shared across the pipeline."""
+"""Shared constants and enums used across Brain and Voice services."""
 
 from enum import StrEnum
 
 
 # ---------------------------------------------------------------------------
-# Pipeline status enum
+# Pipeline & Orchestration
 # ---------------------------------------------------------------------------
 
+
 class PipelineStage(StrEnum):
-    """Stages of the audiobook production pipeline."""
+    """Execution stages of the audiobook generation pipeline."""
 
     CREATED = "created"
     EXTRACTING = "extracting"
+    ANALYZING = "analyzing"
     SCRIPTING = "scripting"
-    BOOTSTRAPPING = "bootstrapping"
     VOICE_REVIEW = "voice_review"
+    BOOTSTRAPPING = "bootstrapping"
     GENERATING = "generating"
     VALIDATING = "validating"
     MASTERING = "mastering"
     EXPORTING = "exporting"
+    SELECTION_COMPLETE = "selection_complete"
     COMPLETE = "complete"
-    ERROR = "error"
-    PAUSING = "pausing"
     PAUSED = "paused"
+    PAUSING = "pausing"
     PAUSED_SCHEDULED = "paused_scheduled"
     DEPLOY_PAUSED = "deploy_paused"
-    SELECTION_COMPLETE = "selection_complete"
+    ERROR = "error"
 
 
 class ValidationStatus(StrEnum):
@@ -137,8 +139,8 @@ MAX_UNIQUE_VOICES = 20
 MINOR_CHARACTER_LINE_THRESHOLD = 3   # ≤ this many lines → generic voice
 
 # Chunking for long chapters
-CHUNK_SIZE_WORDS = 600
-CHUNK_OVERLAP_WORDS = 150
+CHUNK_SIZE_WORDS = 1200
+CHUNK_OVERLAP_WORDS = 0
 
 # ---------------------------------------------------------------------------
 # Export defaults

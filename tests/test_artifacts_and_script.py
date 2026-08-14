@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -611,6 +612,7 @@ class ScriptFidelityTests(unittest.TestCase):
                 self._attribution_registry(),
                 "",
                 0,
+                strict_validation=True,
             )
 
         self.assertTrue(
@@ -1233,6 +1235,40 @@ class ScriptFidelityTests(unittest.TestCase):
         )
         self.assertGreater(ollama.calls, 1)
         self.assertIn("narrator", registry.characters)
+
+    def test_character_checkpoint_is_bound_to_dependency_fingerprint(self) -> None:
+        ollama = FakeCharacterOllama()
+        analyzer = CharacterAnalyzer(ollama, single_pass_threshold=1)
+        book = ExtractedBook(
+            metadata=BookMetadata(title="Long", author="Author", total_chapters=1),
+            chapters=[
+                ExtractedChapter(
+                    number=1,
+                    title="Only",
+                    text="A complete sentence. " * 20,
+                    word_count=60,
+                )
+            ],
+        )
+        with TemporaryDirectory() as temporary:
+            checkpoint = Path(temporary) / "characters.checkpoint.json"
+            checkpoint.write_text(
+                json.dumps(
+                    {
+                        "fingerprint": "old-dependencies",
+                        "last_completed_unit": 999,
+                        "accumulated_chars": {},
+                        "tone_desc": "",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            analyzer.analyze(
+                book,
+                checkpoint_path=checkpoint,
+                checkpoint_fingerprint="new-dependencies",
+            )
+        self.assertGreater(ollama.calls, 0)
 
     def test_generate_request_keeps_validate_wire_alias(self) -> None:
         chapter = ScriptChapter(
