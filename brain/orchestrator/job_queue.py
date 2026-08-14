@@ -282,6 +282,15 @@ class JobQueue:
             for row in rows
         ]
 
+    def delete_review_item(self, project_id: str, item_type: str, item_id: str) -> None:
+        """Remove a review marker after its requested replacement validates."""
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM review_items WHERE project_id = ? AND item_type = ? AND item_id = ?",
+                (project_id, item_type, item_id),
+            )
+            conn.commit()
+
     # ------------------------------------------------------------------
     # Quality logging
     # ------------------------------------------------------------------

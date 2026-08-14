@@ -1089,6 +1089,7 @@ window.ScriptViewer = (() => {
                         ${allSpeakerOptions}
                     </select>
                     <small>${escapeHtml(String(line.line_id || line.id || ''))}</small>
+                    ${line.speaker_confidence == null ? '' : `<small title="Attribution resolver: ${escapeHtml(humanizeToken(line.attribution_resolver || 'local'))}">${Math.round(Number(line.speaker_confidence) * 100)}% Â· ${escapeHtml(humanizeToken(line.attribution_resolver || 'local'))}</small>`}
                     ${isLowConfidence ? `<svg viewBox="0 0 24 24" width="14" height="14" stroke="var(--warning-color, orange)" stroke-width="2" fill="none" style="vertical-align: text-bottom;" title="${escapeHtml(reviewTitle)}"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>` : ''}
                 </div>
                 <div class="line-text">
@@ -1184,7 +1185,8 @@ window.ScriptViewer = (() => {
         const hasQuality = currentData.quality && Object.keys(currentData.quality).length > 0;
         const hasPronunciations = currentData.pronunciations?.candidates?.length > 0;
         const hasJoinReview = currentData.qualityReview?.join_warnings?.length > 0;
-        if (!hasQuality && !hasPronunciations && !hasJoinReview) {
+        const hasSegmentReview = currentData.qualityReview?.segment_reviews?.length > 0;
+        if (!hasQuality && !hasPronunciations && !hasJoinReview && !hasSegmentReview) {
             els.qualityOverview.innerHTML = '<div class="empty-state small"><p>Quality data will appear after audio generation and validation.</p></div>';
             return;
         }
@@ -1226,7 +1228,7 @@ window.ScriptViewer = (() => {
         addQualityStat('Clipping Errors', q.failed_clipping || 0, q.failed_clipping > 0 ? 'bad' : 'good', 'Segments rejected because the waveform clipped.');
 
         const noteworthy = (q.final_attempts || []).filter(
-            item => item.status !== 'pass' || item.attempt > 1
+            item => item.status !== 'pass' || item.attempt > 1 || item.manual_review_required
         );
         if (noteworthy.length) {
             const details = document.createElement('div');
@@ -1243,6 +1245,8 @@ window.ScriptViewer = (() => {
                             <strong class="quality-attempt-status quality-status-${escapeHtml(item.status)}">${escapeHtml(humanizeToken(item.status))}</strong>
                             <span>Attempt ${item.attempt}</span>
                             <span>WER ${((item.wer || 0) * 100).toFixed(1)}%</span>
+                            <span title="Final validator confidence">Confidence ${item.validation_confidence == null ? 'n/a' : `${Math.round(item.validation_confidence * 100)}%`}</span>
+                            ${item.external_validation_provider ? `<span title="${escapeHtml(item.external_validation_reason || '')}">${escapeHtml(humanizeToken(item.external_validation_provider))} Â· ${escapeHtml(humanizeToken(item.external_validation_decision || 'abstain'))}</span>` : ''}
                             <span class="quality-reason" title="Transcript: ${escapeHtml(item.transcribed_text || 'not available')}">${escapeHtml(humanizeToken(item.acceptance_reason))}</span>
                             <audio class="quality-attempt-audio" aria-label="Listen to ${escapeHtml(item.line_id)}, final attempt ${item.attempt}" controls preload="metadata" src="${escapeHtml(item.audio_url || '')}"></audio>
                         </div>
@@ -1282,8 +1286,75 @@ window.ScriptViewer = (() => {
         }
         }
 
+        renderSegmentReview();
         renderJoinReview();
         renderPronunciationInventory();
+    }
+
+    function renderSegmentReview() {
+        const items = currentData.qualityReview?.segment_reviews || [];
+        if (!items.length) return;
+        const section = document.createElement('section');
+        section.className = 'join-review segment-review';
+        const unreviewed = items.filter(item => (item.disposition || 'unreviewed') === 'unreviewed');
+        const reviewed = items.filter(item => (item.disposition || 'unreviewed') !== 'unreviewed');
+        const cards = rows => rows.map(item => `
+            <article class="join-review-item segment-review-item" data-item-id="${escapeHtml(item.item_id)}">
+                <div class="join-review-summary">
+                    <strong>Chapter ${item.chapter_number ?? '?'} Â· ${escapeHtml(item.item_id)}</strong>
+                    <span>${escapeHtml(humanizeToken(item.status))} Â· confidence ${item.validation_confidence == null ? 'unavailable' : `${Math.round(item.validation_confidence * 100)}%`}</span>
+                </div>
+                <p>${escapeHtml(item.reason || 'The validation ladder could not reach a safe automatic decision.')}</p>
+                <p><small>${item.external_validation_provider ? `${escapeHtml(humanizeToken(item.external_validation_provider))} / ${escapeHtml(item.external_validation_model || 'default model')} / ${escapeHtml(humanizeToken(item.external_validation_decision || 'abstain'))}` : 'No external fallback produced a usable decision'}</small></p>
+                <audio aria-label="Review ${escapeHtml(item.item_id)}" controls preload="metadata" src="${escapeHtml(item.audio_url)}"></audio>
+                <div class="join-review-controls">
+                    <label><span>Disposition</span><select class="segment-disposition input-sm">
+                        ${[
+                            ['unreviewed', 'Unreviewed'],
+                            ['acceptable', 'Accept audio'],
+                            ['regenerate', 'Regenerate this audio'],
+                            ['source_tts_issue', 'Source / TTS issue (block)'],
+                            ['needs_remaster', 'Needs remaster']
+                        ].map(([value, label]) => `<option value="${value}" ${item.disposition === value ? 'selected' : ''}>${label}</option>`).join('')}
+                    </select></label>
+                    <label class="join-note-label"><span>Listening note</span><input class="segment-note input-sm" maxlength="2000" value="${escapeHtml(item.review_note || '')}" placeholder="Optional note"></label>
+                    <button type="button" class="btn btn-secondary btn-sm segment-review-save">Save review</button>
+                </div>
+            </article>
+        `).join('');
+        section.innerHTML = `
+            <div class="join-review-heading"><div><strong>Audio requiring your decision</strong><p>Only segments that exhausted automatic confidence checks appear here.</p></div><span>${unreviewed.length} unreviewed</span></div>
+            <div class="join-review-list">${unreviewed.length ? cards(unreviewed) : '<div class="review-complete-message">All escalated audio has been reviewed.</div>'}${reviewed.length ? `<details class="reviewed-joins"><summary>Show reviewed (${reviewed.length})</summary>${cards(reviewed)}</details>` : ''}</div>
+        `;
+        section.querySelectorAll('.segment-review-save').forEach(button => {
+            button.addEventListener('click', async () => {
+                const row = button.closest('.segment-review-item');
+                const projectId = window.state?.currentProjectId;
+                button.disabled = true;
+                button.textContent = 'Savingâ€¦';
+                try {
+                    const response = await fetch(`api/projects/${encodeURIComponent(projectId)}/quality/review`, {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({
+                            item_type: 'segment',
+                            item_id: row.dataset.itemId,
+                            disposition: row.querySelector('.segment-disposition').value,
+                            note: row.querySelector('.segment-note').value.trim()
+                        })
+                    });
+                    if (!response.ok) throw new Error(await response.text());
+                    showToast('Audio review saved. Resume the pipeline to apply it.', 'success');
+                    await fetchQualityReview(projectId);
+                    renderQuality();
+                } catch (error) {
+                    showToast(`Could not save review: ${error.message}`, 'error');
+                    button.disabled = false;
+                    button.textContent = 'Try again';
+                }
+            });
+        });
+        els.qualityOverview.appendChild(section);
     }
 
     function renderJoinReview() {

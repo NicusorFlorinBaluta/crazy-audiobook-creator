@@ -34,6 +34,7 @@ from brain.extractor.epub_parser import EpubParser
 from brain.orchestrator.delivery_manager import DeliveryManager
 from brain.orchestrator.job_queue import JobQueue
 from brain.orchestrator.voice_client import VoiceClient
+from brain.validators.gemini_validation import GeminiValidationService
 from shared.artifacts import (
     atomic_write_json,
     atomic_write_text,
@@ -178,6 +179,10 @@ class Pipeline:
             speaker_confidence_threshold=script_cfg.get(
                 "speaker_confidence_threshold", 0.55
             ),
+        )
+        self.external_validator = GeminiValidationService(
+            dict(self.config.get("external_validation", {})),
+            self.projects_dir,
         )
 
         self._stop_flags: dict[str, bool] = {}
@@ -1320,6 +1325,21 @@ class Pipeline:
             chunk_progress_callback=on_script_chunk,
         )
 
+        escalation = self.external_validator.resolve_attributions(
+            project_dir=project_dir,
+            chapters=chapter_scripts,
+            character_ids=set(registry.characters),
+            character_context={
+                character_id: character.model_dump(
+                    include={"id", "name", "aliases", "gender", "age_range"},
+                    mode="json",
+                )
+                for character_id, character in registry.characters.items()
+            },
+        )
+        if escalation["attempted"]:
+            logger.info("[AttributionEscalation] %s", escalation)
+
         total_lines = 0
         for script in chapter_scripts:
             script_path = scripts_dir / f"chapter_{script.chapter_number:03d}.json"
@@ -1968,6 +1988,66 @@ class Pipeline:
                         "segment_metrics": response.segment_metrics,
                     },
                 )
+                external_audio_retry = 0
+                max_external_audio_retries = max(
+                    0,
+                    int(
+                        self.config.get("external_validation", {}).get(
+                            "max_audio_regenerations",
+                            1,
+                        )
+                    ),
+                )
+                while True:
+                    external_review_ids, auto_regenerate_ids = (
+                        self._apply_external_audio_validation(
+                            project_id=project_id,
+                            project_dir=project_dir,
+                            request_lines=request_lines,
+                            response=response,
+                        )
+                    )
+                    if not auto_regenerate_ids or external_audio_retry >= max_external_audio_retries:
+                        break
+                    segment_dir = Path(response.segment_files_dir)
+                    for line_id in auto_regenerate_ids:
+                        audio_path = segment_dir / f"{line_id}.wav"
+                        audio_path.unlink(missing_ok=True)
+                        audio_path.with_suffix(".pt").unlink(missing_ok=True)
+                    external_audio_retry += 1
+                    logger.warning(
+                        "[ExternalAudioQA] Regenerating chapter %d segments %s (attempt %d/%d)",
+                        chapter_script.chapter_number,
+                        sorted(auto_regenerate_ids),
+                        external_audio_retry,
+                        max_external_audio_retries,
+                    )
+                    response = self.voice_client.generate_chapter(
+                        request,
+                        progress_callback=_on_generation_progress,
+                    )
+                review_by_id = {
+                    item["item_id"]: item
+                    for item in self.job_queue.get_review_items(project_id, "segment")
+                }
+                for result in response.quality_results:
+                    if not result.selected:
+                        continue
+                    human_review = review_by_id.get(result.line_id)
+                    if result.manual_review_required:
+                        self.job_queue.set_review_item(
+                            project_id,
+                            "segment",
+                            result.line_id,
+                            "unreviewed",
+                            result.manual_review_reason,
+                        )
+                    elif human_review and human_review["disposition"] == "regenerate":
+                        self.job_queue.delete_review_item(
+                            project_id,
+                            "segment",
+                            result.line_id,
+                        )
                 self.job_queue.clear_quality_logs(
                     project_id,
                     chapter_script.chapter_number,
@@ -2001,12 +2081,14 @@ class Pipeline:
                     response.generated != len(request_lines)
                     or generated_ids != expected_ids
                     or failed_ids
+                    or external_review_ids
                 ):
                     raise RuntimeError(
                         f"Chapter {chapter_script.chapter_number} generation incomplete: "
                         f"generated={response.generated}/{len(request_lines)}, "
                         f"missing={sorted(expected_ids - generated_ids)}, "
                         f"failed={sorted(failed_ids)}, "
+                        f"manual_audio_review={sorted(external_review_ids)}, "
                         f"validation_failures={response.failed_validation}"
                     )
 
@@ -2509,6 +2591,83 @@ class Pipeline:
         if len(parts) == 1:
             return max(0.0, parts[0])
         return 0.0
+
+    def _apply_external_audio_validation(
+        self,
+        *,
+        project_id: str,
+        project_dir: Path,
+        request_lines: list[Any],
+        response: Any,
+    ) -> tuple[set[str], set[str]]:
+        """Apply audio escalation and identify automatic vs human follow-up."""
+        line_by_id = {line.line_id: line for line in request_lines}
+        review_by_id = {
+            item["item_id"]: item
+            for item in self.job_queue.get_review_items(project_id, "segment")
+        }
+        manual_review_ids: set[str] = set()
+        auto_regenerate_ids: set[str] = set()
+        segment_dir = Path(response.segment_files_dir)
+        reference_manager = None
+        try:
+            from voice.tts_server.voice_library import VoiceLibraryManager
+            voice_config = yaml.safe_load(
+                Path("voice/config.yaml").read_text(encoding="utf-8")
+            ) or {}
+            reference_manager = VoiceLibraryManager(
+                Path(
+                    voice_config.get("storage", {}).get(
+                        "voice_library_dir",
+                        "voice_library",
+                    )
+                )
+            )
+        except Exception as exc:
+            logger.warning("External audio QA could not load voice references: %s", exc)
+        for result in response.quality_results:
+            if not result.selected:
+                continue
+            line = line_by_id.get(result.line_id)
+            audio_path = segment_dir / f"{result.line_id}.wav"
+            human_review = review_by_id.get(result.line_id)
+            if human_review and human_review["disposition"] == "acceptable":
+                result.manual_review_required = False
+                result.manual_review_reason = "Accepted by human review"
+                result.validation_confidence = 1.0
+                result.external_validation_provider = "human"
+            elif line is not None and audio_path.is_file():
+                reference_path = None
+                if reference_manager is not None:
+                    try:
+                        reference_path = reference_manager.get_voice_path(
+                            project_id,
+                            line.voice_id or line.speaker,
+                        )
+                    except Exception:
+                        reference_path = None
+                self.external_validator.validate_audio(
+                    project_dir=project_dir,
+                    audio_path=audio_path,
+                    line_text=line.text,
+                    result=result,
+                    expected_speaker=line.speaker,
+                    expected_emotion=line.emotion,
+                    reference_audio_path=reference_path,
+                )
+            high_confidence_reject = (
+                result.external_validation_decision == "reject"
+                and result.external_validation_confidence is not None
+                and result.external_validation_confidence
+                >= self.external_validator.auto_accept
+            )
+            if high_confidence_reject and not (
+                human_review and human_review["disposition"] == "acceptable"
+            ):
+                auto_regenerate_ids.add(result.line_id)
+            if result.manual_review_required:
+                manual_review_ids.add(result.line_id)
+        return manual_review_ids, auto_regenerate_ids
 
     def _prepare_generation_lines(
         self,

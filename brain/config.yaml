@@ -97,6 +97,37 @@ dashboard:
 metadata:
   auto_fetch_external: false
   cache_hours: 24
+# Confidence-aware escalation for ambiguous speakers and subjective audio QA.
+# API credentials stay in .env. Browser automation uses an isolated persistent
+# Chrome profile and one saved conversation per project/purpose.
+external_validation:
+  enabled: true
+  auto_accept_confidence: 0.90
+  manual_review_confidence: 0.75
+  attribution_batch_size: 20
+  max_audio_regenerations: 1
+  api:
+    enabled: true
+    api_key_env: GEMINI_API_KEY
+    triage_model: gemini-3.5-flash-lite
+    adjudication_model: gemini-3.6-flash
+    timeout_seconds: 120
+    max_attempts: 4
+    # Leave headroom below the account limits shown in AI Studio.
+    daily_request_budgets:
+      gemini-3.5-flash-lite: 450
+      gemini-3.6-flash: 18
+  browser:
+    enabled: false
+    profile_dir: brain/projects/.gemini-browser-profile
+    channel: chrome
+    headless: true
+    timeout_seconds: 180
+    max_turns_per_conversation: 100
+    model_label: Pro
+    model_selector: 'button[aria-label*="model" i]'
+    input_selector: "rich-textarea [contenteditable='true']"
+    response_selector: message-content
 # Pipeline state and artifact behavior
 pipeline:
   auto_start_tts: true

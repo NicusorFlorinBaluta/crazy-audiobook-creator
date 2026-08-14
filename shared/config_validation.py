@@ -54,6 +54,43 @@ def validate_brain_config(config: dict[str, Any]) -> dict[str, Any]:
         ):
             errors.append("metadata.auto_fetch_external must be boolean")
         _number(errors, metadata, "cache_hours", minimum=0, maximum=720)
+    external = config.get("external_validation", {})
+    if not isinstance(external, dict):
+        errors.append("external_validation must be an object")
+    else:
+        for field in ("enabled",):
+            if field in external and not isinstance(external[field], bool):
+                errors.append(f"external_validation.{field} must be boolean")
+        _number(errors, external, "auto_accept_confidence", minimum=0, maximum=1)
+        _number(errors, external, "manual_review_confidence", minimum=0, maximum=1)
+        _number(errors, external, "attribution_batch_size", minimum=1, maximum=100)
+        _number(errors, external, "max_audio_regenerations", minimum=0, maximum=5)
+        api = external.get("api", {})
+        browser = external.get("browser", {})
+        if not isinstance(api, dict):
+            errors.append("external_validation.api must be an object")
+        else:
+            if "enabled" in api and not isinstance(api["enabled"], bool):
+                errors.append("external_validation.api.enabled must be boolean")
+            _number(errors, api, "timeout_seconds", minimum=1, maximum=600)
+            _number(errors, api, "max_attempts", minimum=1, maximum=10)
+            for field in ("triage_model", "adjudication_model", "api_key_env"):
+                if field in api and not str(api[field]).strip():
+                    errors.append(f"external_validation.api.{field} cannot be empty")
+            budgets = api.get("daily_request_budgets", {})
+            if not isinstance(budgets, dict) or any(
+                not isinstance(value, int) or isinstance(value, bool) or value < 0
+                for value in budgets.values()
+            ):
+                errors.append("external_validation.api.daily_request_budgets must contain non-negative integers")
+        if not isinstance(browser, dict):
+            errors.append("external_validation.browser must be an object")
+        else:
+            for field in ("enabled", "headless"):
+                if field in browser and not isinstance(browser[field], bool):
+                    errors.append(f"external_validation.browser.{field} must be boolean")
+            _number(errors, browser, "timeout_seconds", minimum=1, maximum=900)
+            _number(errors, browser, "max_turns_per_conversation", minimum=1, maximum=1000)
     schedule = config.get("schedule", {})
     if not isinstance(schedule, dict):
         errors.append("schedule must be an object")

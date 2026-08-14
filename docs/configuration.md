@@ -123,6 +123,54 @@ is never returned to the dashboard, and should be restricted to the Books API.
 When Google returns `429`, the lookup does not amplify it with immediate
 retries and reports any numeric `Retry-After` value to the user.
 
+### `external_validation`
+
+Ambiguous speaker attribution and subjective audio warnings use a confidence-
+aware escalation ladder:
+
+1. local deterministic/director result;
+2. batched Gemini Flash Lite API triage;
+3. stronger Gemini Flash API adjudication;
+4. Gemini web Pro in a persistent project conversation;
+5. dashboard review when no result reaches `auto_accept_confidence`.
+
+Attribution and audio QA have separate saved web conversations for every
+project. Their URLs are stored under `external_validation/browser_state.json`.
+The browser profile is shared only for authentication; book conversations are
+never shared between projects. A purpose chat rolls over only after
+`max_turns_per_conversation`, avoiding an unbounded context while still not
+creating a new chat per case. Audio is uploaded to the audio-QA conversation,
+while attribution sends bounded text cases in batches.
+
+Set `GEMINI_API_KEY` in `.env`. `daily_request_budgets` are local safety caps,
+not a source of truth for Google quota; the application counts retries too and
+resets its counters at midnight Pacific. Free-tier prompts may be used by
+Google to improve its products, so use a paid API project if that data handling
+is unsuitable.
+
+Gemini may clear only subjective warnings. It cannot override deterministic
+hard gates such as clipping, missing speech, invalid silence, transcript
+failure, or speaker-embedding failure. Every external decision stores provider,
+model, decision, reason, and confidence. Anything below the automatic threshold
+stops before mastering and appears in **Audio requiring your decision**.
+High-confidence external rejection automatically invalidates and regenerates
+only that WAV up to `max_audio_regenerations`; only an exhausted retry or an
+inconclusive decision enters the manual queue.
+
+The web fallback is disabled until its dedicated Chrome profile is initialized:
+
+```powershell
+$env:PYTHONPATH = "."
+& "E:\PyTorch env\my_venv\Scripts\python.exe" tools/setup_gemini_browser.py
+```
+
+Sign in and select the premium Pro model once, then set
+`external_validation.browser.enabled: true`. Routine runs are headless and
+reuse the saved attribution/audio conversations. If Google requires a fresh
+login, changes its page selectors, or presents an anti-automation challenge,
+the fallback fails closed into dashboard review; it does not attempt to bypass
+the challenge.
+
 ### `pipeline`
 
 State is stored in `pipeline_state.db`. GPU work is chapter-batched and serialized independently of `batch_mode`. Valid line, generated-chapter, and mastered-chapter artifacts are reused through fingerprints and manifests.

@@ -78,7 +78,7 @@ from voice.tts_server.voice_library import VoiceLibraryManager
 
 logger = logging.getLogger(__name__)
 
-FRONTEND_BUILD = "2026.08.14.1"
+FRONTEND_BUILD = "2026.08.14.2"
 
 
 class AsyncioConnectionResetFilter(logging.Filter):
@@ -226,7 +226,7 @@ class ReviewItemRequest(BaseModel):
     item_type: Literal["join", "segment"]
     item_id: str = Field(min_length=1, max_length=300)
     disposition: Literal[
-        "unreviewed", "acceptable", "needs_remaster", "source_tts_issue"
+        "unreviewed", "acceptable", "needs_remaster", "source_tts_issue", "regenerate"
     ]
     note: str = Field(default="", max_length=2000)
 
@@ -2745,6 +2745,14 @@ async def update_script_line(
             line["speaker"] = request.speaker
             line["speaker_confidence"] = 1.0
             line["speaker_evidence"] = "Human-reviewed speaker assignment."
+            line["attribution_resolver"] = "human"
+            line.setdefault("attribution_confidence_history", []).append({
+                "resolver": "human",
+                "decision": "resolved",
+                "speaker_id": request.speaker,
+                "confidence": 1.0,
+                "reason": "Human-reviewed speaker assignment.",
+            })
             line["attribution_review_required"] = False
             line["attribution_review_reason"] = ""
             updated = True
@@ -2780,6 +2788,16 @@ async def update_script_line(
                         merged_line["speaker_evidence"] = (
                             "Human-reviewed speaker assignment."
                         )
+                        merged_line["attribution_resolver"] = "human"
+                        merged_line.setdefault(
+                            "attribution_confidence_history", []
+                        ).append({
+                            "resolver": "human",
+                            "decision": "resolved",
+                            "speaker_id": request.speaker,
+                            "confidence": 1.0,
+                            "reason": "Human-reviewed speaker assignment.",
+                        })
                         merged_line["attribution_review_required"] = False
                         merged_line["attribution_review_reason"] = ""
                         merged_updated = True
@@ -3791,10 +3809,41 @@ async def get_quality_review(project_id: str):
         item["disposition"] = review.get("disposition", "unreviewed")
         item["review_note"] = review.get("note", "")
         item["reviewed_at"] = review.get("updated_at")
+    latest_quality: dict[str, dict[str, Any]] = {}
+    for row in job_queue.get_quality_report(project_id):
+        details = row.get("details", {})
+        if not details.get("selected"):
+            continue
+        latest_quality[row["line_id"]] = row
+    segment_reviews = []
+    for (item_type, item_id), review in persisted.items():
+        if item_type != "segment":
+            continue
+        quality = latest_quality.get(item_id, {})
+        details = quality.get("details", {})
+        segment_reviews.append({
+            "item_id": item_id,
+            "chapter_number": quality.get("chapter_number"),
+            "disposition": review.get("disposition", "unreviewed"),
+            "review_note": review.get("note", ""),
+            "reviewed_at": review.get("updated_at"),
+            "status": quality.get("status", "unknown"),
+            "validation_confidence": details.get("validation_confidence"),
+            "external_validation_provider": details.get("external_validation_provider", ""),
+            "external_validation_model": details.get("external_validation_model", ""),
+            "external_validation_decision": details.get("external_validation_decision", ""),
+            "external_validation_confidence": details.get("external_validation_confidence"),
+            "reason": details.get("manual_review_reason") or review.get("note", ""),
+            "audio_url": f"api/projects/{project_id}/segments/{item_id}/audio",
+        })
     return {
         "join_warnings": joins,
+        "segment_reviews": segment_reviews,
         "review_counts": dict(
             collections.Counter(item["disposition"] for item in joins)
+        ),
+        "segment_review_counts": dict(
+            collections.Counter(item["disposition"] for item in segment_reviews)
         ),
     }
 
@@ -3802,7 +3851,44 @@ async def get_quality_review(project_id: str):
 @app.post("/api/projects/{project_id}/quality/review")
 async def update_quality_review(project_id: str, request: ReviewItemRequest):
     """Persist a non-destructive human quality-review disposition."""
-    _require_job(project_id)
+    state = _require_job(project_id)
+    if request.item_type == "segment" and request.disposition == "regenerate":
+        _require_project_stopped(project_id)
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", request.item_id):
+            raise HTTPException(status_code=400, detail="Invalid line ID")
+        quality = [
+            row for row in job_queue.get_quality_report(project_id)
+            if row["line_id"] == request.item_id
+        ]
+        if not quality:
+            raise HTTPException(status_code=404, detail="Quality record not found")
+        chapter_number = int(quality[-1]["chapter_number"])
+        workspace = _workspace_project_dir(project_id)
+        audio = workspace / "segments" / f"{request.item_id}.wav"
+        audio.unlink(missing_ok=True)
+        audio.with_suffix(".pt").unlink(missing_ok=True)
+        updates = {
+            "generated_chapters": [
+                number for number in state.get("generated_chapters", [])
+                if number != chapter_number
+            ],
+            "mastered_chapters": [
+                number for number in state.get("mastered_chapters", [])
+                if number != chapter_number
+            ],
+            "export_stale": True,
+        }
+        job_queue.update_job(project_id, updates)
+        project_dir = _project_dir(project_id)
+        for manifest in (
+            project_dir / "manifests" / f"chapter_{chapter_number:03d}.segments.json",
+            project_dir / "manifests" / f"chapter_{chapter_number:03d}.master.json",
+        ):
+            manifest.unlink(missing_ok=True)
+        DeliveryManager(project_dir).mark_stale_for_chapters(
+            {chapter_number},
+            f"Manual regeneration requested for {request.item_id}",
+        )
     return job_queue.set_review_item(
         project_id,
         request.item_type,
@@ -3871,6 +3957,15 @@ async def get_quality_report(project_id: str):
                 "speaker_similarity": details.get("speaker_similarity"),
                 "prosody_warning": details.get("prosody_warning", False),
                 "selected": bool(details.get("selected", False)),
+                "validation_confidence": details.get("validation_confidence"),
+                "external_validation_provider": details.get("external_validation_provider", ""),
+                "external_validation_model": details.get("external_validation_model", ""),
+                "external_validation_decision": details.get("external_validation_decision", ""),
+                "external_validation_confidence": details.get("external_validation_confidence"),
+                "external_validation_reason": details.get("external_validation_reason", ""),
+                "manual_review_required": bool(details.get("manual_review_required", False)),
+                "manual_review_reason": details.get("manual_review_reason", ""),
+                "external_validation_history": details.get("external_validation_history", []),
             }
         )
             
@@ -3907,6 +4002,15 @@ async def get_quality_report(project_id: str):
                 "noise_floor_db": details.get("noise_floor_db"),
                 "speaker_similarity": details.get("speaker_similarity"),
                 "prosody_warning": details.get("prosody_warning", False),
+                "validation_confidence": details.get("validation_confidence"),
+                "external_validation_provider": details.get("external_validation_provider", ""),
+                "external_validation_model": details.get("external_validation_model", ""),
+                "external_validation_decision": details.get("external_validation_decision", ""),
+                "external_validation_confidence": details.get("external_validation_confidence"),
+                "external_validation_reason": details.get("external_validation_reason", ""),
+                "manual_review_required": bool(details.get("manual_review_required", False)),
+                "manual_review_reason": details.get("manual_review_reason", ""),
+                "external_validation_history": details.get("external_validation_history", []),
                 "audio_url": (
                     f"api/projects/{project_id}/segments/"
                     f"{line['line_id']}/audio"
@@ -3925,6 +4029,41 @@ async def release_gpu():
     """Release all app-owned GPU resources."""
     await _release_gpu_resources()
     return {"status": "success", "message": "GPU resources released"}
+
+
+@app.get("/api/projects/{project_id}/external-validation/status")
+async def get_external_validation_status(project_id: str):
+    """Return readiness without exposing API keys or Gemini conversation URLs."""
+    _require_job(project_id)
+    config = load_config().get("external_validation", {})
+    api = config.get("api", {}) if isinstance(config, dict) else {}
+    browser = config.get("browser", {}) if isinstance(config, dict) else {}
+    key_name = str(api.get("api_key_env", "GEMINI_API_KEY"))
+    profile = Path(str(browser.get("profile_dir", "brain/projects/.gemini-browser-profile")))
+    state_path = _project_dir(project_id) / "external_validation" / "browser_state.json"
+    purposes: list[str] = []
+    if state_path.is_file():
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            purposes = sorted(state.get("conversations", {}))
+        except (OSError, json.JSONDecodeError, TypeError):
+            purposes = []
+    return {
+        "enabled": bool(config.get("enabled", False)),
+        "auto_accept_confidence": config.get("auto_accept_confidence", 0.9),
+        "manual_review_confidence": config.get("manual_review_confidence", 0.75),
+        "api": {
+            "enabled": bool(api.get("enabled", True)),
+            "configured": bool(os.getenv(key_name, "").strip()),
+            "triage_model": api.get("triage_model"),
+            "adjudication_model": api.get("adjudication_model"),
+        },
+        "browser": {
+            "enabled": bool(browser.get("enabled", False)),
+            "profile_initialized": profile.is_dir() and any(profile.iterdir()),
+            "persistent_conversations": purposes,
+        },
+    }
 
 
 @app.post("/api/system/restart")

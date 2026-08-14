@@ -254,11 +254,14 @@ Clients should treat only an explicit success response with complete artifact ID
 | `GET` | `/api/projects/{id}/storage` | Storage categories plus an exact safe-cleanup preview and confirmation token |
 | `POST` | `/api/projects/{id}/storage/cleanup` | Remove only the unchanged set of previewed retry/temp files |
 | `GET` | `/api/projects/{id}/support-bundle` | Redacted configs, state, metrics, preflight, and bounded log tails; no audio |
-| `GET` | `/api/projects/{id}/quality/review` | Join-warning queue enriched with adjacent script/audio and saved disposition |
-| `POST` | `/api/projects/{id}/quality/review` | Save `unreviewed`, `acceptable`, `needs_remaster`, or `source_tts_issue` |
+| `GET` | `/api/projects/{id}/quality/review` | Join warnings and low-confidence/rejected segment audio with saved dispositions |
+| `POST` | `/api/projects/{id}/quality/review` | Save a review disposition; segment `regenerate` safely invalidates only that WAV and its dependent chapter outputs |
 | `GET` | `/api/projects/{id}/segments/{line_id}/audio` | Stream one segment for local quality review |
+| `GET` | `/api/projects/{id}/external-validation/status` | Read Gemini API/browser readiness and persistent-chat purposes without secrets or URLs |
 | `GET` | `/api/projects/{id}/voices/{voice_id}/download` | Download a reusable reference WAV named with its book and character |
 
 Quality attempts include `selected`. This identifies the artifact that was
 actually retained; it is not necessarily the numerically latest attempt.
 Retry counts still describe every attempted retry.
+Selected attempts also expose the local/final confidence, external provider,
+model, decision, confidence history, and whether manual review is required.

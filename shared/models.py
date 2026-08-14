@@ -169,6 +169,15 @@ class ScriptLine(BaseModel):
         max_length=500,
         description="Why this speaker attribution still needs review",
     )
+    attribution_resolver: str = Field(
+        default="local",
+        max_length=100,
+        description="Resolver that produced the current attribution (local, Gemini model, or human)",
+    )
+    attribution_confidence_history: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Confidence-bearing decisions made by each attribution fallback",
+    )
     voice_id: str | None = Field(
         default=None,
         description="Voice-library ID when it differs from the character/speaker ID",
@@ -494,6 +503,20 @@ class QualityResult(BaseModel):
         default_factory=list,
         description="Soft diagnostic messages that do not block acceptance",
     )
+    validation_confidence: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Final confidence after local and optional external audio validation",
+    )
+    external_validation_provider: str = ""
+    external_validation_model: str = ""
+    external_validation_decision: Literal["", "accept", "reject", "abstain"] = ""
+    external_validation_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    external_validation_reason: str = ""
+    external_validation_history: list[dict[str, Any]] = Field(default_factory=list)
+    manual_review_required: bool = False
+    manual_review_reason: str = ""
 
 
 class ChapterQualityReport(BaseModel):
