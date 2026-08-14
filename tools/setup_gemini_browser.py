@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 
@@ -52,6 +53,27 @@ def _resolve_repo_path(value: str | Path) -> Path:
     return path if path.is_absolute() else REPO_ROOT / path
 
 
+def _find_chrome(configured: str = "") -> Path | None:
+    """Locate a normal Chrome installation for interactive authentication."""
+    candidates = []
+    if configured:
+        candidates.append(Path(configured))
+    discovered = shutil.which("chrome") or shutil.which("chrome.exe")
+    if discovered:
+        candidates.append(Path(discovered))
+    for environment_name, suffix in (
+        ("PROGRAMFILES", "Google/Chrome/Application/chrome.exe"),
+        ("PROGRAMFILES(X86)", "Google/Chrome/Application/chrome.exe"),
+        ("LOCALAPPDATA", "Google/Chrome/Application/chrome.exe"),
+    ):
+        import os
+
+        base = os.getenv(environment_name)
+        if base:
+            candidates.append(Path(base) / suffix)
+    return next((path for path in candidates if path.is_file()), None)
+
+
 def main() -> int:
     handoff_result = _handoff_to_project_python()
     if handoff_result is not None:
@@ -59,6 +81,7 @@ def main() -> int:
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="brain/config.yaml")
+    parser.add_argument("--chrome", default="", help="Optional path to chrome.exe")
     args = parser.parse_args()
     try:
         import yaml
@@ -75,25 +98,45 @@ def main() -> int:
         browser.get("profile_dir", "brain/projects/.gemini-browser-profile")
     )
     profile.mkdir(parents=True, exist_ok=True)
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError as exc:
+    chrome = _find_chrome(args.chrome or str(browser.get("chrome_executable", "")))
+    if chrome is None:
         raise SystemExit(
-            "Playwright is not installed. Install brain/requirements.txt in the brain virtual environment."
-        ) from exc
-
-    print("A dedicated Gemini window will open. Sign in and select the premium Pro model.")
-    print("No audiobook text or audio is sent during this setup.")
-    with sync_playwright() as playwright:
-        context = playwright.chromium.launch_persistent_context(
-            str(profile),
-            channel=str(browser.get("channel", "chrome")),
-            headless=False,
+            "Google Chrome was not found. Pass its location with --chrome C:\\path\\to\\chrome.exe"
         )
-        page = context.pages[0] if context.pages else context.new_page()
-        page.goto("https://gemini.google.com/app", wait_until="domcontentloaded")
-        input("After Gemini is signed in and Pro is selected, press Enter here to save the profile: ")
-        context.close()
+
+    print("A normal, non-automated Chrome window will open with a dedicated Gemini profile.")
+    print("Sign in and select the premium Pro model, then close that Chrome window.")
+    print("No audiobook text or audio is sent during this setup.")
+    process = subprocess.Popen(
+        [
+            str(chrome),
+            f"--user-data-dir={profile}",
+            "--profile-directory=Default",
+            "--no-first-run",
+            "--disable-background-mode",
+            "https://gemini.google.com/app",
+        ],
+        cwd=REPO_ROOT,
+    )
+    input(
+        "After sign-in, Pro selection, and closing the dedicated Chrome window, press Enter here: "
+    )
+    if process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired as exc:
+            raise SystemExit(
+                "The dedicated Chrome profile is still in use. Close it from the Chrome tray icon, then run setup again."
+            ) from exc
+    cookie_candidates = (
+        profile / "Default" / "Network" / "Cookies",
+        profile / "Default" / "Cookies",
+    )
+    if not any(path.is_file() for path in cookie_candidates):
+        raise SystemExit(
+            "Chrome closed, but the dedicated profile has no cookie store. Sign-in was not saved; run setup again."
+        )
     print(f"Gemini browser profile saved at {profile.resolve()}")
     return 0
 
