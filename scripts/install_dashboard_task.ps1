@@ -1,6 +1,7 @@
 [CmdletBinding(SupportsShouldProcess)]
 param(
-    [string]$TaskName = "Crazy Audiobook Dashboard"
+    [string]$TaskName = "Crazy Audiobook Dashboard",
+    [string]$RestartTaskName = "Crazy Audiobook Dashboard Restart"
 )
 
 $ErrorActionPreference = "Stop"
@@ -21,6 +22,13 @@ $action = New-ScheduledTaskAction `
     -Execute "powershell.exe" `
     -Argument $arguments `
     -WorkingDirectory $projectRoot
+$restartLauncher = Join-Path $PSScriptRoot "restart_dashboard.ps1"
+$escapedRestartLauncher = $restartLauncher.Replace('"', '""')
+$restartArguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$escapedRestartLauncher`" -TaskName `"$TaskName`""
+$restartAction = New-ScheduledTaskAction `
+    -Execute "powershell.exe" `
+    -Argument $restartArguments `
+    -WorkingDirectory $projectRoot
 $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries `
@@ -32,14 +40,37 @@ $principal = New-ScheduledTaskPrincipal `
     -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) `
     -LogonType S4U `
     -RunLevel Limited
+$restartPrincipal = New-ScheduledTaskPrincipal `
+    -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) `
+    -LogonType Interactive `
+    -RunLevel Limited
 
 if ($PSCmdlet.ShouldProcess($TaskName, "Register on-demand audiobook dashboard task")) {
-    Register-ScheduledTask `
+    $existingDashboardTask = Get-ScheduledTask `
         -TaskName $TaskName `
-        -Action $action `
-        -Settings $settings `
-        -Principal $principal `
-        -Description "Runs the Crazy Audiobook Creator dashboard headlessly on demand." `
+        -ErrorAction SilentlyContinue
+    if (-not $existingDashboardTask) {
+        Register-ScheduledTask `
+            -TaskName $TaskName `
+            -Action $action `
+            -Settings $settings `
+            -Principal $principal `
+            -Description "Runs the Crazy Audiobook Creator dashboard headlessly on demand." | Out-Null
+    }
+    else {
+        Write-Output "Preserved existing '$TaskName' task."
+    }
+    $restartSettings = New-ScheduledTaskSettingsSet `
+        -AllowStartIfOnBatteries `
+        -DontStopIfGoingOnBatteries `
+        -ExecutionTimeLimit (New-TimeSpan -Minutes 10) `
+        -MultipleInstances IgnoreNew
+    Register-ScheduledTask `
+        -TaskName $RestartTaskName `
+        -Action $restartAction `
+        -Settings $restartSettings `
+        -Principal $restartPrincipal `
+        -Description "Safely restarts the Crazy Audiobook Creator dashboard." `
         -Force | Out-Null
-    Write-Output "Registered '$TaskName'. Test it with: schtasks.exe /Run /TN `"$TaskName`""
+    Write-Output "Ensured '$TaskName' and '$RestartTaskName' are available."
 }

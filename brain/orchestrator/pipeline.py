@@ -31,6 +31,7 @@ from brain.director.ollama_client import OllamaClient
 from brain.director.attribution_audit import audit_book_attribution
 from brain.director.script_generator import ScriptGenerator
 from brain.extractor.epub_parser import EpubParser
+from brain.orchestrator.delivery_manager import DeliveryManager
 from brain.orchestrator.job_queue import JobQueue
 from brain.orchestrator.voice_client import VoiceClient
 from shared.artifacts import (
@@ -73,6 +74,15 @@ from shared.reference_selection import select_reference_text
 from shared.config_validation import validate_brain_config
 
 logger = logging.getLogger(__name__)
+
+
+class _GracefulDeliveryPause(Exception):
+    """Raised inside _run_incremental_delivery to pause after a batch completes.
+
+    Using a dedicated exception (rather than StopIteration, which has special
+    meaning in Python's iterator and generator protocol) makes the intent clear
+    and prevents accidental silencing by comprehensions or generator internals.
+    """
 
 
 class Pipeline:
@@ -129,6 +139,7 @@ class Pipeline:
             skip_toc=extract_cfg.get("skip_toc", True),
             skip_appendices=extract_cfg.get("skip_appendices", True),
             skip_front_matter=extract_cfg.get("skip_front_matter", True),
+            skip_preface=extract_cfg.get("skip_preface", True),
             min_chapter_words=extract_cfg.get("min_chapter_words", 100),
             max_chapter_words=extract_cfg.get("max_chapter_words", 20_000),
             chapter_detection=extract_cfg.get("chapter_detection", "auto"),
@@ -547,8 +558,13 @@ class Pipeline:
             self._stop_voice_server()
             raise RuntimeError(f"Voice server subprocess failed to start within {timeout}s")
 
-    def _assert_attribution_audit(self, project_dir: Path) -> dict[str, Any]:
-        """Persist and enforce the source-grounded speaker release gate."""
+    def _assert_attribution_audit(
+        self,
+        project_dir: Path,
+        *,
+        enforce: bool = True,
+    ) -> dict[str, Any]:
+        """Persist the source-grounded audit and optionally enforce its gate."""
         from shared.models import CharacterRegistry, ExtractedBook, ScriptChapter
 
         book = ExtractedBook.model_validate_json(
@@ -569,7 +585,7 @@ class Pipeline:
         )
         report_path = project_dir / "attribution_audit.json"
         atomic_write_json(report_path, report)
-        if not report["passed"]:
+        if enforce and not report["passed"]:
             count = int(report["summary"]["blocking_issues"])
             raise RuntimeError(
                 f"Speaker attribution release gate failed with {count} "
@@ -784,6 +800,14 @@ class Pipeline:
             project_dir / "book.json",
             book.model_dump_json(indent=2),
         )
+        self.job_queue.update_job(
+            project_id,
+            {
+                "total_chapters": len(book.chapters),
+                "total_words": book.metadata.total_words,
+            },
+        )
+        state = self.job_queue.get_job(project_id)
         return ProjectStatus(**state)
 
     # ------------------------------------------------------------------
@@ -939,6 +963,35 @@ class Pipeline:
                 return ProjectStatus(**self.job_queue.get_job(project_id))
 
             self._check_stop(project_id)
+            state = self.job_queue.get_job(project_id)
+            incremental_cfg = state.get("incremental_delivery") or {}
+            incremental_enabled = (
+                incremental_cfg.get("enabled", False)
+                if isinstance(incremental_cfg, dict)
+                else getattr(incremental_cfg, "enabled", False)
+            )
+            selection = state.get("active_generation_chapter_selection")
+
+            if incremental_enabled and selection is not None:
+                raise RuntimeError(
+                    "Incremental delivery cannot run with a manual chapter selection"
+                )
+
+            if incremental_enabled:
+                self._run_incremental_delivery(project_id, project_dir, current_stage)
+                elapsed = time.time() - start_time
+                self._update_stage(
+                    project_id,
+                    PipelineStage.COMPLETE,
+                    elapsed_seconds=elapsed,
+                )
+                logger.info(
+                    "Pipeline complete (incremental delivery) for '%s' in %.1f minutes",
+                    project_id,
+                    elapsed / 60,
+                )
+                return ProjectStatus(**self.job_queue.get_job(project_id))
+
             if current_stage not in {
                 PipelineStage.MASTERING,
                 PipelineStage.EXPORTING,
@@ -991,6 +1044,19 @@ class Pipeline:
                     elapsed / 60,
                 )
 
+        except _GracefulDeliveryPause as _gdp:
+            elapsed = time.time() - start_time
+            logger.info(
+                "Pipeline paused after incremental delivery batch '%s' for '%s'",
+                _gdp,
+                project_id,
+            )
+            self._update_stage(
+                project_id,
+                PipelineStage.PAUSED,
+                elapsed_seconds=elapsed,
+            )
+            return ProjectStatus(**self.job_queue.get_job(project_id))
         except Exception as e:
             elapsed = time.time() - start_time
             logger.error("Pipeline failed for '%s': %s", project_id, e, exc_info=True)
@@ -1057,6 +1123,7 @@ class Pipeline:
                     "prompt": CHARACTER_SYSTEM_PROMPT,
                     "analysis_revision": CHARACTER_ANALYSIS_REVISION,
                     "max_unique_voices": self.character_analyzer.max_unique_voices,
+                    "single_pass_threshold": self.character_analyzer.single_pass_threshold,
                 }
             )
             character_metadata = json.loads(
@@ -1096,6 +1163,7 @@ class Pipeline:
                 "prompt": CHARACTER_SYSTEM_PROMPT,
                 "analysis_revision": CHARACTER_ANALYSIS_REVISION,
                 "max_unique_voices": self.character_analyzer.max_unique_voices,
+                "single_pass_threshold": self.character_analyzer.single_pass_threshold,
             }
         )
         reuse_characters = False
@@ -1117,7 +1185,18 @@ class Pipeline:
             from shared.models import CharacterRegistry
             registry = CharacterRegistry.model_validate_json(chars_path.read_text(encoding="utf-8"))
         else:
-            registry = self.character_analyzer.analyze(book)
+            def _analyzer_check():
+                self._check_stop(project_id)
+                self._check_schedule(project_id)
+                self._check_deployment_pause(project_id)
+
+            chars_ckpt_path = project_dir / "characters.checkpoint.json"
+            registry = self.character_analyzer.analyze(
+                book,
+                check_callback=_analyzer_check,
+                checkpoint_path=chars_ckpt_path,
+                checkpoint_fingerprint=chars_fingerprint,
+            )
             pass1_elapsed = time.time() - t0
 
             atomic_write_text(chars_path, registry.model_dump_json(indent=2))
@@ -1144,11 +1223,31 @@ class Pipeline:
         def on_chapter_start(chapter_num: int):
             nonlocal current_script_chapter, script_tick
             self._check_stop(project_id)
+            self._check_schedule(project_id)
+            self._check_deployment_pause(project_id)
             current_script_chapter = chapter_num
             script_tick = time.perf_counter()
-            self.job_queue.update_job(project_id, {
-                "current_script_chapter": chapter_num,
-            })
+
+            state = self.job_queue.get_job(project_id)
+            updates = {"current_script_chapter": chapter_num}
+            for key in ["scripted_chapters", "generated_chapters", "mastered_chapters"]:
+                if key in state and chapter_num in state[key]:
+                    state[key].remove(chapter_num)
+                    updates[key] = state[key]
+            self.job_queue.update_job(project_id, updates)
+
+            # Remove stale chapter from book_script.json so UI doesn't show old lines
+            merged_script = project_dir / "book_script.json"
+            if merged_script.exists():
+                try:
+                    import json
+                    merged_data = json.loads(merged_script.read_text(encoding="utf-8"))
+                    if "chapters" in merged_data:
+                        merged_data["chapters"] = [c for c in merged_data["chapters"] if c.get("chapter_number") != chapter_num]
+                        from brain.utils.file_utils import atomic_write_text
+                        atomic_write_text(merged_script, json.dumps(merged_data, indent=2, ensure_ascii=False))
+                except Exception:
+                    pass
             completed = len(self.job_queue.get_job(project_id).get("scripted_chapters", []))
             self.job_queue.update_progress(
                 project_id,
@@ -1227,7 +1326,9 @@ class Pipeline:
             atomic_write_text(script_path, script.model_dump_json(indent=2))
             total_lines += script.total_lines
 
-        self._assert_attribution_audit(project_dir)
+        # Persist unresolved attribution as a review queue without discarding
+        # completed script work. Generation/export call this gate with enforce=True.
+        self._assert_attribution_audit(project_dir, enforce=False)
 
         book_script = BookScript(
             metadata=book.metadata,
@@ -1497,7 +1598,180 @@ class Pipeline:
             logger.error("Failed to bootstrap voices: %s", e)
             raise
 
-    def _run_generation(self, project_id: str, project_dir: Path) -> None:
+    def _run_incremental_delivery(self, project_id: str, project_dir: Path, current_stage: PipelineStage) -> None:
+        """Run incremental batching, generating, mastering, and publishing."""
+        dm = DeliveryManager(project_dir)
+        scripts_dir = project_dir / "script"
+        script_files = self._script_files(scripts_dir)
+        from shared.models import ScriptChapter as _ScriptChapter
+        scripts_by_number = {
+            _ScriptChapter.model_validate_json(
+                path.read_text(encoding="utf-8")
+            ).chapter_number: path
+            for path in script_files
+        }
+        chapter_numbers = list(scripts_by_number)
+        if not chapter_numbers:
+            raise RuntimeError("Incremental delivery requires at least one chapter script")
+
+        state = self.job_queue.get_job(project_id)
+        incremental_cfg = state.get("incremental_delivery") or {}
+        if isinstance(incremental_cfg, dict):
+            batch_size = int(incremental_cfg.get("batch_size") or 5)
+        else:
+            # IncrementalDeliverySettings model instance or similar
+            batch_size = int(getattr(incremental_cfg, "batch_size", 5))
+        script_dependency_fingerprint = fingerprint(
+            {
+                str(number): hash_file(scripts_by_number[number])
+                for number in chapter_numbers
+            }
+        )
+        index, batches = dm.ensure_plan(
+            chapter_numbers,
+            batch_size,
+            script_dependency_fingerprint=script_dependency_fingerprint,
+        )
+        book_data = json.loads(
+            (project_dir / "book.json").read_text(encoding="utf-8")
+        )
+        book_meta = book_data.get("metadata", {})
+        cover_candidate = Path(str(book_meta.get("cover_image_path") or ""))
+        metadata_fingerprint = fingerprint(
+            {
+                "metadata": book_meta,
+                "cover_hash": hash_file(cover_candidate),
+            }
+        )
+
+        def master_dependencies(batch_numbers: list[int]) -> tuple[dict[str, str], dict[str, Any]]:
+            hashes: dict[str, str] = {}
+            qualities: dict[str, Any] = {}
+            for number in batch_numbers:
+                manifest_file = master_manifest_path(project_dir, number)
+                manifest_hash = hash_file(manifest_file)
+                if not manifest_hash:
+                    return {}, {}
+                hashes[str(number)] = manifest_hash
+                try:
+                    qualities[str(number)] = json.loads(
+                        manifest_file.read_text(encoding="utf-8")
+                    ).get("mastering_quality", {})
+                except (OSError, ValueError, TypeError):
+                    qualities[str(number)] = {}
+            return hashes, qualities
+
+        def update_publication_state(latest_id: str | None = None) -> None:
+            current_index = dm.load_index()
+            published = [
+                part for part in current_index.deliveries
+                if part.status == "published"
+            ]
+            updates: dict[str, Any] = {
+                "published_delivery_count": len(published),
+            }
+            if latest_id:
+                updates["latest_published_delivery_id"] = latest_id
+            self.job_queue.update_job(project_id, updates)
+
+        def pause_if_requested(delivery_id: str) -> None:
+            current = self.job_queue.get_job(project_id)
+            if not current.get("pause_after_delivery_requested", False):
+                return
+            self.job_queue.update_job(
+                project_id,
+                {
+                    "pause_reason": "Graceful pause after delivery batch.",
+                    "pause_after_delivery_requested": False,
+                    "active_delivery_id": None,
+                    "active_delivery_chapters": [],
+                },
+            )
+            self._update_stage(project_id, PipelineStage.PAUSED)
+            raise _GracefulDeliveryPause(delivery_id)
+
+        for batch in batches:
+            self._check_stop(project_id)
+
+            self.job_queue.update_job(
+                project_id,
+                {
+                    "active_delivery_id": batch.delivery_id,
+                    "active_delivery_chapters": batch.chapter_numbers,
+                },
+            )
+
+            current_master_hashes, current_quality = master_dependencies(
+                batch.chapter_numbers
+            )
+            if dm.is_published_and_valid(
+                batch,
+                plan_fingerprint=index.plan_fingerprint,
+                master_manifest_hashes=current_master_hashes,
+                metadata_fingerprint=metadata_fingerprint,
+            ):
+                logger.info(
+                    "Delivery %s is already published and valid; skipping",
+                    batch.delivery_id,
+                )
+                update_publication_state(batch.delivery_id)
+                pause_if_requested(batch.delivery_id)
+                continue
+
+            batch_chapter_set = set(batch.chapter_numbers)
+
+            # Generate audio for this batch
+            self._run_generation(project_id, project_dir, batch_chapter_set)
+            self._check_stop(project_id)
+
+            # Master this batch
+            self._run_mastering(project_id, project_dir, batch_chapter_set)
+            self._check_stop(project_id)
+
+            current_master_hashes, current_quality = master_dependencies(
+                batch.chapter_numbers
+            )
+            if len(current_master_hashes) != len(batch.chapter_numbers):
+                raise RuntimeError(
+                    f"Delivery {batch.delivery_id} has incomplete mastering dependencies"
+                )
+
+            # Export and index under the same project-scoped packaging lock.
+            temp_export_path = project_dir / f".temp_export_{batch.delivery_id}.m4b"
+            with dm.packaging_lock(wait=True):
+                export_result = self._run_export(
+                    project_id,
+                    project_dir,
+                    partial=True,
+                    chapter_selection=batch_chapter_set,
+                    temp_output=temp_export_path,
+                    acquire_packaging_lock=False,
+                ) or {}
+                title = book_meta.get("title") or project_id
+                dm.publish_delivery(
+                    batch=batch,
+                    temp_artifact_path=temp_export_path,
+                    duration_seconds=float(export_result.get("duration_seconds") or 0.0),
+                    master_manifest_hashes=current_master_hashes,
+                    metadata_fingerprint=metadata_fingerprint,
+                    book_title=title,
+                    plan_fingerprint=index.plan_fingerprint,
+                    quality=current_quality,
+                )
+            update_publication_state(batch.delivery_id)
+            pause_if_requested(batch.delivery_id)
+
+            self._check_schedule(project_id)
+
+        self._check_stop(project_id)
+        self.job_queue.update_job(
+            project_id,
+            {"active_delivery_id": None, "active_delivery_chapters": []},
+        )
+        # Produce the full export once every batch has been published
+        self._run_export(project_id, project_dir)
+
+    def _run_generation(self, project_id: str, project_dir: Path, chapter_numbers: set[int] | None = None) -> None:
         """Run Stages ④-⑤: TTS generation with quality validation."""
         self._assert_attribution_audit(project_dir)
         self._update_stage(project_id, PipelineStage.GENERATING)
@@ -1521,7 +1795,15 @@ class Pipeline:
         generated_chapters, mastered_chapters = self._reconcile_artifacts(
             project_id, project_dir, script_files
         )
-        selection = state.get("active_generation_chapter_selection")
+        selection = (
+            set(chapter_numbers)
+            if chapter_numbers is not None
+            else (
+                set(state["active_generation_chapter_selection"])
+                if state.get("active_generation_chapter_selection") is not None
+                else None
+            )
+        )
         selected_numbers = sorted(
             selection
             if selection is not None
@@ -1774,7 +2056,7 @@ class Pipeline:
 
         self.job_queue.update_job(project_id, {"current_gen_chapter": None})
 
-    def _run_mastering(self, project_id: str, project_dir: Path) -> None:
+    def _run_mastering(self, project_id: str, project_dir: Path, chapter_numbers: set[int] | None = None) -> None:
         """Run Stage ⑥: Audio mastering."""
         self._update_stage(project_id, PipelineStage.MASTERING)
 
@@ -1793,7 +2075,15 @@ class Pipeline:
                 "mastered_chapters": mastered_chapters,
             },
         )
-        selection = state.get("active_generation_chapter_selection")
+        selection = (
+            set(chapter_numbers)
+            if chapter_numbers is not None
+            else (
+                set(state["active_generation_chapter_selection"])
+                if state.get("active_generation_chapter_selection") is not None
+                else None
+            )
+        )
         selected_numbers = sorted(
             selection
             if selection is not None
@@ -1942,8 +2232,20 @@ class Pipeline:
         project_dir: Path,
         partial: bool = False,
         chapter_selection: set[int] | None = None,
-    ) -> None:
+        temp_output: Path | None = None,
+        acquire_packaging_lock: bool = True,
+    ) -> dict[str, Any]:
         """Run Stage ⑦: M4B export."""
+        if acquire_packaging_lock:
+            with DeliveryManager(project_dir).packaging_lock(wait=True):
+                return self._run_export(
+                    project_id,
+                    project_dir,
+                    partial=partial,
+                    chapter_selection=chapter_selection,
+                    temp_output=temp_output,
+                    acquire_packaging_lock=False,
+                )
         self._assert_attribution_audit(project_dir)
         self._update_stage(project_id, PipelineStage.EXPORTING)
         self._progress_estimator.reset(f"{project_id}:export")
@@ -2017,6 +2319,17 @@ class Pipeline:
         if not chapters:
             raise RuntimeError("No mastered chapters are available for export")
 
+        included_numbers = [chapter.number for chapter in chapters]
+        if partial and chapter_selection is not None:
+            missing = set(chapter_selection) - set(included_numbers)
+            extra = set(included_numbers) - set(chapter_selection)
+            if missing or extra:
+                raise RuntimeError(
+                    "Partial export refused because its mastered chapter set does not "
+                    f"match the requested batch (missing={sorted(missing)}, "
+                    f"extra={sorted(extra)})"
+                )
+
         cover_art = (
             Path(book.metadata.cover_image_path)
             if book.metadata.cover_image_path
@@ -2024,7 +2337,6 @@ class Pipeline:
         )
         cover_path_str = str(cover_art) if cover_art.is_file() else None
 
-        included_numbers = [chapter.number for chapter in chapters]
         output_name = (
             f"{project_id}_chapters_{format_chapter_set(included_numbers)}.m4b"
             if partial
@@ -2048,12 +2360,15 @@ class Pipeline:
         export_started = time.perf_counter()
         response = self.voice_client.export_m4b(request)
         export_seconds = time.perf_counter() - export_started
+        if response.status != "success":
+            raise RuntimeError(f"M4B exporter returned status '{response.status}'")
 
         import shutil
         suffix = (
             f"_chapters_{format_chapter_set(included_numbers)}" if partial else ""
         )
-        local_m4b = project_dir / f"{project_id}{suffix}.m4b"
+        local_m4b = temp_output if temp_output else project_dir / f"{project_id}{suffix}.m4b"
+        local_m4b.parent.mkdir(parents=True, exist_ok=True)
 
         if response.output_file and Path(response.output_file).exists():
             shutil.copy2(response.output_file, local_m4b)
@@ -2065,6 +2380,11 @@ class Pipeline:
                 str(local_m4b),
             )
             logger.info("M4B downloaded to: %s", local_m4b)
+        else:
+            raise RuntimeError("M4B exporter returned neither a file nor a download URL")
+
+        if not local_m4b.is_file() or local_m4b.stat().st_size == 0:
+            raise RuntimeError(f"M4B export is missing or empty: {local_m4b}")
 
         logger.info(
             "Export complete (%s): %s, %s, %.1f MB",
@@ -2096,6 +2416,15 @@ class Pipeline:
                 "output_file": str(local_m4b),
             },
         )
+        if not partial:
+            self.job_queue.update_job(project_id, {"export_stale": False})
+        return {
+            "output_file": str(local_m4b),
+            "chapters": included_numbers,
+            "duration_seconds": self._parse_duration_seconds(response.total_duration),
+            "file_size_bytes": local_m4b.stat().st_size,
+            "book_loudness": response.book_loudness,
+        }
 
     # ------------------------------------------------------------------
     # Helpers
@@ -2158,6 +2487,28 @@ class Pipeline:
             return info.frames > 0 and info.samplerate > 0 and info.duration > 0
         except Exception:
             return False
+
+    @staticmethod
+    def _parse_duration_seconds(value: str | float | int | None) -> float:
+        """Parse exporter durations such as H:MM:SS into seconds."""
+        if value is None:
+            return 0.0
+        if isinstance(value, (int, float)):
+            return max(0.0, float(value))
+        text = str(value).strip()
+        if not text:
+            return 0.0
+        try:
+            parts = [float(part) for part in text.split(":")]
+        except ValueError:
+            return 0.0
+        if len(parts) == 3:
+            return max(0.0, parts[0] * 3600 + parts[1] * 60 + parts[2])
+        if len(parts) == 2:
+            return max(0.0, parts[0] * 60 + parts[1])
+        if len(parts) == 1:
+            return max(0.0, parts[0])
+        return 0.0
 
     def _prepare_generation_lines(
         self,

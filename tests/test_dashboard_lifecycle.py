@@ -43,6 +43,33 @@ class DashboardLifecycleTests(unittest.IsolatedAsyncioTestCase):
             blocker.set()
             await dashboard._dashboard_shutdown_task
 
+    async def test_restart_triggers_independent_fixed_task(self) -> None:
+        with patch.object(
+            dashboard,
+            "_launch_dashboard_restart_helper",
+            return_value="Crazy Audiobook Dashboard Restart",
+        ):
+            response = await dashboard.restart_dashboard_server()
+
+        self.assertEqual(response["status"], "restarting")
+        self.assertEqual(
+            response["restart_task"],
+            "Crazy Audiobook Dashboard Restart",
+        )
+        self.assertIsNone(dashboard._dashboard_shutdown_task)
+
+    async def test_restart_does_not_shutdown_when_helper_fails(self) -> None:
+        with patch.object(
+            dashboard,
+            "_launch_dashboard_restart_helper",
+            side_effect=RuntimeError("task unavailable"),
+        ):
+            with self.assertRaises(dashboard.HTTPException) as raised:
+                await dashboard.restart_dashboard_server()
+
+        self.assertEqual(raised.exception.status_code, 503)
+        self.assertIsNone(dashboard._dashboard_shutdown_task)
+
     async def test_metadata_preview_is_cached_and_explicit_apply_sets_reviewed_identity(self) -> None:
         png = b"\x89PNG\r\n\x1a\n" + b"\0" * 8 + (320).to_bytes(4, "big") + (480).to_bytes(4, "big")
         fetched = FetchedMetadata(

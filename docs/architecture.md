@@ -29,13 +29,17 @@ scratch-runner concurrency.
 
 ## Processing stages
 
-1. **Created** (`created`): EPUB upload uploaded and project initialized.
+1. **Created** (`created`): The EPUB is uploaded and the project is initialized.
 2. **Import / extraction**: EPUB text is extracted synchronously during project creation, chapter structure is built, cover art is saved, and the immutable upload is retained as `source.epub` for an explicit future re-extraction.
+   - Non-narrative front/back matter is filtered according to the independent `skip_toc`, `skip_appendices`, `skip_front_matter`, and `skip_preface` options.
+   - When appendix skipping is enabled, canonical reference sections (Glossary, Dramatis Personae, Character Lists, Cast of Characters) are captured into `reference_material` for character analysis while being excluded from narration.
 3. **Scripting** (`scripting`): LLM Pass 1 character analysis & Pass 2 text-to-script annotation.
+   - Pass 1 uses any extracted reference materials (Glossary, Dramatis Personae) to prime the character analyzer with official names, aliases, genders, and character descriptions.
    - Dialogue attribution is model-driven and source-grounded. Unknown IDs and
      low-confidence results trigger focused retries. Pass 2 cannot invent cast
-     members; its conservative final fallback is narrator rather than a
-     gender/proximity guess.
+     members; unresolved dialogue is retained as a low-confidence review item rather than a
+     release-grade guess. Scripting completes and persists `attribution_audit.json`, but
+     generation/export remain blocked until every review item is resolved.
 4. **Bootstrapping** (`bootstrapping`): Speaking cast derived, voice design directions compiled, reference audio generated via Qwen VoiceDesign. Qwen speaker-encoder embeddings provide the primary distinctness signal; a 514-value normalized log-spectrogram summary provides a model-independent fallback diagnostic.
 5. **Voice Review** (`voice_review`): Automated pause gate for user approval. Displays voice cards, preview players, and `[Approve voices & continue]` action banner.
 6. **Generating** (`generating`): Qwen3-TTS synthesizes chapter audio line by line with dynamic contextual pauses (250ms same speaker, 380ms narrator, 400ms quote-to-action, 450ms turn change, 900ms paragraph break).
@@ -45,6 +49,21 @@ scratch-runner concurrency.
 10. **Complete** (`complete`): Audiobook creation complete and ready for download or Home Assistant playback.
 
 ## Why analysis is book-wide but audio is incremental
+
+Incremental delivery locks an ordered chapter plan before the first part is
+published. A part is reused only when its plan, script dependencies, mastering
+manifests, book metadata, file size, and SHA-256 still match. New revisions are
+published immutably under `deliveries/`; the two newest superseded revisions
+remain recoverable and the
+atomic `deliveries/index.json` points to the current revision. Script, voice,
+metadata, and reset operations mark affected parts stale instead of serving
+potentially outdated audio. One project-scoped packaging lock serializes part
+publication, full export, metadata remux, reset, and cleanup. Resetting to
+extraction or scripting moves the complete prior `deliveries/` directory into
+timestamped `delivery_history/`, preserving recovery while unlocking a new plan.
+Only the two newest timestamped delivery-history archives are retained. Delivery
+indexes carry an explicit schema version; known older schemas are migrated in
+memory and unknown future schemas fail closed.
 
 Speaker identity and characterization require book context. The pipeline therefore completes character analysis, the character registry, and scripts for all chapters as one logical phase.
 

@@ -9,7 +9,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="static/css/styles.css?v=20260812.2">
+    <link rel="stylesheet" href="static/css/styles.css?v=20260814.2">
     <script>
         if ('serviceWorker' in navigator) {
             navigator.serviceWorker.getRegistrations().then(function(registrations) {
@@ -243,6 +243,28 @@
                     </div>
                 </details>
 
+
+                <details class="schedule-section" id="deliveries-section" style="margin-top: 20px;">
+                    <summary role="button">
+                        <span><strong>Available Audiobook Parts</strong><small id="deliveries-summary">No parts published yet</small></span>
+                    </summary>
+                    <div class="schedule-body" id="deliveries-container" style="padding: 15px;">
+                        <div class="delivery-settings-dashboard" style="display: flex; gap: 15px; align-items: center; margin-bottom: 15px; padding-bottom: 15px; border-bottom: 1px solid var(--border-color);">
+                            <label style="display: flex; align-items: center; gap: 8px; font-weight: 500; cursor: pointer;">
+                                <input type="checkbox" id="dashboard-enable-incremental" style="width: 16px; height: 16px; cursor: pointer;" onchange="window.toggleIncrementalSettings(this.checked)">
+                                Enable Incremental Delivery
+                            </label>
+                            <div id="dashboard-incremental-options" style="display: none; align-items: center; gap: 10px;">
+                                <label for="dashboard-delivery-batch-size">Chapters per part:</label>
+                                <input type="number" id="dashboard-delivery-batch-size" value="5" min="1" max="20" class="input-sm" style="width: 80px;" oninput="window.checkIncrementalSettings()">
+                            </div>
+                            <button class="btn btn-primary btn-sm" id="dashboard-save-delivery" style="display: none;" onclick="window.saveIncrementalSettings()">Save Settings</button>
+                        </div>
+                        <div id="deliveries-list" style="display: flex; flex-direction: column; gap: 10px;">
+                            <!-- Deliveries will be injected here -->
+                        </div>
+                    </div>
+                </details>
                 <details class="schedule-section" id="schedule-section">
                     <summary role="button">
                         <span><strong>Automatic working hours</strong><small id="schedule-summary">Scheduling is off</small></span>
@@ -270,6 +292,7 @@
                     </summary>
                     <div class="schedule-body operations-body">
                         <div class="operations-actions">
+                            <button class="btn btn-danger btn-sm" id="btn-restart-dashboard">Restart dashboard</button>
                             <button class="btn btn-ghost btn-sm" id="btn-refresh-operations">Refresh</button>
                             <button class="btn btn-ghost btn-sm" id="btn-download-support" aria-describedby="support-bundle-help">Download support bundle</button>
                         </div>
@@ -322,12 +345,16 @@
                     <select id="script-chapter-select" class="select">
                         <option value="">Select Chapter</option>
                     </select>
+                    <button id="btn-regenerate-chapter" class="btn btn-sm btn-secondary" title="Delete current chapter script and force LLM regeneration">
+                        <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: text-bottom; margin-right: 4px;"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.92-10.26l5.57 5.57"/></svg>Regenerate
+                    </button>
                     <label class="visually-hidden" for="script-search">Search script</label>
                     <input type="search" id="script-search" class="input-sm" placeholder="Search text or line ID">
                     <label class="visually-hidden" for="script-speaker-filter">Filter script by speaker</label>
                     <select id="script-speaker-filter" class="input-sm select"><option value="all">All speakers</option></select>
                     <label class="script-filter-toggle"><input type="checkbox" id="script-dialogue-only"> Dialogue only</label>
                     <label class="script-filter-toggle" title="Audit narrator-attributed lines that contain quoted speech; some may be intentional tight narration groups"><input type="checkbox" id="script-quoted-narrator"> Quoted narrator lines</label>
+                    <label class="script-filter-toggle" title="Show only lines with confidence below 55%"><input type="checkbox" id="script-low-confidence"> Low confidence</label>
                     <span class="script-result-count" id="script-result-count"></span>
                     <div class="script-legend" id="script-legend"></div>
                 </div>
@@ -403,6 +430,16 @@
                         <span class="file-size" id="upload-file-size"></span>
                     </div>
                     <button class="btn btn-ghost" id="upload-remove" aria-label="Remove selected EPUB">✕</button>
+                </div>
+                <div class="delivery-settings-upload" style="margin-top: 16px; display: grid; gap: 10px;">
+                    <label style="display: flex; align-items: center; gap: 8px;">
+                        <input type="checkbox" id="upload-enable-incremental">
+                        Publish downloadable parts while the audiobook is generated
+                    </label>
+                    <label id="upload-incremental-options" style="display: none; align-items: center; gap: 8px;">
+                        Chapters per part
+                        <input class="input-sm" type="number" id="upload-delivery-batch-size" value="5" min="1" max="20" style="width: 80px;">
+                    </label>
                 </div>
                 <div class="upload-progress hidden" id="upload-progress">
                     <div class="progress-bar">
@@ -481,9 +518,9 @@
     <div class="toast-container" id="toast-container" role="status" aria-live="polite"></div>
 
     <!-- Scripts -->
-    <script src="static/js/app.js?v=20260812.2"></script>
-    <script src="static/js/pipeline.js?v=20260812.2"></script>
-    <script src="static/js/script-viewer.js?v=20260812.2"></script>
-    <script src="static/js/log-console.js?v=20260812.2"></script>
+    <script src="static/js/app.js?v=20260814.2"></script>
+    <script src="static/js/pipeline.js?v=20260814.2"></script>
+    <script src="static/js/script-viewer.js?v=20260814.2"></script>
+    <script src="static/js/log-console.js?v=20260814.2"></script>
 </body>
 </html>

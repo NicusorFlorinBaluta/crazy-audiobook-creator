@@ -66,6 +66,9 @@ if ($listener) {
         )
     }
 
+}
+
+if ($listener) {
     $deadline = (Get-Date).AddSeconds($ShutdownTimeoutSeconds)
     do {
         Start-Sleep -Milliseconds 500
@@ -78,6 +81,22 @@ if ($listener) {
     if ($listener) {
         throw "Dashboard did not release port 8000 within the shutdown timeout."
     }
+}
+
+# The API port can close just before Task Scheduler marks the launcher action
+# complete. With MultipleInstances=IgnoreNew, starting during that short window
+# reports success but silently drops the replacement instance.
+$taskDeadline = (Get-Date).AddSeconds($ShutdownTimeoutSeconds)
+do {
+    $scheduledTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+    if ($scheduledTask.State -ne "Running") {
+        break
+    }
+    Start-Sleep -Milliseconds 500
+} while ((Get-Date) -lt $taskDeadline)
+
+if ($scheduledTask.State -eq "Running") {
+    throw "Scheduled task '$TaskName' did not stop within the shutdown timeout."
 }
 
 schtasks.exe /Run /TN $TaskName | Out-Host

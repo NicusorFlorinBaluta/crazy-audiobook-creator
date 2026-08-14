@@ -50,6 +50,14 @@ confirmed, the new run is refused instead of running concurrently.
 exit, and unloads app-managed Ollama and Voice models. The Electron wrapper
 calls it before terminating the dashboard process.
 
+`POST /api/system/restart` launches the fixed project restart helper, then
+performs the same controlled cleanup and exits the API process. On Windows the
+independent `Crazy Audiobook Dashboard Restart` scheduled task (installed with
+the dashboard task) owns the handoff, so it survives termination of the old
+dashboard process. It does not execute caller-supplied commands. The Runtime &
+storage panel exposes this operation with confirmation and reconnects the Home
+Assistant view after the new process becomes ready.
+
 #### Reset to Stage (`POST /api/projects/{project_id}/reset`)
 Accepts `{"stage": "<stage_name>"}` where `<stage_name>` is one of 8 supported stages:
 - **`extracting`**: Rebuilds `book.json` from the preserved project `source.epub`, then clears downstream scripts, cast, segments, and masters. Legacy projects without a preserved source return `409` without deleting `book.json`.

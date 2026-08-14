@@ -39,7 +39,20 @@ The application fingerprints the configured model and prompt. Changing them caus
 
 ### `extraction`
 
-Controls front-matter/TOC/appendix filtering and chapter detection. `min_chapter_words` and `max_chapter_words` influence extracted chapter structure, not the later source-preserving script fragments.
+Controls front-matter/TOC/appendix filtering, reference material ingestion, and chapter detection:
+
+| Key | Meaning |
+|---|---|
+| `skip_toc` | Filter out Table of Contents documents and sections |
+| `skip_appendices` | Filter appendices/back matter and capture recognized character references as supplemental analysis input |
+| `skip_front_matter` | Filter out copyright, dedications, and title pages |
+| `skip_preface` | When `true` (default), filters out out-of-universe prefaces, forewords, author's notes, and afterwords from narration |
+| `min_chapter_words` | Minimum word count for a standalone chapter (shorter fragments merge into adjacent chapters) |
+| `max_chapter_words` | Target maximum chapter length before safe subdivision |
+| `chapter_detection` | Boundary detection strategy (`auto`, `heading`, `pattern`, `none`) |
+
+**Reference Material (Glossary & Dramatis Personae)**:
+When `skip_appendices` is enabled, sections titled *Glossary*, *Dramatis Personae*, *Character List*, or *Cast of Characters* are extracted into `ExtractedBook.reference_material`. They are excluded from narration and supplied as bounded, supplemental input to the Stage ② Character Analyzer; direct narrative evidence takes precedence if they conflict.
 
 ### `script`
 
@@ -52,6 +65,16 @@ Controls front-matter/TOC/appendix filtering and chapter detection. `min_chapter
 
 `chunk_overlap_words` is retained for configuration compatibility but current source-fragment batching is non-overlapping by design.
 Grouping merges only adjacent fragments with the same speaker, voice, and FX. It never crosses a blank paragraph and preserves all source fragment IDs and the exact combined source span.
+
+### Incremental delivery
+
+Incremental delivery is project state, configured from project creation or the
+dashboard. `enabled` turns part publication on and `batch_size` accepts 1–20
+chapters. Manual chapter selection and incremental delivery are mutually
+exclusive because published boundaries must represent the full ordered book.
+After the first publication, the enabled state and batch size are locked until
+delivery artifacts are reset. A graceful pause request is honored only between
+parts. Stale or hash-invalid parts are never offered as downloads.
 
 ### `dashboard`
 
@@ -230,7 +253,10 @@ The Brain’s `voice_server.api_token` and Voice’s `server.api_token` must mat
 
 ### `storage`
 
-Controls workspace and voice-library roots plus retention preferences. Automatic size enforcement is not currently implemented; monitor `workspace`, model caches, and partial exports on long books.
+Controls workspace and voice-library roots. Incremental delivery automatically
+retains the current part plus its two newest superseded revisions, and keeps the
+two newest timestamped `delivery_history/` archives. Other workspace and model
+cache size limits are not automatically enforced, so monitor them on long books.
 
 ## Secrets
 

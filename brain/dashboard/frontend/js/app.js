@@ -36,6 +36,9 @@ const els = {
     modalCancel: document.getElementById('modal-cancel'),
     uploadZone: document.getElementById('upload-zone'),
     epubInput: document.getElementById('epub-file-input'),
+    uploadEnableIncremental: document.getElementById('upload-enable-incremental'),
+    uploadIncrementalOptions: document.getElementById('upload-incremental-options'),
+    uploadDeliveryBatchSize: document.getElementById('upload-delivery-batch-size'),
     uploadInfo: document.getElementById('upload-info'),
     uploadFileName: document.getElementById('upload-file-name'),
     uploadFileSize: document.getElementById('upload-file-size'),
@@ -223,6 +226,13 @@ function setupEventListeners() {
     els.uploadZone.addEventListener('dragleave', handleDragLeave);
     els.uploadZone.addEventListener('drop', handleDrop);
     els.epubInput.addEventListener('change', handleFileSelect);
+    els.uploadEnableIncremental?.addEventListener('change', event => {
+        if (els.uploadIncrementalOptions) {
+            els.uploadIncrementalOptions.style.display = event.target.checked
+                ? 'flex'
+                : 'none';
+        }
+    });
     els.uploadRemove.addEventListener('click', clearUpload);
     els.btnUpload.addEventListener('click', handleUploadSubmit);
 
@@ -345,6 +355,7 @@ function setupEventListeners() {
         if (event.target.open) loadOperations();
     });
     document.getElementById('btn-refresh-operations')?.addEventListener('click', loadOperations);
+    document.getElementById('btn-restart-dashboard')?.addEventListener('click', restartDashboard);
     document.getElementById('btn-download-support')?.addEventListener('click', () => {
         if (state.currentProjectId) {
             startServerDownload(
@@ -511,6 +522,7 @@ async function fetchProjectDetails(projectId, isPoll = false) {
             );
         }
         renderProjectDetails(data);
+        fetchAndRenderDeliveries(projectId);
 
         const scheduleEditor = document.getElementById('schedule-section');
         if (
@@ -659,7 +671,26 @@ async function handleUploadSubmit() {
         }
         
         const data = await response.json();
-        showToast('Project created successfully', 'success');
+        const deliveryResponse = await fetch(
+            `api/projects/${encodeURIComponent(data.project_id)}/delivery-settings`,
+            {
+                method: 'PATCH',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    enabled: Boolean(els.uploadEnableIncremental?.checked),
+                    batch_size: Math.max(1, Math.min(20, Number(els.uploadDeliveryBatchSize?.value) || 5))
+                })
+            }
+        );
+        const deliveryData = await deliveryResponse.json().catch(() => ({}));
+        if (!deliveryResponse.ok) {
+            showToast(
+                `Project created, but delivery settings were not saved: ${deliveryData.detail || 'unknown error'}`,
+                'warning'
+            );
+        } else {
+            showToast('Project created successfully', 'success');
+        }
         closeUploadModal();
         await showDetailView(data.project_id);
         
@@ -1191,7 +1222,7 @@ function renderChapterList(project) {
             statusBackground = 'rgba(59, 130, 246, 0.2)';
             statusColor = '#60a5fa';
             if (totalLines > 0 && generatedLines >= totalLines) percent = 99;
-        } else if (stage.includes('script') && (currentScript === chapter || (!currentScript && chapter === scripted.size + 1 && chapter <= total))) {
+        } else if (stage.includes('script') && project.work_progress?.phase !== 'character_analysis' && (currentScript === chapter || (!currentScript && chapter === scripted.size + 1 && chapter <= total))) {
             statusKey = 'active';
             statusText = 'Scripting...';
             statusBackground = 'rgba(234, 179, 8, 0.2)';
@@ -1376,13 +1407,16 @@ function renderWorkStatus(project) {
     );
     const workProgress = project.work_progress || {};
     const progress = project.progress || null;
-    const selectedNames = selected.map(chapter => {
-        const title = detailMap.get(chapter)?.title || `Chapter ${chapter}`;
-        return `Chapter ${chapter} — ${title}`;
-    });
-    const batchDescription = selectedNames.length <= 3
-        ? selectedNames.join(', ')
-        : `${selectedNames.length} selected chapters`;
+    const totalBookChapters = project.total_chapters || 0;
+    const isSelectiveBatch = selected.length > 0 && selected.length < totalBookChapters;
+    let batchSummary = 'Full book';
+    if (isSelectiveBatch) {
+        if (selected.length <= 4) {
+            batchSummary = `Chapters ${selected.join(', ')} (${selected.length} selected)`;
+        } else {
+            batchSummary = `${selected.length} selected chapters`;
+        }
+    }
 
     let completedUnits = 0;
     for (const chapter of selectedSet) {
@@ -1427,17 +1461,31 @@ function renderWorkStatus(project) {
                 100 * (project.scripted_chapters || []).length
                 / Math.max(project.total_chapters || 0, 1)
             );
-        overallLabel = 'Scripting stage';
+        overallLabel = workProgress.phase === 'character_analysis'
+            ? 'Character Analysis'
+            : 'Scripting stage';
         chapterMetric = workProgress.position || '—';
-        chapterLabel = workProgress.phase === 'character_analysis'
-            ? 'Analysis unit'
-            : 'Book chapter';
-        lineMetric = workProgress.tokens ? `${workProgress.tokens}` : '—';
-        lineLabel = workProgress.tokens ? 'Current response tokens' : 'LLM response';
-        activity = workProgress.current || (
-            chapterTitle ? `Scripting — ${chapterTitle}` : 'Analyzing and scripting the full book'
+        chapterLabel = workProgress.chapterLabel || (
+            workProgress.phase === 'character_analysis' ? 'Book chapter' : 'Book chapter'
         );
-        description = `${workProgress.detail || `${(project.scripted_chapters || []).length} of ${project.total_chapters || 0} chapters scripted.`} Audio generation is queued for: ${batchDescription}.`;
+        lineMetric = workProgress.tokens ? `${workProgress.tokens}` : (workProgress.chunkPosition || '—');
+        lineLabel = workProgress.tokens ? 'Tokens streaming' : (workProgress.phase === 'character_analysis' ? 'Analysis chunk' : 'LLM response');
+
+        if (workProgress.phase === 'character_analysis') {
+            activity = workProgress.current || 'Character Analysis · Extracting Cast';
+            description = workProgress.detail || 'Extracting character profiles, genders, and aliases across the full book.';
+            if (isSelectiveBatch) {
+                description += ` · Selected for audio: ${batchSummary}`;
+            }
+        } else {
+            activity = workProgress.current || (
+                chapterTitle ? `Scripting — ${chapterTitle}` : 'Annotating scripts for the full book'
+            );
+            description = workProgress.detail || `${(project.scripted_chapters || []).length} of ${project.total_chapters || 0} chapters scripted.`;
+            if (isSelectiveBatch) {
+                description += ` · Selected for audio: ${batchSummary}`;
+            }
+        }
     } else if (stage === 'voice_review') {
         overall = 100;
         overallLabel = 'Voice preparation';
@@ -1507,9 +1555,11 @@ function renderWorkStatus(project) {
                 ? `${Math.ceil(etaSeconds / 60)} min`
                 : `${Math.ceil(etaSeconds)} sec`)
         : '—';
-    const updatedAt = progress?.updated_at || project.last_activity_at || project.updated_at;
+    const updatedAt = progress?.updated_at || (project.running ? (project.last_run_started_at || new Date().toISOString()) : (project.last_activity_at || project.updated_at));
     let freshness = 'No activity recorded yet.';
-    if (updatedAt) {
+    if (project.running) {
+        freshness = 'Active · Running live';
+    } else if (updatedAt) {
         const ageSeconds = Math.max(0, Math.round((Date.now() - Date.parse(updatedAt)) / 1000));
         freshness = ageSeconds < 10
             ? 'Updated just now'
@@ -1628,7 +1678,7 @@ function renderChapterGridLegacy(project) {
             statusText = `🟢 Scripted (${totalLines}l)`;
             statusBg = 'rgba(132, 204, 22, 0.15)';
             statusColor = '#a3e635';
-        } else if (isScriptingStage && (currentScript === i || (!currentScript && i === (scripted.size + 1)))) {
+        } else if (isScriptingStage && project.work_progress?.phase !== 'character_analysis' && (currentScript === i || (!currentScript && i === (scripted.size + 1)))) {
             statusText = '🟡 Scripting...';
             statusBg = 'rgba(234, 179, 8, 0.15)';
             statusColor = '#facc15';
@@ -1697,6 +1747,8 @@ function deriveWorkProgress(lines, totalChapters) {
         current: null,
         detail: null,
         position: null,
+        chapterLabel: null,
+        chunkPosition: null,
         tokens: null,
         chapterIndex: null,
         chapterTotal: null,
@@ -1704,29 +1756,44 @@ function deriveWorkProgress(lines, totalChapters) {
     };
 
     for (const line of lines) {
-        let match = line.match(/Analyzing unit\s+(\d+)\/(\d+):\s*(.+?)(?:\.\.\.)?$/i);
-        if (match) {
-            const current = Number(match[1]);
-            const total = Number(match[2]);
+        let unitMatch = line.match(/Analyzing unit\s+(\d+)\/(\d+)(?::\s*chapter\s+(\d+)\s+part\s+(\d+)\s+['"](.+?)['"])?/i);
+        if (unitMatch) {
+            const currentUnit = Number(unitMatch[1]);
+            const totalUnits = Number(unitMatch[2]);
+            const chapterNum = unitMatch[3] ? Number(unitMatch[3]) : null;
+            const partNum = unitMatch[4] ? Number(unitMatch[4]) : null;
+            const chTitle = unitMatch[5] || '';
+
             progress.phase = 'character_analysis';
-            progress.stagePercent = Math.round(20 * current / Math.max(total, 1));
-            progress.current = `Character analysis — unit ${current} of ${total}`;
-            progress.detail = match[3].replace(/\.\.\.$/, '');
-            progress.position = `${current} / ${total}`;
+            progress.stagePercent = Math.round(20 * currentUnit / Math.max(totalUnits, 1));
+
+            if (chapterNum && chTitle) {
+                progress.current = `Character Analysis · ${chTitle} (Ch ${chapterNum} of ${totalChapters || '?'})`;
+                progress.detail = `Scanning chapter text (part ${partNum}) to extract cast profiles, genders, and aliases.`;
+                progress.position = `${chapterNum} / ${totalChapters || '?'}`;
+                progress.chapterLabel = 'Book chapter';
+            } else {
+                progress.current = `Character Analysis · Chunk ${currentUnit} of ${totalUnits}`;
+                progress.detail = `Scanning book text across chapters to extract character cast and aliases.`;
+                progress.position = `${currentUnit} / ${totalUnits}`;
+                progress.chapterLabel = 'Analysis chunk';
+            }
+            progress.chunkPosition = `${currentUnit} / ${totalUnits}`;
             progress.tokens = null;
             continue;
         }
 
-        match = line.match(/\[ScriptGenerator\].*Chapter\s+(\d+)\/(\d+):\s*['"](.+?)['"]/i);
+        let match = line.match(/\[ScriptGenerator\].*Chapter\s+(\d+)\/(\d+):\s*['"](.+?)['"]/i);
         if (match) {
             const current = Number(match[1]);
             const total = Number(match[2]) || totalChapters;
             const title = match[3];
             progress.phase = 'chapter_scripting';
             progress.stagePercent = 20 + Math.round(80 * (current - 1) / Math.max(total, 1));
-            progress.current = `Scripting — chapter ${current} of ${total}: ${title}`;
-            progress.detail = `Generating the production script for ${title}.`;
+            progress.current = `Scripting · Chapter ${current} of ${total}: ${title}`;
+            progress.detail = `Annotating dialogue, speaker attribution, and scene directions for ${title}.`;
             progress.position = `${current} / ${total}`;
+            progress.chapterLabel = 'Scripting chapter';
             progress.tokens = null;
             progress.chapterIndex = current;
             progress.chapterTotal = total;
@@ -1743,7 +1810,7 @@ function deriveWorkProgress(lines, totalChapters) {
                     (progress.chapterIndex - 1) + ((chunk - 1) / Math.max(chunks, 1))
                 ) / Math.max(progress.chapterTotal, 1)
             );
-            progress.detail = `Processing fragment chunk ${chunk} of ${chunks} for ${progress.chapterTitle}.`;
+            progress.detail = `Annotating dialogue batch ${chunk} of ${chunks} for ${progress.chapterTitle || 'current chapter'}.`;
             progress.tokens = null;
             continue;
         }
@@ -1754,9 +1821,10 @@ function deriveWorkProgress(lines, totalChapters) {
             const total = Number(match[2]) || totalChapters;
             progress.phase = 'chapter_scripting';
             progress.stagePercent = 20 + Math.round(80 * current / Math.max(total, 1));
-            progress.current = `Scripting — chapter ${current} of ${total} complete`;
+            progress.current = `Scripting · Chapter ${current} of ${total} complete`;
             progress.detail = `${current} of ${total} chapter scripts complete.`;
             progress.position = `${current} / ${total}`;
+            progress.chapterLabel = 'Scripting chapter';
             progress.tokens = null;
             continue;
         }
@@ -1980,6 +2048,41 @@ async function runPreviewedCleanup(confirmationToken) {
     }
 }
 
+async function restartDashboard() {
+    const button = document.getElementById('btn-restart-dashboard');
+    if (!confirm('Restart the audiobook dashboard now? Active work will stop at the safest available point and can be resumed afterward.')) return;
+    button.disabled = true;
+    button.textContent = 'Restarting…';
+    try {
+        const response = await fetch('api/system/restart', {method: 'POST'});
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.detail || 'Dashboard restart could not be started');
+        showToast('Dashboard restart started. This page will reconnect automatically.', 'info');
+
+        let observedOffline = false;
+        const deadline = Date.now() + 120000;
+        while (Date.now() < deadline) {
+            await new Promise(resolve => setTimeout(resolve, 1500));
+            try {
+                const health = await fetch(`api/system/preflight?restart_probe=${Date.now()}`, {
+                    cache: 'no-store'
+                });
+                if (observedOffline && health.ok) {
+                    window.location.reload();
+                    return;
+                }
+            } catch (_) {
+                observedOffline = true;
+            }
+        }
+        throw new Error('Restart was requested, but the dashboard did not reconnect within two minutes');
+    } catch (error) {
+        showToast(error.message, 'error');
+        button.disabled = false;
+        button.textContent = 'Restart dashboard';
+    }
+}
+
 // ============================================================================
 // Utilities
 // ============================================================================
@@ -2120,3 +2223,172 @@ async function checkVoiceServerStatus() {
         els.voiceStatusText.textContent = 'Voice Server: Unavailable';
     }
 }
+
+
+
+let currentDeliverySettings = { enabled: false, batch_size: 5 };
+
+async function fetchAndRenderDeliveries(projectId) {
+
+    try {
+        const response = await fetch(`api/projects/${encodeURIComponent(projectId)}/deliveries`);
+        if (!response.ok) throw new Error('Could not load audiobook parts');
+        const data = await response.json();
+        if (state.currentProjectId !== projectId) return;
+
+        const summary = document.getElementById('deliveries-summary');
+        const list = document.getElementById('deliveries-list');
+        list.innerHTML = '';
+
+        // Update dashboard settings UI
+        currentDeliverySettings = data.settings || {};
+        const incToggle = document.getElementById('dashboard-enable-incremental');
+        const batchInput = document.getElementById('dashboard-delivery-batch-size');
+        const opts = document.getElementById('dashboard-incremental-options');
+        const saveBtn = document.getElementById('dashboard-save-delivery');
+        const settingsLocked = Boolean(state.currentProject?.running) ||
+            Boolean(data.deliveries?.length);
+        incToggle.disabled = settingsLocked;
+        batchInput.disabled = settingsLocked;
+        incToggle.title = settingsLocked
+            ? 'Stop the pipeline and reset published parts before changing delivery boundaries'
+            : '';
+
+        // Only update UI elements if the user hasn't made unsaved changes
+        if (saveBtn.style.display === 'none' || !saveBtn.style.display) {
+            incToggle.checked = currentDeliverySettings.enabled || false;
+            batchInput.value = currentDeliverySettings.batch_size || 5;
+
+            if (incToggle.checked) {
+                opts.style.display = 'flex';
+            } else {
+                opts.style.display = 'none';
+            }
+        }
+
+        if (data.active_delivery_id) {
+            const active = document.createElement('div');
+            active.className = 'delivery-active';
+            active.textContent = `Preparing ${data.active_delivery_id} (chapters ${(data.active_delivery_chapters || []).join(', ')})`;
+            list.appendChild(active);
+            if (!data.pause_after_delivery_requested) {
+                const pauseButton = document.createElement('button');
+                pauseButton.className = 'btn btn-secondary btn-sm';
+                pauseButton.textContent = 'Pause after this part';
+                pauseButton.addEventListener('click', async () => {
+                    try {
+                        const pauseResponse = await fetch(
+                            `api/projects/${encodeURIComponent(projectId)}/pause-after-delivery`,
+                            {method: 'POST'}
+                        );
+                        const pauseData = await pauseResponse.json().catch(() => ({}));
+                        if (!pauseResponse.ok) throw new Error(pauseData.detail || 'Pause request failed');
+                        await fetchAndRenderDeliveries(projectId);
+                    } catch (error) {
+                        showToast(error.message, 'error');
+                    }
+                });
+                active.appendChild(pauseButton);
+            } else {
+                active.append(' — pause queued');
+            }
+        }
+
+        if (!data.deliveries || data.deliveries.length === 0) {
+            summary.textContent = 'No parts published yet';
+            if (!data.active_delivery_id) {
+                list.innerHTML = '<div style="color: var(--text-secondary);">No parts published yet. If incremental delivery is enabled, parts will appear here as they complete.</div>';
+            }
+            return;
+        }
+
+        summary.textContent = `${data.published_count} parts available`;
+
+
+        data.deliveries.forEach((d, index) => {
+            const row = document.createElement('div');
+            row.style.display = 'flex';
+            row.style.justifyContent = 'space-between';
+            row.style.alignItems = 'center';
+            row.style.padding = '10px';
+            row.style.background = 'var(--bg-surface-secondary)';
+            row.style.borderRadius = 'var(--radius-sm)';
+
+            const info = document.createElement('div');
+            const statusLabel = d.status === 'stale' ? ' — needs republishing' : '';
+            info.innerHTML = `<strong>Part ${d.ordinal || index + 1}</strong> <span style="color: var(--text-secondary); font-size: 0.9em; margin-left: 10px;">(Chapters ${d.chapter_numbers.join(', ')})${statusLabel}</span>`;
+
+            const actions = document.createElement('div');
+            const downloadBtn = document.createElement('a');
+            downloadBtn.href = `api/projects/${encodeURIComponent(projectId)}/deliveries/${encodeURIComponent(d.delivery_id)}/download`;
+            downloadBtn.className = 'btn btn-primary btn-sm';
+            downloadBtn.dataset.serverDownload = '';
+            downloadBtn.textContent = '⬇ Download';
+
+            if (d.status === 'published') {
+                actions.appendChild(downloadBtn);
+            }
+            row.appendChild(info);
+            row.appendChild(actions);
+            list.appendChild(row);
+        });
+
+    } catch (e) {
+        console.error("Failed to fetch deliveries", e);
+        showToast(e.message, 'error');
+    }
+}
+
+window.toggleIncrementalSettings = function(checked) {
+    const opts = document.getElementById('dashboard-incremental-options');
+    if (checked) {
+        opts.style.display = 'flex';
+    } else {
+        opts.style.display = 'none';
+    }
+    window.checkIncrementalSettings();
+};
+
+window.checkIncrementalSettings = function() {
+    const incToggle = document.getElementById('dashboard-enable-incremental');
+    const batchInput = document.getElementById('dashboard-delivery-batch-size');
+    const saveBtn = document.getElementById('dashboard-save-delivery');
+
+    const changed = (incToggle.checked !== (currentDeliverySettings.enabled || false)) ||
+                   (parseInt(batchInput.value, 10) !== (currentDeliverySettings.batch_size || 5));
+
+    if (changed) {
+        saveBtn.style.display = 'inline-block';
+    } else {
+        saveBtn.style.display = 'none';
+    }
+};
+
+window.saveIncrementalSettings = async function() {
+    const incToggle = document.getElementById('dashboard-enable-incremental');
+    const batchInput = document.getElementById('dashboard-delivery-batch-size');
+    const saveBtn = document.getElementById('dashboard-save-delivery');
+
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Saving...';
+    try {
+        const projectId = state.currentProjectId;
+        const response = await fetch(`api/projects/${encodeURIComponent(projectId)}/delivery-settings`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                enabled: incToggle.checked,
+                batch_size: parseInt(batchInput.value, 10)
+            })
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.detail || 'Could not save delivery settings');
+        if (state.currentProjectId !== projectId) return;
+        currentDeliverySettings = { enabled: incToggle.checked, batch_size: parseInt(batchInput.value, 10) };
+        saveBtn.style.display = 'none';
+    } catch (e) {
+        showToast(e.message, 'error');
+    }
+    saveBtn.disabled = false;
+    saveBtn.textContent = 'Save Settings';
+};

@@ -49,6 +49,7 @@ from pydantic import BaseModel, Field
 
 os.environ.setdefault("ROCM_SDK_TARGET_FAMILY", "custom")
 
+from brain.orchestrator.delivery_manager import DeliveryError, DeliveryManager
 from brain.orchestrator.pipeline import Pipeline
 from brain.dashboard.api.security import (
     configured_dashboard_token,
@@ -77,7 +78,7 @@ from voice.tts_server.voice_library import VoiceLibraryManager
 
 logger = logging.getLogger(__name__)
 
-FRONTEND_BUILD = "2026.08.12.2"
+FRONTEND_BUILD = "2026.08.14.1"
 
 
 class AsyncioConnectionResetFilter(logging.Filter):
@@ -177,8 +178,36 @@ async def _shutdown_dashboard_process(delay_seconds: float = 0.35) -> None:
         os._exit(0)
 
 
+def _launch_dashboard_restart_helper() -> str:
+    """Trigger the independently registered, fixed-command restart task."""
+    if os.name != "nt":
+        raise RuntimeError("Dashboard self-restart is currently supported on Windows only")
+    task_name = "Crazy Audiobook Dashboard Restart"
+    result = subprocess.run(
+        ["schtasks.exe", "/Run", "/TN", task_name],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise RuntimeError(
+            f"Registered restart task is unavailable: {detail or result.returncode}"
+        )
+    return task_name
+
+
 class ChapterSelectionRequest(BaseModel):
     chapters: list[int] | None = None
+
+class ScriptLineUpdate(BaseModel):
+    speaker: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
+    )
+
 
 
 class VoiceAssignmentRequest(BaseModel):
@@ -227,6 +256,18 @@ def _require_job(project_id: str) -> dict[str, Any]:
         return job_queue.get_job(project_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Project not found") from exc
+
+
+def _require_project_stopped(project_id: str) -> dict[str, Any]:
+    """Reject mutations that could race a live pipeline worker."""
+    state = _require_job(project_id)
+    task = running_tasks.get(project_id)
+    if bool(state.get("running")) or (task is not None and not task.done()):
+        raise HTTPException(
+            status_code=409,
+            detail="Stop the pipeline before changing this project",
+        )
+    return state
 
 
 def _validation_reset_targets(state) -> list[int]:
@@ -688,6 +729,10 @@ def _mark_voice_chapters_stale(
     state = job_queue.get_job(project_id)
     affected = set(affected_chapters)
     pending = set(state.get("voice_revision_pending_chapters", [])) | affected
+    DeliveryManager(_project_dir(project_id)).mark_stale_for_chapters(
+        affected,
+        "Voice assignment changed",
+    )
     job_queue.update_job(
         project_id,
         {
@@ -1290,6 +1335,19 @@ async def start_pipeline(project_id: str):
         )
 
     current = job_queue.get_job(project_id)
+    incremental_settings = current.get("incremental_delivery") or {}
+    if (
+        isinstance(incremental_settings, dict)
+        and incremental_settings.get("enabled")
+        and current.get("generation_chapter_selection") is not None
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Incremental delivery requires the complete ordered chapter set; "
+                "clear the manual chapter selection first"
+            ),
+        )
     if (
         current.get("voice_review_policy", "grandfathered")
         == "required_once"
@@ -1446,9 +1504,16 @@ async def reset_pipeline_stage(project_id: str, request: Request):
             detail=f"Stage '{stage_value}' is not supported for reset",
         )
         
+    packaging_guard = None
     try:
         project_dir = _project_dir(project_id)
         workspace_dir = _workspace_project_dir(project_id)
+        packaging_guard = DeliveryManager(project_dir).packaging_lock(wait=False)
+        try:
+            packaging_guard.__enter__()
+        except DeliveryError as exc:
+            packaging_guard = None
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         
         import shutil
         
@@ -1461,6 +1526,12 @@ async def reset_pipeline_stage(project_id: str, request: Request):
             "reset_target_stage": stage.value,
         }
         
+        def _safe_unlink(p: Path) -> None:
+            try:
+                p.unlink(missing_ok=True)
+            except OSError as e:
+                raise RuntimeError(f"Could not remove {p} during reset: {e}") from e
+
         if stage == PipelineStage.EXTRACTING:
             try:
                 await asyncio.to_thread(pipeline.reextract_project, project_id)
@@ -1477,11 +1548,11 @@ async def reset_pipeline_stage(project_id: str, request: Request):
                 "mastered_chapters": [],
                 "force_character_analysis": True,
             })
-            for p in [project_dir / "characters.json", project_dir / "voice_cast.json"]:
-                p.unlink(missing_ok=True)
+            for p in [project_dir / "characters.json", project_dir / "characters.checkpoint.json", project_dir / "characters.meta.json", project_dir / "voice_cast.json", project_dir / ".fingerprints.json", project_dir / "book_script.json"]:
+                _safe_unlink(p)
             for d in [project_dir / "script", project_dir / "segments", project_dir / "mastered", workspace_dir / "segments", workspace_dir / "mastered"]:
                 if d.exists() and d.is_dir():
-                    shutil.rmtree(d, ignore_errors=True)
+                    shutil.rmtree(d)
                     
         elif stage == PipelineStage.SCRIPTING:
             update.update({
@@ -1495,11 +1566,11 @@ async def reset_pipeline_stage(project_id: str, request: Request):
                 "mastered_chapters": [],
                 "force_character_analysis": True,
             })
-            for p in [project_dir / "characters.json", project_dir / "voice_cast.json"]:
-                p.unlink(missing_ok=True)
+            for p in [project_dir / "characters.json", project_dir / "characters.checkpoint.json", project_dir / "characters.meta.json", project_dir / "voice_cast.json", project_dir / ".fingerprints.json", project_dir / "book_script.json"]:
+                _safe_unlink(p)
             for d in [project_dir / "script", project_dir / "segments", project_dir / "mastered", workspace_dir / "segments", workspace_dir / "mastered"]:
                 if d.exists() and d.is_dir():
-                    shutil.rmtree(d, ignore_errors=True)
+                    shutil.rmtree(d)
                     
         elif stage == PipelineStage.BOOTSTRAPPING:
             update.update({
@@ -1512,10 +1583,10 @@ async def reset_pipeline_stage(project_id: str, request: Request):
                 "mastered_chapters": [],
                 "force_voice_regeneration": True,
             })
-            (project_dir / "voice_cast.json").unlink(missing_ok=True)
+            _safe_unlink(project_dir / "voice_cast.json")
             for d in [project_dir / "segments", project_dir / "mastered", workspace_dir / "segments", workspace_dir / "mastered"]:
                 if d.exists() and d.is_dir():
-                    shutil.rmtree(d, ignore_errors=True)
+                    shutil.rmtree(d)
                     
         elif stage == PipelineStage.VOICE_REVIEW:
             update.update({
@@ -1531,7 +1602,7 @@ async def reset_pipeline_stage(project_id: str, request: Request):
             })
             for d in [project_dir / "segments", project_dir / "mastered", workspace_dir / "segments", workspace_dir / "mastered"]:
                 if d.exists() and d.is_dir():
-                    shutil.rmtree(d, ignore_errors=True)
+                    shutil.rmtree(d)
                     
         elif stage == PipelineStage.GENERATING:
             update.update({
@@ -1540,7 +1611,7 @@ async def reset_pipeline_stage(project_id: str, request: Request):
             })
             for d in [project_dir / "segments", project_dir / "mastered", workspace_dir / "segments", workspace_dir / "mastered"]:
                 if d.exists() and d.is_dir():
-                    shutil.rmtree(d, ignore_errors=True)
+                    shutil.rmtree(d)
 
         elif stage == PipelineStage.VALIDATING:
             update.update({
@@ -1556,13 +1627,13 @@ async def reset_pipeline_stage(project_id: str, request: Request):
                     manifest.unlink(missing_ok=True)
             for d in [project_dir / "mastered", workspace_dir / "mastered"]:
                 if d.exists() and d.is_dir():
-                    shutil.rmtree(d, ignore_errors=True)
+                    shutil.rmtree(d)
                     
         elif stage == PipelineStage.MASTERING:
             update.update({"mastered_chapters": []})
             for d in [project_dir / "mastered", workspace_dir / "mastered"]:
                 if d.exists() and d.is_dir():
-                    shutil.rmtree(d, ignore_errors=True)
+                    shutil.rmtree(d)
             (project_dir / f"{project_id}.m4b").unlink(missing_ok=True)
             (workspace_dir / "output" / f"{project_id}.m4b").unlink(missing_ok=True)
 
@@ -1570,16 +1641,65 @@ async def reset_pipeline_stage(project_id: str, request: Request):
             (project_dir / f"{project_id}.m4b").unlink(missing_ok=True)
             (workspace_dir / "output" / f"{project_id}.m4b").unlink(missing_ok=True)
 
+        if stage in {PipelineStage.EXTRACTING, PipelineStage.SCRIPTING}:
+            deliveries_dir = project_dir / "deliveries"
+            if deliveries_dir.is_dir():
+                history_root = project_dir / "delivery_history"
+                history_root.mkdir(parents=True, exist_ok=True)
+                archive = history_root / datetime.now(timezone.utc).strftime(
+                    "%Y%m%dT%H%M%S%fZ"
+                )
+                os.replace(deliveries_dir, archive)
+                DeliveryManager(project_dir).prune_delivery_history(retain=2)
+            update.update(
+                {
+                    "published_delivery_count": 0,
+                    "latest_published_delivery_id": None,
+                    "active_delivery_id": None,
+                    "active_delivery_chapters": [],
+                }
+            )
+        elif stage != PipelineStage.EXPORTING:
+            DeliveryManager(project_dir).mark_all_stale(
+                f"Pipeline reset to {stage.value}"
+            )
+        if stage != PipelineStage.EXPORTING:
+            update["export_stale"] = True
         job_queue.update_job(project_id, update)
+        packaging_guard.__exit__(None, None, None)
+        packaging_guard = None
         return {"status": "success", "project_id": project_id, "stage": stage.value}
     except KeyError:
         raise HTTPException(status_code=404, detail="Project not found")
+    finally:
+        if packaging_guard is not None:
+            packaging_guard.__exit__(None, None, None)
 
 
 @app.get("/api/projects/{project_id}/download")
-async def download_audiobook(project_id: str):
+async def download_audiobook(project_id: str, delivery_id: str | None = None):
     """Download the final mastered audiobook."""
     project_dir = _project_dir(project_id)
+    if delivery_id:
+        dm = DeliveryManager(project_dir)
+        try:
+            part, m4b_path = dm.resolve_published_artifact(delivery_id)
+        except DeliveryError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return FileResponse(
+            path=m4b_path,
+            filename=part.artifact,
+            media_type="audio/mp4"
+        )
+    try:
+        state = job_queue.get_job(project_id) if job_queue else {}
+    except KeyError:
+        state = {}
+    if state.get("export_stale"):
+        raise HTTPException(
+            status_code=409,
+            detail="The full audiobook is stale and must be exported again",
+        )
     workspace_dir = _workspace_project_dir(project_id)
     m4b_path = project_dir / f"{project_id}.m4b"
     if not m4b_path.exists():
@@ -1703,10 +1823,21 @@ async def get_pipeline_status(project_id: str):
         generated_chapters = set(state.get("generated_chapters", []))
         mastered_chapters = set(state.get("mastered_chapters", []))
         
-        # Dynamically infer the next active scripting chapter if existing scripts exist
+        def _has_valid_script(c_num: int) -> tuple[bool, int, str]:
+            ch_f = script_dir / f"chapter_{c_num:03d}.json"
+            if not ch_f.is_file():
+                return False, 0, ""
+            try:
+                sdata = json.loads(ch_f.read_text(encoding="utf-8"))
+                lines = sdata.get("lines", [])
+                return len(lines) > 0, len(lines), str(sdata.get("chapter_title") or "")
+            except Exception:
+                return False, 0, ""
+
+        # Dynamically infer the next active scripting chapter if existing valid scripts exist
         existing_scripted = [
             c for c in range(1, total_chapters + 1)
-            if (script_dir / f"chapter_{c:03d}.json").exists() or c in scripted_chapters
+            if _has_valid_script(c)[0] or c in scripted_chapters
         ]
         if existing_scripted:
             current_script_ch = min(max(existing_scripted) + 1, total_chapters)
@@ -1716,19 +1847,8 @@ async def get_pipeline_status(project_id: str):
         work_prog = state.get("work_progress") or {}
 
         for ch_num in range(1, total_chapters + 1):
-            ch_script_file = script_dir / f"chapter_{ch_num:03d}.json"
-            title = book_chapter_titles.get(ch_num) or f"Chapter {ch_num}"
-            total_lines = 0
-
-            if ch_script_file.exists():
-                try:
-                    import json
-                    script_data = json.loads(ch_script_file.read_text(encoding="utf-8"))
-                    title = script_data.get("chapter_title", title)
-                    raw_lines = script_data.get("lines", [])
-                    total_lines = len(raw_lines)
-                except Exception:
-                    pass
+            has_script, total_lines, script_title = _has_valid_script(ch_num)
+            title = book_chapter_titles.get(ch_num) or script_title or f"Chapter {ch_num}"
 
             gen_count = segment_counts[ch_num] if total_lines > 0 else 0
             validated_count = (
@@ -1741,7 +1861,7 @@ async def get_pipeline_status(project_id: str):
             if ch_num in mastered_chapters or ch_num in generated_chapters:
                 pct = 100
             elif "script" in stage or stage in ["voice_review", "bootstrapping"]:
-                if ch_script_file.exists() or ch_num in scripted_chapters:
+                if has_script or ch_num in scripted_chapters:
                     pct = 100
                 elif ch_num == current_script_ch:
                     # Scan recent log lines for active fragment chunk progress (e.g. Chunk 3/5)
@@ -1770,7 +1890,7 @@ async def get_pipeline_status(project_id: str):
                     pct = 0
             elif total_lines > 0:
                 pct = int((gen_count / total_lines) * 100)
-            elif ch_script_file.exists() or ch_num in scripted_chapters:
+            elif has_script or ch_num in scripted_chapters:
                 pct = 100
             else:
                 pct = 0
@@ -2090,7 +2210,7 @@ def _exported_audiobook_paths(project_id: str) -> list[Path]:
     return sorted(unique.values(), key=lambda path: str(path).casefold())
 
 
-def _refresh_exported_audiobook_metadata(
+def _refresh_exported_audiobook_metadata_unlocked(
     project_id: str,
     metadata: dict[str, Any],
 ) -> list[str]:
@@ -2152,6 +2272,24 @@ def _refresh_exported_audiobook_metadata(
         finally:
             temporary.unlink(missing_ok=True)
     return refreshed
+
+
+def _refresh_exported_audiobook_metadata(
+    project_id: str,
+    metadata: dict[str, Any],
+) -> list[str]:
+    """Serialize remuxing and invalidate immutable incremental publications."""
+    project_dir = _project_dir(project_id)
+    manager = DeliveryManager(project_dir)
+    with manager.packaging_lock(wait=True):
+        refreshed = _refresh_exported_audiobook_metadata_unlocked(
+            project_id,
+            metadata,
+        )
+        manager.mark_all_stale(
+            "Book metadata or cover changed; republish this delivery"
+        )
+        return refreshed
 
 
 def _fetch_metadata_sync(
@@ -2419,8 +2557,23 @@ async def set_chapter_selection(
         raise HTTPException(status_code=503, detail="Server not initialized")
     state = job_queue.get_job(project_id)
     selection = request.chapters
+    incremental_settings = state.get("incremental_delivery") or {}
+    if (
+        selection is not None
+        and isinstance(incremental_settings, dict)
+        and incremental_settings.get("enabled")
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Disable incremental delivery before selecting individual chapters",
+        )
     if selection is not None:
         selection = sorted(set(selection))
+        if not selection:
+            raise HTTPException(
+                status_code=422,
+                detail="Chapter selection cannot be empty; use null for all chapters",
+            )
         total = int(state.get("total_chapters") or 0)
         invalid = [
             chapter for chapter in selection if chapter < 1 or chapter > total
@@ -2525,6 +2678,207 @@ async def get_script(project_id: str):
     if not script_path.exists():
         raise HTTPException(status_code=404, detail="Script not generated yet")
     return FileResponse(str(script_path), media_type="application/json")
+
+
+def _invalidate_chapter_after_script_change(
+    project_id: str,
+    project_dir: Path,
+    chapter_number: int,
+    reason: str,
+) -> None:
+    """Invalidate all durable outputs that depend on one chapter script."""
+    state = job_queue.get_job(project_id)
+    updates: dict[str, Any] = {"export_stale": True}
+    for key in ("generated_chapters", "mastered_chapters"):
+        updates[key] = [
+            number for number in state.get(key, []) if number != chapter_number
+        ]
+    job_queue.update_job(project_id, updates)
+
+    manifests_dir = project_dir / "manifests"
+    for manifest in (
+        manifests_dir / f"chapter_{chapter_number:03d}.segments.json",
+        manifests_dir / f"chapter_{chapter_number:03d}.master.json",
+    ):
+        manifest.unlink(missing_ok=True)
+    DeliveryManager(project_dir).mark_stale_for_chapters(
+        {chapter_number},
+        reason,
+    )
+
+
+@app.patch("/api/projects/{project_id}/script/chapter/{chapter_number}/line/{line_id}")
+async def update_script_line(
+    project_id: str,
+    chapter_number: int,
+    line_id: str,
+    request: ScriptLineUpdate,
+):
+    """Update a specific line in a chapter's script."""
+    _require_project_stopped(project_id)
+    project_dir = _project_dir(project_id)
+    script_dir = project_dir / "script"
+    if not script_dir.exists():
+        raise HTTPException(status_code=404, detail="Script directory not found")
+
+    chapter_file = script_dir / f"chapter_{chapter_number:03d}.json"
+    if not chapter_file.exists():
+        raise HTTPException(status_code=404, detail=f"Chapter {chapter_number} script not found")
+
+    characters_path = project_dir / "characters.json"
+    if not characters_path.is_file():
+        raise HTTPException(status_code=409, detail="Character registry is missing")
+    characters = json.loads(
+        characters_path.read_text(encoding="utf-8")
+    ).get("characters", {})
+    if request.speaker not in characters:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown character speaker '{request.speaker}'",
+        )
+
+    original_chapter_text = chapter_file.read_text(encoding="utf-8")
+    data = json.loads(original_chapter_text)
+    updated = False
+    for line in data.get("lines", []):
+        if str(line.get("id")) == line_id or str(line.get("line_id")) == line_id:
+            line["speaker"] = request.speaker
+            line["speaker_confidence"] = 1.0
+            line["speaker_evidence"] = "Human-reviewed speaker assignment."
+            line["attribution_review_required"] = False
+            line["attribution_review_reason"] = ""
+            updated = True
+            break
+
+    if not updated:
+        raise HTTPException(status_code=404, detail=f"Line {line_id} not found in chapter {chapter_number}")
+
+    atomic_write_json(chapter_file, data)
+
+    # We must also update the merged book_script.json if it exists
+    merged_file = project_dir / "book_script.json"
+    if merged_file.exists():
+        try:
+            merged_data = json.loads(merged_file.read_text(encoding="utf-8"))
+            chapter = next(
+                (
+                    candidate
+                    for candidate in merged_data.get("chapters", [])
+                    if candidate.get("chapter_number") == chapter_number
+                ),
+                None,
+            )
+            merged_updated = False
+            if chapter is not None:
+                for merged_line in chapter.get("lines", []):
+                    if (
+                        str(merged_line.get("id")) == line_id
+                        or str(merged_line.get("line_id")) == line_id
+                    ):
+                        merged_line["speaker"] = request.speaker
+                        merged_line["speaker_confidence"] = 1.0
+                        merged_line["speaker_evidence"] = (
+                            "Human-reviewed speaker assignment."
+                        )
+                        merged_line["attribution_review_required"] = False
+                        merged_line["attribution_review_reason"] = ""
+                        merged_updated = True
+                        break
+            if not merged_updated:
+                atomic_write_text(chapter_file, original_chapter_text)
+                raise HTTPException(
+                    status_code=409,
+                    detail="Merged script does not contain the selected line",
+                )
+            atomic_write_json(merged_file, merged_data)
+        except (OSError, ValueError, TypeError) as exc:
+            atomic_write_text(chapter_file, original_chapter_text)
+            raise HTTPException(
+                status_code=500,
+                detail=f"Could not update merged script: {exc}",
+            ) from exc
+
+    _invalidate_chapter_after_script_change(
+        project_id,
+        project_dir,
+        chapter_number,
+        "Speaker attribution changed",
+    )
+
+    return {"status": "success", "message": "Script line updated"}
+
+
+@app.post("/api/projects/{project_id}/chapters/{chapter_number}/regenerate")
+async def regenerate_chapter(project_id: str, chapter_number: int):
+    """Delete a chapter's script and fingerprint to force regeneration."""
+    state = _require_project_stopped(project_id)
+    project_dir = _project_dir(project_id)
+
+    # 1. Delete script file
+    script_file = project_dir / "script" / f"chapter_{chapter_number:03d}.json"
+    try:
+        script_file.unlink(missing_ok=True)
+    except OSError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Could not remove chapter script: {exc}",
+        ) from exc
+
+    # 2. Delete from fingerprints
+    fingerprint_file = project_dir / ".fingerprints.json"
+    if fingerprint_file.exists():
+        try:
+            data = json.loads(fingerprint_file.read_text(encoding="utf-8"))
+            if "chapters" in data and str(chapter_number) in data["chapters"]:
+                del data["chapters"][str(chapter_number)]
+                atomic_write_json(fingerprint_file, data)
+        except (OSError, ValueError, TypeError) as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    # 3. Remove from mastered/generated chapters in pipeline state
+    state_file = project_dir / "pipeline.json"
+    if state_file.exists():
+        try:
+            state_data = json.loads(state_file.read_text(encoding="utf-8"))
+            for key in ["scripted_chapters", "generated_chapters", "mastered_chapters"]:
+                if key in state_data and chapter_number in state_data[key]:
+                    state_data[key].remove(chapter_number)
+            state_data["export_stale"] = True
+            atomic_write_json(state_file, state_data)
+        except (OSError, ValueError, TypeError) as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    updates = {
+        key: [number for number in state.get(key, []) if number != chapter_number]
+        for key in ["scripted_chapters", "generated_chapters", "mastered_chapters"]
+    }
+    updates["export_stale"] = True
+    job_queue.update_job(project_id, updates)
+
+    # 3.5 Remove from merged book_script.json so the UI doesn't show stale lines
+    merged_script = project_dir / "book_script.json"
+    if merged_script.exists():
+        merged_data = json.loads(merged_script.read_text(encoding="utf-8"))
+        if "chapters" in merged_data:
+            merged_data["chapters"] = [
+                chapter for chapter in merged_data["chapters"]
+                if chapter.get("chapter_number") != chapter_number
+            ]
+            atomic_write_json(merged_script, merged_data)
+
+    # 4. Delete audio folder if it exists
+    audio_dir = project_dir / "audio" / f"chapter_{chapter_number:03d}"
+    if audio_dir.exists():
+        shutil.rmtree(audio_dir)
+
+    _invalidate_chapter_after_script_change(
+        project_id,
+        project_dir,
+        chapter_number,
+        "Chapter script queued for regeneration",
+    )
+
+    return {"status": "success", "message": f"Chapter {chapter_number} queued for regeneration"}
 
 
 @app.get("/api/projects/{project_id}/characters")
@@ -3079,7 +3433,7 @@ async def upload_project_voice(
         import sys
         import json
         val_script = """
-import sys, json
+import sys, json, os
 from voice.validator.whisper_validator import WhisperValidator
 try:
     val = WhisperValidator(
@@ -3575,11 +3929,126 @@ async def release_gpu():
 
 @app.post("/api/system/restart")
 async def restart_dashboard_server():
-    """Safely release GPU resources and restart the Dashboard process."""
+    """Start the controlled restart helper, then release this API process."""
     global _dashboard_shutdown_task
-    if _dashboard_shutdown_task is None or _dashboard_shutdown_task.done():
-        _dashboard_shutdown_task = asyncio.create_task(_shutdown_dashboard_process())
-    return {"status": "restarting", "message": "Dashboard process is restarting"}
+    if _dashboard_shutdown_task is not None and not _dashboard_shutdown_task.done():
+        return {
+            "status": "already_restarting",
+            "message": "Dashboard process is already restarting",
+        }
+    try:
+        restart_task = _launch_dashboard_restart_helper()
+    except Exception as exc:
+        logger.exception("Could not launch dashboard restart helper")
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {
+        "status": "restarting",
+        "message": "Dashboard process is restarting",
+        "restart_task": restart_task,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Incremental Delivery
+# ---------------------------------------------------------------------------
+
+
+class DeliverySettingsRequest(BaseModel):
+    enabled: bool
+    batch_size: int = Field(default=5, ge=1, le=20)
+
+
+@app.patch("/api/projects/{project_id}/delivery-settings")
+async def update_delivery_settings(project_id: str, request: DeliverySettingsRequest):
+    state = _require_project_stopped(project_id)
+    project_dir = _project_dir(project_id)
+    index = DeliveryManager(project_dir).load_index()
+    if index.deliveries and (
+        index.batch_size != request.batch_size
+        or not request.enabled
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Delivery settings are locked after the first publication; reset "
+                "incremental delivery artifacts before changing them"
+            ),
+        )
+    if request.enabled and state.get("generation_chapter_selection") is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="Clear the manual chapter selection before enabling incremental delivery",
+        )
+
+    settings = dict(state.get("incremental_delivery") or {})
+    settings["enabled"] = request.enabled
+    settings["batch_size"] = request.batch_size
+    # Also update pipeline.json on disk if present to persist settings across restarts
+    state_file = project_dir / "pipeline.json"
+    if state_file.is_file():
+        try:
+            persisted = json.loads(state_file.read_text(encoding="utf-8"))
+            persisted["incremental_delivery"] = settings
+            atomic_write_json(state_file, persisted)
+        except (OSError, ValueError, TypeError) as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Could not persist delivery settings: {exc}",
+            ) from exc
+
+    job_queue.update_job(project_id, {"incremental_delivery": settings})
+
+    return {"status": "success", "settings": settings}
+
+
+@app.get("/api/projects/{project_id}/deliveries")
+async def get_deliveries(project_id: str):
+    _require_job(project_id)
+    project_dir = _project_dir(project_id)
+    state = job_queue.get_job(project_id)
+    dm = DeliveryManager(project_dir)
+    index = dm.load_index()
+
+    return {
+        "settings": state.get("incremental_delivery") or {"enabled": False, "batch_size": 5},
+        "active_delivery_id": state.get("active_delivery_id"),
+        "active_delivery_chapters": state.get("active_delivery_chapters") or [],
+        "pause_after_delivery_requested": bool(
+            state.get("pause_after_delivery_requested")
+        ),
+        "published_count": sum(
+            part.status == "published" for part in index.deliveries
+        ),
+        "deliveries": [p.model_dump() for p in index.deliveries],
+    }
+
+
+@app.get("/api/projects/{project_id}/deliveries/{delivery_id}/download")
+async def download_delivery(project_id: str, delivery_id: str):
+    _require_job(project_id)
+    return await download_audiobook(project_id, delivery_id=delivery_id)
+
+
+@app.post("/api/projects/{project_id}/pause-after-delivery")
+async def request_pause_after_delivery(project_id: str):
+    state = _require_job(project_id)
+    settings = state.get("incremental_delivery") or {}
+    if not isinstance(settings, dict) or not settings.get("enabled"):
+        raise HTTPException(status_code=409, detail="Incremental delivery is not enabled")
+    if not state.get("running"):
+        raise HTTPException(status_code=409, detail="Pipeline is not running")
+    job_queue.update_job(project_id, {"pause_after_delivery_requested": True})
+    return {"status": "success"}
+
+
+@app.delete("/api/projects/{project_id}/pause-after-delivery")
+async def cancel_pause_after_delivery(project_id: str):
+    state = _require_job(project_id)
+    settings = state.get("incremental_delivery") or {}
+    if not isinstance(settings, dict) or not settings.get("enabled"):
+        raise HTTPException(status_code=409, detail="Incremental delivery is not enabled")
+    job_queue.update_job(project_id, {"pause_after_delivery_requested": False})
+    return {"status": "success"}
 
 
 # ---------------------------------------------------------------------------

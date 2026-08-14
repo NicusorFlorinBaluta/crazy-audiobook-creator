@@ -28,7 +28,9 @@ window.ScriptViewer = (() => {
         scriptSpeakerFilter: document.getElementById('script-speaker-filter'),
         scriptDialogueOnly: document.getElementById('script-dialogue-only'),
         scriptQuotedNarrator: document.getElementById('script-quoted-narrator'),
-        scriptResultCount: document.getElementById('script-result-count')
+        scriptLowConfidence: document.getElementById('script-low-confidence'),
+        scriptResultCount: document.getElementById('script-result-count'),
+        btnRegenerateChapter: document.getElementById('btn-regenerate-chapter')
     };
 
     let currentScriptChapter = 0;
@@ -39,6 +41,30 @@ window.ScriptViewer = (() => {
     els.scriptSpeakerFilter?.addEventListener('change', () => renderScriptLines(currentScriptChapter));
     els.scriptDialogueOnly?.addEventListener('change', () => renderScriptLines(currentScriptChapter));
     els.scriptQuotedNarrator?.addEventListener('change', () => renderScriptLines(currentScriptChapter));
+    els.scriptLowConfidence?.addEventListener('change', () => renderScriptLines(currentScriptChapter));
+
+    els.btnRegenerateChapter?.addEventListener('click', async () => {
+        if (!confirm(`Are you sure you want to regenerate Chapter ${currentScriptChapter}? This will delete the current script for this chapter and require a pipeline run to recreate it.`)) return;
+
+        try {
+            const projectId = window.state?.currentProjectId;
+            if (!projectId) return;
+            const actualChapterNumber = currentData.script?.chapters?.[currentScriptChapter]?.chapter_number || (currentScriptChapter + 1);
+            const res = await fetch(`api/projects/${encodeURIComponent(projectId)}/chapters/${actualChapterNumber}/regenerate`, { method: 'POST' });
+            if (res.ok) {
+                showToast(`Chapter ${currentScriptChapter} queued for regeneration. Start the pipeline to rebuild it.`, 'success');
+                // Remove the chapter data from memory and UI
+                if (currentData.script && currentData.script.chapters) {
+                    currentData.script.chapters[currentScriptChapter] = null;
+                }
+                renderScriptLines(currentScriptChapter);
+            } else {
+                showToast(`Failed to regenerate chapter: ${await res.text()}`, 'error');
+            }
+        } catch (e) {
+            showToast(`Error regenerating chapter: ${e.message}`, 'error');
+        }
+    });
 
     // Called by app.js when opening a project
     async function loadData(projectId) {
@@ -946,6 +972,11 @@ window.ScriptViewer = (() => {
     // Script Tab
     // ============================================================================
 
+
+    // ============================================================================
+    // Script Tab
+    // ============================================================================
+
     function renderScriptDropdown() {
         els.chapterSelect.innerHTML = '';
         els.scriptLegend.innerHTML = '';
@@ -961,7 +992,7 @@ window.ScriptViewer = (() => {
         currentData.script.chapters.forEach((ch, idx) => {
             const opt = document.createElement('option');
             opt.value = idx;
-            opt.textContent = ch.title || `Chapter ${idx + 1}`;
+            opt.textContent = ch.chapter_title ? `${ch.chapter_number || (idx + 1)}: ${ch.chapter_title}` : `Chapter ${ch.chapter_number || (idx + 1)}`;
             els.chapterSelect.appendChild(opt);
         });
         els.chapterSelect.value = 0;
@@ -998,17 +1029,29 @@ window.ScriptViewer = (() => {
             });
         }
 
-        const speakerIds = [...new Set(lines.map(line => (line.speaker || 'narrator').toLowerCase()))];
-        const currentSpeaker = els.scriptSpeakerFilter?.value || 'all';
-        if (els.scriptSpeakerFilter) {
-            els.scriptSpeakerFilter.innerHTML = '<option value="all">All speakers</option>' + speakerIds.map(id =>
-                `<option value="${escapeHtml(id)}" ${id === currentSpeaker ? 'selected' : ''}>${escapeHtml(charNameMap[id] || id)}</option>`
-            ).join('');
-        }
+        const speakerIds = [...new Set(lines.map(line => (line.speaker || 'narrator').trim().toLowerCase()))];
         const search = (els.scriptSearch?.value || '').trim().toLowerCase();
         const speakerFilter = els.scriptSpeakerFilter?.value || 'all';
         const dialogueOnly = Boolean(els.scriptDialogueOnly?.checked);
         const quotedNarratorOnly = Boolean(els.scriptQuotedNarrator?.checked);
+        const lowConfidenceOnly = Boolean(els.scriptLowConfidence?.checked);
+
+        const allCharacterIds = currentData.characters ? Object.keys(currentData.characters.characters || currentData.characters) : [];
+        const combinedSpeakerIds = [...new Set([...allCharacterIds, ...speakerIds])].map(id => id.toLowerCase());
+        const allSpeakerOptions = [...new Set(['narrator', ...combinedSpeakerIds.filter(id => id !== 'narrator')])].map(id =>
+            `<option value="${escapeHtml(id)}">${escapeHtml(charNameMap[id] || humanizeToken(id))}</option>`
+        ).join('');
+        if (els.scriptSpeakerFilter) {
+            const previousFilter = els.scriptSpeakerFilter.value || 'all';
+            els.scriptSpeakerFilter.innerHTML =
+                `<option value="all">All speakers</option>${allSpeakerOptions}`;
+            els.scriptSpeakerFilter.value = [
+                ...els.scriptSpeakerFilter.options
+            ].some(option => option.value === previousFilter)
+                ? previousFilter
+                : 'all';
+        }
+
         const visibleLines = lines.filter(line => {
             const speakerId = (line.speaker || 'narrator').toLowerCase();
             const lineId = String(line.line_id || line.id || '');
@@ -1016,7 +1059,8 @@ window.ScriptViewer = (() => {
             return searchMatch
                 && (speakerFilter === 'all' || speakerId === speakerFilter)
                 && (!dialogueOnly || speakerId !== 'narrator')
-                && (!quotedNarratorOnly || (speakerId === 'narrator' && /[“”"']/.test(line.text || '')));
+                && (!quotedNarratorOnly || (speakerId === 'narrator' && /[“”"']/.test(line.text || '')))
+                && (!lowConfidenceOnly || line.attribution_review_required || (line.speaker_confidence !== undefined && line.speaker_confidence !== null ? Number(line.speaker_confidence) : 1.0) < 0.55);
         });
         if (els.scriptResultCount) {
             els.scriptResultCount.textContent = `${visibleLines.length} of ${lines.length} lines`;
@@ -1027,9 +1071,11 @@ window.ScriptViewer = (() => {
         }
 
         visibleLines.forEach(line => {
-            const speakerId = (line.speaker || 'narrator').toLowerCase();
+            const speakerId = (line.speaker || 'narrator').trim().toLowerCase();
             const isNarrator = speakerId === 'narrator';
             const color = charColorMap[speakerId] || 'var(--text-muted)';
+            const isLowConfidence = Boolean(line.attribution_review_required) || (line.speaker_confidence !== undefined && line.speaker_confidence !== null ? Number(line.speaker_confidence) : 1.0) < 0.55;
+            const reviewTitle = line.attribution_review_reason || 'Low confidence attribution (needs review)';
 
             const div = document.createElement('div');
             div.className = `script-line ${isNarrator ? 'line-narrator' : ''}`;
@@ -1039,8 +1085,11 @@ window.ScriptViewer = (() => {
             
             div.innerHTML = `
                 <div class="line-speaker" style="color: ${color}">
-                    ${escapeHtml(charNameMap[speakerId] || line.speaker || 'Narrator')}
+                    <select class="speaker-edit-select input-sm" style="color: inherit; background: transparent; border: 1px solid transparent; max-width: 150px;" data-line-id="${escapeHtml(String(line.line_id || line.id || ''))}" title="Edit speaker">
+                        ${allSpeakerOptions}
+                    </select>
                     <small>${escapeHtml(String(line.line_id || line.id || ''))}</small>
+                    ${isLowConfidence ? `<svg viewBox="0 0 24 24" width="14" height="14" stroke="var(--warning-color, orange)" stroke-width="2" fill="none" style="vertical-align: text-bottom;" title="${escapeHtml(reviewTitle)}"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>` : ''}
                 </div>
                 <div class="line-text">
                     ${escapeHtml(line.text)}
@@ -1050,6 +1099,35 @@ window.ScriptViewer = (() => {
                 </div>
             `;
             
+            const selectEl = div.querySelector('.speaker-edit-select');
+            if (selectEl) {
+                selectEl.value = speakerId;
+                selectEl.addEventListener('change', async (e) => {
+                    const newSpeaker = e.target.value;
+                    try {
+                        const projectId = window.state?.currentProjectId;
+                        if (!projectId) return;
+                        const actualChapterNumber = currentData.script?.chapters?.[currentScriptChapter]?.chapter_number || (currentScriptChapter + 1);
+                        const res = await fetch(`api/projects/${encodeURIComponent(projectId)}/script/chapter/${actualChapterNumber}/line/${line.line_id || line.id}`, {
+                            method: 'PATCH',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ speaker: newSpeaker })
+                        });
+                        if (res.ok) {
+                            showToast('Speaker updated successfully', 'success');
+                            line.speaker = newSpeaker;
+                            line.speaker_confidence = 1.0;
+                            renderScriptLines(currentScriptChapter);
+                        } else {
+                            showToast(`Failed to update speaker: ${await res.text()}`, 'error');
+                            e.target.value = speakerId;
+                        }
+                    } catch (err) {
+                        showToast(`Error updating speaker: ${err.message}`, 'error');
+                        e.target.value = speakerId;
+                    }
+                });
+            }
             els.scriptViewer.appendChild(div);
         });
     }
