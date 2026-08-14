@@ -190,7 +190,10 @@ class VoiceLibraryManager:
         if resolved in referenced:
             return
         for artifact in (resolved, resolved.with_suffix(".pt")):
-            artifact.unlink(missing_ok=True)
+            try:
+                artifact.unlink(missing_ok=True)
+            except OSError as e:
+                logger.warning("Could not unlink obsolete voice artifact %s: %s", artifact, e)
 
     # ------------------------------------------------------------------
     # Registry file management

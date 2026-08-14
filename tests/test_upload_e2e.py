@@ -33,12 +33,22 @@ TRANSCRIPT = (
 
 @unittest.skipUnless(RUN_LIVE, "set RUN_LIVE_UPLOAD_E2E=1 for live API tests")
 class VoiceUploadLiveTests(unittest.TestCase):
-    def setUp(self) -> None:
+    @classmethod
+    def setUpClass(cls) -> None:
         if not FILE_PATH.is_file():
-            self.skipTest(f"live audio fixture not found: {FILE_PATH}")
+            raise unittest.SkipTest(f"live audio fixture not found: {FILE_PATH}")
+        cls.fixture_dir = TemporaryDirectory()
+        cls.fixture_path = Path(cls.fixture_dir.name) / FILE_PATH.name
+        shutil.copy2(FILE_PATH, cls.fixture_path)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.fixture_dir.cleanup()
+
+    def setUp(self) -> None:
         self.temp_dir = TemporaryDirectory()
-        self.audio_path = Path(self.temp_dir.name) / FILE_PATH.name
-        shutil.copy2(FILE_PATH, self.audio_path)
+        self.audio_path = Path(self.temp_dir.name) / self.fixture_path.name
+        shutil.copy2(self.fixture_path, self.audio_path)
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
