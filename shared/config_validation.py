@@ -32,6 +32,19 @@ def _number(
 def validate_brain_config(config: dict[str, Any]) -> dict[str, Any]:
     """Validate brain config before clients or models are initialized."""
     errors: list[str] = []
+    ollama = config.get("ollama", {})
+    if not isinstance(ollama, dict):
+        errors.append("ollama must be an object")
+    else:
+        for field in ("host", "model"):
+            if field in ollama and not str(ollama[field]).strip():
+                errors.append(f"ollama.{field} cannot be empty")
+        fallbacks = ollama.get("fallback_models", [])
+        if (
+            not isinstance(fallbacks, list)
+            or any(not isinstance(item, str) or not item.strip() for item in fallbacks)
+        ):
+            errors.append("ollama.fallback_models must be a list of non-empty model tags")
     voice = config.get("voice_server", {})
     host = str(voice.get("host", "http://127.0.0.1:8100"))
     parsed = urlsplit(host)

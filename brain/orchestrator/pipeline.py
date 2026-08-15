@@ -131,6 +131,7 @@ class Pipeline:
         self.ollama = OllamaClient(
             host=ollama_cfg.get("host", "http://localhost:11434"),
             model=ollama_cfg.get("model", "qwen3:32b"),
+            fallback_models=ollama_cfg.get("fallback_models", []),
             timeout=ollama_cfg.get("timeout", 120),
             max_retries=ollama_cfg.get("max_retries", 3),
             max_retry_seconds=ollama_cfg.get("max_retry_seconds", 900),

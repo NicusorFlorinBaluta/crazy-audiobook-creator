@@ -8,6 +8,9 @@ ollama:
   # even when the Ollama desktop service is also running on its default port.
   host: http://127.0.0.1:11435
   model: qwen2.5:32b
+  # Never substitute an arbitrary installed model. Add exact Ollama tags here
+  # only after validating them for the script-director prompts.
+  fallback_models: []
   auto_start: true
   executable: C:\Users\nicus\AppData\Local\Programs\Ollama\ollama.exe
   models_dir: E:\.ollama\models

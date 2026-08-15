@@ -35,6 +35,10 @@ class ConfigurationValidationTests(unittest.TestCase):
                 {"validation": {"whisper_backend": "mystery_backend"}}
             )
 
+    def test_ollama_fallback_models_must_be_explicit_model_tags(self) -> None:
+        with self.assertRaisesRegex(ValueError, "fallback_models"):
+            validate_brain_config({"ollama": {"fallback_models": [""]}})
+
     def test_invalid_enabled_schedule_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "requires at least one window"):
             validate_brain_config({"schedule": {"enabled": True, "windows": []}})

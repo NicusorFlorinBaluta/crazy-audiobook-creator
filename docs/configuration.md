@@ -10,6 +10,7 @@ The running configuration lives in `brain/config.yaml` and `voice/config.yaml`. 
 |---|---|
 | `host` | Local Ollama base URL |
 | `model` | Model used for both character and script metadata passes |
+| `fallback_models` | Ordered allowlist of exact model tags permitted after a 404; empty means fail closed |
 | `auto_start` | Start a pipeline-owned Ollama server when the configured endpoint is unavailable |
 | `executable` | Ollama executable used by the managed server |
 | `models_dir` | Existing Ollama model store passed as `OLLAMA_MODELS` |
@@ -23,7 +24,7 @@ The running configuration lives in `brain/config.yaml` and `voice/config.yaml`. 
 | `max_retries` | Ollama transport/JSON retry budget |
 | `unload_after_scripting` | Release the Ollama model before loading Qwen TTS on the same GPU |
 
-The application fingerprints the configured model and prompt. Changing them causes dependent script artifacts to be rebuilt. The default workstation configuration uses an isolated loopback port so a separately running Ollama desktop service cannot change its GPU placement.
+The application fingerprints the configured model and prompt. Changing them causes dependent script artifacts to be rebuilt. The default workstation configuration uses an isolated loopback port so a separately running Ollama desktop service cannot change its GPU placement. It never selects an arbitrary installed model: only entries in `fallback_models` may replace the primary model, and the checked-in configuration intentionally leaves that list empty.
 
 ### `voice_server`
 

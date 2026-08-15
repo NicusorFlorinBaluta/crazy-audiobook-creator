@@ -28,6 +28,7 @@ class OllamaClient:
         self,
         host: str = "http://localhost:11434",
         model: str = "qwen3:32b",
+        fallback_models: list[str] | tuple[str, ...] | None = None,
         timeout: int = 120,
         max_retries: int = 3,
         max_retry_seconds: int = 900,
@@ -35,6 +36,7 @@ class OllamaClient:
     ):
         self.host = host.rstrip("/")
         self.model = model
+        self.fallback_models = tuple(fallback_models or ())
         self.timeout = timeout
         self.max_retries = max(1, max_retries)
         self.max_retry_seconds = max(0, max_retry_seconds)
@@ -173,14 +175,20 @@ class OllamaClient:
                     ),
                 ) as response:
                     if response.status_code == 404:
-                        # Model not found on Ollama server — auto-fallback to available model
-                        resolved = self._auto_resolve_model()
+                        resolved = self._resolve_configured_fallback()
                         if resolved and resolved != self.model:
-                            logger.warning("[Ollama] Model '%s' return 404. Auto-switching to installed model '%s'", payload["model"], resolved)
+                            logger.warning(
+                                "[Ollama] Model '%s' returned 404. Switching to explicitly configured fallback '%s'",
+                                payload["model"],
+                                resolved,
+                            )
                             self.model = resolved
                             payload["model"] = resolved
-                            # Retry immediately with resolved model
                             continue
+                        raise OllamaError(
+                            f"Configured Ollama model '{self.model}' is unavailable "
+                            "and no explicitly configured fallback is installed"
+                        )
                     response.raise_for_status()
                     logger.info("[Ollama] ← HTTP 200 received, streaming tokens...")
 
@@ -427,9 +435,10 @@ class OllamaClient:
             data = response.json()
             models = [m.get("name", "") for m in data.get("models", [])]
 
-            # Check if our model is available (allow partial match)
-            model_base = self.model.split(":")[0]
-            available = any(model_base in m for m in models)
+            available = any(
+                self._model_names_match(self.model, installed)
+                for installed in models
+            )
 
             if not available and not quiet:
                 logger.warning(
@@ -446,8 +455,17 @@ class OllamaClient:
                 logger.error("Ollama health check failed: %s", e)
             return False
 
-    def _auto_resolve_model(self) -> str | None:
-        """Find an installed model on the local Ollama instance if requested model 404s."""
+    @staticmethod
+    def _model_names_match(configured: str, installed: str) -> bool:
+        """Match one exact Ollama tag, allowing a registry/library prefix."""
+        configured = configured.strip()
+        installed = installed.strip()
+        return installed == configured or installed.endswith(f"/library/{configured}")
+
+    def _resolve_configured_fallback(self) -> str | None:
+        """Return the first installed fallback from the explicit allowlist."""
+        if not self.fallback_models:
+            return None
         try:
             response = self._ensure_client().get(
                 f"{self.host}/api/tags", timeout=5.0
@@ -455,11 +473,15 @@ class OllamaClient:
             if response.status_code == 200:
                 data = response.json()
                 models = [m.get("name", "") for m in data.get("models", []) if m.get("name")]
-                if models:
-                    logger.info("[Ollama] Discovered installed models: %s", models)
-                    return models[0]  # Use first installed model (e.g. deepseek-r1:32b)
+                logger.info("[Ollama] Discovered installed models: %s", models)
+                for fallback in self.fallback_models:
+                    if any(
+                        self._model_names_match(fallback, installed)
+                        for installed in models
+                    ):
+                        return fallback
         except Exception as e:
-            logger.warning("[Ollama] Failed to auto-resolve installed models: %s", e)
+            logger.warning("[Ollama] Failed to resolve configured fallback models: %s", e)
         return None
 
     def close(self) -> None:

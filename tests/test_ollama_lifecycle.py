@@ -60,6 +60,52 @@ class _FailingHttpClient:
         return None
 
 
+class _ModelResponse:
+    def __init__(self, status_code: int, *, content: str = ""):
+        self.status_code = status_code
+        self.content = content
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            request = httpx.Request("POST", "http://test/api/chat")
+            response = httpx.Response(self.status_code, request=request)
+            raise httpx.HTTPStatusError("model unavailable", request=request, response=response)
+
+    def iter_lines(self):
+        if self.content:
+            yield json.dumps({"message": {"content": self.content}, "done": True})
+
+
+class _ModelSelectionHttpClient:
+    def __init__(self, installed: list[str]):
+        self.installed = installed
+        self.requested_models: list[str] = []
+
+    def stream(self, *args, **kwargs):
+        model = kwargs["json"]["model"]
+        self.requested_models.append(model)
+        if model == "missing:32b":
+            return _ModelResponse(404)
+        return _ModelResponse(200, content="selected")
+
+    def get(self, *args, **kwargs):
+        request = httpx.Request("GET", "http://test/api/tags")
+        return httpx.Response(
+            200,
+            request=request,
+            json={"models": [{"name": name} for name in self.installed]},
+        )
+
+    def close(self):
+        return None
+
+
 class _FakeManagedOllama:
     host = "http://127.0.0.1:11435"
     model = "test:latest"
@@ -89,6 +135,48 @@ class _FakeProcess:
 
 
 class OllamaLifecycleTests(unittest.TestCase):
+    def test_missing_primary_model_fails_closed_without_allowlist(self) -> None:
+        client = OllamaClient(model="missing:32b", max_retries=2)
+        client._client.close()
+        fake = _ModelSelectionHttpClient(["deepseek-r1:32b"])
+        client._client = fake
+
+        with self.assertRaisesRegex(
+            OllamaError,
+            "no explicitly configured fallback",
+        ):
+            client.generate("test")
+
+        self.assertEqual(client.model, "missing:32b")
+        self.assertEqual(fake.requested_models, ["missing:32b"])
+
+    def test_only_explicitly_allowed_installed_fallback_can_be_selected(self) -> None:
+        client = OllamaClient(
+            model="missing:32b",
+            fallback_models=["qwen2.5:32b"],
+            max_retries=2,
+        )
+        client._client.close()
+        fake = _ModelSelectionHttpClient([
+            "deepseek-r1:32b",
+            "qwen2.5:32b",
+        ])
+        client._client = fake
+
+        self.assertEqual(client.generate("test"), "selected")
+        self.assertEqual(client.model, "qwen2.5:32b")
+        self.assertEqual(
+            fake.requested_models,
+            ["missing:32b", "qwen2.5:32b"],
+        )
+
+    def test_health_check_requires_the_configured_tag_not_just_model_family(self) -> None:
+        client = OllamaClient(model="qwen2.5:32b")
+        client._client.close()
+        client._client = _ModelSelectionHttpClient(["qwen2.5:14b"])
+
+        self.assertFalse(client.check_health(quiet=True))
+
     def test_failed_requests_stop_when_retry_budget_is_exhausted(self) -> None:
         client = OllamaClient(max_retries=5, max_retry_seconds=10)
         client._client.close()
