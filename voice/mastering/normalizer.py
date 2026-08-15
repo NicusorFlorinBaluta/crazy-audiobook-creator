@@ -3,7 +3,7 @@
 Implements audiobook-standard loudness normalization:
   - Integrated LUFS measurement
   - Target LUFS adjustment (-19 LUFS default)
-  - True peak limiting (-1 dBTP)
+  - Oversampled peak ceiling
   - Noise gate
   - Sample rate conversion to 44.1 kHz
 """
@@ -33,6 +33,7 @@ class LoudnessNormalizer:
         noise_gate_threshold: float = -50.0,
         noise_gate_attack_ms: float = 5.0,
         noise_gate_release_ms: float = 50.0,
+        peak_ceiling_mode: str = "global",
     ):
         self.target_lufs = target_lufs
         self.peak_limit_dbfs = peak_limit_dbfs
@@ -42,6 +43,9 @@ class LoudnessNormalizer:
         self.noise_gate_threshold = noise_gate_threshold
         self.noise_gate_attack_ms = noise_gate_attack_ms
         self.noise_gate_release_ms = noise_gate_release_ms
+        if peak_ceiling_mode not in {"global", "soft_limiter"}:
+            raise ValueError("peak_ceiling_mode must be 'global' or 'soft_limiter'")
+        self.peak_ceiling_mode = peak_ceiling_mode
 
     def normalize(
         self,
@@ -54,8 +58,8 @@ class LoudnessNormalizer:
         Steps:
         1. Noise gate (clean up silence)
         2. LUFS loudness normalization
-        3. Peak limiting
-        4. Resample to output rate
+        3. Resample to output rate
+        4. Apply an oversampled peak ceiling at the final sample rate
         5. Save to file
 
         Args:
@@ -85,17 +89,26 @@ class LoudnessNormalizer:
                 gain_db,
             )
 
-        # Step 3: Peak limiting
-        audio = self._apply_peak_limiter(audio)
-
-        # Step 4: Resample if needed
+        # Step 3: Resample before the final peak check because conversion can
+        # create new inter-sample peaks.
         if sample_rate != self.output_sample_rate:
             audio = self._resample(audio, sample_rate, self.output_sample_rate)
             sample_rate = self.output_sample_rate
 
+        # Step 4: Transparent peak ceiling. Final loudness is measured again
+        # because peak-constrained material may finish below the LUFS target.
+        pre_ceiling_audio = audio
+        audio = self._apply_peak_ceiling(audio)
+        peak_limit = 10 ** (self.peak_limit_dbfs / 20)
+        knee = peak_limit * 0.80
+        limited_sample_fraction = (
+            float(np.mean(np.abs(pre_ceiling_audio) > knee))
+            if pre_ceiling_audio.size else 0.0
+        )
+
         # Final measurements
         final_lufs = self._measure_lufs(audio, sample_rate)
-        peak = float(np.max(np.abs(audio)))
+        peak = self._measure_true_peak(audio)
         peak_dbfs = float(20 * np.log10(peak)) if peak > 0 else -100.0
 
         # Convert to output format
@@ -128,6 +141,8 @@ class LoudnessNormalizer:
             "lufs": final_lufs,
             "peak_dbfs": peak_dbfs,
             "sample_rate": sample_rate,
+            "peak_ceiling_mode": self.peak_ceiling_mode,
+            "limited_sample_fraction": limited_sample_fraction,
         }
 
     def _measure_lufs(self, audio: np.ndarray, sample_rate: int) -> float:
@@ -156,50 +171,96 @@ class LoudnessNormalizer:
             logger.warning("LUFS measurement failed: %s", e)
             return -70.0
 
-    def _apply_peak_limiter(self, audio: np.ndarray) -> np.ndarray:
-        """Apply a simple peak limiter to prevent clipping."""
+    def _apply_peak_ceiling(self, audio: np.ndarray) -> np.ndarray:
+        """Apply the configured transparent peak ceiling."""
         peak_limit = 10 ** (self.peak_limit_dbfs / 20)
-        peak = np.max(np.abs(audio))
+        if self.peak_ceiling_mode == "soft_limiter":
+            audio = self._apply_soft_limiter(audio, peak_limit)
+        peak = self._measure_true_peak(audio)
 
         if peak > peak_limit:
             ratio = peak_limit / peak
             audio = audio * ratio
-            logger.debug("Peak limited: %.2f → %.2f", peak, peak_limit)
+            logger.debug("Peak ceiling applied: %.2f -> %.2f", peak, peak_limit)
 
         return audio
 
+    @staticmethod
+    def _apply_soft_limiter(
+        audio: np.ndarray,
+        peak_limit: float,
+        knee_ratio: float = 0.80,
+    ) -> np.ndarray:
+        """Limit only peak samples with a continuous, unity-slope soft knee."""
+        if audio.size == 0:
+            return audio
+        knee = peak_limit * knee_ratio
+        headroom = max(peak_limit - knee, 1e-9)
+        magnitude = np.abs(audio)
+        limited = audio.copy()
+        above = magnitude > knee
+        if np.any(above):
+            compressed = knee + headroom * (
+                1.0 - np.exp(-(magnitude[above] - knee) / headroom)
+            )
+            limited[above] = np.sign(audio[above]) * compressed
+        return limited
+
     def _apply_noise_gate(self, audio: np.ndarray, sample_rate: int) -> np.ndarray:
-        """Apply a noise gate to clean up silence portions."""
+        """Apply a noise gate to clean up silence portions (vectorized)."""
         threshold = 10 ** (self.noise_gate_threshold / 20)
-        attack_samples = int(sample_rate * self.noise_gate_attack_ms / 1000)
-        release_samples = int(sample_rate * self.noise_gate_release_ms / 1000)
+        attack_samples = max(1, int(sample_rate * self.noise_gate_attack_ms / 1000))
+        release_samples = max(1, int(sample_rate * self.noise_gate_release_ms / 1000))
 
-        # Calculate envelope (RMS in short windows)
+        # Calculate envelope using fast moving average of squared signal
         window_size = max(1, int(sample_rate * 0.01))  # 10ms windows
-        envelope = np.zeros_like(audio)
+        kernel = np.ones(window_size) / window_size
+        squared_env = np.convolve(audio ** 2, kernel, mode="same")
+        envelope = np.sqrt(np.maximum(0, squared_env))
 
-        for i in range(0, len(audio) - window_size, window_size):
-            rms = np.sqrt(np.mean(audio[i : i + window_size] ** 2))
-            envelope[i : i + window_size] = rms
+        # Gate binary mask
+        gate = (envelope > threshold).astype(np.float64)
 
-        # Gate: where envelope is below threshold, apply attenuation
-        gate = np.where(envelope > threshold, 1.0, 0.0)
+        # Smooth gate with 1-pole exponential filter
+        alpha_attack = 1.0 - np.exp(-1.0 / attack_samples)
+        alpha_release = 1.0 - np.exp(-1.0 / release_samples)
 
-        # Smooth the gate with attack/release
-        smoothed = np.zeros_like(gate)
-        current = 0.0
-        for i in range(len(gate)):
-            if gate[i] > current:
-                # Attack (opening)
-                rate = 1.0 / max(1, attack_samples)
-                current = min(1.0, current + rate)
-            else:
-                # Release (closing)
-                rate = 1.0 / max(1, release_samples)
-                current = max(0.0, current - rate)
-            smoothed[i] = current
+        try:
+            from scipy.signal import lfilter
+
+            attack = lfilter(
+                [alpha_attack],
+                [1.0, -(1.0 - alpha_attack)],
+                gate,
+            )
+            release = lfilter(
+                [alpha_release],
+                [1.0, -(1.0 - alpha_release)],
+                gate[::-1],
+            )[::-1]
+            smoothed = np.clip(np.maximum(attack, release), 0.0, 1.0)
+        except ImportError:
+            smoothed = np.zeros_like(gate)
+            curr = 0.0
+            rates = np.where(gate > 0.5, alpha_attack, alpha_release)
+            for i in range(len(gate)):
+                curr += rates[i] * (gate[i] - curr)
+                smoothed[i] = curr
 
         return audio * smoothed
+
+    @staticmethod
+    def _measure_true_peak(audio: np.ndarray) -> float:
+        """Estimate inter-sample peak with 4x polyphase oversampling."""
+        if len(audio) == 0:
+            return 0.0
+        try:
+            from scipy.signal import resample_poly
+
+            oversampled = resample_poly(audio, 4, 1)
+            return float(np.max(np.abs(oversampled)))
+        except ImportError:
+            return float(np.max(np.abs(audio)))
 
     @staticmethod
     def _resample(audio: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:

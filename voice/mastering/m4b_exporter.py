@@ -10,6 +10,7 @@ Uses FFmpeg to:
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -35,6 +36,7 @@ class M4BExporter:
         cover_art: str | None = None,
         output_config: ExportConfig | None = None,
         workspace: Path = Path("workspace"),
+        output_name: str | None = None,
     ) -> ExportM4BResponse:
         """Export all chapters as a single M4B audiobook file.
 
@@ -60,7 +62,10 @@ class M4BExporter:
         output_dir = project_dir / "output"
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        output_file = output_dir / f"{project_id}.m4b"
+        safe_output_name = Path(output_name or f"{project_id}.m4b").name
+        if Path(safe_output_name).suffix.lower() != ".m4b":
+            safe_output_name += ".m4b"
+        output_file = output_dir / safe_output_name
 
         logger.info(
             "Exporting M4B for '%s': %d chapters",
@@ -78,14 +83,25 @@ class M4BExporter:
         self._write_chapter_metadata(metadata_file, chapters, chapter_durations)
 
         # Step 3: Run FFmpeg
-        self._run_ffmpeg(
-            concat_file=concat_file,
-            metadata_file=metadata_file,
-            output_file=output_file,
-            book_metadata=metadata,
-            cover_art=cover_art,
-            config=config,
-        )
+        temporary_output = output_file.with_name(f".{output_file.name}.part.m4b")
+        temporary_output.unlink(missing_ok=True)
+        try:
+            self._run_ffmpeg(
+                concat_file=concat_file,
+                metadata_file=metadata_file,
+                output_file=temporary_output,
+                book_metadata=metadata,
+                cover_art=cover_art,
+                config=config,
+            )
+            if (
+                not temporary_output.is_file()
+                or temporary_output.stat().st_size == 0
+            ):
+                raise RuntimeError("FFmpeg produced no M4B output")
+            os.replace(temporary_output, output_file)
+        finally:
+            temporary_output.unlink(missing_ok=True)
 
         # Calculate final stats
         total_duration = sum(chapter_durations)
@@ -109,8 +125,50 @@ class M4BExporter:
             total_duration=duration_str,
             total_chapters=len(chapters),
             file_size_mb=file_size_mb,
-            download_url=f"/download/{project_id}/output/{project_id}.m4b",
+            download_url=f"/download/{project_id}/output/{output_file.name}",
+            book_loudness=self._book_loudness_report(chapters),
         )
+
+    @staticmethod
+    def _book_loudness_report(
+        chapters: list[ExportChapterInfo],
+    ) -> dict[str, Any]:
+        """Summarize mastered chapter consistency without changing the audio."""
+        measured = [
+            (chapter.number, float(chapter.lufs), chapter.peak_dbfs)
+            for chapter in chapters
+            if chapter.lufs is not None
+        ]
+        if not measured:
+            return {
+                "status": "unavailable",
+                "measured_chapters": 0,
+                "spread_lu": None,
+                "outlier_chapters": [],
+            }
+        import statistics
+
+        loudness = [item[1] for item in measured]
+        median_lufs = float(statistics.median(loudness))
+        spread_lu = float(max(loudness) - min(loudness))
+        outliers = [
+            number
+            for number, value, _ in measured
+            if abs(value - median_lufs) > 0.75
+        ]
+        peaks = [
+            float(peak) for _, _, peak in measured if peak is not None
+        ]
+        return {
+            "status": "consistent" if spread_lu <= 1.0 else "warning",
+            "measured_chapters": len(measured),
+            "median_lufs": median_lufs,
+            "minimum_lufs": float(min(loudness)),
+            "maximum_lufs": float(max(loudness)),
+            "spread_lu": spread_lu,
+            "outlier_chapters": outliers,
+            "highest_peak_dbfs": max(peaks) if peaks else None,
+        }
 
     def _write_concat_file(
         self,
@@ -140,9 +198,7 @@ class M4BExporter:
         for chapter in chapters:
             chapter_path = project_dir / chapter.file
             if not chapter_path.exists():
-                logger.warning("Chapter file not found: %s", chapter_path)
-                durations.append(0.0)
-                continue
+                raise FileNotFoundError(f"Chapter file not found: {chapter_path}")
 
             try:
                 result = subprocess.run(
@@ -157,11 +213,16 @@ class M4BExporter:
                     text=True,
                     timeout=10,
                 )
+                if result.returncode != 0:
+                    raise RuntimeError(result.stderr.strip() or "ffprobe failed")
                 duration = float(result.stdout.strip())
+                if duration <= 0:
+                    raise RuntimeError("chapter duration is zero")
                 durations.append(duration)
             except Exception as e:
-                logger.warning("Failed to get duration for %s: %s", chapter_path, e)
-                durations.append(0.0)
+                raise RuntimeError(
+                    f"Failed to inspect chapter audio {chapter_path}: {e}"
+                ) from e
 
         return durations
 
@@ -182,9 +243,22 @@ class M4BExporter:
                 f.write("TIMEBASE=1/1000\n")
                 f.write(f"START={current_time_ms}\n")
                 f.write(f"END={current_time_ms + duration_ms}\n")
-                f.write(f"title={chapter.title}\n")
+                f.write(f"title={self._escape_ffmetadata(chapter.title)}\n")
                 f.write("\n")
                 current_time_ms += duration_ms
+
+    @staticmethod
+    def _escape_ffmetadata(value: str) -> str:
+        """Escape a value for FFmpeg's FFMETADATA format."""
+        return (
+            str(value)
+            .replace("\\", "\\\\")
+            .replace("\r", "")
+            .replace("\n", "\\\n")
+            .replace("=", "\\=")
+            .replace(";", "\\;")
+            .replace("#", "\\#")
+        )
 
     def _run_ffmpeg(
         self,
@@ -233,6 +307,13 @@ class M4BExporter:
 
         if book_metadata.year:
             cmd.extend(["-metadata", f"date={book_metadata.year}"])
+        if book_metadata.isbn:
+            cmd.extend([
+                "-metadata", f"isbn={book_metadata.isbn}",
+                "-metadata", f"grouping=ISBN {book_metadata.isbn}",
+            ])
+
+        cmd.extend(["-movflags", "+faststart"])
 
         cmd.append(str(output_file))
 
@@ -256,5 +337,5 @@ class M4BExporter:
             raise RuntimeError("FFmpeg timed out after 10 minutes")
         except FileNotFoundError:
             raise RuntimeError(
-                "FFmpeg not found. Install it: sudo apt install ffmpeg"
+                "FFmpeg not found. Install FFmpeg and add it to PATH"
             )

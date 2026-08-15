@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
+from difflib import SequenceMatcher
 from typing import Any
 
 import numpy as np
@@ -22,9 +24,17 @@ class WhisperValidator:
         self,
         model_name: str = "medium",
         device: str = "auto",
+        backend: str = "auto",
+        vad_filter: bool = False,
     ):
+        if backend not in {"auto", "faster_whisper", "openai_whisper"}:
+            raise ValueError(
+                "backend must be auto, faster_whisper, or openai_whisper"
+            )
         self.model_name = model_name
         self.device = device
+        self.backend = backend
+        self.vad_filter = bool(vad_filter)
         self._model = None
         self._is_loaded = False
 
@@ -41,6 +51,8 @@ class WhisperValidator:
 
         try:
             try:
+                if self.backend == "openai_whisper":
+                    raise ImportError("OpenAI Whisper backend explicitly selected")
                 from faster_whisper import WhisperModel
 
                 compute_type = "float16"
@@ -63,6 +75,8 @@ class WhisperValidator:
                 )
                 self._backend = "faster_whisper"
             except ImportError:
+                if self.backend == "faster_whisper":
+                    raise
                 import whisper
                 import torch
 
@@ -70,7 +84,7 @@ class WhisperValidator:
                 if device == "auto":
                     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-                logger.info("faster_whisper not found, falling back to openai-whisper...")
+                logger.info("faster_whisper not found, using openai-whisper on %s...", device)
                 self._model = whisper.load_model(self.model_name, device=device)
                 self._backend = "openai_whisper"
 
@@ -97,7 +111,7 @@ class WhisperValidator:
 
             logger.info("Whisper model unloaded")
 
-    def transcribe(self, audio_file: str) -> str:
+    def transcribe(self, audio_file: str, language: str | None = None) -> str:
         """Transcribe an audio file to text.
 
         Args:
@@ -109,18 +123,70 @@ class WhisperValidator:
         if not self._is_loaded:
             self.load()
 
-        if getattr(self, "_backend", "faster_whisper") == "openai_whisper":
-            result = self._model.transcribe(audio_file, language="en")
-            return result.get("text", "").strip()
-        else:
-            segments, info = self._model.transcribe(
-                audio_file,
-                language="en",
-                beam_size=5,
-                vad_filter=True,
-            )
-            text = " ".join(segment.text for segment in segments)
-            return text.strip()
+        try:
+            if getattr(self, "_backend", "faster_whisper") == "openai_whisper":
+                kwargs = {"language": language} if language else {}
+                if not self.vad_filter:
+                    result = self._model.transcribe(audio_file, **kwargs)
+                    return result.get("text", "").strip()
+
+                import tempfile
+                import soundfile as sf
+                import torch
+                from silero_vad import load_silero_vad, get_speech_timestamps, collect_chunks
+                
+                vad_model = load_silero_vad()
+                audio_np, sr = sf.read(audio_file, dtype="float32")
+                if audio_np.ndim > 1:
+                    audio_np = audio_np.mean(axis=1)
+                wav = torch.from_numpy(audio_np)  # VAD expects 1D
+                
+                if sr != 16000:
+                    import math
+                    from scipy.signal import resample_poly
+
+                    divisor = math.gcd(sr, 16000)
+                    audio_np = resample_poly(
+                        wav.numpy(),
+                        16000 // divisor,
+                        sr // divisor,
+                    ).astype("float32", copy=False)
+                    wav = torch.from_numpy(audio_np)
+                    sr = 16000
+                
+                speech_timestamps = get_speech_timestamps(wav, vad_model, return_seconds=False)
+                if not speech_timestamps:
+                    # Silero can reject valid very short, high-pitched, or
+                    # emphatic audiobook lines. Fall back to Whisper's raw
+                    # audio path rather than converting a VAD miss into a
+                    # guaranteed transcription failure.
+                    result = self._model.transcribe(audio_file, **kwargs)
+                    return result.get("text", "").strip()
+                    
+                wav_speech = collect_chunks(speech_timestamps, wav)
+                
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                    tmp_path = f.name
+                
+                try:
+                    sf.write(tmp_path, wav_speech.numpy(), 16000)
+                    result = self._model.transcribe(tmp_path, **kwargs)
+                    return result.get("text", "").strip()
+                finally:
+                    import os
+                    os.unlink(tmp_path)
+            else:
+                segments, info = self._model.transcribe(
+                    audio_file,
+                    beam_size=5,
+                    vad_filter=True,
+                    language=language,
+                )
+                text = " ".join(segment.text for segment in segments)
+                return text.strip()
+        except Exception as e:
+            logger.warning("[WhisperValidator] STT transcription failed for '%s': %s", audio_file, e)
+            return ""
 
     def calculate_wer(
         self,
@@ -139,32 +205,163 @@ class WhisperValidator:
             WER as a float between 0.0 and 1.0.
         """
         if normalize:
-            reference = self._normalize_text(reference)
-            hypothesis = self._normalize_text(hypothesis)
+            norm_ref = self._normalize_text(reference)
+            norm_hyp = self._normalize_text(hypothesis)
+        else:
+            norm_ref, norm_hyp = reference, hypothesis
+
+        ref_words = norm_ref.split()
+        hyp_words = norm_hyp.split()
+
+        # Check for hallucinated prompt prefixes (e.g., hypothesis starts with "you" or "u" when reference does not)
+        if hyp_words and ref_words:
+            first_hyp = hyp_words[0].lower()
+            first_ref = ref_words[0].lower()
+            if first_hyp in {"you", "u", "user"} and first_ref not in {"you", "u", "user"}:
+                logger.warning("[WhisperValidator] Detected leading prompt token hallucination: %r vs ref %r", hyp_words[:3], ref_words[:3])
+                return 0.50  # Instantly fail threshold for leading prompt hallucinations
 
         try:
             import jiwer
-            wer = jiwer.wer(reference, hypothesis)
+            wer = jiwer.wer(norm_ref, norm_hyp)
             return min(wer, 1.0)  # Cap at 1.0
+        except ImportError:
+            if not ref_words:
+                return 0.0 if not hyp_words else 1.0
+            d = [[0] * (len(hyp_words) + 1) for _ in range(len(ref_words) + 1)]
+            for i in range(len(ref_words) + 1):
+                d[i][0] = i
+            for j in range(len(hyp_words) + 1):
+                d[0][j] = j
+            for i in range(1, len(ref_words) + 1):
+                for j in range(1, len(hyp_words) + 1):
+                    cost = 0 if ref_words[i - 1] == hyp_words[j - 1] else 1
+                    d[i][j] = min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + cost)
+            return min(d[len(ref_words)][len(hyp_words)] / len(ref_words), 1.0)
         except Exception as e:
             logger.error("WER calculation failed: %s", e)
             return 1.0  # Assume worst case
 
+    def calculate_text_similarity(
+        self,
+        reference: str,
+        hypothesis: str,
+    ) -> float:
+        """Compare compact normalized text for spelling/segmentation variants.
+
+        Whisper commonly renders invented names and compounds with equivalent
+        phonetic spelling or different spaces (for example, ``Tuka``/``Tuca``
+        and ``deathant``/``death hunt``). This is only a secondary signal; the
+        validation loop applies conservative length-dependent thresholds.
+        """
+        norm_ref = re.sub(r"\s+", "", self._normalize_text(reference))
+        norm_hyp = re.sub(r"\s+", "", self._normalize_text(hypothesis))
+        if not norm_ref or not norm_hyp:
+            return 1.0 if norm_ref == norm_hyp else 0.0
+        return SequenceMatcher(None, norm_ref, norm_hyp).ratio()
+
+    @staticmethod
+    def is_orthographic_segmentation_match(
+        reference: str,
+        hypothesis: str,
+    ) -> bool:
+        """Return true when only punctuation or word boundaries differ.
+
+        WER is intentionally sensitive to token boundaries, but audiobook
+        validation should not reject an acoustically equivalent rendering such
+        as ``Letsgoletsgoletsgo`` versus ``Let's go, let's go, let's go``.
+        This signal is deliberately stricter than fuzzy text similarity: after
+        Unicode/case normalization, every letter and digit must be identical
+        and in the same order.
+        """
+
+        def compact(value: str) -> str:
+            normalized = unicodedata.normalize("NFKC", value or "").casefold()
+            return "".join(char for char in normalized if char.isalnum())
+
+        compact_reference = compact(reference)
+        compact_hypothesis = compact(hypothesis)
+        return bool(
+            compact_reference
+            and compact_reference == compact_hypothesis
+        )
+
+    @staticmethod
+    def _expand_english_contractions(text: str) -> str:
+        """Expand common unambiguous contractions without optional packages.
+
+        CI and lightweight installations intentionally omit ``openai-whisper``.
+        Keeping this small pass local makes WER independent of whether its
+        richer English normalizer happens to be installed.
+        """
+        text = (text or "").replace("’", "'").replace("‘", "'")
+        replacements = (
+            (r"\blet's\b", "let us"),
+            (r"\bwon't\b", "will not"),
+            (r"\bshan't\b", "shall not"),
+            (r"\bcan't\b", "can not"),
+            (r"\bcannot\b", "can not"),
+            (r"\b([\w]+)n't\b", r"\1 not"),
+            (r"\bi'm\b", "i am"),
+            (r"\b([\w]+)'re\b", r"\1 are"),
+            (r"\b([\w]+)'ve\b", r"\1 have"),
+            (r"\b([\w]+)'ll\b", r"\1 will"),
+        )
+        for pattern, replacement in replacements:
+            text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+        return text
+
     @staticmethod
     def _normalize_text(text: str) -> str:
-        """Normalize text for WER comparison.
+        """Fully generic text normalizer for WER calculation across any book.
 
-        - Lowercase
-        - Remove punctuation
-        - Expand common numbers
-        - Collapse whitespace
+        Handles:
+          - OpenAI EnglishTextNormalizer (spelling variants, contractions, symbols, abbreviations)
+          - Dynamic cardinal & ordinal number expansion via num2words (e.g. 1st->first, 12->twelve, 1999->one thousand...)
+          - Punctuation stripping & whitespace collapsing
         """
-        text = text.lower()
+        if not text:
+            return ""
 
-        # Remove punctuation (keep apostrophes for contractions)
-        text = re.sub(r"[^\w\s']", " ", text)
+        # This deterministic baseline runs even when the optional Whisper
+        # package is absent (as it is in the low-resource CI environment).
+        text = WhisperValidator._expand_english_contractions(text)
 
-        # Collapse whitespace
+        # Step 1: Use OpenAI Whisper's official English normalizer if available
+        try:
+            from whisper.normalizers import EnglishTextNormalizer
+            if not hasattr(WhisperValidator, "_english_normalizer"):
+                WhisperValidator._english_normalizer = EnglishTextNormalizer()
+            text = WhisperValidator._english_normalizer(text)
+        except Exception:
+            text = text.lower()
+
+        # Step 2: Dynamically convert any remaining numbers/ordinals to words
+        try:
+            import num2words
+
+            def replace_ordinal(match):
+                num_str, suffix = match.group(1), match.group(2)
+                try:
+                    return " " + num2words.num2words(int(num_str), to="ordinal") + " "
+                except Exception:
+                    return match.group(0)
+
+            def replace_cardinal(match):
+                try:
+                    return " " + num2words.num2words(int(match.group(0))) + " "
+                except Exception:
+                    return match.group(0)
+
+            # Match ordinals first (e.g., 21st, 100th)
+            text = re.sub(r"\b(\d+)(st|nd|rd|th)\b", replace_ordinal, text, flags=re.IGNORECASE)
+            # Match cardinal numbers (e.g., 42, 1000)
+            text = re.sub(r"\b\d+\b", replace_cardinal, text)
+        except ImportError:
+            pass
+
+        # Step 3: Remove punctuation and collapse whitespace
+        text = re.sub(r"[^\w\s]", " ", text)
         text = re.sub(r"\s+", " ", text).strip()
 
         return text

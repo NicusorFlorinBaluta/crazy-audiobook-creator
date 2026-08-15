@@ -3,10 +3,20 @@ You are an expert audiobook director preparing a novel for multi-voice narration
 ## Instructions
 
 1. Read the following text carefully
-2. Identify ALL speaking characters (anyone who has dialogue)
+2. Identify ALL speaking entities (anyone or anything that actually has dialogue)
+   - Recognize straight/curly quotes, typographic single quotes, and em-dash dialogue
+   - Do not exclude an animal, ship, place, AI, or object merely because of its type
+   - Do not infer an entity's type or ability to speak from its name
+   - A named or personified place/object is not a speaking entity unless the
+     text explicitly attributes spoken dialogue to it; descriptions,
+     invocations, thoughts, and figurative personification do not count
+   - Animals that only make animal noises (e.g., squawking, barking, chirping) 
+     without human-intelligible spoken dialogue MUST NOT be included
 3. For each character, determine:
    - Their gender, approximate age, and key personality traits
    - A detailed voice description suitable for voice synthesis
+   - ACCURATELY count the number of spoken dialogue lines they have in this text
+   - Extract or invent a highly representative line of dialogue for their `test_sentence`. **CRITICAL: The sentence MUST be at least 15 words long.** For characters with very short lines, you must invent a longer sentence or combine multiple lines that perfectly captures their personality and tone.
 4. Also create a narrator voice that fits the book's genre and tone
 5. Output ONLY valid JSON — no explanation, no markdown code fences
 
@@ -39,17 +49,22 @@ The narrator voice should suit {genre} storytelling — authoritative but warm, 
       "name": "Narrator",
       "gender": "male|female",
       "age_range": "string",
+      "importance": "major",
       "personality_traits": ["trait1", "trait2"],
       "voice_description": "detailed voice description for TTS",
-      "speaking_style": "how the narrator typically speaks"
+      "speaking_style": "how the narrator typically speaks",
+      "test_sentence": "A highly representative sentence showcasing the narrator's pacing, tone, and style."
     }},
     "character_id": {{
       "name": "Character Display Name",
       "gender": "male|female|other",
       "age_range": "string",
+      "importance": "major|minor",
       "personality_traits": ["trait1", "trait2"],
       "voice_description": "detailed voice description for TTS",
-      "speaking_style": "how this character typically speaks"
+      "speaking_style": "how this character typically speaks",
+      "test_sentence": "A highly representative line of dialogue (extracted or invented) showcasing their personality and tone.",
+      "dialogue_count": 0
     }}
   }}
 }}

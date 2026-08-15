@@ -1,570 +1,267 @@
 # API Reference
 
-## Overview
+The application has two local FastAPI services:
 
-The pipeline uses two REST API servers:
-1. **Brain API** (Windows, port 8000) — Dashboard backend + pipeline orchestration
-2. **Voice API** (Ubuntu, port 8100) — TTS generation, validation, and mastering
+- Dashboard/Brain: `http://127.0.0.1:8000`
+- Voice: `http://127.0.0.1:8100`
 
-Both servers use FastAPI and communicate over the local network.
+Loopback and `dashboard.trusted_lan_cidrs` peers require no application token.
+Other peers must send the configured `X-API-Token`; WebSockets may use
+`?token=<value>`. Forwarded headers never grant LAN trust. The Voice `/health`
+route remains unauthenticated for readiness checks.
 
----
+FastAPI’s generated OpenAPI schema at `/docs` is the definitive field-level reference for a running version.
 
-## Voice API (Ubuntu — Port 8100)
+## Dashboard API
 
-The Voice API is the TTS server running on the Ubuntu machine. The Brain (Windows) calls these endpoints to generate audio.
+### Projects
 
-### Health Check
+| Method | Route | Purpose |
+|---|---|---|
+| `GET` | `/api/projects` | List project states |
+| `POST` | `/api/projects` | Upload an EPUB as multipart field `file` |
+| `GET` | `/api/projects/{project_id}` | Get stored state |
+| `DELETE` | `/api/projects/{project_id}` | Delete stopped project state, artifacts, and voice references |
+| `GET` | `/api/projects/{project_id}/status` | State plus per-chapter progress |
 
+Uploads must have an `.epub` suffix, remain under the configured compressed/expanded limits, and pass ZIP traversal/compression checks.
+
+### Pipeline control
+
+| Method | Route | Purpose |
+|---|---|---|
+| `POST` | `/api/projects/{project_id}/start` | Start/resume the project |
+| `POST` | `/api/projects/{project_id}/stop` | Immediately interrupt work and release app-owned services |
+| `POST` | `/api/projects/{project_id}/reset` | Reset to extracting, scripting, bootstrapping, voice_review, generating, validating, mastering, or exporting |
+| `POST` | `/api/projects/{project_id}/voice-review/approve` | Approve speaking voice cast and continue audio generation |
+| `POST` | `/api/projects/{project_id}/request-deploy` | Park at the next chapter boundary |
+| `POST` | `/api/projects/{project_id}/resume-deploy` | Release deployment parking |
+| `POST` | `/api/schedule` | Replace the schedule section |
+| `GET` | `/api/schedule` | Get working hours plus whether a window is open now |
+| `GET` | `/api/voice/health` | Report actual on-demand Voice state without starting it |
+
+Only one project pipeline may run at once. `stop` closes an active Ollama
+stream, requests Voice cancellation, terminates app-owned model services, and
+waits briefly for the worker to release the global lease. Starting another
+project performs the same interruption first. If lease release cannot be
+confirmed, the new run is refused instead of running concurrently.
+
+`POST /api/system/release-gpu` pauses active work, waits briefly for workers to
+exit, and unloads app-managed Ollama and Voice models. The Electron wrapper
+calls it before terminating the dashboard process.
+
+`POST /api/system/restart` launches the fixed project restart helper, then
+performs the same controlled cleanup and exits the API process. On Windows the
+independent `Crazy Audiobook Dashboard Restart` scheduled task (installed with
+the dashboard task) owns the handoff, so it survives termination of the old
+dashboard process. It does not execute caller-supplied commands. The Runtime &
+storage panel exposes this operation with confirmation and reconnects the Home
+Assistant view after the new process becomes ready.
+
+#### Reset to Stage (`POST /api/projects/{project_id}/reset`)
+Accepts `{"stage": "<stage_name>"}` where `<stage_name>` is one of 8 supported stages:
+- **`extracting`**: Rebuilds `book.json` from the preserved project `source.epub`, then clears downstream scripts, cast, segments, and masters. Legacy projects without a preserved source return `409` without deleting `book.json`.
+- **`scripting`**: Clears script JSONs and character cast, keeping extracted EPUB text. Forces fresh LLM character analysis.
+- **`bootstrapping`**: Clears `voice_cast.json`, marks reference generation as forced, and regenerates voice profiles on resume.
+- **`voice_review`**: Resets `voice_review_status` to `"pending"` and sets `active_stage = voice_review`, re-opening the Voice Review banner in the UI.
+- **`generating`**: Clears generated segment WAV files and resets `mastered_chapters = []`. Keeps script and voice cast intact.
+- **`validating`**: Preserves segment WAVs, changes the validation revision, removes segment/master manifests, and re-runs Whisper/speaker/audio checks without re-synthesizing unchanged lines.
+- **`mastering`**: Clears `mastered/` WAV files and `.m4b` export. Re-runs ffmpeg/sox chapter mastering.
+- **`exporting`**: Removes `.m4b` export file to re-run M4B packaging.
+
+### Chapter selection
+
+```http
+POST /api/projects/{project_id}/set-selection
+Content-Type: application/json
+
+{"chapters": [1, 2, 5]}
 ```
-GET /health
-```
 
-**Response**:
+- A nonempty array is a partial audio batch.
+- `{"chapters": null}` selects all chapters and permits a full export.
+- `[]`, zero/negative values, and out-of-range chapters return `422`.
+- Input is sorted and deduplicated.
+
+Analysis and scripting remain book-wide. Selection controls generation, mastering, and that run’s export.
+
+### Files and reports
+
+| Method | Route | Purpose |
+|---|---|---|
+| `GET` | `/api/projects/{project_id}/download` | Download the full M4B, or latest partial when no full file exists |
+| `GET` | `/api/projects/{project_id}/download/chapter/{number}` | Download a mastered chapter WAV |
+| `POST` | `/api/projects/{project_id}/export-partial` | Export currently mastered chapters |
+| `GET` | `/api/projects/{project_id}/script` | Get the book script |
+| `GET` | `/api/projects/{project_id}/characters` | Get the character registry |
+| `GET` | `/api/projects/{project_id}/voices` | List assignable voices and preview readiness |
+| `GET` | `/api/projects/{project_id}/voices/download-all` | Download all prepared character and narrator references as a ZIP |
+| `GET` | `/api/projects/{project_id}/voices/{voice_id}/preview` | Stream a reference-voice WAV |
+| `PATCH` | `/api/projects/{project_id}/characters/{character_id}/voice` | Reassign a character to a voice |
+| `POST` | `/api/projects/{project_id}/voices/{voice_id}/regenerate` | Redesign and validate one reference voice |
+| `POST` | `/api/projects/{project_id}/voices/{voice_id}/upload` | Import a recorded reference plus exact transcript |
+| `POST` | `/api/projects/{project_id}/voice-review/approve` | Approve a new project's cast and optionally continue |
+| `GET` | `/api/projects/{project_id}/quality` | Aggregate quality results |
+| `GET` | `/api/projects/{project_id}/logs` | Recent project log lines |
+| `GET` | `/api/projects/{project_id}/logs/stream` | SSE project log stream |
+| `POST` | `/api/projects/{project_id}/fetch-metadata` | Explicit Google Books lookup |
+| `POST` | `/api/projects/{project_id}/search-metadata` | Ranked manual Google Books title/author search |
+| `GET` | `/api/projects/{project_id}/metadata-candidate/cover` | Preview the cached matched cover |
+| `GET` | `/api/projects/{project_id}/cover` | Display the project's current cover |
+
+Project IDs and all resolved files are constrained beneath the project/workspace roots.
+
+Metadata lookup accepts JSON. `{"apply": false}` returns a ranked, validated
+candidate without changing the book; `{"apply": true, "replace_cover": false}`
+merges the reviewed description, ISBN, genre, year, and provider provenance.
+Manual search accepts `{"title": "...", "author": "..."}`. Passing the
+selected `provider_id` plus the search query back to `fetch-metadata` loads
+that exact volume for review rather than re-running automatic selection.
+Explicit apply also adopts the reviewed title/author and remuxes existing M4B
+packages with current tags and cover; audio and chapter streams are copied.
+Automatic enrichment does not replace EPUB title/author. Explicit human apply
+uses the reviewed identity and stores the source title/author as provenance.
+An existing cover is preserved unless `replace_cover` is explicitly true.
+`refresh` bypasses the query-specific cache. No match returns `404`;
+provider/network failure returns `502`.
+
+`GET /api/projects/{project_id}/download` names the attachment from the current
+book title. Applying details to a completed project atomically stream-copies
+each existing M4B with refreshed title, artist, album, genre, year,
+description, ISBN grouping, and cover while preserving chapter and audio
+streams. The response includes `refreshed_exports`.
+
+`GET /voices` returns a speaking-only cast. Non-speaking registry entries are
+reported only as an excluded count and cannot receive voice assignments. Voice
+previews are read-only and available during any stage once the reference
+exists. Reassignment, redesign, and upload require the pipeline to be stopped
+or parked at a safe boundary. A change invalidates only dependent chapters.
+
+When narration exists, `narrator_choice` contains the ready state, preview URL,
+and selected ID for the male and female narrator candidates. Assign a candidate
+with the normal character voice endpoint using `character_id = narrator`.
+
+The upload route accepts multipart `file` and `transcript`. The transcript must
+exactly match the clean single-speaker recording. WAV, FLAC, MP3, M4A, AAC, and
+OGG are accepted; FFmpeg normalizes audio to mono 24 kHz PCM WAV after duration,
+silence, and clipping checks. Before the existing reference is replaced, the
+managed Voice validator compares Whisper's transcription with the supplied
+text and rejects material mismatches. The first upload check may therefore
+take a minute while the models start; services started only for the check are
+released afterward.
+
+New projects stop at `voice_review` once bootstrap succeeds. Approval accepts
+`{"continue_pipeline": true}`. This gate is recorded once, so later partial
+chapter batches do not wait for approval again.
+
+### Dashboard WebSocket
+
+`WS /ws/updates` carries pipeline progress and error messages for the browser dashboard.
+
+## Voice API
+
+The Brain normally calls these routes. Direct callers must use project-relative paths accepted by the server; arbitrary filesystem paths are rejected.
+
+### Health and lifecycle
+
+| Method | Route | Purpose |
+|---|---|---|
+| `GET` | `/health` | Service/model/GPU health |
+| `POST` | `/cancel/{project_id}` | Mark active project generation cancelled |
+| `POST` | `/unload` | Unload models after the active GPU operation |
+| `WS` | `/ws/progress` | Generation progress stream |
+
+### Voice references
+
+| Method | Route | Purpose |
+|---|---|---|
+| `POST` | `/voices/bootstrap` | Design/validate/register project voices |
+| `POST` | `/voices/regenerate` | Force one reference voice to change |
+| `GET` | `/voices/{project_id}` | List registered project voices |
+
+Bootstrap request:
+
 ```json
 {
-  "status": "ok",
-  "gpu": "NVIDIA GeForce RTX 2080 Super",
-  "vram_total_gb": 8.0,
-  "vram_used_gb": 6.8,
-  "model_loaded": "Qwen3-TTS-1.7B",
-  "uptime_seconds": 3621
-}
-```
-
----
-
-### Bootstrap Character Voices
-
-Generate voice reference clips for all characters in a project.
-
-```
-POST /voices/bootstrap
-```
-
-**Request Body**:
-```json
-{
-  "project_id": "name-of-the-wind",
+  "project_id": "example",
   "characters": {
     "narrator": {
+      "id": "narrator",
       "name": "Narrator",
-      "gender": "male",
-      "voice_description": "Warm mature male baritone, early 40s, measured storytelling cadence..."
-    },
-    "kvothe": {
-      "name": "Kvothe",
-      "gender": "male",
-      "voice_description": "Young male tenor, late teens. Quick and energetic..."
+      "gender": "other",
+      "voice_description": "A clear, restrained storytelling voice"
     }
-  }
+  },
+  "force_regenerate": false
 }
 ```
 
-**Response**:
+### Generation
+
+| Method | Route | Purpose |
+|---|---|---|
+| `POST` | `/generate/line` | Generate one line |
+| `POST` | `/generate/chapter` | Generate, validate, and retry a complete script chapter |
+| `POST` | `/validate` | Validate one existing workspace/voice-library audio file |
+
+Chapter generation accepts:
+
 ```json
 {
-  "status": "success",
-  "project_id": "name-of-the-wind",
-  "voices_generated": {
-    "narrator": {
-      "file": "voice_library/name-of-the-wind/narrator.wav",
-      "duration_seconds": 10.2,
-      "sample_rate": 24000
-    },
-    "kvothe": {
-      "file": "voice_library/name-of-the-wind/kvothe.wav",
-      "duration_seconds": 10.1,
-      "sample_rate": 24000
-    }
-  }
-}
-```
-
-**Notes**:
-- Each voice clip is ~10 seconds of neutral speech
-- Clips are saved to the voice library and reused for all subsequent generation
-- If a voice already exists for a character, it is NOT regenerated (idempotent)
-- To force regeneration, use `"force_regenerate": true`
-
----
-
-### Generate Single Line
-
-Generate audio for a single script line.
-
-```
-POST /generate/line
-```
-
-**Request Body**:
-```json
-{
-  "project_id": "name-of-the-wind",
-  "line": {
-    "line_id": "ch01_005",
-    "speaker": "kvothe_old",
-    "text": "You should be careful what questions you ask, Chronicler.",
-    "emotion": "warning, quiet intensity, measured",
-    "speed": 0.9
-  }
-}
-```
-
-**Response**:
-```json
-{
-  "status": "success",
-  "line_id": "ch01_005",
-  "audio_file": "workspace/name-of-the-wind/segments/ch01_005.wav",
-  "duration_seconds": 3.7,
-  "sample_rate": 24000
-}
-```
-
----
-
-### Generate Full Chapter
-
-Generate audio for an entire chapter. This is the primary endpoint for batch generation.
-
-```
-POST /generate/chapter
-```
-
-**Request Body**:
-```json
-{
-  "project_id": "name-of-the-wind",
-  "chapter_number": 1,
-  "lines": [
-    {
-      "line_id": "ch01_001",
-      "speaker": "narrator",
-      "text": "It was night again...",
-      "emotion": "contemplative, somber",
-      "speed": 0.85,
-      "pause_before_ms": 1000,
-      "pause_after_ms": 1200
-    }
-  ],
+  "project_id": "example",
+  "chapter_number": 3,
+  "lines": [],
   "validate": true,
   "auto_retry": true,
-  "max_retries": 3
+  "max_retries": 3,
+  "validation_terms": ["Tuka"],
+  "language": "en",
+  "validation_revision": ""
 }
 ```
 
-**Response** (returns after ALL lines are generated):
-```json
-{
-  "status": "success",
-  "chapter_number": 1,
-  "total_lines": 247,
-  "generated": 247,
-  "failed_validation": 2,
-  "retried": 5,
-  "total_duration_seconds": 1834.5,
-  "quality_report": {
-    "average_wer": 0.018,
-    "worst_wer": 0.067,
-    "flagged_lines": ["ch01_103", "ch01_198"],
-    "artifact_detections": 0
-  },
-  "segment_files": "workspace/name-of-the-wind/segments/"
-}
-```
-
-**Progress Updates** (via WebSocket):
-During generation, progress updates are streamed via WebSocket at `ws://UBUNTU:8100/ws/progress`:
-```json
-{
-  "project_id": "name-of-the-wind",
-  "chapter": 1,
-  "line_id": "ch01_045",
-  "progress": 45,
-  "total": 247,
-  "percent": 18.2,
-  "eta_seconds": 1230,
-  "current_speaker": "narrator",
-  "current_emotion": "tense, urgent"
-}
-```
-
----
-
-### Validate Audio Segment
-
-Manually validate a specific audio segment.
-
-```
-POST /validate
-```
-
-**Request Body**:
-```json
-{
-  "audio_file": "workspace/name-of-the-wind/segments/ch01_005.wav",
-  "expected_text": "You should be careful what questions you ask, Chronicler."
-}
-```
-
-**Response**:
-```json
-{
-  "status": "pass",
-  "wer": 0.0,
-  "transcribed_text": "you should be careful what questions you ask chronicler",
-  "expected_text_normalized": "you should be careful what questions you ask chronicler",
-  "duration_seconds": 3.7,
-  "expected_duration_seconds": 3.5,
-  "duration_deviation": 0.057,
-  "peak_dbfs": -3.2,
-  "noise_floor_db": -62.1,
-  "clipping_detected": false,
-  "quality_score": 0.97
-}
-```
-
----
-
-### Master Chapter Audio
-
-Assemble and master all segments for a chapter.
-
-```
-POST /master/chapter
-```
-
-**Request Body**:
-```json
-{
-  "project_id": "name-of-the-wind",
-  "chapter_number": 1,
-  "segments": [
-    {
-      "line_id": "ch01_001",
-      "file": "workspace/name-of-the-wind/segments/ch01_001.wav",
-      "pause_before_ms": 1000,
-      "pause_after_ms": 1200
-    }
-  ],
-  "mastering_config": {
-    "target_lufs": -19,
-    "peak_limit_dbfs": -1.0,
-    "crossfade_ms": 30,
-    "output_sample_rate": 44100
-  }
-}
-```
-
-**Response**:
-```json
-{
-  "status": "success",
-  "chapter_number": 1,
-  "output_file": "workspace/name-of-the-wind/chapters/chapter_001.wav",
-  "duration_seconds": 1834.5,
-  "lufs": -19.1,
-  "peak_dbfs": -1.2,
-  "file_size_mb": 309.4
-}
-```
-
----
-
-### Export M4B Audiobook
-
-Package all mastered chapters into a final M4B file.
-
-```
-POST /export/m4b
-```
-
-**Request Body**:
-```json
-{
-  "project_id": "name-of-the-wind",
-  "metadata": {
-    "title": "The Name of the Wind",
-    "author": "Patrick Rothfuss",
-    "narrator": "AI Generated",
-    "genre": "Fantasy",
-    "year": "2007",
-    "description": "A multi-voice audiobook generated by Crazy Audiobook Creator"
-  },
-  "chapters": [
-    {"number": 1, "title": "A Place for Demons", "file": "chapters/chapter_001.wav"},
-    {"number": 2, "title": "A Beautiful Day", "file": "chapters/chapter_002.wav"}
-  ],
-  "cover_art": "workspace/name-of-the-wind/cover.jpg",
-  "output_config": {
-    "codec": "aac",
-    "bitrate": "128k",
-    "channels": 1
-  }
-}
-```
-
-**Response**:
-```json
-{
-  "status": "success",
-  "output_file": "workspace/name-of-the-wind/output/name-of-the-wind.m4b",
-  "total_duration": "10:34:21",
-  "total_chapters": 92,
-  "file_size_mb": 587.3,
-  "download_url": "/download/name-of-the-wind/output/name-of-the-wind.m4b"
-}
-```
-
----
-
-### Download File
-
-Download any file from the Ubuntu workspace.
-
-```
-GET /download/{project_id}/{path}
-```
-
-**Example**:
-```
-GET /download/name-of-the-wind/output/name-of-the-wind.m4b
-```
-
-Returns the file as a binary stream with appropriate Content-Type header.
-
----
-
-### List Voice Library
-
-```
-GET /voices/{project_id}
-```
-
-**Response**:
-```json
-{
-  "project_id": "name-of-the-wind",
-  "voices": [
-    {
-      "character_id": "narrator",
-      "name": "Narrator",
-      "file": "voice_library/name-of-the-wind/narrator.wav",
-      "duration_seconds": 10.2,
-      "created_at": "2026-07-13T20:00:00Z"
-    }
-  ]
-}
-```
-
----
-
-### Regenerate Voice
-
-Force-regenerate a character's voice reference clip.
-
-```
-POST /voices/regenerate
-```
-
-**Request Body**:
-```json
-{
-  "project_id": "name-of-the-wind",
-  "character_id": "kvothe",
-  "voice_description": "Updated voice description if you want to change it"
-}
-```
-
----
-
-## Brain API (Windows — Port 8000)
-
-The Brain API serves the web dashboard and orchestrates the pipeline.
-
-### Dashboard Endpoints
-
-```
-GET /                           → Dashboard home page (HTML)
-GET /api/projects               → List all projects
-POST /api/projects              → Create new project (upload EPUB)
-GET /api/projects/{id}          → Get project details
-GET /api/projects/{id}/script   → Get generated script
-GET /api/projects/{id}/quality  → Get quality report
-POST /api/projects/{id}/start   → Start pipeline execution
-POST /api/projects/{id}/stop    → Stop pipeline execution
-POST /api/projects/{id}/reset   → Reset pipeline to a specific stage
-GET /api/projects/{id}/download → Download the final generated audiobook (M4B)
-GET /api/projects/{id}/status   → Get pipeline status
-POST /api/projects/{id}/retry/{line_id}  → Retry a specific line
-```
-
-### Create Project
-
-```
-POST /api/projects
-Content-Type: multipart/form-data
-```
-
-**Form Fields**:
-- `file`: EPUB file upload
-- `title`: Optional title override
-- `author`: Optional author override
-
-**Response**:
-```json
-{
-  "project_id": "name-of-the-wind",
-  "title": "The Name of the Wind",
-  "author": "Patrick Rothfuss",
-  "chapters_detected": 92,
-  "total_words": 187000,
-  "estimated_audio_hours": 10.5,
-  "estimated_generation_hours": 8.2,
-  "status": "created"
-}
-```
-
-### Pipeline Status
-
-```
-GET /api/projects/{id}/status
-```
-
-**Response**:
-```json
-{
-  "project_id": "name-of-the-wind",
-  "status": "generating",
-  "stage": "tts_generation",
-  "current_chapter": 15,
-  "total_chapters": 92,
-  "current_line": 247,
-  "total_lines": 3850,
-  "chapters_completed": 14,
-  "lines_generated": 2156,
-  "lines_failed": 3,
-  "average_wer": 0.021,
-  "elapsed_seconds": 14400,
-  "eta_seconds": 28800,
-  "started_at": "2026-07-13T20:00:00Z"
-}
-```
-
-### Reset Pipeline
-
-Reset a project to a specific pipeline stage, destroying progress in subsequent stages.
-
-```
-POST /api/projects/{id}/reset
-Content-Type: application/json
-```
-
-**Request Body**:
-```json
-{
-  "stage": "bootstrapping"
-}
-```
-
-### Download Audiobook
-
-Download the final M4B audiobook file. Only valid if the pipeline has reached the `complete` stage.
-
-```
-GET /api/projects/{id}/download
-```
-
-Returns the `.m4b` file as a binary stream.
-
-### WebSocket — Real-Time Updates
-
-```
-ws://localhost:8000/ws/updates
-```
-
-The dashboard connects to this WebSocket for real-time progress. The Brain server proxies updates from the Ubuntu machine.
-
-**Message Types**:
-```json
-{"type": "progress", "chapter": 15, "line": 247, "total": 3850, "percent": 63.4}
-{"type": "quality", "line_id": "ch15_032", "wer": 0.034, "status": "pass"}
-{"type": "quality", "line_id": "ch15_045", "wer": 0.089, "status": "fail", "retrying": true}
-{"type": "chapter_complete", "chapter": 15, "duration_seconds": 1834}
-{"type": "pipeline_complete", "total_duration": "10:34:21", "file_size_mb": 587}
-{"type": "error", "message": "Ubuntu TTS server unreachable", "retrying_in": 60}
-```
-
----
-
-## Data Models (Shared)
-
-These Pydantic models are shared between Brain and Voice:
-
-### Character
-```python
-class Character(BaseModel):
-    id: str                          # "narrator", "kvothe", etc.
-    name: str                        # Display name
-    gender: Literal["male", "female", "other"]
-    age_range: str                   # "40s", "late teens"
-    personality_traits: list[str]
-    voice_description: str           # For TTS Voice Design
-    speaking_style: str
-    discovered_in_pass2: bool = False
-```
-
-### ScriptLine
-```python
-class ScriptLine(BaseModel):
-    line_id: str                     # "ch01_001"
-    speaker: str                     # Character ID
-    text: str                        # Text to speak
-    emotion: str                     # "contemplative, somber"
-    speed: float = 1.0               # 0.8 - 1.2
-    pause_before_ms: int = 0         # 0 - 2000
-    pause_after_ms: int = 500        # 0 - 2000
-```
-
-### Chapter
-```python
-class Chapter(BaseModel):
-    number: int
-    title: str
-    summary: str                     # For continuity with next chapter
-    lines: list[ScriptLine]
-```
-
-### QualityResult
-```python
-class QualityResult(BaseModel):
-    line_id: str
-    status: Literal["pass", "fail", "flagged"]
-    wer: float
-    transcribed_text: str
-    duration_seconds: float
-    expected_duration_seconds: float
-    peak_dbfs: float
-    noise_floor_db: float
-    clipping_detected: bool
-    quality_score: float             # 0.0 - 1.0
-    attempt: int                     # Which retry attempt
-```
-
-### ProjectStatus
-```python
-class ProjectStatus(BaseModel):
-    project_id: str
-    status: Literal["created", "extracting", "scripting", "bootstrapping",
-                     "generating", "mastering", "exporting", "complete", "error"]
-    current_chapter: int | None
-    total_chapters: int
-    current_line: int | None
-    total_lines: int
-    lines_generated: int
-    lines_failed: int
-    average_wer: float
-    elapsed_seconds: float
-    eta_seconds: float | None
-```
+`POST /generate/chapter` returns `application/x-ndjson`. Each line is an object with `type = progress`, `result`, or `error`. Progress data includes `phase` (`synthesis` or `validation`), `line_id`, `completed`, `total`, `percent`, `cache_hit`, and `attempt`. A client disconnect cooperatively cancels the run; a second overlapping request for the same project returns `409`.
+
+The terminal result includes `generated_line_ids`, `failed_line_ids`, and every `quality_results` attempt. `validation_terms` comes from character and pronunciation dictionaries and only scopes fuzzy fantasy-name matching. Success requires an exact one-to-one match with the request’s unique script line IDs. A partial/misaligned response is not a successful chapter.
+
+### Mastering and export
+
+| Method | Route | Purpose |
+|---|---|---|
+| `POST` | `/master/chapter` | Assemble exact segment inputs, announce the title, and master a chapter WAV |
+| `POST` | `/export/m4b` | Package the supplied mastered chapters |
+| `GET` | `/download/{project_id}/{path}` | Download a file beneath that project workspace |
+
+Mastering fails on any missing, empty, or unreadable expected segment. Export fails on missing/uninspectable chapter audio. `output_name` is sanitized to a filename and lets partial exports avoid overwriting the full-book output.
+
+## Error semantics
+
+- `400` / `422`: invalid request, unsafe path, invalid selection, or malformed upload
+- `401`: token missing or incorrect
+- `404`: project or artifact not found
+- `409`: already running, cancellation, or conflicting GPU lifecycle action
+- `500`: generation, validation, mastering, or export failure
+- `503`: service/model unavailable
+
+Clients should treat only an explicit success response with complete artifact IDs as completion; HTTP success plus a partial line set is not sufficient.
+
+## Diagnostics, performance, and review
+
+| Method | Route | Purpose |
+|---|---|---|
+| `GET` | `/api/system/preflight` | Read-only effective runtime/backend compatibility report; does not load models |
+| `GET` | `/api/projects/{id}/metrics` | Versioned, cache-aware performance summary (`?format=csv` downloads chapter rows) |
+| `GET` | `/api/projects/{id}/storage` | Storage categories plus an exact safe-cleanup preview and confirmation token |
+| `POST` | `/api/projects/{id}/storage/cleanup` | Remove only the unchanged set of previewed retry/temp files |
+| `GET` | `/api/projects/{id}/support-bundle` | Redacted configs, state, metrics, preflight, and bounded log tails; no audio |
+| `GET` | `/api/projects/{id}/quality/review` | Join warnings and low-confidence/rejected segment audio with saved dispositions |
+| `POST` | `/api/projects/{id}/quality/review` | Save a review disposition; segment `regenerate` safely invalidates only that WAV and its dependent chapter outputs |
+| `GET` | `/api/projects/{id}/segments/{line_id}/audio` | Stream one segment for local quality review |
+| `GET` | `/api/projects/{id}/external-validation/status` | Read Gemini API/browser readiness and persistent-chat purposes without secrets or URLs |
+| `GET` | `/api/projects/{id}/voices/{voice_id}/download` | Download a reusable reference WAV named with its book and character |
+
+Quality attempts include `selected`. This identifies the artifact that was
+actually retained; it is not necessarily the numerically latest attempt.
+Retry counts still describe every attempted retry.
+Selected attempts also expose the local/final confidence, external provider,
+model, decision, confidence history, and whether manual review is required.

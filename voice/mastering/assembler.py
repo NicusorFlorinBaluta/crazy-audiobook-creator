@@ -38,34 +38,63 @@ class AudioAssembler:
         self,
         segments: list,
         workspace: Path,
+        announcement_audio: np.ndarray | None = None,
     ) -> dict[str, Any]:
         """Assemble multiple segments into a single chapter audio.
 
         Args:
             segments: List of MasterSegmentInfo objects with file paths and pause info.
             workspace: Base workspace directory.
+            announcement_audio: Optional Narrator chapter announcement audio numpy array.
 
         Returns:
             Dict with 'audio' (numpy array) and 'sample_rate'.
         """
-        if not segments:
+        if not segments and announcement_audio is None:
             return {
                 "audio": np.array([], dtype=np.float32),
                 "sample_rate": self.sample_rate,
             }
 
-        logger.info("Assembling %d segments...", len(segments))
+        logger.info("Assembling %d segments (announcement=%s)...", len(segments), announcement_audio is not None)
 
         parts: list[np.ndarray] = []
+        join_diagnostics: list[dict[str, Any]] = []
 
-        # Chapter start silence
+        # Chapter start silence (1.0s standard audiobook start)
         parts.append(self._silence(self.chapter_start_silence_ms))
 
+        # Add Narrator Chapter Announcement if provided
+        if announcement_audio is not None and len(announcement_audio) > 0:
+            ann_audio = announcement_audio.astype(np.float32)
+            if announcement_audio.ndim > 1:
+                ann_audio = ann_audio.mean(axis=1)
+            parts.append(ann_audio)
+            # 1.5s pause after chapter announcement before body text
+            parts.append(self._silence(1500))
+
+        previous_pause_after = 0
+        previous_was_audio = False
+        previous_audio: np.ndarray | None = None
+        previous_line_id = ""
+        previous_utterance_group_id: str | None = None
         for i, segment in enumerate(segments):
-            # Insert pre-segment silence
+            utterance_group_id = getattr(segment, "utterance_group_id", None)
+            same_utterance_group = (
+                utterance_group_id is not None
+                and utterance_group_id == previous_utterance_group_id
+            )
+            # One timing owner: adjacent pause directives are combined with
+            # max(), never added together. Chapter edges are owned here.
             pause_before = getattr(segment, "pause_before_ms", 0)
-            if pause_before > 0:
-                parts.append(self._silence(pause_before))
+            gap_before = (
+                0
+                if i == 0 or same_utterance_group
+                else max(previous_pause_after, pause_before)
+            )
+            if gap_before > 0:
+                parts.append(self._silence(gap_before))
+                previous_was_audio = False
 
             # Load audio segment
             audio_path = Path(segment.file)
@@ -73,10 +102,11 @@ class AudioAssembler:
                 audio_path = workspace / segment.file
 
             if not audio_path.exists():
-                logger.warning("Segment file not found: %s", audio_path)
-                continue
+                raise FileNotFoundError(f"Segment file not found: {audio_path}")
 
             audio, sr = sf.read(str(audio_path))
+            if audio.size == 0:
+                raise ValueError(f"Segment file is empty: {audio_path}")
             if audio.ndim > 1:
                 audio = audio.mean(axis=1)
 
@@ -89,20 +119,44 @@ class AudioAssembler:
                     logger.warning("librosa not available for resampling")
 
             audio = audio.astype(np.float32)
+            if previous_audio is not None:
+                diagnostic = self._join_diagnostic(
+                    previous_line_id=previous_line_id,
+                    current_line_id=str(getattr(segment, "line_id", i)),
+                    previous=previous_audio,
+                    current=audio,
+                    gap_ms=gap_before,
+                )
+                diagnostic["utterance_group_id"] = utterance_group_id
+                diagnostic["crossfade_applied"] = bool(
+                    self.crossfade_ms > 0
+                    and previous_was_audio
+                    and not same_utterance_group
+                )
+                join_diagnostics.append(diagnostic)
 
             # Cross-fade with previous segment
-            if self.crossfade_ms > 0 and len(parts) > 0 and len(parts[-1]) > 0:
+            if (
+                self.crossfade_ms > 0
+                and previous_was_audio
+                and not same_utterance_group
+                and len(parts) > 0
+                and len(parts[-1]) > 0
+            ):
                 audio = self._apply_crossfade(parts[-1], audio)
 
             parts.append(audio)
+            previous_was_audio = True
+            previous_pause_after = getattr(segment, "pause_after_ms", 500)
+            previous_audio = audio.copy()
+            previous_line_id = str(getattr(segment, "line_id", i))
+            previous_utterance_group_id = utterance_group_id
 
-            # Insert post-segment silence
-            pause_after = getattr(segment, "pause_after_ms", 500)
-            if pause_after > 0:
-                parts.append(self._silence(pause_after))
-
-        # Chapter end silence
-        parts.append(self._silence(self.chapter_end_silence_ms))
+        # The final script pause and chapter outro are alternatives, not
+        # cumulative delays.
+        final_pause = max(previous_pause_after, self.chapter_end_silence_ms)
+        if final_pause > 0:
+            parts.append(self._silence(final_pause))
 
         # Concatenate all parts
         assembled = np.concatenate([p for p in parts if len(p) > 0])
@@ -113,6 +167,51 @@ class AudioAssembler:
         return {
             "audio": assembled,
             "sample_rate": self.sample_rate,
+            "join_diagnostics": join_diagnostics,
+            "join_warnings": sum(
+                item["status"] == "warning" for item in join_diagnostics
+            ),
+        }
+
+    @staticmethod
+    def _join_diagnostic(
+        *,
+        previous_line_id: str,
+        current_line_id: str,
+        previous: np.ndarray,
+        current: np.ndarray,
+        gap_ms: int,
+    ) -> dict[str, Any]:
+        """Measure one boundary without changing or rejecting the audio."""
+        def rms_dbfs(audio: np.ndarray) -> float:
+            if audio.size == 0:
+                return -100.0
+            rms = float(np.sqrt(np.mean(np.square(audio.astype(np.float64)))))
+            return float(20 * np.log10(rms)) if rms > 0 else -100.0
+
+        previous_rms = rms_dbfs(previous)
+        current_rms = rms_dbfs(current)
+        loudness_delta = abs(previous_rms - current_rms)
+        boundary_jump = (
+            abs(float(current[0]) - float(previous[-1]))
+            if previous.size and current.size and gap_ms == 0
+            else 0.0
+        )
+        reasons: list[str] = []
+        if loudness_delta > 8.0:
+            reasons.append("segment_loudness_delta")
+        if gap_ms == 0 and boundary_jump > 0.15:
+            reasons.append("abrupt_zero_gap_boundary")
+        return {
+            "previous_line_id": previous_line_id,
+            "current_line_id": current_line_id,
+            "gap_ms": int(gap_ms),
+            "previous_rms_dbfs": previous_rms,
+            "current_rms_dbfs": current_rms,
+            "loudness_delta_db": loudness_delta,
+            "zero_gap_sample_jump": boundary_jump,
+            "status": "warning" if reasons else "clean",
+            "reasons": reasons,
         }
 
     def _silence(self, ms: int) -> np.ndarray:

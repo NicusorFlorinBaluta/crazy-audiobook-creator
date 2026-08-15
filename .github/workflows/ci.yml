@@ -1,0 +1,51 @@
+name: low-resource-ci
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install CPU test dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -r brain/requirements.txt pydub pyloudnorm librosa jiwer
+      - name: Python unit tests
+        run: python -m unittest discover -s tests -v
+      - name: Python compilation
+        run: python -m compileall -q brain voice shared scripts
+      - name: JavaScript syntax
+        shell: pwsh
+        run: |
+          node --check brain/dashboard/frontend/js/app.js
+          node --check brain/dashboard/frontend/js/pipeline.js
+          node --check brain/dashboard/frontend/js/script-viewer.js
+          node --check desktop/main.js
+      - name: Local documentation links
+        run: python scripts/check_markdown_links.py
+
+  model-gates:
+    if: ${{ false }}
+    runs-on: self-hosted
+    steps:
+      - run: echo "Enable manually on the compatible AMD workstation during an approved live-test window."

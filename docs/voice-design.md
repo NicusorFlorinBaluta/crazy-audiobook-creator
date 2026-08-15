@@ -1,241 +1,230 @@
-# Voice Design & Character Voices
+# Voice Design and Speaking Cast
 
-## Overview
+The voice path has two separate jobs:
 
-This document explains how the pipeline creates unique, consistent voices for each character in a fantasy novel using Qwen3-TTS's Voice Design feature.
+1. **Qwen3-TTS VoiceDesign** creates a reusable reference from a compiled
+   natural-language instruction and speaks a known test sentence.
+2. **Qwen3-TTS Base** clones that saved reference for each script line.
 
----
+Keeping these roles separate matters: clone mode accepts reference audio and
+its transcript, but does not accept a free-form acting instruction for every
+utterance.
 
-## The Voice Design → Clone Workflow
+## Per-character test sentences
 
-This is the core technique that ensures every character sounds the same throughout a 10+ hour audiobook.
+During character analysis the LLM is asked to invent a **unique, natural
+15–25 word sentence** for each character — a narrator-flavoured statement for
+the narrator and a line of in-character dialogue for everyone else. The
+sentence is stored on the `Character` model as `test_sentence`.
 
-```
-Step 1: LLM Analyzes Book
-        ↓
-Step 2: LLM Writes Voice Description per Character
-        "Young male tenor, late teens, quick and clever..."
-        ↓
-Step 3: Qwen3-TTS VoiceDesign Mode
-        Generates a 10-second reference clip (.wav)
-        ↓
-Step 4: Reference Clip Saved to Voice Library
-        voice_library/project_name/kvothe.wav
-        ↓
-Step 5: All Future Lines by This Character
-        Use the saved .wav as voice reference
-        Qwen3-TTS clones from this reference
-        Emotion varies per line, voice stays constant
-```
+At bootstrap time the pipeline prefers enough exact dialogue from the completed
+script to form a useful reference. It uses or augments the analyzed
+`test_sentence` when dialogue is short, and `VoiceDesigner._build_test_sentence`
+adds a gender-keyed global fallback for a short minor-character reference. The
+final exact text and selection-policy version are included in the design
+fingerprint. The sentence has two roles:
 
-### Why Not Just Use VoiceDesign Every Time?
+- It is spoken by the VoiceDesign model to produce the reference clip, giving
+  the model a meaningful, character-specific utterance rather than an identical
+  line shared across the whole cast.
+- It becomes the `ref_text` stored in `voices.json` and passed back to the
+  Base model for Full-ICL cloning during chapter generation.
 
-VoiceDesign is **non-deterministic**. If you call it twice with the same description, you get slightly different voices. Over 3,000+ segments, these tiny differences accumulate into an inconsistent, unsettling listening experience.
+**Why this matters**: identical reference sentences across characters produce
+acoustically similar speaker embeddings and make the cast distinctness check
+almost meaningless. Character-specific sentences give each voice a different
+phoneme distribution and intonation pattern, improving acoustic separation
+and the usefulness of the cast-pair diagnostic.
 
-By generating ONCE and cloning from that saved reference, every line sounds like the same "person" — just with different emotions, speed, and intensity. Exactly like a real voice actor.
+## Analysis registry versus speaking cast
 
----
+The book-wide analysis registry deliberately retains potentially relevant
+people, groups, creatures, and named entities. Casting is narrower: only
+registry IDs that own at least one line in the completed book-wide script
+receive a voice assignment or profile.
 
-## Writing Effective Voice Descriptions
+A speaking entity belongs in the cast whether it is human, animal, divine,
+supernatural, artificial, or personified. A named entity with no spoken lines
+does not receive a voice.
 
-The LLM generates voice descriptions during Pass 1, but understanding what makes a good description helps you troubleshoot or override.
+The final design instruction is compiled from the analyzed description plus
+explicit gender and age metadata. Contradictory register terms are repaired
+(for example, a female character described as a baritone becomes a contralto),
+biographical descriptions receive audible pitch/resonance/pacing guidance, and
+near-duplicate profiles receive deterministic contrasting directions.
 
-### Anatomy of a Good Description
+### Voice Similarity & Acoustic Embeddings
+- **Boilerplate Filtering**: Text token similarity comparison (`_token_similarity`) strips out common prompt template boilerplate words (`"clearly adult speaker"`, `"maintain vocal identity..."`) to prevent false similarity warnings between distinct character prompts.
+- **Acoustic Speaker Embeddings**: cast diagnostics primarily use the Qwen speaker encoder. `compute_audio_similarity` provides a model-independent 514-value vector formed from the mean and standard deviation of a normalized 257-bin log spectrogram. Cosine distance compares actual audio rather than prompt wording.
 
-```
-"A warm, mature male baritone, early 40s, with a measured 
-storytelling cadence. Rich and clear, slight British RP 
-pronunciation. Natural gravitas without being overly dramatic."
-```
+## Voice cap and sharing
 
-**Key dimensions**:
-1. **Gender & Age**: "young female, early 20s" or "elderly male, 70s"
-2. **Pitch/Register**: "deep baritone", "high soprano", "medium tenor"
-3. **Pace/Rhythm**: "measured and deliberate", "quick and energetic", "slow and ponderous"
-4. **Timbre/Quality**: "gravelly", "silky smooth", "raspy", "bell-like clarity"
-5. **Accent/Pronunciation**: "British RP", "American neutral", "slight roughness"
-6. **Emotional Baseline**: "warm and kind", "cold and calculating", "nervous energy"
+`script.max_unique_voices` limits generated reference voices, not character
+identities. Important speakers receive their own reference. Lower-dialogue
+characters can point to a stable compatible voice through `voice_id`.
 
-### Descriptions by Fantasy Archetype
+Scripts retain the real speaker ID, so attribution and later reassignment
+remain possible. Generation resolves the assigned `voice_id` without merging
+or deleting script lines.
 
-| Archetype | Example Description |
-|-----------|-------------------|
-| **Wise Mentor** | "Deep male baritone, 60s, slow and deliberate with gravitas. Warm but authoritative, like an experienced professor. Clear enunciation, measured pauses." |
-| **Young Hero** | "Male tenor, late teens, energetic and curious. Quick delivery that speeds up when excited. Occasionally vulnerable, voice cracking with emotion." |
-| **Mysterious Sorceress** | "Female contralto, ageless, low and melodic. Unhurried, each word chosen carefully. A hint of amusement in the undertones, as if she knows secrets." |
-| **Gruff Warrior** | "Male bass, 40s, rough and gravelly. Clipped sentences, impatient delivery. Speaks as if every word costs energy. No-nonsense." |
-| **Noble Queen** | "Female mezzo-soprano, 40s, composed and regal. Precise pronunciation, controlled pace. Warmth underneath formality. Commands without raising voice." |
-| **Comic Relief** | "Male tenor, 30s, animated and expressive. Fast-talking with infectious energy. Dramatic pauses for comedic effect. Slightly higher pitch when excited." |
-| **Dark Villain** | "Male low baritone, age indeterminate, smooth and calculated. Quietly menacing — never needs to shout. Savors words like fine wine. Slight sibilance." |
-| **Innocent Child** | "Female soprano, 10-12, bright and clear. Earnest delivery with occasional breathlessness. Simple sentence patterns, pure and unguarded." |
+## Bootstrap and one-time review
 
-### What NOT to Include
+For each unique voice actually assigned to a speaker (plus the two explicit
+male/female narrator candidates shown at first-project review):
 
-- ❌ Real person names: "sounds like Morgan Freeman" (use archetypes instead)
-- ❌ Technical jargon: "formant frequency at 500Hz" (the model doesn't understand this)
-- ❌ Negative descriptions: "doesn't sound old" (describe what it DOES sound like)
-- ❌ Extremely long descriptions: Keep under 50 words
+1. Build `voice_cast.json` from completed scripts.
+2. Compile and lint the design direction.
+3. Start the loopback-only VoiceDesign helper.
+4. Generate and atomically save a known reference sentence.
+5. Stop VoiceDesign to release GPU memory.
+6. Transcribe the WAV with Whisper and compare it with that sentence.
+7. Validate every exposed candidate and register only references within the bootstrap WER limit. A failed optional alternative is discarded without invalidating a good canonical candidate.
+8. Pause a new project for one manual preview/approval step.
 
----
+At voice review, the selected A/B option is stated explicitly. Applying an
+option shows an in-progress state and a success or failure notification.
+Regeneration replaces only the currently selected option; the button names
+that option before the destructive replacement. Switching options resets the
+audition player to the beginning, and applying an option never replaces the
+character card title with an internal candidate label. Character reference text is
+drawn from speaker-pure script lines, so narrator tags and action beats must
+not be embedded in a character's preview.
+9. Load Qwen Base when chapter generation starts.
 
-## Voice Library Structure
+Each effective profile has a fingerprint containing its metadata, compiled
+instruction, exact final reference text, selection-policy version, design model,
+and design configuration. Unchanged references are
+reused. Existing projects created before the approval feature are
+grandfathered. Newly created projects wait once; later partial chapter batches
+do not prompt again.
 
-```
-voice_library/
-└── name-of-the-wind/
-    ├── narrator.wav          # 10-second reference clip
-    ├── kvothe_young.wav
-    ├── kvothe_old.wav
-    ├── denna.wav
-    ├── chronicler.wav
-    ├── bast.wav
-    ├── ambrose.wav
-    ├── ...
-    └── voices.json           # Voice registry with descriptions
-```
+The narrator is a deliberate exception to the no-unused-profiles rule. Because
+the narrator speaks extensively and the choice materially changes the whole
+book, bootstrap prepares one male and one female narrator reference. The review
+banner plays both and stores the selected profile in `voice_cast.json`.
+Only that selection is used by line generation; changing it later invalidates
+only chapters that contain narration.
 
-### voices.json
-```json
-{
-  "project_id": "name-of-the-wind",
-  "created_at": "2026-07-13T20:00:00Z",
-  "voices": {
-    "narrator": {
-      "file": "narrator.wav",
-      "description": "Warm mature male baritone...",
-      "gender": "male",
-      "generated_at": "2026-07-13T20:00:05Z",
-      "duration_seconds": 10.2,
-      "sample_rate": 24000
-    }
-  }
-}
-```
+## Generated and uploaded references
 
----
+The production pipeline intentionally uses two complementary Qwen checkpoints:
 
-## Per-Line Emotion Instructions
+1. `VoiceDesign` turns the compiled character description into a unique,
+   speaker-pure reference recording during bootstrap.
+2. `Base` converts that recording and its exact transcript into a cached
+   Full-ICL clone prompt and generates the character's audiobook lines.
 
-While the voice stays consistent (via reference clip), each line gets unique emotion instructions:
+This is Qwen's documented **Voice Design then Clone** workflow. `CustomVoice`
+is not an additional refinement stage: it selects one of Qwen's nine preset
+timbres and cannot consume an arbitrary designed reference. Using it between
+VoiceDesign and Base would reduce the available identity palette rather than
+strengthen the designed identity, so it is not part of the default pipeline.
 
-### How Emotion Instructions Work
+Each project has `voice_library/<project-id>/voices.json` plus its reference
+WAVs. Registry entries include the path, exact spoken transcript (`ref_text`),
+description, duration, sample rate, identity metadata, source type
+(`generated` or `uploaded`), and design/content fingerprint.
 
-```python
-# Voice reference = WHO the character sounds like (constant)
-# Emotion instruction = HOW they deliver this specific line (varies)
+The `"file"` field in each registry entry is an **absolute path** to the actual
+WAV, whose filename includes a UUID suffix (e.g. `narrator_male_7f8dfaa9.wav`).
+`VoiceLibraryManager.get_voice_path` consults the registry first; it only falls
+back to the legacy `<character_id>.wav` convention when no entry exists. Do not
+assume a voice file is named `<character_id>.wav`. When a registry entry is
+replaced, its unreferenced WAV and `.pt` speaker-embedding cache are removed.
 
-audio = qwen3_tts.generate(
-    text="You should be careful what questions you ask.",
-    voice_reference="voice_library/kvothe_old.wav",  # Always the same
-    instruction="Speak with quiet intensity and a warning undertone"  # Changes per line
-)
-```
+The casting dashboard is organized by reusable voice profile. It shows only
+real speakers and explicitly reports how many non-speaking analysis entries
+were excluded. A speaker can be assigned to another cast voice. A profile can
+be redesigned from text or replaced with an uploaded WAV, FLAC, MP3, M4A, AAC,
+or OGG sample.
 
-### Emotion Instruction Examples
+Every ready profile, including the selected narrator, also has a **Download
+voice sample** action. It downloads the canonical reference WAV with a
+descriptive `<book> - <character> - voice-reference.wav` filename. That file
+can be imported into a matching character profile in a later book with the
+normal upload action and the exact words spoken in the reference. The filename
+is descriptive only; cloning still depends on the accompanying exact
+transcript.
 
-| Scene Context | Text | Emotion Instruction |
-|---------------|------|-------------------|
-| Tense confrontation | "Get out." | "Speak with cold, barely controlled fury. Quiet but cutting." |
-| Romantic scene | "I've been looking for you." | "Speak warmly and softly, with gentle affection and slight nervousness." |
-| Discovery | "It's real. It's actually real." | "Speak with breathless wonder, building from disbelief to excitement." |
-| Grief | "She's gone." | "Speak with hollow, numb grief. Flat delivery, barely above a whisper." |
-| Humor | "Well, that went according to plan." | "Speak with dry sarcasm and self-deprecating amusement." |
-| Battle | "Hold the line!" | "Shout with fierce determination and urgency. Commanding." |
+The dashboard also offers **Download all samples**, which bundles every ready
+character/narrator reference and a transcript-bearing manifest into one ZIP.
 
----
+Uploads are converted to mono 24 kHz PCM WAV. They must contain one clean,
+non-silent, non-clipped speaker and be 3–30 seconds long. The user supplies the
+exact transcript so Qwen Base can use higher-quality full ICL cloning instead
+of x-vector-only mode. Whisper verifies that transcript before the existing
+reference is replaced. A material mismatch fails closed and reports what ASR
+heard; harmless spacing/orthographic equivalence uses the same normalization as
+chapter validation. This one-time check can take longer on a cold model start,
+and managed model services are released when it finishes.
 
-## Handling Many Characters
+## Dependency invalidation
 
-Fantasy novels can have dozens of speaking characters. Strategy for managing voices:
+Reference content hashes are part of line-generation fingerprints. Reassigning
+a speaker or replacing a profile marks only chapters that use it as stale.
+Those chapters regenerate the next time they are selected; unrelated completed
+chapters remain valid.
 
-### Tier System
+Playback is safe at any stage. Reassignment, redesign, and upload require the
+pipeline to be stopped or parked at a safe boundary so a chapter cannot contain
+a mid-generation voice change.
 
-| Tier | Criteria | Voice Treatment |
-|------|----------|----------------|
-| **Major** | 50+ lines of dialogue | Full custom voice description |
-| **Supporting** | 10-50 lines | Shorter voice description |
-| **Minor** | 3-10 lines | Gender-matched generic voice |
-| **Walk-on** | 1-2 lines | Narrator voice with character emotion |
+## Emotion and speed
 
-### Maximum Voices
+The script supplies readable emotion and speed values, but production output
+currently treats them as descriptive metadata. Automatic pitch/tempo/tone
+post-processing is disabled by default after the 2026-08-09 full-book output
+showed widespread echo-like smearing from the phase-vocoder fallback.
 
-Limit to **15-20 unique voices** per book. Beyond this:
-- Listeners can't distinguish so many voices
-- Each additional voice reference uses ~500KB of disk
-- Minor characters sharing a generic voice is fine — real audiobook narrators do this too
+- Qwen Base output is preserved without time-stretch or pitch-shift effects.
+- Numeric peak protection remains active.
+- Explicit post-processing is experimental and must be enabled in
+  `voice/config.yaml`.
+- The librosa phase-vocoder fallback requires a second explicit unsafe opt-in
+  and must not be used for production books.
 
-### Generic Voice Pool
+Changing the clean-audio policy invalidates synthesis fingerprints. Audio made
+under the old policy is therefore not silently reused by a clean-output run.
+See [the echo incident report](audio-echo-incident-2026-08-10.md).
 
-For minor characters, maintain a small pool of generic voices:
-```
-generic_voices/
-├── male_young.wav      # Young male, neutral
-├── male_middle.wav     # Middle-aged male, neutral
-├── male_old.wav        # Elderly male, neutral
-├── female_young.wav    # Young female, neutral
-├── female_middle.wav   # Middle-aged female, neutral
-└── female_old.wav      # Elderly female, neutral
-```
+## Good design directions
 
-Minor characters are assigned from this pool based on gender and age:
-- Guard #1 (male, 30s) → `male_middle.wav`
-- Innkeeper's wife (female, 50s) → `female_middle.wav`
+Describe audible qualities:
 
----
-
-## Voice Regeneration
-
-If a generated voice doesn't sound right for a character:
-
-### Via Dashboard
-1. Navigate to Voice Library → select character
-2. Listen to the reference clip
-3. Edit the voice description
-4. Click "Regenerate Voice"
-5. Listen to the new clip
-6. If satisfied, confirm → all future generations use the new voice
-7. If existing audio was generated with the old voice, re-render those segments
-
-### Via API
-```
-POST /voices/regenerate
-{
-  "project_id": "name-of-the-wind",
-  "character_id": "kvothe",
-  "voice_description": "Updated description..."
-}
+```text
+A low, clear adult voice with dry texture, restrained warmth, precise
+consonants, and measured pacing. Calm authority without theatrical booming.
 ```
 
-### When to Regenerate
-- Voice doesn't match the character's described personality
-- Voice sounds too similar to another character
-- Voice has unwanted artifacts or accents
-- You want to experiment with different interpretations
+Useful dimensions include pitch range, vocal weight, texture, resonance, pace,
+articulation, energy, and an accent only when the model can render it reliably.
+Avoid named actors, appearance or biography without an audible consequence,
+contradictory traits, extreme effects that harm intelligibility, and
+instructions about what words to speak.
 
----
+Accent is optional and should be light, story-appropriate, and consistent. It
+is a secondary contrast dimension after register, vocal weight, resonance,
+texture, articulation, and cadence. Heavy or arbitrary accent instructions can
+reduce pronunciation accuracy, drift between samples, and become caricatured.
 
-## Tips for Fantasy Audiobooks
+The official Qwen VoiceDesign family currently tops out at the 1.7B checkpoint
+used here. Larger expressive TTS systems are not drop-in replacements for the
+current VoiceDesign-reference plus Base-cloning workflow. They require a
+separate benchmark for identity consistency, long-form stability, validation,
+VRAM use, and resumability before becoming a production backend.
 
-### Invented Languages
-If the book contains phrases in invented languages (Elvish, Dragon-speech):
-- The TTS will attempt to pronounce them phonetically
-- Results may vary — unusual phoneme combinations can trip up the model
-- Consider adding pronunciation hints in the script: `"Ainulindalë (eye-noo-LIN-da-lay)"`
+## Operational notes
 
-### Songs and Poetry
-Fantasy books often contain songs or poetry:
-- These should be spoken, not sung (TTS can't sing)
-- Use a slower speed (0.8-0.85x) with a more rhythmic emotion instruction
-- Example instruction: "Speak in a lyrical, rhythmic cadence, as if reciting poetry. Measured pace with emphasis on rhyme and meter."
-
-### Battle Scenes
-- Multiple characters shouting requires strong voice differentiation
-- Use more aggressive emotion instructions: "shout", "roar", "bark orders"
-- Shorter segments for rapid dialogue exchanges
-- Faster speed (1.1-1.15x) for urgent moments
-
-### Narrated Internal Monologue
-Many fantasy authors use italicized internal thoughts:
-- Assign to the thinking character (not narrator)
-- Emotion instruction: "Speak as internal thought, slightly softer and more intimate, as if talking to oneself"
-- Slightly slower speed (0.9x)
+- Voice bootstrap is expensive, so it runs after book-wide scripting and is
+  reused while its fingerprints remain current.
+- Qwen VoiceDesign and Qwen Base are not kept in GPU memory together.
+- The VoiceDesign helper binds only to `127.0.0.1:8101` and exists only during
+  bootstrap.
+- The selected narrator candidate is a normal registered reference and also
+  speaks chapter-title announcements.
+- The narrator candidate selected at the voice review gate (e.g. `narrator_male`)
+  is recorded only in `voice_cast.json` under `assigned_characters`. It is **not**
+  written back to `characters.json`. During line generation, `_prepare_generation_lines`
+  therefore reads `voice_cast.json` as the authoritative speaker → voice mapping before
+  falling back to `characters.json`. Any code that resolves a voice for generation must
+  follow this same precedence.

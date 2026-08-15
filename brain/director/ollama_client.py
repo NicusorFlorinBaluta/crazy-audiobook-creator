@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 import time
 from typing import Any
 
@@ -27,14 +28,59 @@ class OllamaClient:
         self,
         host: str = "http://localhost:11434",
         model: str = "qwen3:32b",
+        fallback_models: list[str] | tuple[str, ...] | None = None,
         timeout: int = 120,
-        max_retries: int = 15,
+        max_retries: int = 3,
+        max_retry_seconds: int = 900,
+        context_window: int = 8192,
     ):
         self.host = host.rstrip("/")
         self.model = model
+        self.fallback_models = tuple(fallback_models or ())
         self.timeout = timeout
-        self.max_retries = max_retries
-        self._client = httpx.Client(timeout=httpx.Timeout(timeout, connect=10.0))
+        self.max_retries = max(1, max_retries)
+        self.max_retry_seconds = max(0, max_retry_seconds)
+        self.context_window = context_window
+        self._client_lock = threading.Lock()
+        self._client = self._new_client()
+        self._cancel_event = threading.Event()
+        self.last_generation_metrics: dict[str, Any] = {}
+
+    def _new_client(self) -> httpx.Client:
+        return httpx.Client(
+            timeout=httpx.Timeout(self.timeout, connect=10.0, read=self.timeout)
+        )
+
+    def _ensure_client(self) -> httpx.Client:
+        with self._client_lock:
+            if getattr(self._client, "is_closed", False):
+                self._client = self._new_client()
+            return self._client
+
+    def begin_run(self) -> None:
+        """Clear a previous cooperative cancellation before a new pipeline run."""
+        self._ensure_client()
+        self._cancel_event.clear()
+
+    def cancel_current(self, *, force: bool = False) -> None:
+        """Interrupt an active stream, optionally closing its socket now."""
+        self._cancel_event.set()
+        if force:
+            with self._client_lock:
+                try:
+                    self._client.close()
+                except Exception:
+                    pass
+        logger.info("[Ollama] Cancellation requested")
+
+    def _raise_if_cancelled(self) -> None:
+        if self._cancel_event.is_set():
+            raise KeyboardInterrupt("Ollama generation cancelled")
+
+    def _wait_for_retry(self, seconds: int) -> None:
+        """Wait between retries while remaining immediately cancellable."""
+        if self._cancel_event.wait(seconds):
+            self._raise_if_cancelled()
 
     def generate(
         self,
@@ -73,7 +119,7 @@ class OllamaClient:
                 "temperature": temperature,
                 "top_p": top_p,
                 "num_predict": -1,
-                "num_ctx": 8192,
+                "num_ctx": self.context_window,
                 "num_gpu": 99,
             },
         }
@@ -81,8 +127,23 @@ class OllamaClient:
             payload["format"] = format
 
         last_error: Exception | None = None
+        retry_started = time.monotonic()
 
         for attempt in range(1, self.max_retries + 1):
+            self._raise_if_cancelled()
+            retry_elapsed = time.monotonic() - retry_started
+            if (
+                attempt > 1
+                and self.max_retry_seconds
+                and retry_elapsed >= self.max_retry_seconds
+            ):
+                logger.error(
+                    "[Ollama] Retry budget exhausted after %.1fs (%d attempt%s)",
+                    retry_elapsed,
+                    attempt - 1,
+                    "" if attempt == 2 else "s",
+                )
+                break
             try:
                 prompt_kb = sum(len(m["content"]) for m in messages) / 1024
                 logger.info(
@@ -98,19 +159,45 @@ class OllamaClient:
                 full_text = []
                 token_count = 0
                 last_log_tokens = 0
+                final_chunk: dict[str, Any] = {}
 
-                with self._client.stream(
+                client = self._ensure_client()
+                with client.stream(
                     "POST",
                     f"{self.host}/api/chat",
                     json=payload,
-                    timeout=httpx.Timeout(self.timeout),
+                    # ``timeout`` is an inactivity watchdog, not a total
+                    # generation limit. Each received chunk resets it.
+                    timeout=httpx.Timeout(
+                        self.timeout,
+                        connect=60.0,
+                        read=self.timeout,
+                    ),
                 ) as response:
+                    if response.status_code == 404:
+                        resolved = self._resolve_configured_fallback()
+                        if resolved and resolved != self.model:
+                            logger.warning(
+                                "[Ollama] Model '%s' returned 404. Switching to explicitly configured fallback '%s'",
+                                payload["model"],
+                                resolved,
+                            )
+                            self.model = resolved
+                            payload["model"] = resolved
+                            continue
+                        raise OllamaError(
+                            f"Configured Ollama model '{self.model}' is unavailable "
+                            "and no explicitly configured fallback is installed"
+                        )
                     response.raise_for_status()
                     logger.info("[Ollama] ← HTTP 200 received, streaming tokens...")
 
                     for line in response.iter_lines():
+                        self._raise_if_cancelled()
                         if line:
                             chunk = json.loads(line)
+                            if chunk.get("done"):
+                                final_chunk = chunk
                             if "message" in chunk and "content" in chunk["message"]:
                                 full_text.append(chunk["message"]["content"])
                                 token_count += 1
@@ -146,6 +233,21 @@ class OllamaClient:
                     token_count / elapsed if elapsed > 0 else 0,
                     text[:120].replace("\n", " "),
                 )
+                self.last_generation_metrics = {
+                    "attempt": attempt,
+                    "prompt_characters": sum(len(m["content"]) for m in messages),
+                    "response_characters": len(text),
+                    "stream_chunks": token_count,
+                    "elapsed_seconds": round(elapsed, 6),
+                    "chunks_per_second": round(
+                        token_count / elapsed if elapsed > 0 else 0.0, 6
+                    ),
+                    "prompt_eval_count": final_chunk.get("prompt_eval_count"),
+                    "eval_count": final_chunk.get("eval_count"),
+                    "prompt_eval_duration_ns": final_chunk.get("prompt_eval_duration"),
+                    "eval_duration_ns": final_chunk.get("eval_duration"),
+                    "load_duration_ns": final_chunk.get("load_duration"),
+                }
                 return text
 
             except httpx.TimeoutException as e:
@@ -174,6 +276,7 @@ class OllamaClient:
             except OllamaError:
                 raise
             except Exception as e:
+                self._raise_if_cancelled()
                 last_error = e
                 logger.warning(
                     "[Ollama] ✗ Unexpected error (attempt %d/%d): %s: %s",
@@ -185,11 +288,21 @@ class OllamaClient:
 
             if attempt < self.max_retries:
                 wait = min(30, 2 ** attempt)
+                if self.max_retry_seconds:
+                    remaining = self.max_retry_seconds - (
+                        time.monotonic() - retry_started
+                    )
+                    if remaining <= 0:
+                        logger.error(
+                            "[Ollama] Retry budget exhausted; not starting another request"
+                        )
+                        break
+                    wait = min(wait, max(0, int(remaining)))
                 logger.info("[Ollama] Retrying in %d seconds...", wait)
-                time.sleep(wait)
+                self._wait_for_retry(wait)
 
         raise OllamaError(
-            f"Failed after {self.max_retries} attempts: {last_error}"
+            f"Failed after bounded retries: {last_error}"
         ) from last_error
 
     def generate_json(
@@ -226,6 +339,28 @@ class OllamaClient:
 
         return self._extract_json(raw)
 
+    def unload_model(self, model: str | None = None) -> bool:
+        """Best-effort release of the model from Ollama GPU memory."""
+        target_model = model or self.model
+        try:
+            # Use a short-lived client because immediate cancellation may have
+            # deliberately closed the streaming client.
+            response = httpx.post(
+                f"{self.host}/api/generate",
+                json={"model": target_model, "keep_alive": 0},
+                timeout=httpx.Timeout(30.0, connect=5.0),
+            )
+            response.raise_for_status()
+            logger.info("[Ollama] Unloaded model '%s'", target_model)
+            return True
+        except Exception as exc:
+            logger.warning(
+                "[Ollama] Could not unload model '%s': %s",
+                target_model,
+                exc,
+            )
+            return False
+
     def _extract_json(self, text: str) -> dict[str, Any]:
         """Extract and parse JSON from LLM output.
 
@@ -254,15 +389,24 @@ class OllamaClient:
         except json.JSONDecodeError as e:
             logger.debug("[JSON] Direct parse failed: %s", e)
 
+        # Check for markdown code fence block ```json ... ```
+        fenced_match = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", text, re.DOTALL)
+        if fenced_match:
+            try:
+                result = json.loads(fenced_match.group(1))
+                logger.info("[JSON] Parsed from markdown fenced block successfully (try 2).")
+                return result
+            except json.JSONDecodeError:
+                pass
+
         import json_repair
         
         # Try robust parsing using json_repair
         try:
             logger.info("[JSON] Attempting robust json_repair parsing...")
-            # We want to feed json_repair just the text after the think block, or the whole text
-            # Usually extracting from the first { to the end helps it.
-            brace_match = re.search(r"\{.*\}", text, re.DOTALL)
-            json_text = brace_match.group(0) if brace_match else text
+            target_str = fenced_match.group(1) if fenced_match else text
+            brace_match = re.search(r"\{.*\}", target_str, re.DOTALL)
+            json_text = brace_match.group(0) if brace_match else target_str
             
             result = json_repair.loads(json_text)
             if isinstance(result, dict):
@@ -283,19 +427,20 @@ class OllamaClient:
             f"Response starts with: {text[:200]!r}"
         )
 
-    def check_health(self) -> bool:
+    def check_health(self, *, quiet: bool = False) -> bool:
         """Check if Ollama is running and the model is available."""
         try:
-            response = self._client.get(f"{self.host}/api/tags")
+            response = self._ensure_client().get(f"{self.host}/api/tags")
             response.raise_for_status()
             data = response.json()
             models = [m.get("name", "") for m in data.get("models", [])]
 
-            # Check if our model is available (allow partial match)
-            model_base = self.model.split(":")[0]
-            available = any(model_base in m for m in models)
+            available = any(
+                self._model_names_match(self.model, installed)
+                for installed in models
+            )
 
-            if not available:
+            if not available and not quiet:
                 logger.warning(
                     "Model '%s' not found. Available: %s",
                     self.model,
@@ -304,12 +449,44 @@ class OllamaClient:
             return available
 
         except Exception as e:
-            logger.error("Ollama health check failed: %s", e)
+            if quiet:
+                logger.debug("Ollama health preflight failed: %s", e)
+            else:
+                logger.error("Ollama health check failed: %s", e)
             return False
+
+    @staticmethod
+    def _model_names_match(configured: str, installed: str) -> bool:
+        """Match one exact Ollama tag, allowing a registry/library prefix."""
+        configured = configured.strip()
+        installed = installed.strip()
+        return installed == configured or installed.endswith(f"/library/{configured}")
+
+    def _resolve_configured_fallback(self) -> str | None:
+        """Return the first installed fallback from the explicit allowlist."""
+        if not self.fallback_models:
+            return None
+        try:
+            response = self._ensure_client().get(
+                f"{self.host}/api/tags", timeout=5.0
+            )
+            if response.status_code == 200:
+                data = response.json()
+                models = [m.get("name", "") for m in data.get("models", []) if m.get("name")]
+                logger.info("[Ollama] Discovered installed models: %s", models)
+                for fallback in self.fallback_models:
+                    if any(
+                        self._model_names_match(fallback, installed)
+                        for installed in models
+                    ):
+                        return fallback
+        except Exception as e:
+            logger.warning("[Ollama] Failed to resolve configured fallback models: %s", e)
+        return None
 
     def close(self) -> None:
         """Close the HTTP client."""
-        self._client.close()
+        self.cancel_current(force=True)
 
     def __enter__(self) -> OllamaClient:
         return self

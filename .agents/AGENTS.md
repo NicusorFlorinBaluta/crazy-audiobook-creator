@@ -15,3 +15,9 @@
 - Do NOT change network or global system settings.
 - Do NOT uninstall or modify existing applications.
 - Run everything locally within the project structure (venv, local installs) when possible.
+
+## Code Reloading & Testing Rules
+- **CRITICAL: Uvicorn Module Caching**: The background Uvicorn server runs without `--reload`. Modifying Python source files in `brain/` or `voice/` on disk does NOT automatically update in-memory modules of a running Uvicorn server.
+- **Verification Rule**: Whenever core Python modules (`character_analyzer.py`, `script_generator.py`, `pipeline.py`) are modified:
+  1. Either restart the Uvicorn server process so it re-imports the updated files, or
+  2. Execute verification tests directly using `python.exe` with `$env:PYTHONPATH="."` to guarantee the test runs against the exact fresh code on disk.

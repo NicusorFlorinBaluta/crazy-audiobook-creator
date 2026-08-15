@@ -5,11 +5,23 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="description" content="Crazy Audiobook Creator — AI-powered audiobook production pipeline">
     <title>Crazy Audiobook Creator</title>
-    <link rel="icon" type="image/png" href="/static/img/favicon.png">
+    <link rel="icon" type="image/png" href="static/img/favicon.png">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/css/styles.css?v=5">
+    <link rel="stylesheet" href="static/css/styles.css?v=20260814.3">
+    <script>
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.getRegistrations().then(function(registrations) {
+                for (let r of registrations) { r.unregister(); }
+            });
+        }
+        if ('caches' in window) {
+            caches.keys().then(function(names) {
+                for (let n of names) { caches.delete(n); }
+            });
+        }
+    </script>
 </head>
 <body>
     <!-- ============================================ -->
@@ -25,14 +37,14 @@
     <!-- Top navigation                               -->
     <!-- ============================================ -->
     <nav class="top-nav">
-        <div class="nav-brand" id="nav-home-btn">
-            <img class="brand-logo" src="/static/img/logo.png" alt="Logo">
+        <button type="button" class="nav-brand" id="nav-home-btn" aria-label="Back to projects">
+            <img class="brand-logo" src="static/img/logo.png" alt="">
             <div class="brand-text">
                 <span class="brand-title">Crazy Audiobook Creator</span>
                 <span class="brand-subtitle">AI-Powered Pipeline</span>
             </div>
-        </div>
-        <div class="nav-status" id="nav-status">
+        </button>
+        <div class="nav-status" id="nav-status" role="status" aria-live="polite" title="The voice service starts automatically when audio work needs it">
             <div class="status-dot" id="voice-status-dot"></div>
             <span id="voice-status-text">Voice Server: Checking...</span>
         </div>
@@ -55,6 +67,25 @@
                     <span class="btn-icon">+</span>
                     New Project
                 </button>
+            </div>
+            <div class="project-list-toolbar" id="project-list-toolbar">
+                <label class="visually-hidden" for="project-search">Search projects</label>
+                <input type="search" class="input-sm" id="project-search" placeholder="Search title, author, or project ID">
+                <label class="visually-hidden" for="project-status-filter">Filter projects by status</label>
+                <select class="input-sm select" id="project-status-filter">
+                    <option value="all">All statuses</option>
+                    <option value="active">Active</option>
+                    <option value="complete">Complete</option>
+                    <option value="paused">Paused</option>
+                    <option value="voice_review">Voice review</option>
+                    <option value="error">Error</option>
+                </select>
+                <label class="visually-hidden" for="project-sort">Sort projects</label>
+                <select class="input-sm select" id="project-sort">
+                    <option value="newest">Newest first</option>
+                    <option value="oldest">Oldest first</option>
+                    <option value="title">Title</option>
+                </select>
             </div>
 
             <!-- Empty state -->
@@ -81,32 +112,40 @@
                     ← Back to Projects
                 </button>
                 <div class="detail-actions">
-                    <button class="btn btn-ghost" id="btn-fetch-metadata">🔍 Fetch Artwork</button>
-                    <button class="btn btn-warning hidden" id="btn-request-deploy">🅿️ Safe Deploy</button>
-                    <button class="btn btn-success hidden" id="btn-resume-deploy">▶ Resume Deploy</button>
+                    <button class="btn btn-ghost" id="btn-fetch-metadata" title="Find a close Google Books match and review it before applying">🔍 Find book details</button>
                     <button class="btn btn-success" id="btn-start-pipeline">
                         ▶ Start Pipeline
                     </button>
                     <button class="btn btn-warning hidden" id="btn-pause-pipeline">
                         ⏸ Pause
                     </button>
-                    <select id="select-reset-stage" class="select">
-                        <option value="" disabled selected>Reset to Stage...</option>
-                        <option value="created">Created</option>
-                        <option value="extracting">Extracting</option>
-                        <option value="scripting">Scripting</option>
-                        <option value="bootstrapping">Bootstrapping</option>
-                        <option value="generating">Generating</option>
-                        <option value="validating">Validating</option>
-                        <option value="mastering">Mastering</option>
-                    </select>
-                    <button class="btn btn-warning hidden" id="btn-reset-stage">Reset</button>
+                    <button class="btn btn-ghost hidden" id="btn-request-deploy">Park at Boundary</button>
+                    <button class="btn btn-primary hidden" id="btn-resume-deploy">Resume Parked</button>
                     <button class="btn btn-success hidden" id="btn-download-audiobook">
-                        ⬇ Download
+                        ⬇ Download audiobook
                     </button>
+                    <details class="advanced-actions" id="advanced-actions">
+                        <summary class="btn btn-ghost" role="button">More actions</summary>
+                        <div class="advanced-actions-menu">
+                    <label for="select-reset-stage">Restart from a pipeline stage</label>
+                    <select id="select-reset-stage" class="select" aria-describedby="reset-stage-help">
+                        <option value="" disabled selected hidden>Choose stage…</option>
+                        <option value="extracting" title="Extracting: Rebuild from preserved source.epub; legacy projects without it are not modified">Extracting (re-extract preserved EPUB)</option>
+                        <option value="scripting" title="Scripting: Re-run LLM script & character extraction (clears script JSONs and cast, keeps EPUB text)">Scripting (re-run LLM script & casting)</option>
+                        <option value="bootstrapping" title="Bootstrapping: Re-generate voice design profiles and reference audio (keeps script intact)">Bootstrapping (re-design voice audio)</option>
+                        <option value="voice_review" title="Voice Review: Re-open the Voice Review banner to change speaking voices or tweak cast without re-scripting">Voice Review (re-open voice cast approval)</option>
+                        <option value="generating" title="Generating: Re-generate chapter audio segments (clears audio segments, keeps script and voice cast)">Generating (re-generate chapter audio)</option>
+                        <option value="validating" title="Validating: Preserve synthesized WAVs, invalidate validation cache, and rerun all acceptance checks">Validating (preserve audio, re-check quality)</option>
+                        <option value="mastering" title="Mastering: Preserve accepted segments, clear mastered audio and M4B, and re-master chapters">Mastering (re-master chapter audio)</option>
+                        <option value="exporting" title="Exporting: Preserve mastered chapters and remove only the M4B package">Exporting (re-package M4B audiobook)</option>
+                    </select>
+                    <p class="action-help" id="reset-stage-help">Choose a stage to see exactly what will be kept and regenerated.</p>
+                    <button class="btn btn-warning hidden" id="btn-reset-stage">Restart from selected stage</button>
                     <button class="btn btn-ghost btn-danger-text" id="btn-delete-project">
-                        🗑 Delete
+                        🗑 Delete project
                     </button>
+                        </div>
+                    </details>
                 </div>
             </div>
 
@@ -121,50 +160,216 @@
                 </div>
             </div>
 
+            <section class="attention-panel hidden" id="attention-panel" aria-live="polite">
+                <div class="attention-heading">
+                    <div><span class="attention-kicker">Attention required</span><h2 id="attention-title">Review inbox</h2><p id="attention-summary"></p></div>
+                    <button class="btn btn-success hidden" id="btn-resume-after-review">Resume pipeline</button>
+                </div>
+                <div class="attention-toolbar">
+                    <label>Type<select class="input-sm" id="attention-type"><option value="all">All</option><option value="audio">Audio</option><option value="attribution">Speaker</option><option value="pronunciation">Pronunciation</option></select></label>
+                    <label>Status<select class="input-sm" id="attention-status"><option value="blocking">Blocking</option><option value="all">All</option><option value="resolved">Resolved</option></select></label>
+                    <label>Confidence<select class="input-sm" id="attention-confidence"><option value="all">All bands</option><option value="low">Low</option><option value="review">Review</option><option value="high">High</option></select></label>
+                </div>
+                <div class="attention-list" id="attention-list"></div>
+                <div class="attention-pagination"><button class="btn btn-ghost btn-sm" id="attention-prev">Previous</button><span id="attention-page"></span><button class="btn btn-ghost btn-sm" id="attention-next">Next</button></div>
+            </section>
+
             <!-- Pipeline progress -->
             <div class="pipeline-section" id="pipeline-section">
-                <h2>Pipeline Progress</h2>
+                <details class="pipeline-details" id="pipeline-details" open>
+                <summary role="button"><strong>Pipeline progress</strong><span id="pipeline-summary">Waiting to start</span></summary>
+                <div class="pipeline-details-body">
                 <div class="pipeline-tracker" id="pipeline-tracker"></div>
-                <div class="pipeline-live" id="pipeline-live"></div>
-                
-                <!-- Chapter Progress & Selection Grid -->
-                <div class="chapter-progress-section" id="chapter-progress-section" style="margin-top: 15px; background: rgba(0,0,0,0.2); padding: 15px; border-radius: 8px;">
-                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-                        <h3 style="margin: 0; font-size: 1.1em;">Chapter Progress & Selection</h3>
-                        <div class="chapter-selection-toolbar" style="display: flex; gap: 8px; align-items: center;">
-                            <button class="btn btn-ghost btn-sm" id="btn-select-all-chapters">All</button>
-                            <button class="btn btn-ghost btn-sm" id="btn-select-none-chapters">None</button>
-                            <input type="text" id="chapter-range-input" class="input-sm" placeholder="1-5" style="width: 60px; padding: 4px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.2); background: rgba(0,0,0,0.4); color: white;">
-                            <button class="btn btn-ghost btn-sm" id="btn-apply-range">Apply Range</button>
+                <div class="pipeline-live" id="pipeline-live" role="status" aria-live="polite"></div>
+                <div class="work-status-panel" id="work-status-panel" aria-live="polite">
+                    <div class="work-status-main">
+                        <span class="work-status-kicker">Current activity</span>
+                        <strong id="work-status-title">Waiting to start</strong>
+                        <span id="work-status-detail">No pipeline work is active.</span>
+                        <small id="work-status-freshness">No activity recorded yet.</small>
+                    </div>
+                    <div class="work-status-metrics">
+                        <div><strong id="work-overall-percent">0%</strong><span id="work-overall-label">Current stage</span></div>
+                        <div><strong id="work-chapter-position">—</strong><span id="work-chapter-label">Current chapter</span></div>
+                        <div><strong id="work-line-position">—</strong><span id="work-line-label">Current utterance</span></div>
+                        <div><strong id="work-eta">—</strong><span id="work-eta-label">Estimated remaining</span></div>
+                    </div>
+                    <div class="work-overall-track"><span id="work-overall-fill"></span></div>
+                </div>
+                </div>
+                </details>
+
+                <details class="chapter-progress-section schedule-section" id="chapter-progress-section">
+                    <summary class="chapter-section-heading" role="button">
+                        <span>
+                            <span class="chapter-heading-line">
+                                <strong>Chapters</strong>
+                                <span id="chapter-summary-badge">0 / 0 completed</span>
+                            </span>
+                            <small>Selection applies to the next generation run; the completed audiobook stays unchanged until you start it.</small>
+                        </span>
+                        <span class="chapter-selection-summary" id="chapter-selection-summary">All chapters selected</span>
+                    </summary>
+                    <div class="schedule-body chapter-body-container" id="chapter-body-container">
+                        <div class="chapter-selection-toolbar">
+                            <div class="chapter-toolbar-group">
+                                <button class="btn btn-ghost btn-sm" id="btn-select-all-chapters">Select all</button>
+                                <button class="btn btn-ghost btn-sm" id="btn-select-none-chapters">Clear</button>
+                                <label class="visually-hidden" for="chapter-range-input">Chapter number range</label>
+                                <input type="text" id="chapter-range-input" class="input-sm" placeholder="1-5, 8, 12-14" aria-describedby="chapter-selection-help">
+                                <button class="btn btn-primary btn-sm" id="btn-apply-range">Apply range</button>
+                            </div>
+                            <div class="chapter-toolbar-group chapter-toolbar-search">
+                                <label class="visually-hidden" for="chapter-search-input">Search chapter titles</label>
+                                <input type="search" id="chapter-search-input" class="input-sm" placeholder="Search chapter titles">
+                                <label class="visually-hidden" for="chapter-status-filter">Filter chapters by status</label>
+                                <select id="chapter-status-filter" class="input-sm select">
+                                    <option value="all">All statuses</option>
+                                    <option value="active">Active</option>
+                                    <option value="pending">Pending</option>
+                                    <option value="scripted">Scripted</option>
+                                    <option value="generated">Generated</option>
+                                    <option value="done">Mastered</option>
+                                    <option value="skipped">Skipped</option>
+                                </select>
+                            </div>
+                        </div>
+                        <p class="chapter-selection-help" id="chapter-selection-help">Select chapters here, then use “Generate selected chapters again” above.</p>
+                        <div class="chapter-list-header" aria-hidden="true">
+                            <span></span><span>Chapter</span><span>Status</span><span>Progress</span><span></span>
+                        </div>
+                        <div class="chapter-grid" id="chapter-grid"></div>
+                        <div class="chapter-pagination-toolbar" id="chapter-pagination-toolbar">
+                            <div class="pagination-info" id="pagination-info">Showing 1-15 of 0 chapters</div>
+                            <div class="pagination-controls">
+                                <button class="btn btn-ghost btn-sm" id="btn-prev-page" disabled>◀ Prev</button>
+                                <span class="pagination-page-num" id="pagination-page-num">Page 1 of 1</span>
+                                <button class="btn btn-ghost btn-sm" id="btn-next-page" disabled>Next ▶</button>
+                                <label class="visually-hidden" for="select-page-size">Chapters per page</label>
+                                <select id="select-page-size" class="input-sm">
+                                    <option value="15" selected>15 per page</option>
+                                    <option value="30">30 per page</option>
+                                    <option value="50">50 per page</option>
+                                    <option value="all">Show all</option>
+                                </select>
+                            </div>
                         </div>
                     </div>
-                    <div class="chapter-grid" id="chapter-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 8px;"></div>
-                </div>
+                </details>
+
+
+                <details class="schedule-section" id="deliveries-section" style="margin-top: 20px;">
+                    <summary role="button">
+                        <span><strong>Available Audiobook Parts</strong><small id="deliveries-summary">No parts published yet</small></span>
+                    </summary>
+                    <div class="schedule-body" id="deliveries-container" style="padding: 15px;">
+                        <div class="delivery-settings-dashboard" style="display: flex; gap: 15px; align-items: center; margin-bottom: 15px; padding-bottom: 15px; border-bottom: 1px solid var(--border-color);">
+                            <label style="display: flex; align-items: center; gap: 8px; font-weight: 500; cursor: pointer;">
+                                <input type="checkbox" id="dashboard-enable-incremental" style="width: 16px; height: 16px; cursor: pointer;" onchange="window.toggleIncrementalSettings(this.checked)">
+                                Enable Incremental Delivery
+                            </label>
+                            <div id="dashboard-incremental-options" style="display: none; align-items: center; gap: 10px;">
+                                <label for="dashboard-delivery-batch-size">Chapters per part:</label>
+                                <input type="number" id="dashboard-delivery-batch-size" value="5" min="1" max="20" class="input-sm" style="width: 80px;" oninput="window.checkIncrementalSettings()">
+                            </div>
+                            <button class="btn btn-primary btn-sm" id="dashboard-save-delivery" style="display: none;" onclick="window.saveIncrementalSettings()">Save Settings</button>
+                        </div>
+                        <div id="deliveries-list" style="display: flex; flex-direction: column; gap: 10px;">
+                            <!-- Deliveries will be injected here -->
+                        </div>
+                    </div>
+                </details>
+                <details class="schedule-section" id="schedule-section">
+                    <summary role="button">
+                        <span><strong>Automatic working hours</strong><small id="schedule-summary">Scheduling is off</small></span>
+                        <span class="schedule-state" id="schedule-state">Off</span>
+                    </summary>
+                    <div class="schedule-body">
+                        <div class="schedule-intro">
+                            <label class="toggle-row"><input type="checkbox" id="schedule-enabled"><span>Automatically work only during these windows</span></label>
+                            <p class="schedule-scope"><strong>Global setting:</strong> these working hours apply to every queued audiobook project.</p>
+                            <label>Timezone <input type="text" id="schedule-timezone" class="input-sm" value="Europe/Bucharest"></label>
+                        </div>
+                        <div id="schedule-windows" class="schedule-windows"></div>
+                        <div class="schedule-actions">
+                            <button class="btn btn-ghost btn-sm" id="btn-add-schedule-window">Add window</button>
+                            <button class="btn btn-primary btn-sm" id="btn-save-schedule">Save working hours</button>
+                        </div>
+                        <p class="schedule-help">Select at least one weekday per window. The pipeline parks at a safe boundary and resumes automatically when a working window opens. Overnight windows belong to the day on which they start.</p>
+                    </div>
+                </details>
+
+                <details class="schedule-section operations-section" id="operations-section">
+                    <summary role="button">
+                        <span><strong>Runtime &amp; storage</strong><small id="operations-summary">Open to inspect compatibility and disk use</small></span>
+                        <span class="schedule-state" id="operations-state">Not checked</span>
+                    </summary>
+                    <div class="schedule-body operations-body">
+                        <div class="operations-actions">
+                            <button class="btn btn-danger btn-sm" id="btn-restart-dashboard">Restart dashboard</button>
+                            <button class="btn btn-ghost btn-sm" id="btn-refresh-operations">Refresh</button>
+                            <button class="btn btn-ghost btn-sm" id="btn-download-support" aria-describedby="support-bundle-help">Download support bundle</button>
+                        </div>
+                        <p class="schedule-help" id="support-bundle-help">Contains diagnostics and logs; excludes the source EPUB and generated audio.</p>
+                        <div class="operations-grid">
+                            <section><h4>Runtime preflight</h4><div id="preflight-details" class="operations-list">Not checked yet.</div></section>
+                            <section><h4>Project storage</h4><div id="storage-details" class="operations-list">Not checked yet.</div></section>
+                        </div>
+                        <div class="cleanup-preview" id="cleanup-preview"></div>
+                    </div>
+                </details>
             </div>
 
             <!-- Tab navigation -->
-            <div class="tab-bar" id="detail-tabs">
-                <button class="tab active" data-tab="tab-characters">Characters</button>
-                <button class="tab" data-tab="tab-script">Script</button>
-                <button class="tab" data-tab="tab-quality">Quality</button>
-                <button class="tab tab-logs" data-tab="tab-logs">🖥 Logs</button>
+            <div class="tab-bar" id="detail-tabs" role="tablist" aria-label="Project details">
+                <button class="tab active" id="tab-button-characters" role="tab" aria-selected="true" aria-controls="tab-characters" tabindex="0" data-tab="tab-characters">Voice casting</button>
+                <button class="tab" id="tab-button-script" role="tab" aria-selected="false" aria-controls="tab-script" tabindex="-1" data-tab="tab-script">Script</button>
+                <button class="tab" id="tab-button-quality" role="tab" aria-selected="false" aria-controls="tab-quality" tabindex="-1" data-tab="tab-quality">Quality</button>
+                <button class="tab tab-logs" id="tab-button-logs" role="tab" aria-selected="false" aria-controls="tab-logs" tabindex="-1" data-tab="tab-logs">🖥 Logs</button>
             </div>
 
-            <!-- Character Registry Tab -->
-            <div class="tab-content active" id="tab-characters">
+            <!-- Speaking-only Voice Casting Tab -->
+            <div class="tab-content active" id="tab-characters" role="tabpanel" aria-labelledby="tab-button-characters">
+                <section class="voice-review-banner hidden" id="voice-review-banner"></section>
+                <div class="casting-summary" id="casting-summary"></div>
+                <div class="casting-toolbar" id="casting-toolbar">
+                    <label class="visually-hidden" for="casting-search">Search voice profiles</label>
+                    <input type="search" class="input-sm" id="casting-search" placeholder="Search characters or voices">
+                    <label class="visually-hidden" for="casting-filter">Filter voice profiles</label>
+                    <select class="input-sm select" id="casting-filter">
+                        <option value="all">All profiles</option>
+                        <option value="assigned">Assigned</option>
+                        <option value="alternatives">Has alternatives</option>
+                        <option value="warnings">Has warnings</option>
+                        <option value="ready">Ready</option>
+                    </select>
+                    <a class="btn btn-ghost btn-sm hidden" id="btn-download-all-voices" data-server-download href="#" title="Download every prepared character and narrator reference as a ZIP">Download all samples</a>
+                </div>
                 <div class="character-grid" id="character-grid">
                     <div class="empty-state small">
-                        <p>Characters will appear after the LLM analysis completes</p>
+                        <p>Casting becomes available after the script identifies who actually speaks.</p>
                     </div>
                 </div>
             </div>
 
             <!-- Script Viewer Tab -->
-            <div class="tab-content" id="tab-script">
+            <div class="tab-content" id="tab-script" role="tabpanel" aria-labelledby="tab-button-script" tabindex="0">
                 <div class="script-controls">
+                    <label class="visually-hidden" for="script-chapter-select">Script chapter</label>
                     <select id="script-chapter-select" class="select">
                         <option value="">Select Chapter</option>
                     </select>
+                    <button id="btn-regenerate-chapter" class="btn btn-sm btn-secondary" title="Delete current chapter script and force LLM regeneration">
+                        <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: text-bottom; margin-right: 4px;"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.92-10.26l5.57 5.57"/></svg>Regenerate
+                    </button>
+                    <label class="visually-hidden" for="script-search">Search script</label>
+                    <input type="search" id="script-search" class="input-sm" placeholder="Search text or line ID">
+                    <label class="visually-hidden" for="script-speaker-filter">Filter script by speaker</label>
+                    <select id="script-speaker-filter" class="input-sm select"><option value="all">All speakers</option></select>
+                    <label class="script-filter-toggle"><input type="checkbox" id="script-dialogue-only"> Dialogue only</label>
+                    <label class="script-filter-toggle" title="Audit narrator-attributed lines that contain quoted speech; some may be intentional tight narration groups"><input type="checkbox" id="script-quoted-narrator"> Quoted narrator lines</label>
+                    <label class="script-filter-toggle" title="Show only lines with confidence below 55%"><input type="checkbox" id="script-low-confidence"> Low confidence</label>
+                    <span class="script-result-count" id="script-result-count"></span>
                     <div class="script-legend" id="script-legend"></div>
                 </div>
                 <div class="script-viewer" id="script-viewer">
@@ -175,7 +380,7 @@
             </div>
 
             <!-- Quality Report Tab -->
-            <div class="tab-content" id="tab-quality">
+            <div class="tab-content" id="tab-quality" role="tabpanel" aria-labelledby="tab-button-quality" tabindex="0">
                 <div class="quality-overview" id="quality-overview">
                     <div class="empty-state small">
                         <p>Quality data will appear after audio generation</p>
@@ -184,7 +389,7 @@
             </div>
 
             <!-- Log Console Tab -->
-            <div class="tab-content" id="tab-logs">
+            <div class="tab-content" id="tab-logs" role="tabpanel" aria-labelledby="tab-button-logs" tabindex="0">
                 <div class="log-console-toolbar">
                     <span class="log-status log-status-disconnected" id="log-status">● Disconnected</span>
                     <div class="log-toolbar-actions">
@@ -192,8 +397,21 @@
                             <input type="checkbox" id="log-autoscroll" checked>
                             Auto-scroll
                         </label>
+                        <label class="visually-hidden" for="log-search">Search logs</label>
+                        <input type="search" class="input-sm" id="log-search" placeholder="Search logs">
+                        <label class="visually-hidden" for="log-level-filter">Filter log level</label>
+                        <select class="input-sm select" id="log-level-filter">
+                            <option value="all">All levels</option>
+                            <option value="error">Errors</option>
+                            <option value="warning">Warnings</option>
+                            <option value="info">Info</option>
+                        </select>
+                        <label class="log-toggle"><input type="checkbox" id="log-hide-noise" checked> Hide routine lines</label>
+                        <span class="log-noise-summary" id="log-noise-summary"></span>
+                        <label class="log-toggle"><input type="checkbox" id="log-wrap"> Wrap</label>
                         <button class="btn btn-ghost btn-sm" id="log-clear">Clear</button>
                         <button class="btn btn-ghost btn-sm" id="log-copy">Copy All</button>
+                        <button class="btn btn-ghost btn-sm" id="log-download">Download</button>
                     </div>
                 </div>
                 <div class="log-console" id="log-console" role="log" aria-live="polite">
@@ -206,26 +424,36 @@
     <!-- ============================================ -->
     <!-- Upload Modal                                 -->
     <!-- ============================================ -->
-    <div class="modal-overlay hidden" id="upload-modal">
-        <div class="modal">
+    <div class="modal-overlay hidden" id="upload-modal" role="presentation">
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="upload-modal-title" aria-describedby="upload-modal-description" tabindex="-1">
             <div class="modal-header">
-                <h2>New Audiobook Project</h2>
-                <button class="modal-close" id="modal-close">&times;</button>
+                <h2 id="upload-modal-title">New Audiobook Project</h2>
+                <button class="modal-close" id="modal-close" type="button" aria-label="Close new project dialog">&times;</button>
             </div>
             <div class="modal-body">
-                <div class="upload-zone" id="upload-zone">
+                <button type="button" class="upload-zone" id="upload-zone">
                     <div class="upload-icon">📤</div>
-                    <h3>Drop your EPUB file here</h3>
-                    <p>or click to browse</p>
-                    <input type="file" id="epub-file-input" accept=".epub" hidden>
-                </div>
+                    <span class="upload-heading">Drop your EPUB file here</span>
+                    <span id="upload-modal-description">or click to browse</span>
+                </button>
+                <input type="file" id="epub-file-input" accept=".epub" aria-label="Choose EPUB file" hidden>
                 <div class="upload-info hidden" id="upload-info">
                     <div class="file-icon">📖</div>
                     <div class="file-details">
                         <span class="file-name" id="upload-file-name"></span>
                         <span class="file-size" id="upload-file-size"></span>
                     </div>
-                    <button class="btn btn-ghost" id="upload-remove">✕</button>
+                    <button class="btn btn-ghost" id="upload-remove" aria-label="Remove selected EPUB">✕</button>
+                </div>
+                <div class="delivery-settings-upload" style="margin-top: 16px; display: grid; gap: 10px;">
+                    <label style="display: flex; align-items: center; gap: 8px;">
+                        <input type="checkbox" id="upload-enable-incremental">
+                        Publish downloadable parts while the audiobook is generated
+                    </label>
+                    <label id="upload-incremental-options" style="display: none; align-items: center; gap: 8px;">
+                        Chapters per part
+                        <input class="input-sm" type="number" id="upload-delivery-batch-size" value="5" min="1" max="20" style="width: 80px;">
+                    </label>
                 </div>
                 <div class="upload-progress hidden" id="upload-progress">
                     <div class="progress-bar">
@@ -243,15 +471,70 @@
         </div>
     </div>
 
+    <!-- Metadata review modal -->
+    <div class="modal-overlay hidden" id="metadata-modal" role="presentation">
+        <div class="modal metadata-modal" role="dialog" aria-modal="true" aria-labelledby="metadata-modal-title" tabindex="-1">
+            <div class="modal-header">
+                <div>
+                    <h2 id="metadata-modal-title">Review matched book details</h2>
+                    <p class="metadata-subtitle" id="metadata-match-summary"></p>
+                </div>
+                <button class="modal-close" id="metadata-modal-close" type="button" aria-label="Close metadata review">&times;</button>
+            </div>
+            <details class="metadata-manual-search" id="metadata-manual-search">
+                <summary>Search for another book or edition</summary>
+                <form id="metadata-search-form">
+                    <label>
+                        Book title
+                        <input class="input" id="metadata-search-title" type="search" maxlength="300" required autocomplete="off">
+                    </label>
+                    <label>
+                        Author <span>(optional)</span>
+                        <input class="input" id="metadata-search-author" type="search" maxlength="300" autocomplete="off">
+                    </label>
+                    <button class="btn btn-primary" id="metadata-search-submit" type="submit">Search Google Books</button>
+                </form>
+                <p class="metadata-search-status" id="metadata-search-status" role="status"></p>
+                <div class="metadata-search-results" id="metadata-search-results"></div>
+            </details>
+            <div class="modal-body metadata-review" id="metadata-review">
+                <div class="metadata-cover-wrap">
+                    <img id="metadata-cover-preview" alt="Matched book cover" hidden>
+                    <div class="metadata-cover-empty" id="metadata-cover-empty">No cover available</div>
+                </div>
+                <div class="metadata-fields">
+                    <dl>
+                        <div><dt>Matched title</dt><dd id="metadata-title"></dd></div>
+                        <div><dt>Author</dt><dd id="metadata-author"></dd></div>
+                        <div><dt>Year</dt><dd id="metadata-year"></dd></div>
+                        <div><dt>Genre</dt><dd id="metadata-genre"></dd></div>
+                        <div><dt>ISBN</dt><dd id="metadata-isbn"></dd></div>
+                    </dl>
+                    <p class="metadata-description" id="metadata-description"></p>
+                    <p class="metadata-note">Applying uses the reviewed title, author, description, genre, year, ISBN, and cover choice. Original EPUB identity is retained internally as provenance. Existing audiobook downloads are repackaged without re-encoding audio.</p>
+                    <label class="metadata-replace-cover hidden" id="metadata-replace-cover-row">
+                        <input type="checkbox" id="metadata-replace-cover">
+                        Replace the cover already embedded in this EPUB
+                    </label>
+                    <div class="metadata-warnings hidden" id="metadata-warnings" role="status"></div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-ghost" id="metadata-cancel">Cancel</button>
+                <button class="btn btn-primary" id="metadata-apply">Apply matched details</button>
+            </div>
+        </div>
+    </div>
+
     <!-- ============================================ -->
     <!-- Toast notifications                          -->
     <!-- ============================================ -->
-    <div class="toast-container" id="toast-container"></div>
+    <div class="toast-container" id="toast-container" role="status" aria-live="polite"></div>
 
     <!-- Scripts -->
-    <script src="/static/js/app.js?v=5"></script>
-    <script src="/static/js/pipeline.js?v=5"></script>
-    <script src="/static/js/script-viewer.js?v=5"></script>
-    <script src="/static/js/log-console.js?v=5"></script>
+    <script src="static/js/app.js?v=20260814.3"></script>
+    <script src="static/js/pipeline.js?v=20260814.3"></script>
+    <script src="static/js/script-viewer.js?v=20260814.3"></script>
+    <script src="static/js/log-console.js?v=20260814.3"></script>
 </body>
 </html>

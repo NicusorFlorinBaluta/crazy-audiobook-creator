@@ -6,10 +6,10 @@ pipeline state persistence, and inter-stage data flow.
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Literal
+from datetime import datetime, timezone
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from shared.constants import (
     DEFAULT_SPEED,
@@ -30,9 +30,17 @@ class BookMetadata(BaseModel):
     title: str
     author: str
     language: str = "en"
+    description: str = ""
+    isbn: str = ""
+    genre: str = ""
+    year: str = ""
     total_chapters: int = 0
     total_words: int = 0
     cover_image_path: str | None = None
+    metadata_provider: str = ""
+    metadata_provider_id: str = ""
+    metadata_confidence: float | None = None
+    metadata_fetched_at: str = ""
 
 
 class ExtractedChapter(BaseModel):
@@ -49,6 +57,10 @@ class ExtractedBook(BaseModel):
 
     metadata: BookMetadata
     chapters: list[ExtractedChapter]
+    reference_material: dict[str, str] = Field(
+        default_factory=dict,
+        description="Extracted reference sections such as Glossary, Dramatis Personae, and Character Lists",
+    )
 
 
 # ===================================================================
@@ -78,7 +90,12 @@ class Character(BaseModel):
     name: str = Field(description="Display name, e.g. 'Kvothe (young)'")
     gender: Gender
     age_range: str = Field(description="e.g. '40s', 'late teens'")
+    importance: Literal["major", "minor"] = Field(default="minor", description="Role significance in the narrative")
     personality_traits: list[str] = Field(default_factory=list)
+    aliases: list[str] = Field(
+        default_factory=list,
+        description="Known nicknames, titles, or alternative names for this character",
+    )
     voice_description: str = Field(
         description="Natural language voice description for TTS Voice Design"
     )
@@ -93,6 +110,19 @@ class Character(BaseModel):
     voice_fx: VoiceFXSettings | None = Field(
         default=None,
         description="Voice FX settings (pitch, speed, tone) for this character",
+    )
+    dialogue_count: int = Field(
+        default=0,
+        ge=0,
+        description="Estimated number of spoken dialogue turns; used only for voice prioritization",
+    )
+    voice_id: str | None = Field(
+        default=None,
+        description="Voice-library ID; minor characters may intentionally share a voice",
+    )
+    test_sentence: str | None = Field(
+        default=None,
+        description="Character-specific quote for VoiceDesign generation",
     )
 
 
@@ -114,9 +144,46 @@ class CharacterRegistry(BaseModel):
 class ScriptLine(BaseModel):
     """A single speech segment in the audiobook script."""
 
-    line_id: str = Field(description="Unique ID, e.g. 'ch01_001'")
+    line_id: str = Field(
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
+        description="Unique path-safe ID, e.g. 'ch01_0001'",
+    )
     speaker: str = Field(description="Character ID from the registry")
+    speaker_confidence: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Director confidence in dialogue speaker attribution",
+    )
+    speaker_evidence: str = Field(
+        default="",
+        max_length=500,
+        description="Short source-context reason for the selected speaker",
+    )
+    attribution_review_required: bool = Field(
+        default=False,
+        description="Whether a human must confirm this speaker before audio generation",
+    )
+    attribution_review_reason: str = Field(
+        default="",
+        max_length=500,
+        description="Why this speaker attribution still needs review",
+    )
+    attribution_resolver: str = Field(
+        default="local",
+        max_length=100,
+        description="Resolver that produced the current attribution (local, Gemini model, or human)",
+    )
+    attribution_confidence_history: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Confidence-bearing decisions made by each attribution fallback",
+    )
+    voice_id: str | None = Field(
+        default=None,
+        description="Voice-library ID when it differs from the character/speaker ID",
+    )
     text: str = Field(description="The text to speak")
+    spoken_text: str | None = Field(default=None, description="Optional explicitly overridden pronunciation for TTS synthesis")
     emotion: str = Field(
         default="neutral",
         description="Emotional state described in natural language, e.g. 'contemplative, somber'",
@@ -143,7 +210,53 @@ class ScriptLine(BaseModel):
         le=5000,
         description="Silence after this segment (ms)",
     )
+    dialogue_kind: Literal[
+        "spoken", "non_spoken_quote", "reported_collective_speech"
+    ] | None = Field(
+        default=None,
+        description=(
+            "Classification for quoted source fragments. Spoken quotations "
+            "must use a character speaker; narrator quotations require an "
+            "explicit non_spoken_quote or source-tagged anonymous collective "
+            "speech classification and evidence."
+        ),
+    )
+    utterance_group_id: str | None = Field(
+        default=None,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
+        description=(
+            "Optional ID linking separately synthesized speaker turns that should "
+            "be mastered as one tightly connected utterance"
+        ),
+    )
+    source_fragment_id: int | None = Field(
+        default=None,
+        ge=0,
+        description="Stable zero-based fragment index within the source chapter",
+    )
+    source_fragment_ids: list[int] = Field(
+        default_factory=list,
+        description="All source fragment IDs represented by a grouped utterance",
+    )
+    source_start: int | None = Field(
+        default=None,
+        ge=0,
+        description="Inclusive character offset in the extracted chapter text",
+    )
+    source_end: int | None = Field(
+        default=None,
+        ge=0,
+        description="Exclusive character offset in the extracted chapter text",
+    )
 
+
+class SceneState(BaseModel):
+    """A scene-level prosody state for pacing and mood constraint."""
+    mood: str = Field(description="Overall scene mood (e.g. 'tense', 'melancholic')")
+    tension: str = Field(description="Tension level (e.g. 'high', 'building', 'low')")
+    narrator_pace: float = Field(description="Base pacing for the narrator in this scene")
+    character_state: str = Field(description="General state of characters in the scene")
+    transition_intent: str = Field(description="How this scene transitions to the next")
 
 class ScriptChapter(BaseModel):
     """A fully annotated chapter script ready for TTS generation."""
@@ -154,6 +267,7 @@ class ScriptChapter(BaseModel):
         default="",
         description="1-2 sentence summary for continuity with next chapter",
     )
+    scenes: list[SceneState] = Field(default_factory=list)
     lines: list[ScriptLine]
 
     @property
@@ -212,7 +326,10 @@ class GenerateLineResponse(BaseModel):
     """Response after generating audio for a single line."""
 
     status: str = "success"
-    line_id: str
+    line_id: str = Field(
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
+        description="Stable path-safe line identifier",
+    )
     audio_file: str
     duration_seconds: float
     sample_rate: int = 24000
@@ -221,12 +338,31 @@ class GenerateLineResponse(BaseModel):
 class GenerateChapterRequest(BaseModel):
     """Request to generate audio for an entire chapter."""
 
+    model_config = ConfigDict(populate_by_name=True)
+
     project_id: str
     chapter_number: int
+    scenes: list[SceneState] = Field(default_factory=list)
     lines: list[ScriptLine]
-    validate: bool = True
+    validation_enabled: bool = Field(
+        default=True,
+        validation_alias="validate",
+        serialization_alias="validate",
+    )
     auto_retry: bool = True
     max_retries: int = 3
+    validation_terms: list[str] = Field(
+        default_factory=list,
+        description="Approved names/glossary terms eligible for fuzzy ASR matching",
+    )
+    validation_revision: str = Field(
+        default="",
+        description="Project-scoped revision used to explicitly invalidate validation cache",
+    )
+    language: str | None = Field(
+        default=None,
+        description="Optional project language code passed to speech recognition",
+    )
 
 
 class GenerateChapterResponse(BaseModel):
@@ -237,10 +373,22 @@ class GenerateChapterResponse(BaseModel):
     total_lines: int
     generated: int
     failed_validation: int = 0
+    accepted_with_warning: int = 0
     retried: int = 0
+    synthesis_cache_hits: int = 0
+    synthesis_cache_misses: int = 0
+    validation_cache_hits: int = 0
+    validation_cache_misses: int = 0
+    timings_seconds: dict[str, float] = Field(default_factory=dict)
+    segment_metrics: list[dict[str, Any]] = Field(default_factory=list)
+    peak_vram_gb: float | None = None
+    risk_adjusted_line_ids: list[str] = Field(default_factory=list)
     total_duration_seconds: float = 0.0
     quality_report: ChapterQualityReport | None = None
     segment_files_dir: str = ""
+    generated_line_ids: list[str] = Field(default_factory=list)
+    failed_line_ids: list[str] = Field(default_factory=list)
+    quality_results: list[QualityResult] = Field(default_factory=list)
 
 
 # ===================================================================
@@ -254,22 +402,51 @@ class BootstrapVoicesRequest(BaseModel):
     project_id: str
     characters: dict[str, Character]
     force_regenerate: bool = False
+    design_fingerprints: dict[str, str] = Field(default_factory=dict)
+    candidate_counts: dict[str, int] = Field(default_factory=dict)
 
 
-class BootstrapVoiceResult(BaseModel):
-    """Result of generating a single voice reference clip."""
+class VoiceCandidate(BaseModel):
+    """A generated voice reference candidate."""
 
+    id: str
     file: str
     duration_seconds: float
     sample_rate: int = 24000
+    transcription_wer: float | None = Field(default=None, ge=0.0)
+    acoustic_metrics: dict[str, float] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
 
+class BootstrapVoiceResult(VoiceCandidate):
+    """Result of generating voice reference clips for a character."""
+
+    id: str = "default"
+    candidates: list[VoiceCandidate] = Field(default_factory=list)
+
+
+
+class CastPairDiagnostic(BaseModel):
+    """Warning-only objective evidence for one pair of cast references."""
+
+    left_voice_id: str
+    right_voice_id: str
+    speaker_similarity: float = Field(ge=-1.0, le=1.0)
+    composite_similarity: float = Field(ge=-1.0, le=1.0)
+    pitch_delta_hz: float = Field(ge=0.0)
+    pitch_range_delta_hz: float = Field(ge=0.0)
+    spectral_centroid_delta_hz: float = Field(ge=0.0)
+    status: str
+    warning_suppressed: bool = False
+    suppression_reason: str | None = None
 
 class BootstrapVoicesResponse(BaseModel):
+
     """Response after generating all voice reference clips."""
 
     status: str = "success"
     project_id: str
     voices_generated: dict[str, BootstrapVoiceResult]
+    cast_diagnostics: list[CastPairDiagnostic] = Field(default_factory=list)
 
 
 # ===================================================================
@@ -296,6 +473,22 @@ class QualityResult(BaseModel):
     peak_dbfs: float = 0.0
     noise_floor_db: float = 0.0
     clipping_detected: bool = False
+    duration_ok: bool = True
+    has_long_silence: bool = False
+    pacing_anomaly: bool = False
+    monotone_warning: bool = False
+    pitch_median: float = 0.0
+    pitch_cv: float = 0.0
+    reference_pitch_median: float = 0.0
+    text_similarity: float = Field(default=0.0, ge=0.0, le=1.0)
+    effective_text_error: float = Field(default=1.0, ge=0.0, le=1.0)
+    acceptance_reason: str = ""
+    speaker_similarity: float | None = Field(
+        default=None,
+        ge=-1.0,
+        le=1.0,
+        description="Cosine similarity between generated and reference speaker embeddings",
+    )
     quality_score: float = Field(
         default=0.0,
         ge=0.0,
@@ -303,6 +496,27 @@ class QualityResult(BaseModel):
         description="Composite quality score",
     )
     attempt: int = 1
+    selected: bool = False
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    passed_hard_gates: bool = True
+    warnings: list[str] = Field(
+        default_factory=list,
+        description="Soft diagnostic messages that do not block acceptance",
+    )
+    validation_confidence: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Final confidence after local and optional external audio validation",
+    )
+    external_validation_provider: str = ""
+    external_validation_model: str = ""
+    external_validation_decision: Literal["", "accept", "reject", "abstain"] = ""
+    external_validation_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    external_validation_reason: str = ""
+    external_validation_history: list[dict[str, Any]] = Field(default_factory=list)
+    manual_review_required: bool = False
+    manual_review_reason: str = ""
 
 
 class ChapterQualityReport(BaseModel):
@@ -311,6 +525,7 @@ class ChapterQualityReport(BaseModel):
     chapter_number: int
     total_segments: int = 0
     passed: int = 0
+    accepted_with_warning: int = 0
     failed: int = 0
     flagged: int = 0
     total_retries: int = 0
@@ -318,6 +533,7 @@ class ChapterQualityReport(BaseModel):
     worst_wer: float = 0.0
     average_quality_score: float = 0.0
     flagged_lines: list[str] = Field(default_factory=list)
+    warning_lines: list[str] = Field(default_factory=list)
     artifact_detections: int = 0
 
 
@@ -328,6 +544,7 @@ class BookQualityReport(BaseModel):
     generated_at: datetime = Field(default_factory=datetime.utcnow)
     total_segments: int = 0
     passed: int = 0
+    accepted_with_warning: int = 0
     failed: int = 0
     flagged: int = 0
     total_retries: int = 0
@@ -353,6 +570,9 @@ class MasterChapterRequest(BaseModel):
     chapter_number: int
     segments: list[MasterSegmentInfo]
     mastering_config: MasteringConfig | None = None
+    chapter_title: str = ""
+    announce_chapter: bool = True
+    narrator_voice_id: str = "narrator"
 
 
 class MasterSegmentInfo(BaseModel):
@@ -362,6 +582,7 @@ class MasterSegmentInfo(BaseModel):
     file: str
     pause_before_ms: int = 0
     pause_after_ms: int = 500
+    utterance_group_id: str | None = None
 
 
 class MasteringConfig(BaseModel):
@@ -383,6 +604,8 @@ class MasterChapterResponse(BaseModel):
     lufs: float = 0.0
     peak_dbfs: float = 0.0
     file_size_mb: float = 0.0
+    join_warnings: int = 0
+    join_diagnostics: list[dict[str, Any]] = Field(default_factory=list)
 
 
 # ===================================================================
@@ -398,6 +621,7 @@ class ExportM4BRequest(BaseModel):
     chapters: list[ExportChapterInfo]
     cover_art: str | None = None
     output_config: ExportConfig | None = None
+    output_name: str | None = None
 
 
 class AudiobookMetadata(BaseModel):
@@ -409,6 +633,7 @@ class AudiobookMetadata(BaseModel):
     genre: str = "Fantasy"
     year: str = ""
     description: str = ""
+    isbn: str = ""
 
 
 class ExportChapterInfo(BaseModel):
@@ -417,6 +642,8 @@ class ExportChapterInfo(BaseModel):
     number: int
     title: str
     file: str
+    lufs: float | None = None
+    peak_dbfs: float | None = None
 
 
 class ExportConfig(BaseModel):
@@ -436,11 +663,48 @@ class ExportM4BResponse(BaseModel):
     total_chapters: int = 0
     file_size_mb: float = 0.0
     download_url: str = ""
+    book_loudness: dict[str, Any] = Field(default_factory=dict)
 
 
 # ===================================================================
 # Pipeline / Project Status (Stage ⑧: Dashboard)
 # ===================================================================
+
+
+class IncrementalDeliverySettings(BaseModel):
+    """Settings for publishing audiobook parts incrementally."""
+
+    enabled: bool = False
+    batch_size: int = Field(default=5, ge=1, le=20)
+    packaging: Literal["parts"] = "parts"
+    publish_final_full: bool = True
+
+
+class ProgressSnapshot(BaseModel):
+    """Versioned, stage-agnostic description of the currently active work."""
+
+    schema_version: int = 1
+    stage: str = ""
+    phase: str = ""
+    message: str = ""
+    chapter: int | None = None
+    chapter_position: int | None = None
+    chapter_total: int | None = None
+    line_id: str = ""
+    line_position: int | None = None
+    line_total: int | None = None
+    attempt: int = 1
+    cache_hit: bool | None = None
+    completed_units: float = 0.0
+    total_units: float = 0.0
+    percent: float = 0.0
+    elapsed_seconds: float = 0.0
+    eta_seconds: float | None = None
+    eta_confidence: Literal["none", "low", "medium", "high"] = "none"
+    started_at: datetime | None = None
+    updated_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
 
 
 class ProjectStatus(BaseModel):
@@ -473,7 +737,18 @@ class ProjectStatus(BaseModel):
     # Safe deployment and selective generation controls
     deployment_requested: bool = False
     generation_chapter_selection: list[int] | None = None
+    active_generation_chapter_selection: list[int] | None = None
+    active_stage: PipelineStage | None = None
+    pause_reason: str | None = None
+    progress: ProgressSnapshot | None = None
 
+    # Incremental delivery state
+    incremental_delivery: IncrementalDeliverySettings = Field(default_factory=IncrementalDeliverySettings)
+    active_delivery_id: str | None = None
+    active_delivery_chapters: list[int] = Field(default_factory=list)
+    published_delivery_count: int = 0
+    latest_published_delivery_id: str | None = None
+    pause_after_delivery_requested: bool = False
 
 class ProjectSummary(BaseModel):
     """Brief summary of a project for listing."""
@@ -554,5 +829,12 @@ class VoiceHealthResponse(BaseModel):
     gpu: str = ""
     vram_total_gb: float = 0.0
     vram_used_gb: float = 0.0
+    vram_reserved_gb: float = 0.0
+    vram_peak_allocated_gb: float = 0.0
+    vram_peak_reserved_gb: float = 0.0
     model_loaded: str = ""
+    attention_backend: str = ""
+    validator_backend: str = ""
+    validator_model: str = ""
+    validator_vad_filter: bool = False
     uptime_seconds: float = 0.0

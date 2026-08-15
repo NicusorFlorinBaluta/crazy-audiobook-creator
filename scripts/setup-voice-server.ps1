@@ -1,6 +1,7 @@
 # Setup Voice Server on Windows for AMD 7900 XTX (ROCm)
 param (
-    [string]$VenvPath = "E:\PyTorch env\my_venv"
+    [string]$VenvPath = "E:\PyTorch env\my_venv",
+    [switch]$DryRun
 )
 
 Write-Host "==========================================================" -ForegroundColor Cyan
@@ -14,44 +15,66 @@ if (-not (Test-Path $PythonExe)) {
     exit 1
 }
 Write-Host "[OK] Found AMD PyTorch venv: $VenvPath" -ForegroundColor Green
+if ($DryRun) {
+    Write-Host "[DRY RUN] No packages will be installed or removed." -ForegroundColor Cyan
+    & $PythonExe "$PSScriptRoot\runtime_preflight.py" --pip-check
+    exit $LASTEXITCODE
+}
 
-# Step 2: Install voice server dependencies
+# Step 2: Remove the retired Parler package from this Qwen environment
 Write-Host ""
-Write-Host "[1/3] Installing voice server dependencies into AMD venv..." -ForegroundColor Yellow
-$env:GIT_CLONE_PROTECTION_ACTIVE = "false"
-& $PythonExe -m pip install git+https://github.com/huggingface/parler-tts.git soundfile openai-whisper plyer requests python-multipart ebooklib beautifulsoup4 qwen-tts
+Write-Host "[1/4] Checking for retired Parler dependencies..." -ForegroundColor Yellow
+& $PythonExe -m pip show parler-tts *> $null
+if ($LASTEXITCODE -eq 0) {
+    & $PythonExe -m pip uninstall -y parler-tts
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Could not remove parler-tts from the Qwen environment."
+        exit $LASTEXITCODE
+    }
+    Write-Host "[OK] Removed incompatible parler-tts package." -ForegroundColor Green
+} else {
+    Write-Host "[OK] No incompatible parler-tts package is installed." -ForegroundColor Green
+}
+
+# Step 3: Install the supported Qwen voice-server dependencies
+Write-Host ""
+Write-Host "[2/4] Installing voice server dependencies into AMD venv..." -ForegroundColor Yellow
+$RequirementsPath = Join-Path $PSScriptRoot "..\voice\requirements.txt"
+$ConstraintsPath = Join-Path $PSScriptRoot "..\voice\constraints-windows-rocm-tested.txt"
+& $PythonExe -m pip install -r $RequirementsPath -c $ConstraintsPath
 if ($LASTEXITCODE -ne 0) {
     Write-Error "Pip install failed with exit code $LASTEXITCODE. Please check your network or python venv."
     exit $LASTEXITCODE
 }
 
-# Step 3: Apply audiotools ROCm patch if needed
+# Step 4: Verify the resolved environment
 Write-Host ""
-Write-Host "[2/3] Checking audiotools ROCm patch..." -ForegroundColor Yellow
-$DecoratorPath = Join-Path $VenvPath "Lib\site-packages\audiotools\ml\decorators.py"
-if (Test-Path $DecoratorPath) {
-    $content = Get-Content $DecoratorPath -Raw
-    if ($content -match "op: dist\.ReduceOp = dist\.ReduceOp\.AVG") {
-        Write-Host "Applying ReduceOp patch to $DecoratorPath..." -ForegroundColor Yellow
-        $content = $content -replace "op: dist\.ReduceOp = dist\.ReduceOp\.AVG", "op: dist.ReduceOp = None"
-        Set-Content -Path $DecoratorPath -Value $content -NoNewline
-        Write-Host "[OK] Audiotools patch applied successfully!" -ForegroundColor Green
-    } else {
-        Write-Host "[OK] Audiotools patch already applied or not required." -ForegroundColor Green
-    }
-} else {
-    Write-Host "[!] audiotools/ml/decorators.py not found in venv (will be checked when audiotools is loaded)." -ForegroundColor Yellow
+Write-Host "[3/4] Checking Python dependency consistency..." -ForegroundColor Yellow
+& $PythonExe -m pip check
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "Python dependency consistency check failed with exit code $LASTEXITCODE."
+    exit $LASTEXITCODE
 }
 
-# Step 4: Verify FFmpeg
+# Step 5: Verify FFmpeg
 Write-Host ""
-Write-Host "[3/3] Checking FFmpeg installation..." -ForegroundColor Yellow
+Write-Host "[4/4] Checking FFmpeg installation..." -ForegroundColor Yellow
 $FFmpegCmd = Get-Command ffmpeg -ErrorAction SilentlyContinue
 if ($FFmpegCmd) {
     Write-Host "[OK] FFmpeg is available at: $($FFmpegCmd.Source)" -ForegroundColor Green
 } else {
     Write-Warning "FFmpeg was not found in PATH! M4B export requires FFmpeg. Please install FFmpeg and add it to PATH."
 }
+
+Write-Host ""
+Write-Host "Writing read-only runtime compatibility report..." -ForegroundColor Yellow
+$ReportPath = Join-Path $PSScriptRoot "..\runtime-environment.json"
+& $PythonExe "$PSScriptRoot\runtime_preflight.py" --pip-check --output $ReportPath
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "Runtime compatibility preflight failed. Review $ReportPath."
+    exit $LASTEXITCODE
+}
+Write-Host "[OK] Runtime report: $ReportPath" -ForegroundColor Green
 
 Write-Host ""
 Write-Host "==========================================================" -ForegroundColor Cyan

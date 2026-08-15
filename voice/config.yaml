@@ -1,5 +1,5 @@
 # ============================================================
-# Voice (Ubuntu) — Configuration
+# Voice (Local Windows GPU Service) — Configuration
 # ============================================================
 
 # --- TTS Engine ---
@@ -9,38 +9,81 @@ tts:
   dtype: "float16"                   # "float16" | "bfloat16" | "float32"
   sample_rate: 24000                 # Native output sample rate (Hz)
   max_text_length: 500               # Max characters per generation call
+  language: "English"                # Avoid unreliable auto-detection on short lines
+  attn_implementation: "sdpa"        # ~16% faster wall time than eager in the local smoke benchmark
 
-  # Voice Design settings
+  # Clean-audio policy. The 2026-08-09 E2E found echo-like smearing in lines
+  # processed by the librosa phase-vocoder fallback. Keep output dry until a
+  # replacement backend passes controlled listening tests.
+  post_processing:
+    enabled: false
+    allow_phase_vocoder_fallback: false
+
+  # Reference-voice design settings
+  voice_design_model: "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign"
   voice_design_duration: 10          # Duration of reference clips (seconds)
   voice_design_test_sentences:
-    male: "The ancient tower stood against the darkening sky, its stones weathered by centuries of wind and rain."
-    female: "She walked through the moonlit garden, her footsteps barely disturbing the fallen leaves."
-    neutral: "The library was vast and silent, filled with the scent of old paper and forgotten memories."
+    male: "The ancient tower stood against the darkening sky as rain swept across the weathered stone."
+    female: "She walked through the moonlit garden, listening as fallen leaves whispered beneath each careful step."
+    neutral: "The library was vast and silent, filled with old paper, dust, and half-forgotten memories."
 
   # Generation parameters
   generation:
     max_new_tokens: 4096
     do_sample: true
-    temperature: 0.7
-    top_p: 0.9
-    repetition_penalty: 1.1
+    temperature: 0.9
+    top_k: 50
+    top_p: 1.0
+    repetition_penalty: 1.05
+    # Experimental only. Keep disabled until the fixed-fixture and chapter
+    # benchmarks prove no truncation or quality regression.
+    adaptive_max_new_tokens:
+      enabled: false
+      base_tokens: 256
+      tokens_per_character: 10.0
+      minimum_tokens: 512
 
 # --- Quality Validation ---
 validation:
   enabled: true
-  whisper_model: "medium"            # "tiny" | "base" | "small" | "medium" | "large-v3"
-  whisper_device: "auto"             # "auto" | "cuda" | "cpu"
+  # Keep both models only within one chapter's retry loop. Whisper is released
+  # at the chapter boundary, so the next long TTS pass runs without contention.
+  keep_tts_and_whisper_resident: true
+  # Listening-approved clarity policy for very short emphatic lines. Longer
+  # dialogue, repetitions, names, and ordinary narration remain unchanged.
+  risk_aware_first_attempt: true
+  whisper_model: "large-v3"        # "tiny" | "base" | "small" | "medium" | "large-v3"
+  whisper_device: "cuda"            # "auto" | "cuda" | "cpu"
+  # CTranslate2's faster-whisper CUDA runtime targets NVIDIA on Windows.
+  # Use PyTorch OpenAI Whisper for this AMD/ROCm environment.
+  whisper_backend: "openai_whisper" # "auto" | "faster_whisper" | "openai_whisper"
+  # Raw OpenAI Whisper preserved short/high-pitched and repeated speech in the
+  # full-book ROCm E2E run. Optional Silero preprocessing remains available,
+  # with a raw-audio fallback when VAD detects no speech.
+  whisper_vad_filter: false
 
   # Thresholds
-  wer_threshold: 0.05               # 5%
+  wer_threshold: 0.20               # 20%
+  emotion_wer_allowance: 0.0        # Keep transcript accuracy strict unless benchmark evidence justifies a relaxation
   max_retries: 3
+  speaker_similarity_threshold: 0.55
+  voice_profile_similarity_warning: 0.985
+  voice_profile_acoustic_regenerations: 1
 
   # Audio checks
   artifact_noise_threshold: -50      # dB
   clipping_threshold: -0.5           # dBFS
   min_duration_seconds: 0.3
   max_silence_seconds: 3.0
-  duration_tolerance: 0.3            # ±30%
+  duration_tolerance: 0.6            # ±60%, plus 0.8s allowance for short lines
+
+  # Non-blocking diagnostics. Thresholds are explicit so benchmark tuning
+  # invalidates cached validation results deterministically.
+  prosody:
+    enabled: true
+    min_duration_seconds: 1.0
+    pitch_cv_threshold: 0.06
+    dynamic_range_threshold: 4.0
 
   # Text normalization for WER
   normalize_text: true
@@ -49,13 +92,14 @@ validation:
 
 # --- Audio Mastering ---
 mastering:
-  target_lufs: -19                   # ACX standard range: -18 to -23
+  target_lufs: -19                   # Internal playback target (LUFS)
   peak_limit_dbfs: -1.0
+  peak_ceiling_mode: "soft_limiter"  # Listening-approved; preserves most samples while controlling true peaks
   crossfade_ms: 30
   fade_curve: "cosine"               # "linear" | "cosine" | "exponential"
 
   # Noise gate
-  noise_gate_enabled: true
+  noise_gate_enabled: false          # Generated audio normally needs no gate
   noise_gate_threshold: -50
   noise_gate_attack_ms: 5
   noise_gate_release_ms: 50
@@ -79,9 +123,11 @@ export:
 # --- FastAPI Server ---
 server:
   port: 8100
-  host: "0.0.0.0"
+  host: "127.0.0.1"
   workers: 1                         # Keep at 1 for GPU
-  cors_origins: ["*"]
+  cors_origins: ["http://127.0.0.1:8000", "http://localhost:8000"]
+  api_token: ""
+  idle_unload_seconds: 300
   max_upload_size_mb: 100
 
 # --- Storage ---

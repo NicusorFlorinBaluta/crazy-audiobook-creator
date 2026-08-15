@@ -10,6 +10,7 @@ window.PipelineManager = (() => {
         'EXTRACTING',
         'SCRIPTING',
         'BOOTSTRAPPING',
+        'VOICE_REVIEW',
         'GENERATING',
         'VALIDATING',
         'MASTERING',
@@ -23,6 +24,9 @@ window.PipelineManager = (() => {
         btnStart: document.getElementById('btn-start-pipeline'),
         btnPause: document.getElementById('btn-pause-pipeline'),
     };
+
+    let pipelineDisclosureProject = null;
+    let pipelineDisclosureInitialized = false;
 
     function init() {
         renderTracker();
@@ -48,20 +52,41 @@ window.PipelineManager = (() => {
     function updateTracker(currentStage, status, data = null) {
         if (!currentStage) return;
         
-        const currentIndex = STAGES.indexOf(currentStage.toUpperCase());
+        const stageUpper = currentStage.toUpperCase();
+        const statusLower = (status || '').toLowerCase();
+        const selectionComplete = stageUpper === 'SELECTION_COMPLETE'
+            || statusLower === 'selection_complete';
+        const isFinished = ['COMPLETE', 'COMPLETED'].includes(stageUpper) ||
+                           ['complete', 'completed'].includes(statusLower);
+        
+        let currentIndex = STAGES.indexOf(stageUpper);
+        if (stageUpper === 'SELECTION_COMPLETE' || stageUpper === 'COMPLETED') {
+            currentIndex = STAGES.length - 1;
+        }
         
         document.querySelectorAll('.pipeline-stage').forEach((el, idx) => {
             el.className = 'pipeline-stage'; // reset
             const percentEl = el.querySelector('.stage-percent');
+            const nameEl = el.querySelector('.stage-name');
             if (percentEl) percentEl.textContent = '';
+            if (nameEl) nameEl.textContent = STAGES[idx].replace('_', ' ');
             
-            if (idx < currentIndex || status === 'complete') {
+            if (selectionComplete && idx === STAGES.length - 1) {
+                el.classList.add('active');
+                if (nameEl) nameEl.textContent = 'BATCH COMPLETE';
+                if (percentEl) percentEl.textContent = 'PARTIAL';
+            } else if (isFinished || idx < currentIndex) {
                 el.classList.add('done');
                 if (percentEl) percentEl.textContent = '100%';
             } else if (idx === currentIndex) {
                 if (status === 'error') {
                     el.classList.add('error');
-                } else if (status === 'running' || status === 'paused') {
+                } else if (
+                    statusLower === 'running'
+                    || statusLower === 'paused'
+                    || statusLower === 'voice_review'
+                    || statusLower === 'waiting_for_review'
+                ) {
                     el.classList.add('active');
                     
                     // Compute percentage based on real metrics from the pipeline state!
@@ -69,30 +94,48 @@ window.PipelineManager = (() => {
                         let pct = null;
                         const stage = STAGES[idx];
                         const totalCh = data.total_chapters || 0;
-                        const totalLines = data.total_lines || 0;
+                        const selected = data.active_generation_chapter_selection
+                            || data.generation_chapter_selection
+                            || Array.from({length: totalCh}, (_, index) => index + 1);
+                        const selectedSet = new Set(selected);
+                        const batchTotal = selectedSet.size || totalCh;
                         
-                        // SCRIPTING runs locally via Ollama. We'd need to poll the script dir, 
-                        // but we can't add a new API endpoint without restarting the server (which would interrupt the E2E test).
-                        if (stage === 'SCRIPTING' && data.completed_script_chapters) {
-                            pct = (data.completed_script_chapters.length / totalCh) * 100;
+                        if (stage === 'SCRIPTING' && data.scripted_chapters) {
+                            pct = Number.isFinite(data.work_progress?.stagePercent)
+                                ? data.work_progress.stagePercent
+                                : (
+                                    totalCh
+                                        ? (data.scripted_chapters.length / totalCh) * 100
+                                        : 0
+                                );
                         } else if (stage === 'SCRIPTING') {
-                            // If we don't have hard metrics, show an active animation instead of blank!
                             percentEl.innerHTML = '<span class="loading-dots">⏳</span>';
                         } else if (stage === 'BOOTSTRAPPING') {
-                            pct = data.bootstrapping_completed ? 100 : 25;
-                        } else if (stage === 'GENERATING' && totalCh > 0) {
-                            const doneCount = data.completed_gen_chapters ? data.completed_gen_chapters.length : 0;
-                            // Since chapter generation is a blocking call, we estimate progress based on completed chapters.
-                            // Add 0.5 to show it is currently working on a chapter.
-                            pct = ((doneCount + (doneCount < totalCh ? 0.5 : 0)) / totalCh) * 100;
-                        } else if (stage === 'VALIDATING' && totalCh > 0) {
-                            const doneCount = data.completed_gen_chapters ? data.completed_gen_chapters.length : 0;
-                            pct = ((doneCount + (doneCount < totalCh ? 0.5 : 0)) / totalCh) * 100;
-                        } else if (stage === 'MASTERING' && totalCh > 0) {
-                            const doneCount = data.completed_master_chapters ? data.completed_master_chapters.length : 0;
-                            pct = (doneCount / totalCh) * 100;
+                            pct = data.bootstrapping_completed ? 100 : null;
+                            if (!data.bootstrapping_completed) {
+                                percentEl.innerHTML = '<span class="loading-dots">⏳</span>';
+                            }
+                        } else if (stage === 'VOICE_REVIEW') {
+                            pct = 100;
+                        } else if (stage === 'GENERATING' && batchTotal > 0) {
+                            const genSet = new Set(
+                                (data.generated_chapters || []).filter(chapter => selectedSet.has(chapter))
+                            );
+                            const curCh = data.current_gen_chapter || 1;
+                            const curDetail = data.chapter_details ? data.chapter_details.find(d => d.number === curCh) : null;
+                            const curPct = curDetail ? (curDetail.progress_percent / 100) : 0;
+                            pct = ((genSet.size + curPct) / batchTotal) * 100;
+                        } else if (stage === 'VALIDATING' && batchTotal > 0) {
+                            const genCount = (data.generated_chapters || [])
+                                .filter(chapter => selectedSet.has(chapter)).length;
+                            pct = (genCount / batchTotal) * 100;
+                        } else if (stage === 'MASTERING' && batchTotal > 0) {
+                            const masterCount = (data.mastered_chapters || [])
+                                .filter(chapter => selectedSet.has(chapter)).length;
+                            pct = (masterCount / batchTotal) * 100;
                         } else if (stage === 'EXPORTING') {
-                            pct = 50; // coarse
+                            pct = null;
+                            percentEl.innerHTML = '<span class="loading-dots">⏳</span>';
                         }
                         
                         if (pct !== null) {
@@ -104,34 +147,98 @@ window.PipelineManager = (() => {
         });
         
         // Hide live progress if not running
-        if (status !== 'running') {
+        if (!['running', 'in_progress'].includes(statusLower) || isFinished) {
             els.live.classList.remove('active');
         }
     }
 
+    let _etaState = { startMs: 0, lastPct: 0, phaseKey: '' };
+
     function updateLiveProgress(data) {
-        if (!data) return;
-        
+        if (!data || !data.message) {
+            els.live.classList.remove('active');
+            els.live.innerHTML = '';
+            _etaState = { startMs: 0, lastPct: 0, phaseKey: '' };
+            return;
+        }
+
+        const now = Date.now();
+        const percent = Number.isFinite(data.percent) ? data.percent : 0;
+        const phaseKey = data.phase || data.stage || 'work';
+        if (phaseKey !== _etaState.phaseKey || percent < _etaState.lastPct) {
+            _etaState = { startMs: now, lastPct: percent, phaseKey };
+        } else {
+            _etaState.lastPct = percent;
+        }
+
+        let etaStr = '';
+        if (Number.isFinite(data.eta_seconds)) {
+            const remainingSec = Math.max(0, Math.round(data.eta_seconds));
+            etaStr = remainingSec > 60
+                ? ` ~${Math.ceil(remainingSec / 60)} min remaining`
+                : ` ~${remainingSec} sec remaining`;
+        } else if (_etaState.startMs && data.percent > 0 && data.percent < 100) {
+            const elapsed = now - _etaState.startMs;
+            const msPerPercent = elapsed / data.percent;
+            const remainingPercent = 100 - data.percent;
+            const remainingMs = remainingPercent * msPerPercent;
+            
+            if (elapsed > 3000) { // Wait 3s before showing ETA
+                const remainingSec = Math.round(remainingMs / 1000);
+                if (remainingSec > 60) {
+                    etaStr = ` ~${Math.ceil(remainingSec / 60)} min remaining`;
+                } else {
+                    etaStr = ` ~${remainingSec} sec remaining`;
+                }
+            }
+        }
+
         els.live.classList.add('active');
         els.live.innerHTML = `
             <div class="live-dot"></div>
             <div class="live-progress">
-                <div>${escapeHtml(data.message || 'Processing...')}</div>
+                <div>${escapeHtml(data.message || 'Processing...')} <span class="eta" style="opacity:0.7;font-size:0.9em">${etaStr}</span></div>
                 <div class="progress-bar">
-                    <div class="progress-fill" style="width: ${data.percent || 100}%"></div>
+                    <div class="progress-fill" style="width: ${percent}%"></div>
                 </div>
             </div>
-            <div>${data.percent ? data.percent.toFixed(1) + '%' : ''}</div>
+            <div>${Number.isFinite(data.percent) ? data.percent.toFixed(1) + '%' : ''}</div>
         `;
     }
 
-    function toggleControls(status, isRunning) {
-        // Find DOM elements directly since this is in a separate module scope
+    function toggleControls(status, isRunning, data = null) {
         const btnResetStage = document.getElementById('btn-reset-stage');
         const selectResetStage = document.getElementById('select-reset-stage');
         const btnDownloadAudiobook = document.getElementById('btn-download-audiobook');
+        const pipelineDetails = document.getElementById('pipeline-details');
+        const advancedActions = document.getElementById('advanced-actions');
 
-        if (isRunning) {
+        const statusLower = (status || '').toLowerCase();
+        const isDone = ['complete', 'completed', 'selection_complete'].includes(statusLower);
+        const hasMastered = data && data.mastered_chapters && data.mastered_chapters.length > 0;
+
+        const projectId = data?.project_id || null;
+        if (pipelineDetails && (
+            !pipelineDisclosureInitialized
+            || projectId !== pipelineDisclosureProject
+        )) {
+            // Choose a useful default once per project. Subsequent polling must
+            // preserve the user's disclosure choice instead of snapping it shut.
+            pipelineDetails.open = !isDone || isRunning;
+            pipelineDisclosureProject = projectId;
+            pipelineDisclosureInitialized = true;
+        }
+        if (advancedActions && isRunning) advancedActions.open = false;
+
+        if (btnDownloadAudiobook) {
+            if (isDone || hasMastered) {
+                btnDownloadAudiobook.classList.remove('hidden');
+            } else {
+                btnDownloadAudiobook.classList.add('hidden');
+            }
+        }
+
+        if (isRunning && !isDone) {
             els.btnStart.classList.add('hidden');
             els.btnPause.classList.remove('hidden');
             if (selectResetStage) selectResetStage.classList.add('hidden');
@@ -141,15 +248,15 @@ window.PipelineManager = (() => {
             els.btnPause.classList.add('hidden');
             if (selectResetStage) selectResetStage.classList.remove('hidden');
             
-            if (status === 'complete' || status === 'completed') {
-                els.btnStart.textContent = '▶ Run Again';
-                if (btnDownloadAudiobook) btnDownloadAudiobook.classList.remove('hidden');
-            } else if (status === 'error' || status === 'paused') {
+            if (isDone) {
+                els.btnStart.textContent = '▶ Generate selected chapters again';
+                els.btnStart.title = 'Uses the chapter selection below and preserves the current completed audiobook until new output is ready';
+            } else if (['error', 'paused', 'paused_scheduled', 'deploy_paused', 'voice_review', 'waiting_for_review'].includes(statusLower)) {
                 els.btnStart.textContent = '▶ Resume Pipeline';
-                if (btnDownloadAudiobook) btnDownloadAudiobook.classList.add('hidden');
+                els.btnStart.removeAttribute('title');
             } else {
                 els.btnStart.textContent = '▶ Start Pipeline';
-                if (btnDownloadAudiobook) btnDownloadAudiobook.classList.add('hidden');
+                els.btnStart.removeAttribute('title');
             }
         }
     }

@@ -16,22 +16,28 @@ The main entry point for the Ubuntu TTS server that handles:
 from __future__ import annotations
 
 import logging
+import asyncio
+import os
+import threading
 import time
 from contextlib import asynccontextmanager
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 import yaml
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+
+os.environ.setdefault("ROCM_SDK_TARGET_FAMILY", "custom")
 
 from voice.tts_server.qwen3_engine import Qwen3TTSEngine
 from voice.tts_server.voice_designer import VoiceDesigner
 from voice.tts_server.voice_library import VoiceLibraryManager
 from voice.validator.whisper_validator import WhisperValidator
 from voice.validator.audio_analyzer import AudioAnalyzer
-from voice.validator.validation_loop import ValidationLoop
+from voice.validator.validation_loop import GenerationCancelled, ValidationLoop
 from voice.mastering.assembler import AudioAssembler
 from voice.mastering.normalizer import LoudnessNormalizer
 from voice.mastering.m4b_exporter import M4BExporter
@@ -51,6 +57,7 @@ from shared.models import (
     VoiceHealthResponse,
     ChapterQualityReport,
 )
+from shared.config_validation import validate_voice_config
 
 logger = logging.getLogger(__name__)
 
@@ -67,9 +74,114 @@ normalizer: LoudnessNormalizer | None = None
 exporter: M4BExporter | None = None
 config: dict[str, Any] = {}
 start_time: float = 0.0
+last_activity: float = 0.0
+active_gpu_jobs: int = 0
+server_event_loop: asyncio.AbstractEventLoop | None = None
+gpu_job_lock = threading.RLock()
+active_project_runs: dict[str, threading.Event] = {}
+run_state_lock = threading.Lock()
 
 # WebSocket connections for progress updates
 ws_connections: list[WebSocket] = []
+
+
+@contextmanager
+def gpu_job():
+    """Serialize model lifecycle and GPU work across request threads."""
+    global active_gpu_jobs, last_activity
+    with gpu_job_lock:
+        active_gpu_jobs += 1
+        last_activity = time.time()
+        try:
+            yield
+        finally:
+            active_gpu_jobs -= 1
+            last_activity = time.time()
+
+
+def _workspace() -> Path:
+    return Path(config.get("storage", {}).get("workspace_dir", "workspace")).resolve()
+
+
+def _directory_size_bytes(root: Path) -> int:
+    """Return current storage use without following directory symlinks."""
+    if not root.exists():
+        return 0
+    total = 0
+    for entry in os.scandir(root):
+        try:
+            if entry.is_symlink():
+                continue
+            if entry.is_dir(follow_symlinks=False):
+                total += _directory_size_bytes(Path(entry.path))
+            elif entry.is_file(follow_symlinks=False):
+                total += entry.stat(follow_symlinks=False).st_size
+        except (FileNotFoundError, PermissionError):
+            continue
+    return total
+
+
+def _enforce_workspace_quota() -> None:
+    max_gb = float(config.get("storage", {}).get("max_workspace_gb", 0) or 0)
+    if max_gb <= 0:
+        return
+    used_bytes = _directory_size_bytes(_workspace())
+    limit_bytes = max_gb * 1024 ** 3
+    if used_bytes >= limit_bytes:
+        raise HTTPException(
+            status_code=507,
+            detail=(
+                f"Voice workspace quota reached "
+                f"({used_bytes / 1024 ** 3:.1f}/{max_gb:.1f} GiB). "
+                "Remove old intermediates before generating more audio."
+            ),
+        )
+
+
+def _safe_storage_project(root: Path, project_id: str) -> Path:
+    root = root.resolve()
+    candidate = (root / project_id).resolve()
+    if not candidate.is_relative_to(root) or candidate == root:
+        raise HTTPException(status_code=400, detail="Invalid project ID")
+    return candidate
+
+
+def _safe_workspace_project(project_id: str) -> Path:
+    return _safe_storage_project(_workspace(), project_id)
+
+
+def _safe_project_path(project_id: str, value: str | Path) -> Path:
+    project_dir = _safe_workspace_project(project_id)
+    candidate = Path(value)
+    if not candidate.is_absolute():
+        if candidate.parts and candidate.parts[0] == project_id:
+            candidate = (_workspace() / candidate).resolve()
+        else:
+            candidate = (project_dir / candidate).resolve()
+    else:
+        candidate = candidate.resolve()
+    if not candidate.is_relative_to(project_dir):
+        raise HTTPException(status_code=403, detail="Path is outside the project workspace")
+    return candidate
+
+
+async def _broadcast_progress(message: dict[str, Any]) -> None:
+    for ws in list(ws_connections):
+        try:
+            await ws.send_json(message)
+        except Exception:
+            try:
+                ws_connections.remove(ws)
+            except ValueError:
+                pass
+
+
+def _progress_from_worker(message: dict[str, Any]) -> None:
+    if server_event_loop and server_event_loop.is_running():
+        asyncio.run_coroutine_threadsafe(
+            _broadcast_progress(message),
+            server_event_loop,
+        )
 
 
 def load_config(config_path: str = "voice/config.yaml") -> dict[str, Any]:
@@ -77,7 +189,7 @@ def load_config(config_path: str = "voice/config.yaml") -> dict[str, Any]:
     path = Path(config_path)
     if path.exists():
         with open(path, "r", encoding="utf-8") as f:
-            return yaml.safe_load(f) or {}
+            return validate_voice_config(yaml.safe_load(f) or {})
     logger.warning("Config not found: %s — using defaults", path)
     return {}
 
@@ -86,31 +198,70 @@ def load_config(config_path: str = "voice/config.yaml") -> dict[str, Any]:
 async def lifespan(app: FastAPI):
     """Application lifespan handler — load model on startup, unload on shutdown."""
     global engine, designer, library, validator, assembler, normalizer, exporter
-    global config, start_time
+    global config, start_time, last_activity, server_event_loop
 
     start_time = time.time()
+    last_activity = start_time
+    server_event_loop = asyncio.get_running_loop()
     config = load_config()
 
+    from shared.single_instance import SingleInstanceLock
+    lock = SingleInstanceLock("voice_server.lock")
+    if not lock.acquire():
+        logger.error("Another Voice Server instance is already running! Exiting.")
+        import sys
+        sys.exit(1)
+
     # Initialize components
+    from voice.tts_server.embedding_store import EmbeddingStore
+    embedding_store = EmbeddingStore(db_path="voice_cache.db")
+
     tts_cfg = config.get("tts", {})
     engine = Qwen3TTSEngine(
-        model_name=tts_cfg.get("model", "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign"),
+        model_name=tts_cfg.get("model", "Qwen/Qwen3-TTS-12Hz-1.7B-Base"),
         device=tts_cfg.get("device", "cuda"),
         dtype=tts_cfg.get("dtype", "float16"),
         sample_rate=tts_cfg.get("sample_rate", 24000),
+        embedding_store=embedding_store,
+        generation_config=tts_cfg.get("generation", {}),
+        max_text_length=tts_cfg.get("max_text_length", 500),
+        language=tts_cfg.get("language", "English"),
+        attn_implementation=tts_cfg.get("attn_implementation", "sdpa"),
+        post_processing_config=tts_cfg.get("post_processing", {}),
     )
 
     val_cfg = config.get("validation", {})
     whisper_val = WhisperValidator(
         model_name=val_cfg.get("whisper_model", "large-v3"),
         device=val_cfg.get("whisper_device", "auto"),
+        backend=val_cfg.get("whisper_backend", "auto"),
+        vad_filter=val_cfg.get("whisper_vad_filter", False),
     )
 
     storage_cfg = config.get("storage", {})
     library = VoiceLibraryManager(
         library_dir=storage_cfg.get("voice_library_dir", "voice_library"),
     )
-    designer = VoiceDesigner(engine=engine, library=library, validator=whisper_val)
+    designer = VoiceDesigner(
+        engine=engine,
+        library=library,
+        validator=whisper_val,
+        voice_design_duration=tts_cfg.get("voice_design_duration", 10),
+        voice_design_model=tts_cfg.get(
+            "voice_design_model",
+            "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+        ),
+        voice_design_test_sentences=tts_cfg.get(
+            "voice_design_test_sentences", {}
+        ),
+        wer_threshold=val_cfg.get("wer_threshold", 0.20),
+        similarity_warning_threshold=val_cfg.get(
+            "voice_profile_similarity_warning", 0.97
+        ),
+        acoustic_regeneration_attempts=val_cfg.get(
+            "voice_profile_acoustic_regenerations", 1
+        ),
+    )
     audio_analyzer = AudioAnalyzer(
         noise_threshold=val_cfg.get("artifact_noise_threshold", -50),
         clipping_threshold=val_cfg.get("clipping_threshold", -0.5),
@@ -122,8 +273,21 @@ async def lifespan(app: FastAPI):
         analyzer=audio_analyzer,
         engine=engine,
         library=library,
-        wer_threshold=val_cfg.get("wer_threshold", 0.05),
+        wer_threshold=val_cfg.get("wer_threshold", 0.20),
         max_retries=val_cfg.get("max_retries", 3),
+        embedding_store=embedding_store,
+        speaker_similarity_threshold=val_cfg.get(
+            "speaker_similarity_threshold",
+            0.55,
+        ),
+        keep_models_resident=val_cfg.get(
+            "keep_tts_and_whisper_resident", False
+        ),
+        risk_aware_first_attempt=val_cfg.get(
+            "risk_aware_first_attempt", False
+        ),
+        emotion_wer_allowance=val_cfg.get("emotion_wer_allowance", 0.0),
+        prosody_config=val_cfg.get("prosody", {}),
     )
 
     master_cfg = config.get("mastering", {})
@@ -135,19 +299,50 @@ async def lifespan(app: FastAPI):
         target_lufs=master_cfg.get("target_lufs", -19),
         peak_limit_dbfs=master_cfg.get("peak_limit_dbfs", -1.0),
         output_sample_rate=master_cfg.get("output_sample_rate", 44100),
+        output_bit_depth=master_cfg.get("output_bit_depth", 16),
+        noise_gate_enabled=master_cfg.get("noise_gate_enabled", False),
+        noise_gate_threshold=master_cfg.get("noise_gate_threshold", -50),
+        noise_gate_attack_ms=master_cfg.get("noise_gate_attack_ms", 5),
+        noise_gate_release_ms=master_cfg.get("noise_gate_release_ms", 50),
+        peak_ceiling_mode=master_cfg.get("peak_ceiling_mode", "global"),
     )
     exporter = M4BExporter()
 
-    # Load the TTS model
-    logger.info("Loading TTS model...")
-    engine.load()
+    # Models are loaded lazily by the operation that needs them.  In
+    # particular, eagerly loading Qwen Base here would make the bootstrap
+    # endpoint briefly co-resident with the VoiceDesign helper process.
+    logger.info("Voice server initialized; TTS models will load on demand")
+
+    async def vram_cleanup_loop():
+        """Unload models after a configurable idle period."""
+        idle_seconds = int(config.get("server", {}).get("idle_unload_seconds", 300))
+        while True:
+            await asyncio.sleep(min(30, max(5, idle_seconds)))
+            try:
+                if (
+                    idle_seconds > 0
+                    and active_gpu_jobs == 0
+                    and time.time() - last_activity >= idle_seconds
+                ):
+                    with gpu_job_lock:
+                        if active_gpu_jobs == 0 and engine and engine.is_loaded:
+                            engine.unload()
+                            logger.info("Unloaded TTS model after %ds idle", idle_seconds)
+                        if validator and validator.whisper.is_loaded:
+                            validator.whisper.unload()
+            except Exception:
+                logger.exception("Idle model cleanup failed")
+
+    cleanup_task = asyncio.create_task(vram_cleanup_loop())
 
     yield
 
     # Shutdown
+    cleanup_task.cancel()
     logger.info("Shutting down — unloading model...")
     if engine:
         engine.unload()
+    lock.release()
 
 
 # ---------------------------------------------------------------------------
@@ -161,13 +356,29 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+_import_config = load_config()
+_cors_origins = _import_config.get("server", {}).get(
+    "cors_origins",
+    ["http://127.0.0.1:8000", "http://localhost:8000"],
+)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_cors_origins,
+    allow_credentials="*" not in _cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def require_api_token(request: Request, call_next):
+    token = config.get("server", {}).get("api_token", "") or _import_config.get(
+        "server", {}
+    ).get("api_token", "")
+    if token and request.url.path != "/health":
+        if request.headers.get("X-API-Token") != token:
+            return JSONResponse({"detail": "Invalid API token"}, status_code=401)
+    return await call_next(request)
 
 
 # ---------------------------------------------------------------------------
@@ -184,7 +395,20 @@ async def health_check() -> VoiceHealthResponse:
         gpu=engine.get_gpu_name() if engine else "Unknown",
         vram_total_gb=vram.get("vram_total_gb", 0.0),
         vram_used_gb=vram.get("vram_used_gb", 0.0),
+        vram_reserved_gb=vram.get("vram_reserved_gb", 0.0),
+        vram_peak_allocated_gb=vram.get("vram_peak_allocated_gb", 0.0),
+        vram_peak_reserved_gb=vram.get("vram_peak_reserved_gb", 0.0),
         model_loaded=engine.model_name if engine and engine.is_loaded else "none",
+        attention_backend=engine.attn_implementation if engine else "",
+        validator_backend=(
+            validator.whisper.backend if validator else ""
+        ),
+        validator_model=(
+            validator.whisper.model_name if validator else ""
+        ),
+        validator_vad_filter=(
+            bool(validator.whisper.vad_filter) if validator else False
+        ),
         uptime_seconds=time.time() - start_time,
     )
 
@@ -192,9 +416,22 @@ async def health_check() -> VoiceHealthResponse:
 @app.post("/voices/bootstrap")
 def bootstrap_voices(request: BootstrapVoicesRequest) -> BootstrapVoicesResponse:
     """Generate voice reference clips for all characters."""
-    if not designer:
+    if not designer or not engine:
         raise HTTPException(status_code=503, detail="Server not initialized")
-    return designer.bootstrap_voices(request)
+    with gpu_job():
+        # VoiceDesign and the Qwen Base clone model do not fit safely in VRAM
+        # together.
+        engine.unload()
+        try:
+            return designer.bootstrap_voices(request)
+        except Exception as e:
+            import traceback
+            with open("voice_crash.log", "a") as f:
+                f.write(f"Crash in bootstrap_voices: {e}\n{traceback.format_exc()}\n")
+            raise
+        finally:
+            if designer.validator and designer.validator.is_loaded:
+                designer.validator.unload()
 
 
 @app.post("/voices/regenerate")
@@ -215,7 +452,14 @@ def regenerate_voice(
         age_range="unknown",
         voice_description=voice_description,
     )
-    result = designer.regenerate_voice(project_id, character_id, character)
+    with gpu_job():
+        if engine:
+            engine.unload()
+        try:
+            result = designer.regenerate_voice(project_id, character_id, character)
+        finally:
+            if designer.validator and designer.validator.is_loaded:
+                designer.validator.unload()
     return {"status": "success", "result": result.model_dump()}
 
 
@@ -233,26 +477,51 @@ def generate_line(request: GenerateLineRequest) -> GenerateLineResponse:
     if not engine or not library:
         raise HTTPException(status_code=503, detail="Server not initialized")
 
-    workspace = Path(config.get("storage", {}).get("workspace_dir", "workspace"))
-    output_path = workspace / request.project_id / "segments" / f"{request.line.line_id}.wav"
-
-    voice_ref = library.get_voice_path(request.project_id, request.line.speaker)
-    if not voice_ref.exists():
-        raise HTTPException(
-            status_code=404,
-            detail=f"Voice reference not found for speaker: {request.line.speaker}",
-        )
-
-    audio = engine.generate_speech(
-        text=request.line.text,
-        voice_reference_path=voice_ref,
-        emotion_instruction=request.line.emotion,
-        speed=request.line.speed,
-        voice_fx=request.line.voice_fx,
-        output_path=output_path,
+    t0 = time.time()
+    output_path = (
+        _safe_workspace_project(request.project_id)
+        / "segments"
+        / f"{request.line.line_id}.wav"
     )
 
+    logger.info(
+        "[VoiceServer] Synthesizing line %s (speaker='%s', text_len=%d, emotion='%s')",
+        request.line.line_id,
+        request.line.speaker,
+        len(request.line.text),
+        request.line.emotion or "normal",
+    )
+
+    voice_id = request.line.voice_id or request.line.speaker
+    voice_ref = library.get_voice_path(request.project_id, voice_id)
+    if not voice_ref.exists():
+        logger.warning("[VoiceServer] Voice ref missing for '%s', falling back to narrator", request.line.speaker)
+        voice_ref = library.get_voice_path(request.project_id, "narrator")
+
+    ref_text = library.get_voice_ref_text(request.project_id, voice_id)
+    if voice_ref == library.get_voice_path(request.project_id, "narrator"):
+        ref_text = library.get_voice_ref_text(request.project_id, "narrator")
+
+    with gpu_job():
+        audio = engine.generate_speech(
+            text=request.line.text,
+            voice_reference_path=voice_ref,
+            ref_text=ref_text or "",
+            emotion_instruction=request.line.emotion,
+            speed=request.line.speed,
+            voice_fx=request.line.voice_fx,
+            output_path=output_path,
+        )
+
     duration = len(audio) / engine.sample_rate
+    elapsed = time.time() - t0
+    logger.info(
+        "[VoiceServer] Line %s completed: audio_duration=%.2fs, gen_time=%.2fs → %s",
+        request.line.line_id,
+        duration,
+        elapsed,
+        output_path.name,
+    )
 
     return GenerateLineResponse(
         status="success",
@@ -264,63 +533,201 @@ def generate_line(request: GenerateLineRequest) -> GenerateLineResponse:
 
 
 @app.post("/generate/chapter")
-def generate_chapter(request: GenerateChapterRequest) -> GenerateChapterResponse:
-    """Generate audio for an entire chapter with validation."""
+def generate_chapter(request: GenerateChapterRequest, fast_req: Request):
+    """Generate audio for an entire chapter with validation, streaming progress."""
     if not validator:
         raise HTTPException(status_code=503, detail="Server not initialized")
 
-    workspace = Path(config.get("storage", {}).get("workspace_dir", "workspace"))
-    result = validator.process_chapter(
-        project_id=request.project_id,
-        chapter_number=request.chapter_number,
-        lines=request.lines,
-        workspace=workspace,
-        validate=request.validate,
-        auto_retry=request.auto_retry,
-        max_retries=request.max_retries,
-        ws_connections=ws_connections,
+    t0 = time.time()
+    logger.info(
+        "[VoiceServer] Starting chapter %d generation for '%s' (%d lines, validate=%s)",
+        request.chapter_number,
+        request.project_id,
+        len(request.lines),
+        request.validation_enabled,
     )
 
-    return result
+    workspace = _workspace()
+    _safe_workspace_project(request.project_id)
+    _enforce_workspace_quota()
+    cancellation = threading.Event()
+    with run_state_lock:
+        if request.project_id in active_project_runs:
+            raise HTTPException(
+                status_code=409,
+                detail="A chapter request is already active for this project",
+            )
+        active_project_runs[request.project_id] = cancellation
+
+    import queue
+    import json
+    q = queue.Queue()
+
+    def _stream_progress(msg: dict[str, Any]) -> None:
+        q.put({"type": "progress", "data": msg})
+        _progress_from_worker(msg)
+
+    def _worker():
+        torch_module = None
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
+                torch_module = torch
+        except Exception as exc:
+            logger.debug("Peak VRAM reset unavailable: %s", exc)
+            
+        try:
+            with gpu_job():
+                result = validator.process_chapter(
+                    project_id=request.project_id,
+                    chapter_number=request.chapter_number,
+                    lines=request.lines,
+                    workspace=workspace,
+                    validate=request.validation_enabled,
+                    auto_retry=request.auto_retry,
+                    max_retries=request.max_retries,
+                    progress_callback=_stream_progress,
+                    cancel_check=cancellation.is_set,
+                    validation_terms=set(request.validation_terms),
+                    validation_revision=request.validation_revision,
+                    language=request.language,
+                )
+            if torch_module is not None:
+                try:
+                    result.peak_vram_gb = torch_module.cuda.max_memory_allocated() / 1e9
+                except Exception:
+                    pass
+            elapsed = time.time() - t0
+            logger.info(
+                "[VoiceServer] Chapter %d finished in %.2fs: %d/%d lines generated, %d failed",
+                request.chapter_number,
+                elapsed,
+                result.generated,
+                result.total_lines,
+                result.failed_validation,
+            )
+            q.put({"type": "result", "data": result.model_dump()})
+        except GenerationCancelled as exc:
+            q.put({"type": "error", "error": "cancelled", "detail": str(exc)})
+        except Exception as exc:
+            logger.error("Generation error: %s", exc)
+            q.put({"type": "error", "error": "exception", "detail": str(exc)})
+        finally:
+            with run_state_lock:
+                if active_project_runs.get(request.project_id) is cancellation:
+                    active_project_runs.pop(request.project_id, None)
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+    async def event_generator():
+        try:
+            while True:
+                if await fast_req.is_disconnected():
+                    cancellation.set()
+                    break
+                try:
+                    msg = await asyncio.to_thread(q.get, True, 1.0)
+                    yield json.dumps(msg) + "\n"
+                    if msg.get("type") in ("result", "error"):
+                        break
+                except queue.Empty:
+                    yield "\n" # keepalive
+        finally:
+            if await fast_req.is_disconnected():
+                cancellation.set()
+
+    return StreamingResponse(event_generator(), media_type="application/x-ndjson")
 
 
 @app.post("/validate")
 def validate_segment(request: ValidateRequest) -> dict:
-    """Validate a single audio segment."""
     if not validator:
         raise HTTPException(status_code=503, detail="Server not initialized")
 
-    result = validator.validate_single(
-        audio_file=request.audio_file,
-        expected_text=request.expected_text,
-    )
+    audio_path = Path(request.audio_file).resolve()
+    allowed_roots = [
+        _workspace(),
+        Path(
+            config.get("storage", {}).get("voice_library_dir", "voice_library")
+        ).resolve(),
+    ]
+    if not any(audio_path.is_relative_to(root) for root in allowed_roots):
+        raise HTTPException(status_code=403, detail="Audio path is outside allowed storage")
+    if not audio_path.is_file():
+        raise HTTPException(status_code=404, detail="Audio file not found")
+    with gpu_job():
+        result = validator.validate_single(
+            audio_file=str(audio_path),
+            expected_text=request.expected_text,
+        )
     return result.model_dump()
 
 
 @app.post("/master/chapter")
 def master_chapter(request: MasterChapterRequest) -> MasterChapterResponse:
     """Master (assemble + normalize) a chapter's audio."""
-    if not assembler or not normalizer:
+    if not assembler or not normalizer or not engine or not library:
         raise HTTPException(status_code=503, detail="Server not initialized")
 
-    workspace = Path(config.get("storage", {}).get("workspace_dir", "workspace"))
+    workspace = _workspace()
+    if not request.segments:
+        raise HTTPException(status_code=422, detail="No segments supplied")
+    for segment in request.segments:
+        path = _safe_project_path(request.project_id, segment.file)
+        if not path.is_file():
+            raise HTTPException(
+                status_code=422,
+                detail=f"Missing segment: {segment.line_id}",
+            )
 
-    # Assemble segments
-    assembled = assembler.assemble_chapter(
-        segments=request.segments,
-        workspace=workspace,
-    )
+    announcement_audio = None
+    if request.announce_chapter:
+        narrator_ref = library.get_voice_path(
+            request.project_id,
+            request.narrator_voice_id,
+        )
+        if not narrator_ref.is_file():
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Selected narrator voice is required for chapter "
+                    f"announcements: {request.narrator_voice_id}"
+                ),
+            )
+        announcement_text = request.chapter_title.strip() or (
+            f"Chapter {request.chapter_number}"
+        )
+        with gpu_job():
+            announcement_audio = engine.generate_speech(
+                text=announcement_text,
+                voice_reference_path=narrator_ref,
+                ref_text=library.get_voice_ref_text(
+                    request.project_id,
+                    request.narrator_voice_id,
+                )
+                or "",
+                emotion_instruction="clear chapter announcement",
+                speed=1.0,
+            )
 
-    # Normalize loudness
-    output_dir = workspace / request.project_id / "chapters"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / f"chapter_{request.chapter_number:03d}.wav"
+    with gpu_job():
+        assembled = assembler.assemble_chapter(
+            segments=request.segments,
+            workspace=workspace,
+            announcement_audio=announcement_audio,
+        )
+        if len(assembled["audio"]) == 0:
+            raise HTTPException(status_code=422, detail="Assembled chapter is empty")
 
-    mastering_result = normalizer.normalize(
-        audio=assembled["audio"],
-        sample_rate=assembled["sample_rate"],
-        output_path=str(output_path),
-    )
+        output_dir = _safe_workspace_project(request.project_id) / "chapters"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / f"chapter_{request.chapter_number:03d}.wav"
+        mastering_result = normalizer.normalize(
+            audio=assembled["audio"],
+            sample_rate=assembled["sample_rate"],
+            output_path=str(output_path),
+        )
 
     return MasterChapterResponse(
         status="success",
@@ -330,6 +737,8 @@ def master_chapter(request: MasterChapterRequest) -> MasterChapterResponse:
         lufs=mastering_result["lufs"],
         peak_dbfs=mastering_result["peak_dbfs"],
         file_size_mb=output_path.stat().st_size / (1024 * 1024),
+        join_warnings=int(assembled.get("join_warnings", 0)),
+        join_diagnostics=assembled.get("join_diagnostics", []),
     )
 
 
@@ -339,7 +748,25 @@ def export_m4b(request: ExportM4BRequest) -> ExportM4BResponse:
     if not exporter:
         raise HTTPException(status_code=503, detail="Server not initialized")
 
-    workspace = Path(config.get("storage", {}).get("workspace_dir", "workspace"))
+    workspace = _workspace()
+    _safe_workspace_project(request.project_id)
+    if not request.chapters:
+        raise HTTPException(status_code=422, detail="No mastered chapters supplied")
+    for chapter in request.chapters:
+        path = _safe_project_path(request.project_id, chapter.file)
+        if not path.is_file():
+            raise HTTPException(
+                status_code=422,
+                detail=f"Missing mastered chapter {chapter.number}",
+            )
+    if request.cover_art:
+        cover = Path(request.cover_art).resolve()
+        project_roots = [
+            _safe_workspace_project(request.project_id),
+            _safe_storage_project(Path("brain/projects"), request.project_id),
+        ]
+        if not any(cover.is_relative_to(root) for root in project_roots):
+            raise HTTPException(status_code=403, detail="Cover path is outside project storage")
     result = exporter.export(
         project_id=request.project_id,
         metadata=request.metadata,
@@ -347,6 +774,7 @@ def export_m4b(request: ExportM4BRequest) -> ExportM4BResponse:
         cover_art=request.cover_art,
         output_config=request.output_config,
         workspace=workspace,
+        output_name=request.output_name,
     )
 
     return result
@@ -355,14 +783,13 @@ def export_m4b(request: ExportM4BRequest) -> ExportM4BResponse:
 @app.get("/download/{project_id}/{path:path}")
 def download_file(project_id: str, path: str):
     """Download a file from the workspace."""
-    workspace = Path(config.get("storage", {}).get("workspace_dir", "workspace")).resolve()
-    project_dir = (workspace / project_id).resolve()
+    project_dir = _safe_workspace_project(project_id)
     
     file_path = (project_dir / path).resolve()
     if not file_path.is_relative_to(project_dir):
         raise HTTPException(status_code=403, detail="Access denied")
 
-    if not file_path.exists():
+    if not file_path.is_file():
         raise HTTPException(status_code=404, detail=f"File not found: {path}")
 
     return FileResponse(
@@ -380,6 +807,10 @@ def download_file(project_id: str, path: str):
 @app.websocket("/ws/progress")
 async def websocket_progress(websocket: WebSocket):
     """WebSocket endpoint for streaming progress updates."""
+    token = config.get("server", {}).get("api_token", "")
+    if token and websocket.query_params.get("token") != token:
+        await websocket.close(code=1008)
+        return
     await websocket.accept()
     ws_connections.append(websocket)
     logger.info("WebSocket client connected")
@@ -389,8 +820,45 @@ async def websocket_progress(websocket: WebSocket):
             # Keep connection alive, receive any client messages
             await websocket.receive_text()
     except WebSocketDisconnect:
-        ws_connections.remove(websocket)
+        try:
+            ws_connections.remove(websocket)
+        except ValueError:
+            pass
         logger.info("WebSocket client disconnected")
+
+
+@app.post("/cancel/{project_id}")
+async def cancel_project(project_id: str):
+    """Request cooperative cancellation at the next segment boundary."""
+    with run_state_lock:
+        cancellation = active_project_runs.get(project_id)
+        if cancellation:
+            cancellation.set()
+    return {
+        "status": "cancelling" if cancellation else "idle",
+        "project_id": project_id,
+    }
+
+
+@app.post("/unload")
+async def unload_models():
+    """Unload all TTS and Whisper models from GPU VRAM instantly."""
+    global engine, validator
+    unloaded = []
+    with gpu_job_lock:
+        if active_gpu_jobs:
+            raise HTTPException(
+                status_code=409,
+                detail="Models are busy; cancel the project and wait for acknowledgement",
+            )
+        if engine:
+            engine.unload()
+            unloaded.append("qwen3_tts")
+        if validator and validator.whisper.is_loaded:
+            validator.whisper.unload()
+            unloaded.append("whisper")
+    logger.info("[VoiceServer] Unloaded models on request: %s", unloaded)
+    return {"status": "unloaded", "models": unloaded}
 
 
 # ---------------------------------------------------------------------------
@@ -412,8 +880,13 @@ def main():
     cfg = load_config(args.config)
     server_cfg = cfg.get("server", {})
 
-    host = args.host or server_cfg.get("host", "0.0.0.0")
+    host = args.host or server_cfg.get("host", "127.0.0.1")
     port = args.port or server_cfg.get("port", 8100)
+    token = server_cfg.get("api_token", "")
+    if host not in ("127.0.0.1", "localhost", "::1") and not token:
+        raise RuntimeError(
+            "Refusing to bind Voice Server beyond loopback without server.api_token"
+        )
 
     logging.basicConfig(
         level=logging.INFO,

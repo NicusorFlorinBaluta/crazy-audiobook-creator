@@ -41,17 +41,20 @@ class VoiceClient:
     def __init__(
         self,
         host: str = "http://127.0.0.1:8100",
-        timeout: int = 30,
-        retries: int = 5,
+        timeout: int = 3600,
+        retries: int = 3,
         retry_delay: int = 2,
+        api_token: str = "",
     ):
         self.host = host.rstrip("/")
         self.timeout = timeout
         self.retries = retries
         self.retry_delay = retry_delay
+        headers = {"X-API-Token": api_token} if api_token else None
         self._client = httpx.Client(
-            timeout=httpx.Timeout(timeout, connect=10.0),
+            timeout=httpx.Timeout(float(timeout), connect=10.0),
             follow_redirects=True,
+            headers=headers,
         )
 
     # ------------------------------------------------------------------
@@ -62,6 +65,15 @@ class VoiceClient:
         """Check if the Voice server is running and healthy."""
         data = self._get("/health")
         return VoiceHealthResponse(**data)
+
+    def health_check_once(self, timeout_seconds: float = 2.0) -> VoiceHealthResponse:
+        """Perform a quiet single preflight check before launching a managed server."""
+        response = self._client.get(
+            f"{self.host}/health",
+            timeout=httpx.Timeout(timeout_seconds),
+        )
+        response.raise_for_status()
+        return VoiceHealthResponse(**response.json())
 
     def wait_for_server(self, max_wait_seconds: int = 120) -> bool:
         """Wait for the Voice server to become available.
@@ -75,7 +87,7 @@ class VoiceClient:
         start = time.time()
         while time.time() - start < max_wait_seconds:
             try:
-                health = self.health_check()
+                health = self.health_check_once(timeout_seconds=5.0)
                 if health.status == "ok":
                     logger.info("Voice server is ready: %s", health.model_loaded)
                     return True
@@ -121,20 +133,59 @@ class VoiceClient:
         data = self._post("/generate/line", request.model_dump())
         return GenerateLineResponse(**data)
 
-    def generate_chapter(self, request: GenerateChapterRequest) -> GenerateChapterResponse:
-        """Generate audio for an entire chapter."""
+    def generate_chapter(
+        self, 
+        request: GenerateChapterRequest,
+        progress_callback=None
+    ) -> GenerateChapterResponse:
+        """Generate audio for an entire chapter via an NDJSON event stream."""
+        import json
         logger.info(
             "Generating chapter %d (%d lines) for project '%s'",
             request.chapter_number,
             len(request.lines),
             request.project_id,
         )
-        data = self._post(
-            "/generate/chapter",
-            request.model_dump(),
-            timeout=7200,  # 2 hours max for a chapter
-        )
-        return GenerateChapterResponse(**data)
+        url = f"{self.host}/generate/chapter"
+        
+        last_error = None
+        for attempt in range(1, self.retries + 1):
+            try:
+                with httpx.Client(timeout=httpx.Timeout(7200.0, connect=10.0), headers=self._client.headers) as client:
+                    with client.stream("POST", url, json=request.model_dump(by_alias=True)) as response:
+                        response.raise_for_status()
+                        for line in response.iter_lines():
+                            if not line:
+                                continue
+                            try:
+                                data = json.loads(line)
+                            except json.JSONDecodeError:
+                                continue
+                            
+                            if data.get("type") == "progress":
+                                msg = data.get("data", {})
+                                line_id = msg.get("line_id", "unknown")
+                                phase = msg.get("phase", "synthesis")
+                                cache_note = " (cache hit)" if msg.get("cache_hit") else ""
+                                logger.info("%s segment %s%s", phase.title(), line_id, cache_note)
+                                if progress_callback:
+                                    progress_callback(msg)
+                            elif data.get("type") == "result":
+                                return GenerateChapterResponse(**data.get("data", {}))
+                            elif data.get("type") == "error":
+                                raise RuntimeError(f"Voice Server generation error: {data.get('error')} - {data.get('detail')}")
+                raise RuntimeError("Stream ended without returning a result.")
+            except (httpx.TimeoutException, httpx.RequestError) as e:
+                last_error = e
+                logger.warning(
+                    "POST /generate/chapter stream failed (attempt %d/%d): %s",
+                    attempt,
+                    self.retries,
+                    e,
+                )
+                if attempt < self.retries:
+                    time.sleep(self.retry_delay)
+        raise last_error or RuntimeError("Failed to generate chapter after retries")
 
     # ------------------------------------------------------------------
     # Validation
@@ -177,6 +228,14 @@ class VoiceClient:
         )
         return ExportM4BResponse(**data)
 
+    def cancel_project(self, project_id: str) -> dict[str, Any]:
+        """Request cancellation at the next TTS segment boundary."""
+        return self._post(f"/cancel/{project_id}", timeout=10)
+
+    def unload_models(self) -> dict[str, Any]:
+        """Unload models after active generation has stopped."""
+        return self._post("/unload", timeout=30)
+
     # ------------------------------------------------------------------
     # Internal HTTP helpers
     # ------------------------------------------------------------------
@@ -205,8 +264,12 @@ class VoiceClient:
         url = f"{self.host}{path}"
         effective_timeout = timeout or self.timeout
         last_error: Exception | None = None
+        req_size = len(str(json_data)) if json_data else 0
+
+        logger.info("[VoiceClient] Requesting %s %s (timeout=%ss, payload=%d bytes)", method, path, effective_timeout, req_size)
 
         for attempt in range(1, self.retries + 1):
+            t0 = time.time()
             try:
                 response = self._client.request(
                     method,
@@ -215,6 +278,8 @@ class VoiceClient:
                     timeout=effective_timeout,
                 )
                 response.raise_for_status()
+                elapsed = time.time() - t0
+                logger.info("[VoiceClient] %s %s -> 200 OK (%.2fs)", method, path, elapsed)
                 return response.json()
 
             except httpx.TimeoutException as e:
@@ -243,7 +308,7 @@ class VoiceClient:
                     e,
                     error_details,
                 )
-                if e.response.status_code in (401, 403, 404, 422):
+                if e.response.status_code in (401, 403, 404, 409, 422):
                     raise VoiceClientError(
                         f"{method} {path} failed: {e.response.status_code} {e.response.reason_phrase}\nDetails: {error_details}"
                     ) from e

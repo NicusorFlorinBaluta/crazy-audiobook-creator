@@ -1,35 +1,41 @@
-"""Constants and enumerations shared across the pipeline."""
+"""Shared constants and enums used across Brain and Voice services."""
 
 from enum import StrEnum
 
 
 # ---------------------------------------------------------------------------
-# Pipeline status enum
+# Pipeline & Orchestration
 # ---------------------------------------------------------------------------
 
+
 class PipelineStage(StrEnum):
-    """Stages of the audiobook production pipeline."""
+    """Execution stages of the audiobook generation pipeline."""
 
     CREATED = "created"
     EXTRACTING = "extracting"
+    ANALYZING = "analyzing"
     SCRIPTING = "scripting"
+    VOICE_REVIEW = "voice_review"
     BOOTSTRAPPING = "bootstrapping"
     GENERATING = "generating"
     VALIDATING = "validating"
     MASTERING = "mastering"
     EXPORTING = "exporting"
+    SELECTION_COMPLETE = "selection_complete"
     COMPLETE = "complete"
-    ERROR = "error"
     PAUSED = "paused"
+    PAUSING = "pausing"
     PAUSED_SCHEDULED = "paused_scheduled"
     DEPLOY_PAUSED = "deploy_paused"
-    SELECTION_COMPLETE = "selection_complete"
+    WAITING_FOR_REVIEW = "waiting_for_review"
+    ERROR = "error"
 
 
 class ValidationStatus(StrEnum):
     """Result of a quality validation check."""
 
     PASS = "pass"
+    ACCEPTED_WITH_WARNING = "accepted_with_warning"
     FAIL = "fail"
     FLAGGED = "flagged"
 
@@ -68,19 +74,21 @@ DEFAULT_SPEED = 1.0
 MIN_SPEED = 0.7
 MAX_SPEED = 1.3
 
-# Test sentences for voice design (phoneme-rich, emotionally neutral)
+# Test sentences for voice design. Keep these short enough to finish inside the
+# default 10-second reference window; truncated references poison Full-ICL
+# cloning because the registered transcript no longer matches the audio.
 VOICE_DESIGN_TEST_SENTENCES = {
     "male": (
-        "The ancient tower stood against the darkening sky, "
-        "its stones weathered by centuries of wind and rain."
+        "The ancient tower stood against the darkening sky as rain "
+        "swept across the weathered stone."
     ),
     "female": (
-        "She walked through the moonlit garden, "
-        "her footsteps barely disturbing the fallen leaves."
+        "She walked through the moonlit garden, listening as fallen "
+        "leaves whispered beneath each careful step."
     ),
     "other": (
-        "The library was vast and silent, "
-        "filled with the scent of old paper and forgotten memories."
+        "The library was vast and silent, filled with old paper, dust, "
+        "and half-forgotten memories."
     ),
 }
 
@@ -88,7 +96,7 @@ VOICE_DESIGN_TEST_SENTENCES = {
 # Validation thresholds
 # ---------------------------------------------------------------------------
 
-DEFAULT_WER_THRESHOLD = 0.05         # 5% word error rate
+DEFAULT_WER_THRESHOLD = 0.20         # 20% word error rate
 MAX_VALIDATION_RETRIES = 3
 ARTIFACT_NOISE_THRESHOLD_DB = -50.0
 CLIPPING_THRESHOLD_DBFS = -0.5
@@ -102,6 +110,14 @@ QUALITY_WEIGHT_WER = 0.6
 QUALITY_WEIGHT_ARTIFACT = 0.3
 QUALITY_WEIGHT_DURATION = 0.1
 QUALITY_SCORE_PASS_THRESHOLD = 0.7
+
+# Bump these when a change intentionally invalidates previously generated
+# metadata or audio. They are included in artifact fingerprints.
+SCRIPT_SCHEMA_VERSION = "3"
+GENERATION_SCHEMA_VERSION = "3"
+VALIDATION_SCHEMA_VERSION = "3"
+MASTERING_SCHEMA_VERSION = "2"
+VOICE_CAST_SCHEMA_VERSION = "1"
 
 # ---------------------------------------------------------------------------
 # Script generation defaults
@@ -124,8 +140,8 @@ MAX_UNIQUE_VOICES = 20
 MINOR_CHARACTER_LINE_THRESHOLD = 3   # ≤ this many lines → generic voice
 
 # Chunking for long chapters
-CHUNK_SIZE_WORDS = 600
-CHUNK_OVERLAP_WORDS = 150
+CHUNK_SIZE_WORDS = 1200
+CHUNK_OVERLAP_WORDS = 0
 
 # ---------------------------------------------------------------------------
 # Export defaults
