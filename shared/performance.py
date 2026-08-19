@@ -7,7 +7,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Iterable
 
-METRICS_SCHEMA_VERSION = 2
+METRICS_SCHEMA_VERSION = 3
 
 
 def _percentile(values: list[float], quantile: float) -> float:
@@ -61,6 +61,13 @@ def _safe_int(value: Any) -> int:
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _safe_float(value: Any) -> float:
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _tts_segment_summary(
@@ -180,6 +187,28 @@ def latest_chapter_records(
 def summarize_metrics(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
     """Build cache- and resume-aware totals from versioned JSONL records."""
     records = list(records)
+    director_runs = [
+        {
+            "director_mode": str(
+                record.get("director_mode")
+                or (
+                    "two_pass"
+                    if _safe_float(record.get("pass1_seconds")) > 0
+                    else "unknown"
+                )
+            ),
+            "pass1_seconds": _safe_float(record.get("pass1_seconds")),
+            "pass2_seconds": _safe_float(record.get("pass2_seconds")),
+            "reconciliation_seconds": _safe_float(
+                record.get("reconciliation_seconds")
+            ),
+            "total_seconds": _safe_float(record.get("total_seconds")),
+            "chapters": _safe_int(record.get("chapters")),
+            "segments": _safe_int(record.get("segments")),
+        }
+        for record in records
+        if record.get("event") == "script_generation"
+    ]
     generation = latest_chapter_records(records, "chapter_generation")
     mastering = latest_chapter_records(records, "chapter_mastering")
     timing_totals: defaultdict[str, float] = defaultdict(float)
@@ -209,5 +238,6 @@ def summarize_metrics(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
         "generation_totals": dict(sorted(totals.items())),
         "timing_totals_seconds": dict(sorted(timing_totals.items())),
         "tts_segments": _tts_segment_summary(generation),
+        "script_director_runs": director_runs,
         "chapters": generation,
     }

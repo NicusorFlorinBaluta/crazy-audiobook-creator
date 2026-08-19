@@ -7,12 +7,17 @@ import os
 import secrets
 from typing import Any
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 
 TOKEN_ENV_VAR = "CRAZY_AUDIOBOOK_DASHBOARD_TOKEN"
 DEFAULT_TRUSTED_LAN_CIDRS = (
     "10.0.0.0/8",
     "172.16.0.0/12",
     "192.168.0.0/16",
+    "100.64.0.0/10",  # Tailscale CGNAT range
     "fc00::/7",
     "fe80::/10",
 )

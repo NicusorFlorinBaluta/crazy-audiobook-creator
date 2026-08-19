@@ -69,6 +69,16 @@ is an audit aid: tight narrator/dialogue grouping can be intentional.
 
 Quality retry rows link back to their source script line.
 
+## Book-section review
+
+An uncertain EPUB section appears under **Attention required → Book sections**
+before scripting starts. The row shows the local recommendation, confidence,
+word count, filename, and automated decision trail without revealing book text.
+Choose **Include in narration**, **Exclude**, or **Keep as reference**. The
+preserved `source.epub` is re-extracted and the pipeline resumes automatically
+after the last blocking section is resolved. Once scripting exists, reset to
+extraction first so downstream artifacts are deliberately invalidated.
+
 ## Quality review
 
 Summary cards include definitions for accepted rate, accepted warnings,

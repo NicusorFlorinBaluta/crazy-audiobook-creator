@@ -117,6 +117,17 @@ class AudioDecision(BaseModel):
     defects: list[str] = Field(default_factory=list)
 
 
+class ExtractionDecision(BaseModel):
+    item_id: str
+    decision: Literal["include", "exclude", "reference", "abstain"]
+    confidence: float = Field(ge=0.0, le=1.0)
+    reason: str = Field(max_length=1000)
+
+
+class ExtractionBatch(BaseModel):
+    decisions: list[ExtractionDecision]
+
+
 def _extract_json(text: str) -> dict[str, Any]:
     candidate = text.strip()
     fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", candidate, re.DOTALL)
@@ -126,10 +137,41 @@ def _extract_json(text: str) -> dict[str, Any]:
         start, end = candidate.find("{"), candidate.rfind("}")
         if start >= 0 and end > start:
             candidate = candidate[start : end + 1]
-    value = json.loads(candidate)
+    start = candidate.find("{")
+    if start < 0:
+        raise ValueError("Gemini response did not contain a JSON object")
+    value, _ = json.JSONDecoder().raw_decode(candidate[start:])
     if not isinstance(value, dict):
         raise ValueError("Gemini response was not a JSON object")
     return value
+
+
+def _gemini_response_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Inline Pydantic references and remove metadata outside Gemini's subset."""
+    definitions = dict(schema.get("$defs", {}))
+
+    def convert(value: Any) -> Any:
+        if isinstance(value, list):
+            return [convert(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+        reference = value.get("$ref")
+        if isinstance(reference, str) and reference.startswith("#/$defs/"):
+            name = reference.rsplit("/", 1)[-1]
+            target = definitions.get(name)
+            if not isinstance(target, dict):
+                raise ValueError(f"Unresolved response-schema reference: {reference}")
+            return convert(target)
+        return {
+            key: convert(item)
+            for key, item in value.items()
+            if key not in {"$defs", "title", "default", "additionalProperties"}
+        }
+
+    converted = convert(schema)
+    if not isinstance(converted, dict):
+        raise ValueError("Gemini response schema must be an object")
+    return converted
 
 
 class _UsageBudget:
@@ -221,7 +263,7 @@ class GeminiApiClient:
             "generationConfig": {
                 "temperature": 0,
                 "responseMimeType": "application/json",
-                "responseSchema": schema,
+                "responseSchema": _gemini_response_schema(schema),
             },
         }
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
@@ -250,7 +292,11 @@ class GeminiApiClient:
             )
             return _extract_json(text)
         except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise ExternalValidationError(f"Gemini API request failed: {exc}") from exc
+            response_detail = ""
+            if response is not None and response.status_code >= 400:
+                response_detail = re.sub(r"\s+", " ", response.text).strip()[:500]
+            suffix = f"; response={response_detail}" if response_detail else ""
+            raise ExternalValidationError(f"Gemini API request failed: {exc}{suffix}") from exc
 
 
 class GeminiWebClient:
@@ -429,7 +475,7 @@ class GeminiValidationService:
         self.manual_threshold = float(config.get("manual_review_confidence", 0.75))
         self.attribution_batch_size = max(1, int(config.get("attribution_batch_size", 20)))
         self.triage_model = str(config.get("api", {}).get("triage_model", "gemini-3.5-flash-lite"))
-        self.adjudication_model = str(config.get("api", {}).get("adjudication_model", "gemini-3.6-flash"))
+        self.adjudication_model = str(config.get("api", {}).get("adjudication_model", "gemini-3.5-flash"))
         circuit = dict(config.get("circuit_breaker", {}))
         self.health = _ProviderHealth(
             projects_dir / ".external_validation_health.json",
@@ -472,6 +518,109 @@ class GeminiValidationService:
     @staticmethod
     def _audio_schema() -> dict[str, Any]:
         return AudioDecision.model_json_schema()
+
+    @staticmethod
+    def _extraction_schema() -> dict[str, Any]:
+        return ExtractionBatch.model_json_schema()
+
+    def resolve_extraction_sections(
+        self,
+        *,
+        project_dir: Path,
+        sections: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Classify ambiguous EPUB spine documents with bounded evidence."""
+        if not self.enabled or not sections:
+            return {"decisions": {}, "trace": []}
+        cases = [
+            {
+                "item_id": str(item.get("item_id")),
+                "href": str(item.get("href", "")),
+                "title": str(item.get("title", "")),
+                "word_count": int(item.get("word_count", 0)),
+                "epub_semantics": item.get("semantics", []),
+                "local_decision": item.get("decision"),
+                "local_confidence": item.get("confidence"),
+                "local_reason": str(item.get("reason", ""))[:300],
+                "bounded_excerpt": str(item.get("classifier_excerpt", ""))[:400],
+            }
+            for item in sections
+        ]
+        base_prompt = (
+            "Classify EPUB sections for audiobook extraction. 'include' means narrative text "
+            "that should be spoken; 'exclude' means navigation, publishing matter, marketing, "
+            "acknowledgments, or other non-narrative material; 'reference' means glossary or "
+            "character/world reference material useful to analysis but not narration. Preserve "
+            "prologues, epilogues, interludes, letters, poems, and narrative appendices. Abstain "
+            "when evidence is insufficient. Return one JSON decision per item."
+        )
+        stages = [
+            ("gemini_api_triage", self.triage_model),
+            ("gemini_api_adjudication", self.adjudication_model),
+            ("gemini_web", "Gemini web Pro"),
+        ]
+        remaining = {case["item_id"] for case in cases}
+        accepted: dict[str, dict[str, Any]] = {}
+        trace: list[dict[str, Any]] = []
+        for stage, model in stages:
+            if not remaining:
+                break
+            stage_cases = [case for case in cases if case["item_id"] in remaining]
+            stage_prompt = (
+                base_prompt
+                + "\nCASES:\n"
+                + json.dumps(stage_cases, ensure_ascii=False)
+                + "\nPRIOR DECISIONS:\n"
+                + json.dumps(trace, ensure_ascii=False)
+            )
+            try:
+                raw, latency_ms = self._call_stage(
+                    stage,
+                    lambda: (
+                        self.web.generate_json(project_dir, "extraction", stage_prompt)
+                        if stage == "gemini_web"
+                        else self.api.generate_json(
+                            model=model,
+                            prompt=stage_prompt,
+                            schema=self._extraction_schema(),
+                        )
+                    ),
+                )
+                batch = ExtractionBatch.model_validate(raw)
+            except (ExternalValidationError, ValueError) as exc:
+                for item_id in sorted(remaining):
+                    self._event(project_dir, "extraction", item_id, stage, model,
+                                "unavailable", None, str(exc))
+                    trace.append({
+                        "item_id": item_id,
+                        "provider": stage,
+                        "model": model,
+                        "decision": "unavailable",
+                        "confidence": None,
+                        "reason": str(exc),
+                    })
+                continue
+            for decision in batch.decisions:
+                if decision.item_id not in remaining:
+                    continue
+                record = {
+                    "provider": stage,
+                    "model": model,
+                    "decision": decision.decision,
+                    "confidence": decision.confidence,
+                    "reason": decision.reason,
+                }
+                trace.append({"item_id": decision.item_id, **record})
+                self._event(project_dir, "extraction", decision.item_id, stage, model,
+                            decision.decision, decision.confidence, decision.reason,
+                            latency_ms)
+                if (
+                    decision.decision != "abstain"
+                    and decision.confidence >= self.auto_accept
+                ):
+                    accepted[decision.item_id] = record
+                    remaining.discard(decision.item_id)
+        return {"decisions": accepted, "trace": trace}
 
     def _run_attribution_stage(self, stage: str, model: str, prompt: str, project_dir: Path) -> AttributionBatch:
         raw = (
@@ -516,30 +665,63 @@ class GeminiValidationService:
                         "current_speaker": neighbor.speaker,
                         "confidence": neighbor.speaker_confidence,
                     }
-                    for neighbor in chapter.lines[max(0, index - 3) : index + 4]
+                    for neighbor in chapter.lines[max(0, index - 10) : index + 11]
                 ]
+                surrounding_scene = " ".join(
+                    neighbor.text for neighbor in chapter.lines[max(0, index - 8) : index + 9]
+                )
                 cases.append({
                     "item_id": line.line_id,
                     "chapter": chapter.chapter_number,
                     "chapter_title": chapter.chapter_title,
                     "text": line.text,
+                    "attached_source_tag_or_evidence": line.speaker_evidence,
                     "current_speaker": line.speaker,
                     "local_confidence": line.speaker_confidence,
                     "local_reason": line.attribution_review_reason or line.speaker_evidence,
+                    "surrounding_scene_text": surrounding_scene,
                     "neighboring_turns": context,
                 })
-        candidates = character_context or {
+        candidates = dict(character_context or {
             character_id: {"id": character_id} for character_id in sorted(character_ids)
+        })
+        generic_defaults = {
+            "minor_male": {"id": "minor_male", "name": "Unnamed Man", "gender": "male", "description": "Any unnamed male speaker, man, senator, guard, soldier, trapper, technician."},
+            "minor_female": {"id": "minor_female", "name": "Unnamed Woman", "gender": "female", "description": "Any unnamed female speaker, woman, passerby, technician."},
+            "child_male": {"id": "child_male", "name": "Boy", "gender": "male", "description": "Any unnamed young boy or male child."},
+            "child_female": {"id": "child_female", "name": "Girl", "gender": "female", "description": "Any unnamed young girl or female child."},
+            "narrator": {"id": "narrator", "name": "Narrator", "gender": "neutral", "description": "The narrator. Use only for written text, signs, thoughts, or non-spoken quotations."},
         }
-        prompt_prefix = (
-            "Resolve audiobook dialogue attribution. Use only a candidate id listed below. Abstain when the "
-            "source excerpt does not justify a speaker. Return one decision for every case as JSON "
-            "with this exact shape: {\"decisions\":[{\"item_id\":str,\"decision\":\"resolved\"|"
-            "\"abstain\",\"speaker_id\":str|null,\"confidence\":0..1,\"reason\":str,"
-            "\"evidence\":str}]}. Do not infer from stereotypes.\nCANDIDATES:\n"
-            + json.dumps(candidates, ensure_ascii=False)
-            + "\nCASES:\n"
-        )
+        for gid, gdef in generic_defaults.items():
+            if gid not in candidates:
+                candidates[gid] = gdef
+        # Build chapter-scoped candidates map
+        chapter_candidates: dict[int, dict[str, Any]] = {}
+        for chapter in chapters:
+            ch_text = "".join(l.text for l in chapter.lines)
+            active_ids = set()
+            generics = {"narrator", "minor_male", "minor_female", "child_male", "child_female", "crowd", "collective", "character_male", "character_female"}
+            for cid, c in candidates.items():
+                if cid in generics:
+                    active_ids.add(cid)
+                    continue
+                c_name = str(c.get("name", "")).lower()
+                if c_name and c_name in ch_text.lower():
+                    active_ids.add(cid)
+                    continue
+                c_aliases = [str(a).strip().lower() for a in c.get("aliases", [])]
+                if any(len(a) >= 3 and a in ch_text.lower() for a in c_aliases):
+                    active_ids.add(cid)
+                    continue
+                # ID parts (e.g. 'dusk' from 'sixth_of_dusk')
+                id_parts = [p.lower() for p in cid.split("_") if len(p) >= 4]
+                if any(p in ch_text.lower() for p in id_parts):
+                    active_ids.add(cid)
+                    continue
+            chapter_candidates[chapter.chapter_number] = {
+                cid: c for cid, c in candidates.items() if cid in active_ids
+            } if len(active_ids - generics) > 0 else candidates
+
         remaining = set(by_id)
         trace: list[dict[str, Any]] = []
         stages = [
@@ -559,7 +741,28 @@ class GeminiValidationService:
                 stage_cases.append(staged)
             for start in range(0, len(stage_cases), self.attribution_batch_size):
                 batch = stage_cases[start : start + self.attribution_batch_size]
-                stage_prompt = prompt_prefix + json.dumps(batch, ensure_ascii=False)
+                batch_chapters = {case.get("chapter") for case in batch if case.get("chapter")}
+                batch_candidates = {}
+                for ch_num in batch_chapters:
+                    batch_candidates.update(chapter_candidates.get(ch_num, candidates))
+                if not batch_candidates:
+                    batch_candidates = candidates
+
+                stage_prompt = (
+                    "Resolve audiobook dialogue attribution with deep conversational grounding.\n"
+                    "RULES:\n"
+                    "1. Use ONLY a candidate ID listed below. For spoken dialogue in quotation marks, assign the in-story character speaking (never narrator).\n"
+                    "2. TWO-PARTY CONVERSATION ALTERNATION: In scenes between two active characters without intervening speakers, untagged dialogue turns strictly alternate between Speaker A and Speaker B. Do NOT assume a continuous monologue across separate quotes unless an explicit narrative tag indicates continuation.\n"
+                    "3. VOCATIVE DIRECT ADDRESS: When a quote addresses someone by name or title (e.g. '..., Dusk' or 'Remember us, worldspinner'), the speaker is the OTHER character talking TO that person, never the person addressed.\n"
+                    "4. LEADING ACTION BEATS: When a quote is preceded in the same paragraph by a singular pronoun action beat (e.g. 'He nodded slowly. \"...\"'), the subject pronoun gender/identity binds to the speaker of that quote.\n"
+                    "5. EXPLICIT SPEECH TAGS & PRONOUNS: When a quote has an attached speech tag in the context or evidence (e.g. 'he replied', 'she asked', '[Name] whispered'), the speaker's canonical gender and identity MUST strictly match the pronoun/name in that tag.\n"
+                    "6. Return one decision for every case as JSON with shape:\n"
+                    "{\"decisions\":[{\"item_id\":str,\"decision\":\"resolved\"|\"abstain\",\"speaker_id\":str|null,\"confidence\":0..1,\"reason\":str,\"evidence\":str}]}.\n\n"
+                    "CANDIDATES:\n"
+                    + json.dumps(batch_candidates, ensure_ascii=False, indent=2)
+                    + "\n\nCASES:\n"
+                    + json.dumps(batch, ensure_ascii=False, indent=2)
+                )
                 try:
                     result, latency_ms = self._call_stage(
                         stage,
@@ -603,7 +806,11 @@ class GeminiValidationService:
                                 decision.decision, decision.confidence, decision.reason,
                                 latency_ms, {"speaker_id": decision.speaker_id,
                                              "evidence": decision.evidence})
-                    valid = decision.decision == "resolved" and decision.speaker_id in character_ids
+                    is_quoted_dialogue = line.text.strip().startswith(('"', '“', '‘', "'"))
+                    if is_quoted_dialogue and decision.speaker_id == "narrator" and stage == "gemini_api_triage":
+                        valid = False
+                    else:
+                        valid = decision.decision == "resolved" and decision.speaker_id in character_ids
                     if valid and decision.confidence >= self.auto_accept:
                         line.speaker = str(decision.speaker_id)
                         line.speaker_confidence = decision.confidence
@@ -747,6 +954,19 @@ class GeminiValidationService:
                 result.manual_review_reason = f"External audio QA rejected this segment: {decision.reason}"
                 return result
             prompt += "\nA previous validator was inconclusive: " + decision.model_dump_json()
+        if (
+            result.status.value in {"pass", "accepted_with_warning"}
+            and result.passed_hard_gates
+            and len(errors) == len(stages)
+        ):
+            result.manual_review_required = False
+            result.manual_review_reason = ""
+            logger.info(
+                "[ExternalAudioQA] External triage unavailable (%s); accepting locally verified segment %s",
+                "; ".join(errors),
+                result.line_id,
+            )
+            return result
         result.manual_review_required = True
         confidence_label = (
             "low confidence"

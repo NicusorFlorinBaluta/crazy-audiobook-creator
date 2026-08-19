@@ -33,6 +33,10 @@ class OllamaClient:
         max_retries: int = 3,
         max_retry_seconds: int = 900,
         context_window: int = 8192,
+        max_output_tokens: int = 8192,
+        max_generation_seconds: int = 900,
+        repetition_window_chars: int = 512,
+        repetition_count: int = 4,
     ):
         self.host = host.rstrip("/")
         self.model = model
@@ -41,6 +45,10 @@ class OllamaClient:
         self.max_retries = max(1, max_retries)
         self.max_retry_seconds = max(0, max_retry_seconds)
         self.context_window = context_window
+        self.max_output_tokens = max(1, max_output_tokens)
+        self.max_generation_seconds = max(1, max_generation_seconds)
+        self.repetition_window_chars = max(0, repetition_window_chars)
+        self.repetition_count = max(2, repetition_count)
         self._client_lock = threading.Lock()
         self._client = self._new_client()
         self._cancel_event = threading.Event()
@@ -106,6 +114,9 @@ class OllamaClient:
         Raises:
             OllamaError: If the request fails after all retries.
         """
+        # Never let a failed request inherit diagnostics from the preceding
+        # successful request.
+        self.last_generation_metrics = {}
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
@@ -118,7 +129,10 @@ class OllamaClient:
             "options": {
                 "temperature": temperature,
                 "top_p": top_p,
-                "num_predict": -1,
+                # Never allow a malformed or looping response to generate
+                # indefinitely. This is also enforced on the client side in
+                # case a server version ignores ``num_predict``.
+                "num_predict": self.max_output_tokens,
                 "num_ctx": self.context_window,
                 "num_gpu": 99,
             },
@@ -156,6 +170,7 @@ class OllamaClient:
                 )
 
                 t0 = time.time()
+                started_monotonic = time.monotonic()
                 full_text = []
                 token_count = 0
                 last_log_tokens = 0
@@ -201,6 +216,38 @@ class OllamaClient:
                             if "message" in chunk and "content" in chunk["message"]:
                                 full_text.append(chunk["message"]["content"])
                                 token_count += 1
+                                generation_elapsed = (
+                                    time.monotonic() - started_monotonic
+                                )
+                                if generation_elapsed >= self.max_generation_seconds:
+                                    self._record_generation_abort(
+                                        attempt=attempt,
+                                        messages=messages,
+                                        response_parts=full_text,
+                                        token_count=token_count,
+                                        elapsed=generation_elapsed,
+                                        reason="wall_clock_limit",
+                                    )
+                                    raise OllamaGenerationLimitError(
+                                        "Ollama generation exceeded the configured "
+                                        f"{self.max_generation_seconds}s wall-clock limit"
+                                    )
+                                if (
+                                    token_count >= self.max_output_tokens
+                                    and not chunk.get("done")
+                                ):
+                                    self._record_generation_abort(
+                                        attempt=attempt,
+                                        messages=messages,
+                                        response_parts=full_text,
+                                        token_count=token_count,
+                                        elapsed=generation_elapsed,
+                                        reason="output_token_limit",
+                                    )
+                                    raise OllamaGenerationLimitError(
+                                        "Ollama generation reached the configured "
+                                        f"{self.max_output_tokens}-token output limit"
+                                    )
                                 # Log every 200 tokens so we know it's alive
                                 if token_count - last_log_tokens >= 200:
                                     elapsed = time.time() - t0
@@ -211,9 +258,35 @@ class OllamaClient:
                                         elapsed,
                                     )
                                     last_log_tokens = token_count
+                                    if self._has_repeated_tail(full_text):
+                                        self._record_generation_abort(
+                                            attempt=attempt,
+                                            messages=messages,
+                                            response_parts=full_text,
+                                            token_count=token_count,
+                                            elapsed=generation_elapsed,
+                                            reason="repetition_loop",
+                                        )
+                                        raise OllamaGenerationLimitError(
+                                            "Ollama generation entered a repeated-output loop"
+                                        )
 
                 text = "".join(full_text)
                 elapsed = time.time() - t0
+
+                if final_chunk.get("done_reason") == "length":
+                    self._record_generation_abort(
+                        attempt=attempt,
+                        messages=messages,
+                        response_parts=full_text,
+                        token_count=token_count,
+                        elapsed=elapsed,
+                        reason="server_output_limit",
+                    )
+                    raise OllamaGenerationLimitError(
+                        "Ollama stopped at the configured output limit before "
+                        "completing the response"
+                    )
 
                 if not text.strip():
                     with open("empty_response_debug.txt", "w", encoding="utf-8") as f:
@@ -305,6 +378,58 @@ class OllamaClient:
             f"Failed after bounded retries: {last_error}"
         ) from last_error
 
+    def _has_repeated_tail(self, response_parts: list[str]) -> bool:
+        """Detect exact periodic output at the tail, regardless of loop length."""
+        max_period = self.repetition_window_chars
+        repeats = self.repetition_count
+        if not max_period:
+            return False
+        text = "".join(response_parts)
+        max_period = min(max_period, len(text) // repeats)
+        if max_period <= 0:
+            return False
+        # Very small periods are still caught by a 32-character block made of
+        # that pattern, while avoiding noisy single-character comparisons.
+        min_period = min(32, max_period)
+        for period in range(min_period, max_period + 1):
+            required = period * repeats
+            tail = text[-required:]
+            block = tail[-period:]
+            if block.strip() and all(
+                tail[offset : offset + period] == block
+                for offset in range(0, required, period)
+            ):
+                return True
+        return False
+
+    def _record_generation_abort(
+        self,
+        *,
+        attempt: int,
+        messages: list[dict[str, str]],
+        response_parts: list[str],
+        token_count: int,
+        elapsed: float,
+        reason: str,
+    ) -> None:
+        """Record bounded, text-free diagnostics for an aborted generation."""
+        response_characters = sum(len(part) for part in response_parts)
+        self.last_generation_metrics = {
+            "attempt": attempt,
+            "prompt_characters": sum(len(message["content"]) for message in messages),
+            "response_characters": response_characters,
+            "stream_chunks": token_count,
+            "elapsed_seconds": round(elapsed, 6),
+            "termination_reason": reason,
+        }
+        logger.error(
+            "[Ollama] Generation aborted safely: reason=%s chunks=%d chars=%d elapsed=%.1fs",
+            reason,
+            token_count,
+            response_characters,
+            elapsed,
+        )
+
     def generate_json(
         self,
         prompt: str,
@@ -335,6 +460,7 @@ class OllamaClient:
             temperature=temperature,
             top_p=top_p,
             system=system,
+            format="json",
         )
 
         return self._extract_json(raw)
@@ -497,3 +623,7 @@ class OllamaClient:
 
 class OllamaError(Exception):
     """Raised when Ollama communication fails."""
+
+
+class OllamaGenerationLimitError(OllamaError):
+    """Raised when a generation safeguard terminates a runaway response."""

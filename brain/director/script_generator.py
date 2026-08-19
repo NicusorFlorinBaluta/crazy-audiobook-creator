@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from brain.director.ollama_client import OllamaClient
+from brain.director.ollama_client import OllamaClient, OllamaGenerationLimitError
 from shared.constants import CHUNK_OVERLAP_WORDS, CHUNK_SIZE_WORDS, Gender
 from shared.artifacts import (
     assert_script_covers_source,
@@ -27,6 +27,7 @@ from shared.artifacts import (
     script_fingerprint,
 )
 from shared.models import (
+    Character,
     CharacterRegistry,
     ExtractedChapter,
     ScriptChapter,
@@ -34,6 +35,13 @@ from shared.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+JOINT_SCRIPT_ANALYSIS_REVISION = 1
+
+_PRONOUN_STOPWORDS = {
+    "she", "he", "it", "they", "him", "her", "his", "hers", "them",
+    "male", "female", "man", "woman", "boy", "girl", "person", "someone", "speaker",
+}
 
 
 @dataclass(frozen=True)
@@ -54,6 +62,16 @@ class AttributionIssue:
     message: str
     exact_speaker: str | None = None
     exact_dialogue_kind: str | None = None
+
+
+@dataclass(frozen=True)
+class DeliveryIssue:
+    """A missing or invalid creative delivery decision for one fragment."""
+
+    fragment_index: int
+    fragment_id: int
+    fields: tuple[str, ...]
+    message: str
 
 
 class MetadataAttributionError(ValueError):
@@ -152,9 +170,28 @@ Provide a rich, specific emotion directive matching TTS performance capabilities
 - Weary / somber / reflective: 0.80-0.90 (pause_after_ms: 700)
 
 ---
-## Output Schema
+## Compact Output Schema
 
 CRITICAL REMINDER: You MUST output ONLY valid JSON matching the Output Schema below. Do NOT output any conversational text, essays, explanations, or markdown fences. Just the raw JSON object starting with {{ and ending with }}.
+
+Quality is the primary requirement. Compactness MUST NOT remove a speaker
+decision, confidence, evidence, emotion, or speed that the rules below require.
+Return minified JSON without indentation or decorative whitespace.
+
+For EVERY fragment, return:
+- `id`, `emotion`, and `speed`.
+- `scene_index` on the first row and only when the scene changes afterward.
+
+For dialogue fragments, also return:
+- `speaker`, `speaker_confidence`, and short source-grounded `speaker_evidence`.
+- Omit `dialogue_kind` for ordinary character speech; it is deterministically
+  restored as `spoken`. Return it explicitly for `non_spoken_quote` and
+  `reported_collective_speech`, including their required evidence.
+
+For non-dialogue fragments, omit speaker attribution fields; the application
+deterministically restores narrator ownership. Omit `pause_before_ms` and
+`pause_after_ms` when the standard emotion/speed pacing rule applies. Include a
+pause field only for a deliberate exception that materially improves delivery.
 
 {{
   "chapter_number": {chapter_number},
@@ -173,14 +210,16 @@ CRITICAL REMINDER: You MUST output ONLY valid JSON matching the Output Schema be
     {{
       "id": 0,
       "scene_index": 0,
+      "emotion": "descriptive emotion state",
+      "speed": 1.0
+    }},
+    {{
+      "id": 1,
       "speaker": "character_id",
       "speaker_confidence": 0.95,
-      "speaker_evidence": "short dialogue tag or context cue; empty for narration",
-      "dialogue_kind": "spoken",
-      "emotion": "descriptive emotion state",
-      "speed": 1.0,
-      "pause_before_ms": 0,
-      "pause_after_ms": 500
+      "speaker_evidence": "short source cue",
+      "emotion": "descriptive dialogue emotion",
+      "speed": 1.0
     }}
   ]
 }}
@@ -190,9 +229,44 @@ _USER_PROMPT = """## Source Text Fragments
 
 {chapter_text_json}
 
-Provide the metadata (speaker, emotion, speed) for EACH fragment ID in the JSON array above. Ensure every single ID is accounted for in your output `lines` array.
+Provide quality-preserving compact metadata for EACH fragment ID in the JSON array above. Ensure every single ID is accounted for in your output `lines` array. Never omit emotion or speed. Never omit speaker, confidence, or evidence for dialogue.
 
-CRITICAL: YOU MUST ONLY OUTPUT A SINGLE VALID JSON OBJECT ENCLOSED IN {{}}. DO NOT ADD ANY CONVERSATIONAL TEXT BEFORE OR AFTER THE JSON.
+CRITICAL: YOU MUST ONLY OUTPUT ONE MINIFIED VALID JSON OBJECT ENCLOSED IN {{}}. DO NOT ADD CONVERSATIONAL TEXT OR MARKDOWN.
+"""
+
+_JOINT_CHARACTER_DISCOVERY_PROMPT = """
+
+## Joint Character Discovery
+
+While annotating these same fragments, update the speaking-character registry without
+another pass over the source. Existing character IDs must be reused. If a dialogue
+speaker is not in the registry, add exactly one entry to `character_updates` and use
+that same snake_case ID on its spoken lines. Never add a person or entity that does
+not speak in these fragments.
+
+Every new entry must include `evidence_fragment_ids` pointing to local fragment IDs
+whose surrounding source explicitly names or describes that speaker, plus a
+`discovery_confidence` from 0 to 1. Do not use pronouns, proximity, gender, or a
+nearby named entity as identity evidence. Later appearances may update an existing
+ID with explicit aliases or stronger voice evidence.
+
+Add this sibling field to the normal output object:
+"character_updates": [
+  {
+    "character_id": "snake_case_id",
+    "name": "display name",
+    "aliases": ["explicit source alias"],
+    "gender": "male|female|other",
+    "age_range": "source-supported age or unknown",
+    "personality_traits": ["brief trait"],
+    "voice_description": "under 50 words using gender/age, pitch, volume, speed, accent, texture/clarity, fluency, emotion/tone/personality",
+    "speaking_style": "brief source-grounded description",
+    "test_sentence": "invented spoiler-free 15 to 25 word sentence",
+    "evidence_fragment_ids": [0],
+    "discovery_confidence": 0.95
+  }
+]
+Use an empty array when the fragment batch reveals no new or updated speaker.
 """
 
 
@@ -300,6 +374,8 @@ class ScriptGenerator:
         registry: CharacterRegistry,
         previous_summary: str = "",
         chunk_progress_callback: Callable[[int, int], None] | None = None,
+        *,
+        allow_character_discovery: bool = False,
     ) -> ScriptChapter:
         """Generate a full script for a single chapter.
 
@@ -334,9 +410,16 @@ class ScriptGenerator:
                 registry,
                 previous_summary,
                 id_offset=0,
+                allow_character_discovery=allow_character_discovery,
             )
         else:
-            script = self._process_chunked(chapter, registry, previous_summary, chunk_progress_callback)
+            script = self._process_chunked(
+                chapter,
+                registry,
+                previous_summary,
+                chunk_progress_callback,
+                allow_character_discovery=allow_character_discovery,
+            )
 
         if self.group_utterances:
             script = self._group_adjacent_utterances(script, chapter.text)
@@ -351,6 +434,11 @@ class ScriptGenerator:
         progress_callback: Callable[[ScriptChapter], None] = None,
         chapter_start_callback: Callable[[int], None] | None = None,
         chunk_progress_callback: Callable[[int, int], None] | None = None,
+        *,
+        allow_character_discovery: bool = False,
+        discovery_checkpoint_chapters: set[int] | None = None,
+        registry_progress_callback: Callable[[CharacterRegistry, int], None] | None = None,
+        fingerprint_override: str | None = None,
     ) -> list[ScriptChapter]:
         """Generate scripts for all chapters sequentially with incremental saving."""
         scripts: list[ScriptChapter] = []
@@ -383,16 +471,23 @@ class ScriptGenerator:
                 metadata_path = (
                     scripts_dir / f"chapter_{chapter.number:03d}.meta.json"
                 )
-                expected_fingerprint = self.chapter_fingerprint(
-                    chapter,
-                    registry,
+                expected_fingerprint = fingerprint_override or self.chapter_fingerprint(
+                    chapter, registry
                 )
                 if script_path.exists() and metadata_path.exists():
                     try:
                         metadata = json.loads(
                             metadata_path.read_text(encoding="utf-8")
                         )
-                        if metadata.get("fingerprint") != expected_fingerprint:
+                        checkpoint_reusable = (
+                            allow_character_discovery
+                            and discovery_checkpoint_chapters is not None
+                            and chapter.number in discovery_checkpoint_chapters
+                        )
+                        if (
+                            metadata.get("fingerprint") != expected_fingerprint
+                            and not checkpoint_reusable
+                        ):
                             raise ValueError("script dependency fingerprint changed")
                         script = ScriptChapter.model_validate_json(script_path.read_text(encoding="utf-8"))
                         assert_script_covers_source(script, chapter.text)
@@ -413,7 +508,11 @@ class ScriptGenerator:
 
             ch_t0 = _time.time()
             script = self.generate_chapter_script(
-                chapter, registry, previous_summary, chunk_progress_callback
+                chapter,
+                registry,
+                previous_summary,
+                chunk_progress_callback,
+                allow_character_discovery=allow_character_discovery,
             )
             ch_elapsed = _time.time() - ch_t0
 
@@ -431,6 +530,9 @@ class ScriptGenerator:
                     {"fingerprint": expected_fingerprint},
                 )
                 logger.info("[ScriptGenerator] Incrementally saved %s", script_path.name)
+
+            if registry_progress_callback:
+                registry_progress_callback(registry, chapter.number)
 
             logger.info(
                 "[ScriptGenerator] Chapter %d/%d done in %.1fs | %d lines | summary: %r",
@@ -640,9 +742,22 @@ class ScriptGenerator:
         id_offset: int = 0,
         *,
         strict_validation: bool = False,
+        allow_character_discovery: bool = False,
     ) -> ScriptChapter:
-        """Annotate a non-overlapping set of immutable source fragments."""
-        char_summary = self._format_registry(registry)
+        full_text = "".join(fragment.text for fragment in fragments)
+        allowed_speakers = self._get_chapter_scoped_speakers(full_text, registry)
+        scoped_registry = (
+            registry
+            if len(allowed_speakers) >= len(registry.characters)
+            else CharacterRegistry(
+                characters={
+                    cid: c
+                    for cid, c in registry.characters.items()
+                    if cid in allowed_speakers
+                }
+            )
+        )
+        char_summary = self._format_registry(scoped_registry)
 
         system_prompt = _SYSTEM_PROMPT.format(
             character_registry=char_summary,
@@ -662,6 +777,8 @@ class ScriptGenerator:
         chapter_text_json = json.dumps(fragment_dicts, indent=2)
         
         prompt = _USER_PROMPT.format(chapter_text_json=chapter_text_json)
+        if allow_character_discovery:
+            prompt += _JOINT_CHARACTER_DISCOVERY_PROMPT
 
         prompt_kb = (len(system_prompt) + len(prompt)) / 1024
         if prompt_kb > 80:
@@ -672,11 +789,12 @@ class ScriptGenerator:
             )
 
         logger.info(
-            "[ScriptGenerator] Ch%d '%s' → LLM | %.1f KB prompt | %d fragments",
+            "[ScriptGenerator] Ch%d '%s' → LLM | %.1f KB prompt | %d fragments | %d active characters",
             chapter_number,
             chapter_title[:40],
             prompt_kb,
             len(fragments),
+            len(scoped_registry.characters),
         )
 
         import time as _time
@@ -684,10 +802,13 @@ class ScriptGenerator:
         raw = None
         last_error: Exception | None = None
         used_fallback = False
-        allowed_speakers = set(registry.characters)
         full_attempts = 0
         structural_failures = 0
         focused_retries = 0
+        strict_attribution_retries = 0
+        delivery_focused_retries = 0
+        delivery_focused_rounds = 0
+        delivery_issue_counts: dict[str, int] = {}
         local_repairs = 0
         fragment_fallbacks = 0
         issue_counts: dict[str, int] = {}
@@ -738,12 +859,86 @@ class ScriptGenerator:
                                     )
                                     or {}
                                 )
-                                if request_succeeded
-                                else {}
                             ),
                         }
                     )
                 self._validate_metadata_ids(candidate, len(fragments))
+                delivery_issues = self._collect_delivery_metadata_issues(
+                    candidate,
+                    fragments,
+                    id_offset=id_offset,
+                )
+                for delivery_issue in delivery_issues:
+                    for field in delivery_issue.fields:
+                        delivery_issue_counts[field] = (
+                            delivery_issue_counts.get(field, 0) + 1
+                        )
+                for delivery_round in range(1, 3):
+                    if not delivery_issues:
+                        break
+                    delivery_focused_rounds += 1
+                    delivery_focused_retries += len(delivery_issues)
+                    try:
+                        replacements = self._retry_delivery_batch(
+                            delivery_issues,
+                            candidate,
+                            fragments,
+                            request_metrics,
+                            id_offset=id_offset,
+                            round_number=delivery_round,
+                        )
+                    except Exception as exc:
+                        if delivery_round >= 2:
+                            raise
+                        logger.warning(
+                            "Focused delivery repair round %d failed for chapter "
+                            "%d fragment(s) %s: %s. Trying one final focused "
+                            "repair before any full-chunk retry.",
+                            delivery_round,
+                            chapter_number,
+                            ", ".join(
+                                str(item.fragment_id) for item in delivery_issues
+                            ),
+                            exc,
+                        )
+                        continue
+                    for fragment_index, replacement in replacements.items():
+                        self._replace_metadata_line(
+                            candidate,
+                            fragment_index,
+                            replacement,
+                        )
+                    delivery_issues = self._collect_delivery_metadata_issues(
+                        candidate,
+                        fragments,
+                        id_offset=id_offset,
+                    )
+                if delivery_issues:
+                    raise ValueError(
+                        "Focused delivery repair remained invalid: "
+                        + "; ".join(issue.message for issue in delivery_issues)
+                    )
+
+                compact_stats = self._expand_compact_metadata(candidate, fragments)
+                request_metrics[-1]["compact_metadata"] = compact_stats
+                logger.info(
+                    "[ScriptGenerator] Compact metadata for chapter %d: "
+                    "%d received chars -> %d canonical chars (%.1f%% avoided)",
+                    chapter_number,
+                    compact_stats["received_characters"],
+                    compact_stats["canonical_characters"],
+                    compact_stats["character_savings_ratio"] * 100,
+                )
+                self._validate_metadata_ids(candidate, len(fragments))
+
+                if allow_character_discovery:
+                    self._apply_joint_character_updates(
+                        candidate,
+                        fragments,
+                        registry,
+                    )
+                    allowed_speakers = set(registry.characters)
+                    char_summary = self._format_registry(registry)
 
                 issues = self._collect_metadata_speaker_issues(
                     candidate,
@@ -805,12 +1000,78 @@ class ScriptGenerator:
                             confidence_threshold=self.speaker_confidence_threshold,
                         )
                         if post_retry_issues:
-                            self._apply_deterministic_attribution_repairs(
+                            local_repairs += (
+                                self._apply_deterministic_attribution_repairs(
+                                    candidate,
+                                    post_retry_issues,
+                                    fragments=fragments,
+                                    registry=registry,
+                                    allowed_speakers=allowed_speakers,
+                                )
+                            )
+
+                post_retry_issues = self._collect_metadata_speaker_issues(
+                    candidate,
+                    fragments,
+                    allowed_speakers,
+                    registry=registry,
+                    id_offset=id_offset,
+                    confidence_threshold=self.speaker_confidence_threshold,
+                )
+                strict_issues = [
+                    issue
+                    for issue in post_retry_issues
+                    if issue.kind
+                    in {"narrator_spoken_dialogue", "narrator_dialogue_tag"}
+                ]
+                if strict_issues:
+                    strict_attribution_retries += len(strict_issues)
+                    try:
+                        replacements = self._retry_attribution_batch(
+                            strict_issues,
+                            candidate,
+                            fragments,
+                            allowed_speakers,
+                            registry,
+                            char_summary,
+                            request_metrics,
+                            id_offset=id_offset,
+                            strict_spoken=True,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "Strict spoken-dialogue retry failed for chapter %d "
+                            "fragment(s) %s: %s",
+                            chapter_number,
+                            ", ".join(
+                                str(item.fragment_id) for item in strict_issues
+                            ),
+                            exc,
+                        )
+                    else:
+                        for fragment_index, replacement in replacements.items():
+                            self._replace_metadata_line(
                                 candidate,
-                                post_retry_issues,
-                                fragments=fragments,
-                                registry=registry,
-                                allowed_speakers=allowed_speakers,
+                                fragment_index,
+                                replacement,
+                            )
+                        strict_remaining = self._collect_metadata_speaker_issues(
+                            candidate,
+                            fragments,
+                            allowed_speakers,
+                            registry=registry,
+                            id_offset=id_offset,
+                            confidence_threshold=self.speaker_confidence_threshold,
+                        )
+                        if strict_remaining:
+                            local_repairs += (
+                                self._apply_deterministic_attribution_repairs(
+                                    candidate,
+                                    strict_remaining,
+                                    fragments=fragments,
+                                    registry=registry,
+                                    allowed_speakers=allowed_speakers,
+                                )
                             )
 
                 remaining_issues = self._collect_metadata_speaker_issues(
@@ -822,33 +1083,61 @@ class ScriptGenerator:
                     confidence_threshold=self.speaker_confidence_threshold,
                 )
                 if remaining_issues:
-                    if strict_validation or attempt < 3:
+                    if strict_validation:
                         raise MetadataAttributionError(remaining_issues)
-                    else:
-                        # Soft pass-through on final attempt: apply safe fallback metadata to remaining unresolved lines
-                        for rem_issue in remaining_issues:
-                            logger.warning(
-                                "Soft pass-through: unresolved attribution on chapter %d fragment %d (%s): %s. Applying conservative fallback metadata.",
-                                chapter_number,
-                                rem_issue.fragment_id,
-                                rem_issue.kind,
-                                rem_issue.message,
-                            )
-                            fallback_meta = self._fallback_fragment_metadata(
-                                rem_issue.fragment_index,
-                                candidate,
-                                fragments,
-                                allowed_speakers,
-                                registry,
-                            )
-                            self._replace_metadata_line(
-                                candidate,
-                                rem_issue.fragment_index,
-                                fallback_meta,
-                            )
+                    # Attribution uncertainty is not a structural failure. A
+                    # second full-chunk generation is both expensive and less
+                    # targeted than the focused repair that already ran. Keep
+                    # the usable response and surface each unresolved fragment
+                    # as a low-confidence review candidate instead.
+                    unresolved_indexes = {
+                        issue.fragment_index for issue in remaining_issues
+                    }
+                    fragment_fallbacks += len(unresolved_indexes)
+                    for fragment_index in sorted(unresolved_indexes):
+                        fragment_issues = [
+                            issue
+                            for issue in remaining_issues
+                            if issue.fragment_index == fragment_index
+                        ]
+                        logger.warning(
+                            "Focused attribution remained unresolved for chapter "
+                            "%d fragment %d (%s). Applying conservative review "
+                            "metadata without regenerating the full chunk.",
+                            chapter_number,
+                            id_offset + fragment_index,
+                            ", ".join(
+                                sorted({issue.kind for issue in fragment_issues})
+                            ),
+                        )
+                        fallback_meta = self._fallback_fragment_metadata(
+                            fragment_index,
+                            candidate,
+                            fragments,
+                            allowed_speakers,
+                            registry,
+                        )
+                        self._replace_metadata_line(
+                            candidate,
+                            fragment_index,
+                            fallback_meta,
+                        )
 
                 self._validate_metadata_ids(candidate, len(fragments))
                 raw = candidate
+                break
+            except OllamaGenerationLimitError as exc:
+                # Reissuing the same oversized or looping prompt can consume
+                # the full safeguard budget again. Fall back conservatively;
+                # downstream confidence review can escalate uncertain lines.
+                last_error = exc
+                structural_failures += 1
+                logger.error(
+                    "Runaway metadata generation stopped for chapter %d: %s. "
+                    "Skipping duplicate full-request retries.",
+                    chapter_number,
+                    exc,
+                )
                 break
             except MetadataAttributionError as exc:
                 if strict_validation:
@@ -963,6 +1252,10 @@ class ScriptGenerator:
                 "structural_retries": max(0, full_attempts - 1),
                 "full_semantic_retries": 0,
                 "focused_retries": focused_retries,
+                "strict_attribution_retries": strict_attribution_retries,
+                "delivery_focused_retries": delivery_focused_retries,
+                "delivery_focused_rounds": delivery_focused_rounds,
+                "delivery_issue_counts": delivery_issue_counts,
                 "local_repairs": local_repairs,
                 "fragment_fallbacks": fragment_fallbacks,
                 "attribution_issue_counts": issue_counts,
@@ -983,6 +1276,328 @@ class ScriptGenerator:
         for issue in issues:
             counts[issue.kind] = counts.get(issue.kind, 0) + 1
 
+    @staticmethod
+    def _collect_delivery_metadata_issues(
+        raw: dict[str, Any],
+        fragments: list[SourceFragment],
+        *,
+        id_offset: int = 0,
+    ) -> list[DeliveryIssue]:
+        """Find creative delivery fields that cannot be safely derived."""
+        ScriptGenerator._validate_metadata_ids(raw, len(fragments))
+        metadata_map = ScriptGenerator._metadata_line_map(raw)
+        issues: list[DeliveryIssue] = []
+        for fragment_index in range(len(fragments)):
+            item = metadata_map[fragment_index]
+            invalid_fields: list[str] = []
+            if not str(item.get("emotion") or "").strip():
+                invalid_fields.append("emotion")
+            try:
+                speed = float(item["speed"])
+                valid_speed = 0.5 <= speed <= 2.0
+            except (KeyError, TypeError, ValueError):
+                valid_speed = False
+            if not valid_speed:
+                invalid_fields.append("speed")
+            if invalid_fields:
+                fragment_id = id_offset + fragment_index
+                issues.append(
+                    DeliveryIssue(
+                        fragment_index=fragment_index,
+                        fragment_id=fragment_id,
+                        fields=tuple(invalid_fields),
+                        message=(
+                            f"Fragment {fragment_id} has invalid required delivery "
+                            f"field(s): {', '.join(invalid_fields)}"
+                        ),
+                    )
+                )
+        return issues
+
+    def _retry_delivery_batch(
+        self,
+        issues: list[DeliveryIssue],
+        raw: dict[str, Any],
+        fragments: list[SourceFragment],
+        request_metrics: list[dict[str, Any]],
+        *,
+        id_offset: int,
+        round_number: int,
+    ) -> dict[int, dict[str, Any]]:
+        """Repair only omitted/invalid delivery decisions in one bounded call."""
+        if not issues:
+            return {}
+        target_indexes = {issue.fragment_index for issue in issues}
+        context_indexes: set[int] = set()
+        for target in target_indexes:
+            context_indexes.update(
+                range(max(0, target - 6), min(len(fragments), target + 7))
+            )
+        metadata_map = self._metadata_line_map(raw)
+        context = [
+            {
+                "local_id": index,
+                "text": fragments[index].text,
+                "dialogue": self._is_dialogue_fragment(fragments[index].text),
+                "current_emotion": metadata_map[index].get("emotion"),
+                "current_speed": metadata_map[index].get("speed"),
+            }
+            for index in sorted(context_indexes)
+        ]
+        targets = [
+            {
+                "local_id": issue.fragment_index,
+                "chapter_fragment_id": issue.fragment_id,
+                "required_fields": list(issue.fields),
+            }
+            for issue in issues
+        ]
+        retry_instruction = (
+            " This is the final focused attempt: be especially strict about "
+            "returning every requested field with a valid value."
+            if round_number > 1
+            else ""
+        )
+        focused_prompt = (
+            "Repair only the listed missing or invalid audiobook delivery "
+            "fields. Infer emotion and pacing from the complete local source "
+            "context so delivery remains coherent. Return exactly one row per "
+            "listed local_id and no other rows. Each row must contain id plus "
+            "every field named in required_fields: emotion must be a concise, "
+            "specific delivery direction and speed must be a number from 0.5 "
+            "through 2.0. Do not return speaker fields or rewrite source text. "
+            "Use local_id as id; chapter_fragment_id is informational only."
+            + retry_instruction
+            + "\n\nTargets:\n"
+            + json.dumps(targets, indent=2)
+            + "\n\nLocal context:\n"
+            + json.dumps(context, indent=2)
+        )
+        request_started = time.perf_counter()
+        request_succeeded = False
+        try:
+            response = self.ollama.generate_json(
+                focused_prompt,
+                temperature=0.1,
+                system=(
+                    "You are a strict audiobook delivery-metadata repairer. "
+                    "Output only JSON with a lines array. Preserve meaning and "
+                    "prior valid metadata."
+                ),
+            )
+            request_succeeded = True
+        finally:
+            request_metrics.append(
+                {
+                    "request_kind": "focused_delivery_batch",
+                    "round": round_number,
+                    "fragment_ids": sorted(issue.fragment_id for issue in issues),
+                    "wall_seconds": round(
+                        time.perf_counter() - request_started,
+                        6,
+                    ),
+                    "success": request_succeeded,
+                    "ollama": dict(
+                        getattr(self.ollama, "last_generation_metrics", {}) or {}
+                    ),
+                }
+            )
+        response_lines = response.get("lines") if isinstance(response, dict) else None
+        if not isinstance(response_lines, list):
+            raise ValueError("Focused delivery response must contain a lines array")
+        issue_map = {issue.fragment_index: issue for issue in issues}
+        replacements: dict[int, dict[str, Any]] = {}
+        for item in response_lines:
+            if not isinstance(item, dict):
+                raise ValueError("Focused delivery response line is invalid")
+            try:
+                item_id = int(item.get("id"))
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Focused delivery response has an invalid id") from exc
+            if item_id not in target_indexes or item_id in replacements:
+                raise ValueError(
+                    f"Focused delivery returned an unexpected or duplicate id {item_id}"
+                )
+            issue = issue_map[item_id]
+            missing = [field for field in issue.fields if field not in item]
+            if missing:
+                raise ValueError(
+                    f"Focused delivery omitted required fields for {item_id}: {missing}"
+                )
+            replacements[item_id] = {
+                field: item[field] for field in issue.fields
+            }
+        if set(replacements) != target_indexes:
+            raise ValueError(
+                "Focused delivery response IDs differ from requested IDs; "
+                f"expected={sorted(target_indexes)}, received={sorted(replacements)}"
+            )
+        return replacements
+
+    @staticmethod
+    def _standard_pause_after_ms(
+        emotion: str,
+        speed: float,
+        *,
+        is_dialogue: bool,
+    ) -> int:
+        """Derive only the routine pacing values formerly repeated in JSON."""
+        value = emotion.casefold()
+        if speed >= 1.12 or any(
+            term in value
+            for term in (
+                "urgent", "panic", "shout", "angry", "demand", "action",
+                "terrified", "breathless urgency",
+            )
+        ):
+            return 250
+        if any(
+            term in value
+            for term in ("whisper", "secret", "hushed", "conspiratorial")
+        ):
+            return 600
+        if speed <= 0.9 or any(
+            term in value
+            for term in (
+                "somber", "weary", "reflective", "nostalgia", "sad",
+                "contemplation", "solemn",
+            )
+        ):
+            return 700
+        return 400 if is_dialogue else 500
+
+    @classmethod
+    def _expand_compact_metadata(
+        cls,
+        raw: dict[str, Any],
+        fragments: list[SourceFragment],
+    ) -> dict[str, Any]:
+        """Restore derivable fields while refusing to default creative intent.
+
+        Speaker decisions for dialogue plus emotion and speed remain model
+        outputs. Only structurally known narration ownership, ordinary spoken
+        classification, repeated scene indexes, and routine pauses are filled
+        here.
+        """
+        if not isinstance(raw, dict):
+            raise ValueError("LLM metadata response must be an object")
+        received_characters = len(
+            json.dumps(raw, ensure_ascii=False, separators=(",", ":"))
+        )
+        raw_lines = raw.get("lines")
+        if not isinstance(raw_lines, list):
+            raise ValueError("LLM response has no lines array")
+        cls._validate_metadata_ids(raw, len(fragments))
+
+        current_scene = 0
+        for item in sorted(raw_lines, key=lambda row: int(row["id"])):
+            fragment_index = int(item["id"])
+
+            if "scene_index" in item:
+                try:
+                    current_scene = int(item["scene_index"])
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        f"Fragment {fragment_index} has an invalid scene_index"
+                    ) from exc
+                if current_scene < 0:
+                    raise ValueError(
+                        f"Fragment {fragment_index} has a negative scene_index"
+                    )
+            item["scene_index"] = current_scene
+
+            emotion = str(item.get("emotion") or "").strip()
+            if not emotion:
+                raise ValueError(
+                    f"Fragment {fragment_index} is missing required emotion"
+                )
+            item["emotion"] = emotion[:200]
+            try:
+                speed = float(item["speed"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"Fragment {fragment_index} is missing valid required speed"
+                ) from exc
+            if not 0.5 <= speed <= 2.0:
+                raise ValueError(
+                    f"Fragment {fragment_index} speed is outside 0.5-2.0"
+                )
+            item["speed"] = speed
+
+            is_dialogue = cls._is_dialogue_fragment(
+                fragments[fragment_index].text
+            )
+            if not is_dialogue:
+                # These values are facts of the source-fragment structure, not
+                # creative decisions worth spending model tokens on.
+                item["speaker"] = "narrator"
+                item["speaker_confidence"] = None
+                item["speaker_evidence"] = ""
+                item["dialogue_kind"] = None
+            else:
+                speaker = cls._normalize_speaker_id(item.get("speaker"))
+                if speaker != "narrator" and not item.get("dialogue_kind"):
+                    item["dialogue_kind"] = "spoken"
+
+            item.setdefault("pause_before_ms", 0)
+            item.setdefault(
+                "pause_after_ms",
+                cls._standard_pause_after_ms(
+                    emotion,
+                    speed,
+                    is_dialogue=is_dialogue,
+                ),
+            )
+
+        canonical_characters = len(
+            json.dumps(raw, ensure_ascii=False, separators=(",", ":"))
+        )
+        savings_ratio = (
+            max(0.0, 1.0 - received_characters / canonical_characters)
+            if canonical_characters
+            else 0.0
+        )
+        return {
+            "received_characters": received_characters,
+            "canonical_characters": canonical_characters,
+            "character_savings": max(
+                0, canonical_characters - received_characters
+            ),
+            "character_savings_ratio": round(savings_ratio, 6),
+        }
+
+    @staticmethod
+    def _metadata_line_map(raw: dict[str, Any]) -> dict[int, dict[str, Any]]:
+        result: dict[int, dict[str, Any]] = {}
+        for item in raw.get("lines", []):
+            if not isinstance(item, dict) or "id" not in item:
+                continue
+            try:
+                result[int(item["id"])] = item
+            except (TypeError, ValueError):
+                continue
+        return result
+
+    @staticmethod
+    def _replace_metadata_line(
+        raw: dict[str, Any],
+        fragment_index: int,
+        replacement: dict[str, Any],
+    ) -> None:
+        for index, item in enumerate(raw.get("lines", [])):
+            if not isinstance(item, dict):
+                continue
+            try:
+                item_id = int(item.get("id"))
+            except (TypeError, ValueError):
+                continue
+            if item_id == fragment_index:
+                updated = dict(item)
+                updated.update(replacement)
+                updated["id"] = fragment_index
+                raw["lines"][index] = updated
+                return
+        raise ValueError(f"No metadata row exists for fragment {fragment_index}")
     @staticmethod
     def _metadata_line_map(raw: dict[str, Any]) -> dict[int, dict[str, Any]]:
         result: dict[int, dict[str, Any]] = {}
@@ -1033,6 +1648,25 @@ class ScriptGenerator:
                 continue
             target_speaker = issue.exact_speaker
             target_kind = issue.exact_dialogue_kind
+
+            if target_speaker is None and fragments is not None and registry is not None:
+                if issue.kind in {"gender_contradiction", "pronoun_gender", "generic_gender"}:
+                    req_gender = None
+                    if "male" in issue.message.lower():
+                        req_gender = Gender.MALE
+                    elif "female" in issue.message.lower():
+                        req_gender = Gender.FEMALE
+                    resolved = ScriptGenerator._resolve_dialogue_speaker(
+                        issue.fragment_index,
+                        fragments,
+                        metadata_map,
+                        allowed_speakers or set(registry.characters.keys()),
+                        registry=registry,
+                        target_gender=req_gender,
+                    )
+                    if resolved and resolved != "narrator":
+                        target_speaker = resolved
+                        target_kind = "spoken"
 
             if target_speaker is None:
                 continue
@@ -1139,8 +1773,6 @@ class ScriptGenerator:
                             )
                             or {}
                         )
-                        if request_succeeded
-                        else {}
                     ),
                 }
             )
@@ -1206,11 +1838,15 @@ class ScriptGenerator:
         request_metrics: list[dict[str, Any]],
         *,
         id_offset: int,
+        strict_spoken: bool = False,
     ) -> dict[int, dict[str, Any]]:
         """Correct all suspect turns in one bounded conversation-aware call."""
         if not issues:
             return {}
         target_indexes = {issue.fragment_index for issue in issues}
+        global_to_local = {
+            issue.fragment_id: issue.fragment_index for issue in issues
+        }
         context_indexes: set[int] = set()
         for target in target_indexes:
             context_indexes.update(
@@ -1218,7 +1854,8 @@ class ScriptGenerator:
             )
         context = [
             {
-                "id": index,
+                "local_id": index,
+                "chapter_fragment_id": id_offset + index,
                 "text": fragments[index].text,
                 "dialogue": self._is_dialogue_fragment(fragments[index].text),
                 "current_speaker": self._metadata_line_map(raw)
@@ -1227,18 +1864,26 @@ class ScriptGenerator:
             }
             for index in sorted(context_indexes)
         ]
-        reasons = [
-            {
-                "id": issue.fragment_index,
-                "global_fragment_id": issue.fragment_id,
-                "reason": issue.message,
-            }
-            for issue in issues
-        ]
+        reasons = []
+        for fragment_index in sorted(target_indexes):
+            fragment_issues = [
+                issue for issue in issues
+                if issue.fragment_index == fragment_index
+            ]
+            reasons.append(
+                {
+                    "local_id": fragment_index,
+                    "chapter_fragment_id": id_offset + fragment_index,
+                    "reasons": [issue.message for issue in fragment_issues],
+                }
+            )
+        example_id = min(target_indexes)
         focused_prompt = (
             "Correct speaker metadata only for the listed suspect audiobook "
-            "fragments. Return one row for every listed id and no other rows. "
-            "Preserve every id. Evaluate each complete local conversation, "
+            "fragments. Return one row for every listed local_id and no other "
+            "rows. Copy local_id into the response field named id. The "
+            "chapter_fragment_id is informational only and MUST NOT be returned "
+            "as id. Evaluate each complete local conversation, "
             "including untagged alternating turns. Use explicit tags, aliases, "
             "turn continuity, and source context; never select from gender or "
             "mere proximity. Classify dialogue_kind as spoken; as "
@@ -1247,9 +1892,9 @@ class ScriptGenerator:
             "when an adjacent source tag identifies an anonymous plural group. "
             "Each row may contain only id, speaker, "
             "speaker_confidence, speaker_evidence, and dialogue_kind. The id "
-            "MUST be the integer source-fragment id from the suspect list; it "
+            "MUST be the integer local_id from the suspect list; it "
             "is never a speaker name. Output exactly this JSON shape: "
-            '{"lines":[{"id":41,"speaker":"character_id",'
+            f'{{"lines":[{{"id":{example_id},"speaker":"character_id",'
             '"speaker_confidence":0.95,"speaker_evidence":"source cue",'
             '"dialogue_kind":"spoken"}]}. Do not use an object keyed by '
             "speaker, and do not swap id with speaker.\n\n"
@@ -1257,6 +1902,20 @@ class ScriptGenerator:
             f"Suspect fragments:\n{json.dumps(reasons, indent=2)}\n\n"
             f"Conversation context:\n{json.dumps(context, indent=2)}"
         )
+        if strict_spoken:
+            non_narrator_speakers = sorted(
+                speaker for speaker in allowed_speakers if speaker != "narrator"
+            )
+            focused_prompt += (
+                "\n\nSTRICT SPOKEN-DIALOGUE CORRECTION: Source validation has "
+                "already established that every suspect is a voiced character "
+                "turn. 'narrator', non_spoken_quote, and "
+                "reported_collective_speech are forbidden. Choose the best "
+                "source-grounded non-narrator speaker, keep confidence honest, "
+                "and cite the local continuity or tag evidence. Allowed "
+                "non-narrator IDs: "
+                + ", ".join(non_narrator_speakers)
+            )
         focused_system = (
             "You are a strict audiobook speaker-attribution corrector. Output "
             "only JSON with a lines array. Do not rewrite source text or invent "
@@ -1276,9 +1935,13 @@ class ScriptGenerator:
             request_metrics.append(
                 {
                     "request_kind": (
-                        "focused_fragment"
-                        if len(target_indexes) == 1
-                        else "focused_attribution_batch"
+                        "strict_spoken_attribution"
+                        if strict_spoken
+                        else (
+                            "focused_fragment"
+                            if len(target_indexes) == 1
+                            else "focused_attribution_batch"
+                        )
                     ),
                     "fragment_ids": sorted(
                         issue.fragment_id for issue in issues
@@ -1293,8 +1956,6 @@ class ScriptGenerator:
                             getattr(self.ollama, "last_generation_metrics", {})
                             or {}
                         )
-                        if request_succeeded
-                        else {}
                     ),
                 }
             )
@@ -1312,11 +1973,28 @@ class ScriptGenerator:
                 item_id = int(item.get("id"))
             except (TypeError, ValueError) as exc:
                 raise ValueError("Focused attribution response has an invalid id") from exc
-            if item_id in replacements:
-                raise ValueError(f"Focused attribution duplicated fragment id {item_id}")
-            replacements[item_id] = {
+            # The prompt contract is batch-local. Older prompts exposed the
+            # chapter-global ID too prominently, however, and some models copy
+            # that value. Accept it defensively and canonicalize before any
+            # metadata is replaced.
+            if item_id in target_indexes:
+                local_id = item_id
+            elif item_id in global_to_local:
+                local_id = global_to_local[item_id]
+            else:
+                raise ValueError(
+                    "Focused attribution returned an unknown fragment id "
+                    f"{item_id}"
+                )
+            if local_id in replacements:
+                raise ValueError(
+                    "Focused attribution duplicated fragment id "
+                    f"{local_id}"
+                )
+            replacements[local_id] = {
                 key: value for key, value in item.items() if key in allowed_fields
             }
+            replacements[local_id]["id"] = local_id
         if set(replacements) != target_indexes:
             raise ValueError(
                 "Focused attribution response IDs differ from requested IDs; "
@@ -1406,6 +2084,8 @@ class ScriptGenerator:
         registry: CharacterRegistry,
         previous_summary: str,
         chunk_progress_callback: Callable[[int, int], None] | None = None,
+        *,
+        allow_character_discovery: bool = False,
     ) -> ScriptChapter:
         """Process complete source fragments in non-overlapping batches."""
         fragments = self._split_into_fragment_spans(chapter.text)
@@ -1436,6 +2116,7 @@ class ScriptGenerator:
                 if chunk_num == 1
                 else f"{previous_summary}\nCurrent chapter so far: {context_summary}",
                 id_offset=offset,
+                allow_character_discovery=allow_character_discovery,
             )
             all_lines.extend(chunk_script.lines)
             if hasattr(chunk_script, 'scenes'): all_scenes.extend(chunk_script.scenes)
@@ -1506,6 +2187,254 @@ class ScriptGenerator:
                     f"Chapter {script.chapter_number} contains unknown speaker "
                     f"'{spk}'; Pass 2 may not create cast members"
                 )
+
+    @staticmethod
+    def remap_reconciled_speakers(
+        scripts: list[ScriptChapter],
+        registry: CharacterRegistry,
+        remap: dict[str, str],
+    ) -> None:
+        """Apply conservative identity reconciliation to completed scripts."""
+        for character in registry.characters.values():
+            character.dialogue_count = 0
+        for script in scripts:
+            for line in script.lines:
+                original = ScriptGenerator._normalize_speaker_id(line.speaker)
+                speaker = remap.get(original, original)
+                if speaker not in registry.characters:
+                    raise ValueError(
+                        f"Chapter {script.chapter_number} retains unknown reconciled "
+                        f"speaker '{speaker}'"
+                    )
+                line.speaker = speaker
+                if speaker != "narrator":
+                    registry.characters[speaker].dialogue_count += 1
+
+    def _apply_joint_character_updates(
+        self,
+        raw: dict[str, Any],
+        fragments: list[SourceFragment],
+        registry: CharacterRegistry,
+    ) -> None:
+        """Admit only source-evidenced speakers discovered by the joint pass."""
+        updates = raw.get("character_updates", [])
+        if not isinstance(updates, list):
+            raise ValueError("character_updates must be an array in joint mode")
+        line_map = self._metadata_line_map(raw)
+        dialogue_by_speaker: dict[str, list[int]] = {}
+        for index, item in line_map.items():
+            if index < 0 or index >= len(fragments):
+                continue
+            if not self._is_dialogue_fragment(fragments[index].text):
+                continue
+            speaker = self._normalize_speaker_id(item.get("speaker"))
+            if speaker != "narrator":
+                dialogue_by_speaker.setdefault(speaker, []).append(index)
+
+        for update in updates:
+            if not isinstance(update, dict):
+                raise ValueError("character_updates contains a non-object entry")
+            character_id = self._normalize_speaker_id(
+                update.get("character_id") or update.get("id")
+            )
+            if character_id == "narrator":
+                continue
+            confidence = max(
+                0.0,
+                min(1.0, float(update.get("discovery_confidence", 0.0) or 0.0)),
+            )
+            evidence_ids: list[int] = []
+            for value in update.get("evidence_fragment_ids", []):
+                try:
+                    parsed = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= parsed < len(fragments):
+                    evidence_ids.append(parsed)
+
+            name = str(
+                update.get("name") or character_id.replace("_", " ").title()
+            ).strip()[:160]
+            raw_aliases = update.get("aliases", [])
+            if isinstance(raw_aliases, str):
+                raw_aliases = [raw_aliases]
+            aliases = [
+                str(value).strip()[:160]
+                for value in raw_aliases
+                if str(value).strip()
+            ][:20]
+            identity_terms = [name, character_id.replace("_", " "), *aliases]
+            identity_terms = [
+                term for term in identity_terms
+                if len(term) >= 3
+                and self._normalize_speaker_id(term) not in _UNSAFE_SPEAKER_ALIASES
+            ]
+            assigned_dialogue = dialogue_by_speaker.get(character_id, [])
+            evidence_excerpts: list[str] = []
+            for evidence_id in evidence_ids:
+                start = max(0, evidence_id - 1)
+                end = min(len(fragments), evidence_id + 2)
+                context = " ".join(
+                    fragment.text for fragment in fragments[start:end]
+                ).strip()
+                context_folded = context.casefold()
+                identity_present = any(
+                    re.search(
+                        rf"(?<!\w){re.escape(term.casefold())}(?!\w)",
+                        context_folded,
+                    )
+                    for term in identity_terms
+                )
+                dialogue_nearby = any(
+                    abs(dialogue_id - evidence_id) <= 1
+                    for dialogue_id in assigned_dialogue
+                )
+                if identity_present and dialogue_nearby:
+                    evidence_excerpts.append(context[:500])
+
+            existing = registry.characters.get(character_id)
+            if existing is None and (
+                confidence < self.speaker_confidence_threshold
+                or not assigned_dialogue
+                or not evidence_excerpts
+            ):
+                logger.warning(
+                    "[JointDirector] Rejected unsupported speaker discovery '%s' "
+                    "(confidence=%.2f, dialogue=%d, evidence=%d)",
+                    character_id,
+                    confidence,
+                    len(assigned_dialogue),
+                    len(evidence_excerpts),
+                )
+                continue
+
+            evidence_text = " ".join(evidence_excerpts).casefold()
+            aliases = [
+                alias for alias in aliases
+                if re.search(
+                    rf"(?<!\w){re.escape(alias.casefold())}(?!\w)",
+                    evidence_text,
+                )
+            ]
+
+            gender_value = str(update.get("gender", "other")).casefold()
+            if gender_value in {"male", "man", "boy"}:
+                gender = Gender.MALE
+            elif gender_value in {"female", "woman", "girl"}:
+                gender = Gender.FEMALE
+            else:
+                gender = Gender.OTHER
+            voice_description = str(update.get("voice_description", "")).strip()
+            if not voice_description:
+                voice_description = (
+                    f"{gender.value} speaker, unknown adult age. medium pitch, "
+                    "moderate volume, measured speed. neutral accent, clear texture, "
+                    "high clarity, natural fluency, neutral emotion and tone."
+                )
+
+            if existing is None:
+                registry.characters[character_id] = Character(
+                    id=character_id,
+                    name=name,
+                    gender=gender,
+                    age_range=str(update.get("age_range", "unknown"))[:80],
+                    personality_traits=[
+                        str(value)[:100]
+                        for value in update.get("personality_traits", [])
+                        if str(value).strip()
+                    ][:12],
+                    aliases=aliases,
+                    voice_description=voice_description[:1000],
+                    speaking_style=str(update.get("speaking_style", ""))[:500],
+                    test_sentence=(
+                        str(update.get("test_sentence"))[:500]
+                        if update.get("test_sentence")
+                        else None
+                    ),
+                    dialogue_count=len(assigned_dialogue),
+                    discovered_in_pass2=True,
+                    discovery_confidence=confidence,
+                    discovery_evidence=evidence_excerpts[:20],
+                )
+                logger.info(
+                    "[JointDirector] Registered source-evidenced speaker '%s' "
+                    "(confidence=%.2f)",
+                    character_id,
+                    confidence,
+                )
+                continue
+
+            existing.dialogue_count += len(assigned_dialogue)
+            existing.discovery_confidence = max(
+                existing.discovery_confidence or 0.0,
+                confidence,
+            )
+            existing.discovery_evidence = list(dict.fromkeys(
+                [*existing.discovery_evidence, *evidence_excerpts]
+            ))[:20]
+            if len(voice_description) > len(existing.voice_description):
+                existing.voice_description = voice_description[:1000]
+            if len(str(update.get("speaking_style", ""))) > len(existing.speaking_style):
+                existing.speaking_style = str(update.get("speaking_style"))[:500]
+            existing.aliases = list(dict.fromkeys([*existing.aliases, *aliases]))[:20]
+            if existing.gender == Gender.OTHER and gender in {Gender.MALE, Gender.FEMALE}:
+                existing.gender = gender
+
+    @staticmethod
+    def _get_chapter_scoped_speakers(
+        chapter_text: str,
+        registry: CharacterRegistry,
+    ) -> set[str]:
+        """Return the set of valid speaker IDs present or mentioned in this chapter, plus universal generics."""
+        generics = {
+            "narrator",
+            "minor_male",
+            "minor_female",
+            "child_male",
+            "child_female",
+            "crowd",
+            "collective",
+            "character_male",
+            "character_female",
+        }
+        ch_lower = chapter_text.lower()
+        active = set(generics)
+
+        for char_id, char in registry.characters.items():
+            if char_id in generics:
+                active.add(char_id)
+                continue
+            if char.name and re.search(rf"\b{re.escape(char.name.strip().lower())}\b", ch_lower):
+                active.add(char_id)
+                continue
+            name_parts = [
+                p.lower()
+                for p in (char.name or "").split()
+                if len(p) >= 2 and p.lower() not in _PRONOUN_STOPWORDS
+            ]
+            if any(re.search(rf"\b{re.escape(part)}\b", ch_lower) for part in name_parts):
+                active.add(char_id)
+                continue
+            id_parts = [
+                p.lower()
+                for p in char_id.split("_")
+                if len(p) >= 2 and p not in _PRONOUN_STOPWORDS
+            ]
+            if any(re.search(rf"\b{re.escape(part)}\b", ch_lower) for part in id_parts):
+                active.add(char_id)
+                continue
+            for alias in char.aliases:
+                alias_clean = alias.strip().lower()
+                if len(alias_clean) >= 2 and alias_clean not in _PRONOUN_STOPWORDS:
+                    if re.search(rf"\b{re.escape(alias_clean)}\b", ch_lower):
+                        active.add(char_id)
+                        break
+
+        # If no named characters matched, allow all registry characters
+        if len(active - generics) == 0:
+            return set(registry.characters)
+
+        return active
 
     @staticmethod
     def _format_registry(registry: CharacterRegistry) -> str:
@@ -1922,6 +2851,27 @@ class ScriptGenerator:
                         )
                         continue
 
+            evidence = str(
+                metadata_map.get(i, {}).get("speaker_evidence") or ""
+            ).strip()
+            if dialogue_kind == "spoken" and len(evidence) < 8:
+                issues.append(
+                    AttributionIssue(
+                        kind="missing_speaker_evidence",
+                        fragment_index=i,
+                        fragment_id=fragment_id,
+                        submitted_speaker=speaker,
+                        exact_speaker=(
+                            exact_speaker if exact_speaker == speaker else None
+                        ),
+                        message=(
+                            f"Fragment {fragment_id} has spoken dialogue without "
+                            "a meaningful source-grounded speaker explanation"
+                        ),
+                    )
+                )
+                continue
+
             confidence = metadata_map.get(i, {}).get("speaker_confidence")
             if confidence is None:
                 issues.append(
@@ -2047,10 +2997,24 @@ class ScriptGenerator:
                 return matching_roles[0], "generic_role_tag", gender
             return None, "generic_gender", gender
 
-        if re.search(r"\bshe\b", tag):
-            return None, "pronoun_gender", Gender.FEMALE
-        if re.search(r"\bhe\b", tag):
+        he_pos = re.search(
+            r"\bhe\b(?:\s+\w+){0,2}\s+(?:" + speech_verbs + r")\b|(?:\b" + speech_verbs + r")\s+(?:\w+\s+){0,2}\bhe\b",
+            tag,
+        )
+        she_pos = re.search(
+            r"\bshe\b(?:\s+\w+){0,2}\s+(?:" + speech_verbs + r")\b|(?:\b" + speech_verbs + r")\s+(?:\w+\s+){0,2}\bshe\b",
+            tag,
+        )
+        if he_pos and she_pos:
+            return (None, "pronoun_gender", Gender.MALE) if he_pos.start() < she_pos.start() else (None, "pronoun_gender", Gender.FEMALE)
+        if he_pos:
             return None, "pronoun_gender", Gender.MALE
+        if she_pos:
+            return None, "pronoun_gender", Gender.FEMALE
+        if re.search(r"\bhe\b", tag) and not re.search(r"\bshe\b", tag):
+            return None, "pronoun_gender", Gender.MALE
+        if re.search(r"\bshe\b", tag) and not re.search(r"\bhe\b", tag):
+            return None, "pronoun_gender", Gender.FEMALE
         return None, None, None
 
     @staticmethod
@@ -2108,6 +3072,10 @@ class ScriptGenerator:
     def _is_collective_dialogue_tag(text: str) -> bool:
         """Return whether a short speech tag names only an anonymous group."""
         if not text or not ScriptGenerator._is_pure_dialogue_tag(text):
+            return False
+        # Subordinate temporal clauses like "as they walked", "while they waited", "once they were..."
+        # are background action, not a collective speaker.
+        if re.search(r"\b(?:as|while|when|if|because|once|after|before|since|until)\s+they\b", text, re.IGNORECASE):
             return False
         return bool(
             re.search(

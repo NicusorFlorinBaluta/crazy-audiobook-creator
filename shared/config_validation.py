@@ -45,6 +45,10 @@ def validate_brain_config(config: dict[str, Any]) -> dict[str, Any]:
             or any(not isinstance(item, str) or not item.strip() for item in fallbacks)
         ):
             errors.append("ollama.fallback_models must be a list of non-empty model tags")
+        _number(errors, ollama, "max_output_tokens", minimum=1, maximum=65536)
+        _number(errors, ollama, "max_generation_seconds", minimum=1, maximum=7200)
+        _number(errors, ollama, "repetition_window_chars", minimum=0, maximum=8192)
+        _number(errors, ollama, "repetition_count", minimum=2, maximum=20)
     voice = config.get("voice_server", {})
     host = str(voice.get("host", "http://127.0.0.1:8100"))
     parsed = urlsplit(host)
@@ -54,6 +58,14 @@ def validate_brain_config(config: dict[str, Any]) -> dict[str, Any]:
     _number(errors, voice, "timeout", minimum=1)
     _number(errors, voice, "retries", minimum=0, maximum=20)
     script = config.get("script", {})
+    if not isinstance(script, dict):
+        errors.append("script must be an object")
+        script = {}
+    elif (
+        "joint_analysis" in script
+        and not isinstance(script["joint_analysis"], bool)
+    ):
+        errors.append("script.joint_analysis must be boolean")
     _number(errors, script, "chunk_size_words", minimum=50)
     _number(errors, script, "max_fragments_per_chunk", minimum=1)
     _number(errors, script, "speaker_confidence_threshold", minimum=0, maximum=1)

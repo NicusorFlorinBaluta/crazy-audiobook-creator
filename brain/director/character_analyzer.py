@@ -70,6 +70,11 @@ _SYSTEM_PROMPT = """You are an expert audiobook director and strict data extract
   impressions do NOT count as spoken dialogue. An animal is only a character 
   if it speaks actual linguistic words in quotes.
 
+### Gender Resolution Guidelines
+- Determine canonical gender (`male` or `female`) by actively scanning surrounding narrative text for explicit pronouns (`he`, `him`, `his`, `himself`, `man`, `boy`, `father`, `son`, `brother`, `husband`, `sir`, `lord` vs `she`, `her`, `hers`, `herself`, `woman`, `girl`, `mother`, `daughter`, `sister`, `wife`, `lady`).
+- Do NOT mark a named character as `other` if surrounding narrative text uses `he` or `she`.
+- Use `other` ONLY for true non-gendered collective entities, swarms, or when zero gender indicators exist in the entire text.
+
 ### Character ID Guidelines
 - CRITICAL: Use the character's actual name as the character_id in snake_case.
   For example: "starling", "sixth_of_dusk", "mother_frond".
@@ -150,7 +155,7 @@ class CharacterAnalyzer:
         ollama: OllamaClient,
         temperature: float = 0.3,
         genre: str = "fantasy",
-        max_unique_voices: int = 20,
+        max_unique_voices: int = 0,
         single_pass_threshold: int = 15_000,
     ):
         self.ollama = ollama
@@ -165,6 +170,7 @@ class CharacterAnalyzer:
         check_callback: Callable[[], None] | None = None,
         checkpoint_path: Path | str | None = None,
         checkpoint_fingerprint: str = "",
+        reference_audit_path: Path | str | None = None,
     ) -> CharacterRegistry:
         """Analyze a book and produce a character registry, using multi-pass for long books."""
         total_chars = sum(len(ch.text) for ch in book.chapters)
@@ -204,8 +210,6 @@ class CharacterAnalyzer:
         if total_chars <= self.single_pass_threshold:
             # Single pass for standard books (fits within Qwen 32k context)
             book_text = self._prepare_book_text(book)
-            if reference_summary:
-                book_text = reference_summary + "\n\n" + book_text
             system_prompt = _SYSTEM_PROMPT.format(genre=self.genre)
             prompt = _USER_PROMPT.format(book_text=book_text)
 
@@ -403,17 +407,297 @@ class CharacterAnalyzer:
                     pass
 
         registry = self._ensure_explicit_unnamed_speakers(registry, book)
+        registry = self._augment_characters_with_gemini(registry, book)
         self._assign_voice_ids(registry.characters)
 
-        elapsed = _time.time() - t0
-        logger.info(
-            "[CharacterAnalyzer] Pass 1 complete in %.1fs | %d characters: %s",
-            elapsed,
-            len(registry.characters),
-            list(registry.characters.keys()),
-        )
+        if reference_audit_path and getattr(book, "reference_material", None):
+            self._write_reference_audit(registry, book, reference_audit_path)
 
         return registry
+
+    def _build_character_evidence_dossier(
+        self,
+        registry: CharacterRegistry,
+        book: ExtractedBook,
+    ) -> dict[str, Any]:
+        """Collect whole-book narrative evidence, dialogue samples, and pronoun counts for all characters."""
+        all_text = "\n".join(ch.text for ch in book.chapters)
+        dossier: dict[str, Any] = {}
+        for cid, char in registry.characters.items():
+            if cid == "narrator":
+                continue
+            name = char.name or cid
+            search_terms = list(dict.fromkeys([name, cid.replace("_", " "), *(char.aliases or [])]))
+            search_terms = [
+                t for t in search_terms
+                if len(t) >= 3 and t.lower() not in _UNSAFE_CHARACTER_ALIASES
+            ]
+            pattern = (
+                re.compile(rf"\b(?:{'|'.join(re.escape(t) for t in search_terms)})\b", re.IGNORECASE)
+                if search_terms
+                else re.compile(rf"\b{re.escape(name)}\b", re.IGNORECASE)
+            )
+            contexts: list[str] = []
+            for m in pattern.finditer(all_text):
+                start = max(0, m.start() - 150)
+                end = min(len(all_text), m.end() + 150)
+                snippet = all_text[start:end].replace("\n", " ").strip()
+                contexts.append(snippet)
+
+            combined = " ".join(contexts[:15])
+            he_count = len(re.findall(r"\b(he|his|him|himself|man|boy)\b", combined, re.IGNORECASE))
+            she_count = len(re.findall(r"\b(she|her|hers|herself|woman|girl)\b", combined, re.IGNORECASE))
+
+            dossier[cid] = {
+                "current_name": name,
+                "current_gender": char.gender.value if hasattr(char.gender, "value") else str(char.gender),
+                "current_age": char.age_range,
+                "current_description": char.voice_description,
+                "pronoun_counts": {"he_him": he_count, "she_her": she_count},
+                "evidence_snippets": contexts[:4],
+            }
+        return dossier
+
+    def _augment_characters_with_gemini(
+        self,
+        registry: CharacterRegistry,
+        book: ExtractedBook,
+    ) -> CharacterRegistry:
+        """Enrich character genders, 12-D voice profiles, and test sentences using Gemini Flash."""
+        import os
+        from dotenv import load_dotenv
+        load_dotenv()
+        api_key = os.getenv("GEMINI_API_KEY", "").strip()
+        if not api_key:
+            logger.info("[CharacterAnalyzer] GEMINI_API_KEY not found; skipping Gemini character augmentation.")
+            return registry
+
+        dossier = self._build_character_evidence_dossier(registry, book)
+        if not dossier:
+            return registry
+
+        logger.info(
+            "[CharacterAnalyzer] Augmenting %d characters with Gemini Flash whole-book evidence...",
+            len(dossier),
+        )
+
+        prompt = f"""You are an expert audiobook director and vocal casting specialist.
+Analyze the following book characters and their textual evidence extracted from the novel.
+
+For each character:
+1. Determine their exact canonical **gender** (male, female, or other for true non-binary/collective entities) based on the textual pronoun evidence and narrative context.
+2. Determine their **age_range** (e.g. child, teen, 20s, 30s, 40s, 50s, elderly, ageless).
+3. Produce an evocative, highly distinct **voice_description** following the 12-dimension TTS VoiceDesign framework:
+   - Voice archetype, pitch & volume (e.g. deep resonant baritone, bright soprano, raspy tenor)
+   - Cadence, speed & texture (e.g. slow measured gravelly, crisp brisk articulate, melodic warm)
+   - Personality, emotion & tone matching their role in the story.
+   Do NOT use generic 'calm, authoritative' phrases. Make each character sound vividly unique and true to their book personality!
+4. Write a compelling **test_sentence** (15-25 words) that showcases their distinctive voice and personality.
+5. Provide concise **personality_traits** and **speaking_style**.
+
+Characters and Evidence:
+{json.dumps(dossier, indent=2)}
+"""
+
+        schema = {
+            "type": "object",
+            "properties": {
+                "characters": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "character_id": {"type": "string"},
+                            "name": {"type": "string"},
+                            "gender": {"type": "string", "enum": ["male", "female", "other"]},
+                            "age_range": {"type": "string"},
+                            "voice_description": {"type": "string"},
+                            "personality_traits": {"type": "array", "items": {"type": "string"}},
+                            "speaking_style": {"type": "string"},
+                            "test_sentence": {"type": "string"}
+                        },
+                        "required": ["character_id", "name", "gender", "age_range", "voice_description", "personality_traits", "speaking_style", "test_sentence"]
+                    }
+                }
+            },
+            "required": ["characters"]
+        }
+
+        try:
+            import httpx
+            url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent"
+            payload = {
+                "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                "generationConfig": {
+                    "temperature": 0.2,
+                    "responseMimeType": "application/json",
+                    "responseSchema": schema,
+                },
+            }
+            resp = httpx.post(
+                url,
+                headers={"x-goog-api-key": api_key},
+                json=payload,
+                timeout=120.0,
+            )
+            if resp.status_code != 200:
+                logger.warning(
+                    "[CharacterAnalyzer] Gemini character augmentation failed with status %d: %s",
+                    resp.status_code,
+                    resp.text[:200],
+                )
+                return registry
+
+            body = resp.json()
+            candidates = body.get("candidates", [])
+            if not candidates:
+                return registry
+            raw_text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "{}")
+            augmented_data = json.loads(raw_text)
+
+            for char_patch in augmented_data.get("characters", []):
+                cid = char_patch.get("character_id")
+                if not cid or cid not in registry.characters or cid == "narrator":
+                    continue
+                char = registry.characters[cid]
+                gender_str = str(char_patch.get("gender", "")).lower()
+                if gender_str == "male":
+                    char.gender = Gender.MALE
+                elif gender_str == "female":
+                    char.gender = Gender.FEMALE
+                elif gender_str == "other":
+                    char.gender = Gender.OTHER
+
+                if char_patch.get("age_range"):
+                    char.age_range = char_patch["age_range"]
+                if char_patch.get("voice_description"):
+                    char.voice_description = char_patch["voice_description"]
+                if char_patch.get("speaking_style"):
+                    char.speaking_style = char_patch["speaking_style"]
+                if char_patch.get("personality_traits"):
+                    char.personality_traits = char_patch["personality_traits"]
+                if char_patch.get("test_sentence"):
+                    char.test_sentence = char_patch["test_sentence"]
+
+                logger.info(
+                    "[CharacterAnalyzer] Augmented '%s' (%s) -> gender=%s, age=%s, voice=%s",
+                    char.name,
+                    cid,
+                    char.gender.value,
+                    char.age_range,
+                    char.voice_description[:50],
+                )
+        except Exception as exc:
+            logger.warning("[CharacterAnalyzer] Gemini character augmentation encountered an error: %s", exc)
+
+        return registry
+
+    def _write_reference_audit(
+        self,
+        registry: CharacterRegistry,
+        book: ExtractedBook,
+        reference_audit_path: Path | str,
+    ) -> None:
+        from shared.artifacts import atomic_write_json
+        ref_text = "\n".join(book.reference_material.values()) if book.reference_material else ""
+        accepted = []
+        rejected = []
+        try:
+            prompt = (
+                "AUTHOR REFERENCE:\n" + ref_text + "\n\n"
+                "Extract canonical updates for registered characters: "
+                + ", ".join(cid for cid in registry.characters if cid != "narrator")
+            )
+            raw = self.ollama.generate_json(prompt, temperature=0.0)
+            patches = raw.get("patches", []) if isinstance(raw, dict) else []
+            for patch in patches:
+                cid = patch.get("character_id")
+                if cid in registry.characters and cid != "narrator":
+                    char = registry.characters[cid]
+                    if patch.get("revised_voice_description"):
+                        char.voice_description = patch["revised_voice_description"]
+                    if patch.get("aliases"):
+                        char.aliases = sorted(set(char.aliases + patch["aliases"]))
+                    if patch.get("personality_traits"):
+                        char.personality_traits = patch["personality_traits"]
+                    if patch.get("speaking_style"):
+                        char.speaking_style = patch["speaking_style"]
+                    accepted.append(patch)
+                else:
+                    rejected.append({**patch, "reason": "unknown_or_unproven_character"})
+            audit_data = {"status": "completed", "accepted": accepted, "rejected": rejected}
+        except Exception:
+            logger.warning("[CharacterAnalyzer] Supplemental reference augmentation unavailable: supplement unavailable")
+            audit_data = {"status": "unavailable", "accepted": [], "rejected": []}
+        atomic_write_json(Path(reference_audit_path), audit_data)
+
+    def create_joint_seed_registry(self, book: ExtractedBook) -> CharacterRegistry:
+        """Create initial character registry for joint director pass."""
+        narrator = Character(
+            id="narrator",
+            name="Narrator",
+            gender=Gender.OTHER,
+            age_range="adult",
+            voice_description="male speaker, 40s age. low pitch, moderate volume, measured speed. Standard American accent. clear texture, high clarity, natural fluency. warm emotion, authoritative tone, thoughtful personality.",
+            speaking_style="Flowing descriptive prose, unhurried",
+            test_sentence="The forest was old, its roots deep in the forgotten history of the world.",
+        )
+        reg = CharacterRegistry(
+            book_title=book.metadata.title,
+            book_author=book.metadata.author,
+            characters={"narrator": narrator},
+        )
+        return self._ensure_explicit_unnamed_speakers(reg, book)
+
+    def finalize_joint_registry(
+        self,
+        registry: CharacterRegistry,
+        book: ExtractedBook,
+        check_callback: Callable[[], None] | None = None,
+        reference_audit_path: Path | str | None = None,
+    ) -> tuple[CharacterRegistry, dict[str, str]]:
+        """Reconcile and consolidate discovered characters from joint director pass."""
+        remap = {cid: cid for cid in registry.characters}
+        reconciled_chars: dict[str, Character] = {}
+        
+        # Sort characters so longer / alias-owning characters take precedence
+        sorted_chars = sorted(
+            registry.characters.values(),
+            key=lambda c: (c.id == "narrator", len(c.name), len(c.aliases)),
+            reverse=True,
+        )
+        for char in sorted_chars:
+            if char.id == "narrator":
+                reconciled_chars["narrator"] = char
+                continue
+            matched = False
+            for target_id, target_char in list(reconciled_chars.items()):
+                if target_id == "narrator":
+                    continue
+                if (
+                    char.name in target_char.aliases
+                    or any(a.lower() == char.name.lower() for a in target_char.aliases)
+                    or char.id in target_char.aliases
+                ):
+                    remap[char.id] = target_id
+                    matched = True
+                    break
+            if not matched:
+                reconciled_chars[char.id] = char
+        
+        reconciled = CharacterRegistry(
+            book_title=registry.book_title,
+            book_author=registry.book_author,
+            genre=registry.genre,
+            tone=registry.tone,
+            characters=reconciled_chars,
+        )
+        reconciled = self._ensure_explicit_unnamed_speakers(reconciled, book)
+        reconciled = self._augment_characters_with_gemini(reconciled, book)
+        self._assign_voice_ids(reconciled.characters)
+        if reference_audit_path and getattr(book, "reference_material", None):
+            self._write_reference_audit(reconciled, book, reference_audit_path)
+        return reconciled, remap
 
     @staticmethod
     def _extract_dialogue_lines(text: str, max_chars: int = 2000) -> str:
@@ -659,8 +943,8 @@ class CharacterAnalyzer:
         )
 
     def _assign_voice_ids(self, characters: dict[str, Character]) -> None:
-        """Apply the unique-voice cap after all deterministic role discovery."""
-        if len(characters) > self.max_unique_voices:
+        """Apply unique voice IDs, capping to generic archetypes only if a positive limit is configured."""
+        if self.max_unique_voices and self.max_unique_voices > 0 and len(characters) > self.max_unique_voices:
             logger.info(
                 "[CharacterAnalyzer] Capping %d → %d unique voices",
                 len(characters),
@@ -695,10 +979,13 @@ class CharacterAnalyzer:
                 if character_id in important:
                     character.voice_id = character_id
                     continue
-                same_gender = representatives.get(character.gender, [])
-                character.voice_id = (
-                    same_gender[0] if same_gender else "narrator"
-                )
+                # Minor overflow characters fall back to generic minor archetypes, NEVER the lead protagonist
+                if character.gender == Gender.FEMALE:
+                    character.voice_id = "minor_female" if "minor_female" in characters else "narrator"
+                elif character.gender == Gender.MALE:
+                    character.voice_id = "minor_male" if "minor_male" in characters else "narrator"
+                else:
+                    character.voice_id = "narrator"
         else:
             for character_id, character in characters.items():
                 character.voice_id = character_id

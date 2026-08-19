@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import unittest
+import tempfile
 from pathlib import Path
 from bs4 import BeautifulSoup
+from ebooklib import epub
 
 from brain.extractor.epub_parser import EpubParser, SKIP_TITLE_PATTERNS, PREFACE_TITLE_PATTERNS
+from brain.extractor.text_cleaner import TextCleaner
 
 
 class EpubParserFilteringTests(unittest.TestCase):
@@ -177,6 +180,115 @@ class EpubParserFilteringTests(unittest.TestCase):
         chapters, references = self.parser_skip_preface._split_by_headings(soup)
         self.assertEqual(chapters, [])
         self.assertIn("Glossary", references)
+
+    def test_all_caps_story_text_is_preserved_but_known_running_header_is_removed(self) -> None:
+        cleaner = TextCleaner()
+        text = "A RUNNING HEADER\n\nRUN FOR YOUR LIFE\n\nThe gate shattered behind them."
+        cleaned = cleaner.clean(text, repeated_headers={"a running header"})
+        self.assertNotIn("A RUNNING HEADER", cleaned)
+        self.assertIn("RUN FOR YOUR LIFE", cleaned)
+
+    def test_short_narrative_is_kept_and_short_generic_section_is_merged(self) -> None:
+        parser = EpubParser(min_chapter_words=10)
+        chapters = parser._finalize_chapters([
+            {"title": "A small ornament", "text": "Three silver stars."},
+            {"title": "Interlude: The Bell", "text": "It rang once."},
+            {"title": "Chapter 2", "text": "Enough ordinary words follow here to make the main chapter comfortably long today."},
+        ])
+        self.assertEqual([chapter.title for chapter in chapters], ["Interlude: The Bell", "Chapter 2"])
+        self.assertIn("Three silver stars", chapters[0].text)
+
+    def test_long_split_prefers_paragraph_and_sentence_boundaries(self) -> None:
+        parser = EpubParser(max_chapter_words=8, min_chapter_words=1)
+        parts = parser._split_long_chapter(
+            "Chapter One",
+            "One two three four. Five six.\n\nSeven eight nine ten. Eleven twelve.",
+            0,
+        )
+        self.assertGreaterEqual(len(parts), 2)
+        self.assertTrue(all(part.word_count <= 8 for part in parts))
+        self.assertTrue(parts[0].text.endswith("six."))
+
+
+class EpubGoldenStructureTests(unittest.TestCase):
+    """Exercise actual ZIP/container EPUBs, not only BeautifulSoup fragments."""
+
+    @staticmethod
+    def _write_book(path: Path, documents: list[dict]) -> None:
+        book = epub.EpubBook()
+        book.set_identifier(path.stem)
+        book.set_title(f"Golden {path.stem}")
+        book.set_language("en")
+        book.add_author("Test Author")
+        spine = ["nav"]
+        toc = []
+        for index, spec in enumerate(documents, 1):
+            item = epub.EpubHtml(
+                title=spec.get("nav_title", spec.get("title", f"Section {index}")),
+                file_name=f"text/section-{index}.xhtml",
+                lang="en",
+            )
+            item.set_content(spec["html"])
+            book.add_item(item)
+            spine.append((item, spec.get("linear", "yes")))
+            toc.append(item)
+        book.toc = tuple(toc)
+        book.spine = spine
+        book.add_item(epub.EpubNcx())
+        book.add_item(epub.EpubNav())
+        epub.write_epub(str(path), book)
+
+    def test_ten_structural_variants_preserve_story_and_trim_non_story(self) -> None:
+        variants = [
+            [{"title": "Chapter 1", "html": "<h1>Chapter 1</h1><p>MARKER alpha story words continue beyond the threshold safely.</p>"}],
+            [{"title": "Chapter 2", "html": "<section><h3>Chapter 2</h3><p>MARKER beta story words continue beyond the threshold safely.</p></section>"}],
+            [{"nav_title": "Chapter Three", "html": "<div><p>MARKER gamma nav labelled narrative remains intact and readable.</p></div>"}],
+            [{"title": "Prologue", "html": "<h1>Prologue</h1><p>RUN FOR YOUR LIFE</p><p>MARKER delta story remains intact.</p>"}],
+            [{"title": "Interlude", "html": "<h2>Interlude</h2><p>MARKER epsilon.</p>"}],
+            [
+                {"title": "Copyright", "html": "<h1>Copyright</h1><p>TRIM-ME publishing boilerplate only.</p>"},
+                {"title": "Chapter 6", "html": "<h1>Chapter 6</h1><p>MARKER zeta narrative words continue safely here.</p>"},
+            ],
+            [{"title": "Chapter 7", "html": "<h1>Chapter 7</h1><p>MARKER eta continued.</p><aside epub:type='footnote'>TRIM-ME footnote.</aside>"}],
+            [{"title": "Chapter 8", "html": "<h1>Chapter 8</h1><div><p>MARKER theta first paragraph.</p><p>Second paragraph is not duplicated.</p></div>"}],
+            [{"title": "Chapter 9", "html": "<p>Chapter 9</p><p>MARKER iota pattern based body remains available.</p>"}],
+            [
+                {"title": "Chapter 10", "html": "<h1>Chapter 10</h1><p>MARKER kappa primary narrative remains.</p>"},
+                {"title": "Bonus", "linear": "no", "html": "<h2>Bonus</h2><p>TRIM-ME non linear promotional supplement.</p>"},
+            ],
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for index, documents in enumerate(variants, 1):
+                path = root / f"variant-{index}.epub"
+                self._write_book(path, documents)
+                parser = EpubParser(min_chapter_words=1)
+                extracted = parser.parse(path)
+                combined = "\n".join(chapter.text for chapter in extracted.chapters)
+                self.assertIn("MARKER", combined, f"variant {index}")
+                self.assertNotIn("TRIM-ME", combined, f"variant {index}")
+                self.assertEqual(
+                    parser.last_audit["summary"]["spine_documents"],
+                    len(documents) + 1,  # generated EPUB nav is itself in the spine
+                )
+
+    def test_large_excluded_share_is_blocking_and_audited(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "large-appendix.epub"
+            large = " ".join(["reference"] * 1_100)
+            self._write_book(path, [
+                {"title": "Chapter 1", "html": "<h1>Chapter 1</h1><p>MARKER short narrative remains here.</p>"},
+                {"title": "Appendix", "html": f"<h1>Appendix</h1><p>{large}</p>"},
+            ])
+            parser = EpubParser(min_chapter_words=1)
+            parser.parse(path)
+            appendix = next(
+                section for section in parser.last_audit["sections"]
+                if section["title"] == "Appendix"
+            )
+            self.assertTrue(appendix["review_required"])
+            self.assertIn("large_excluded_word_ratio", appendix["anomalies"])
+            self.assertGreater(parser.last_audit["anomalies"]["excluded_ratio"], 0.9)
 
 
 if __name__ == "__main__":

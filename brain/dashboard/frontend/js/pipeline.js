@@ -253,7 +253,7 @@ window.PipelineManager = (() => {
                 els.btnStart.title = 'Uses the chapter selection below and preserves the current completed audiobook until new output is ready';
             } else if (['error', 'paused', 'paused_scheduled', 'deploy_paused', 'voice_review', 'waiting_for_review'].includes(statusLower)) {
                 els.btnStart.textContent = '▶ Resume Pipeline';
-                els.btnStart.removeAttribute('title');
+                els.btnStart.title = 'A deliberate manual resume can run outside configured working hours for this run only';
             } else {
                 els.btnStart.textContent = '▶ Start Pipeline';
                 els.btnStart.removeAttribute('title');

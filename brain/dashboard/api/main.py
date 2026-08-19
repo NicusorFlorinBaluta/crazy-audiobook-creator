@@ -12,6 +12,10 @@ Endpoints:
 
 from __future__ import annotations
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 import asyncio
 import array
 import collections
@@ -81,7 +85,7 @@ from voice.tts_server.voice_library import VoiceLibraryManager
 
 logger = logging.getLogger(__name__)
 
-FRONTEND_BUILD = "2026.08.14.3"
+FRONTEND_BUILD = "2026.08.19.1"
 
 
 class AsyncioConnectionResetFilter(logging.Filter):
@@ -917,7 +921,7 @@ async def lifespan(app: FastAPI):
     global pipeline, job_queue
 
     from shared.single_instance import SingleInstanceLock
-    lock = SingleInstanceLock("dashboard.lock")
+    lock = SingleInstanceLock("dashboard_service.lock")
     if not lock.acquire():
         logger.error("Another Dashboard API instance is already running! Exiting.")
         import sys
@@ -1320,12 +1324,31 @@ async def delete_project(project_id: str):
 # ---------------------------------------------------------------------------
 
 @app.post("/api/projects/{project_id}/start")
-async def start_pipeline(project_id: str):
+async def start_pipeline(
+    project_id: str,
+    override_schedule: bool = False,
+):
     """Start the pipeline for a project."""
     if not pipeline or not job_queue:
         raise HTTPException(status_code=503, detail="Server not initialized")
 
     if project_id in running_tasks and not running_tasks[project_id].done():
+        current = job_queue.get_job(project_id)
+        if current.get("status") in (PipelineStage.PAUSED_SCHEDULED.value, PipelineStage.PAUSED_DEPLOYMENT.value):
+            if override_schedule and current.get("status") == PipelineStage.PAUSED_SCHEDULED.value:
+                job_queue.update_job(
+                    project_id,
+                    {
+                        "schedule_override_active": True,
+                        "pause_reason": None,
+                    },
+                )
+                return {
+                    "status": "resumed",
+                    "project_id": project_id,
+                    "stage": current.get("active_stage") or current.get("status"),
+                    "schedule_overridden": True,
+                }
         raise HTTPException(status_code=409, detail="Pipeline already running")
     active_project = next(
         (
@@ -1345,6 +1368,12 @@ async def start_pipeline(project_id: str):
         )
 
     current = job_queue.get_job(project_id)
+    if current.get("generation_chapter_selection") == []:
+        raise HTTPException(
+            status_code=409,
+            detail="Select at least one chapter before starting generation",
+        )
+
     gate = collect_review_gate(project_id, _project_dir(project_id), job_queue)
     if gate.blocking_items:
         raise HTTPException(
@@ -1352,19 +1381,6 @@ async def start_pipeline(project_id: str):
             detail=(
                 f"Resolve {len(gate.blocking_items)} blocking review item(s) "
                 "before resuming the pipeline."
-            ),
-        )
-    incremental_settings = current.get("incremental_delivery") or {}
-    if (
-        isinstance(incremental_settings, dict)
-        and incremental_settings.get("enabled")
-        and current.get("generation_chapter_selection") is not None
-    ):
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "Incremental delivery requires the complete ordered chapter set; "
-                "clear the manual chapter selection first"
             ),
         )
     if (
@@ -1394,6 +1410,7 @@ async def start_pipeline(project_id: str):
             "active_stage": resume_stage.value,
             "pause_reason": None,
             "reset_target_stage": None,
+            "schedule_override_active": override_schedule,
         },
     )
 
@@ -1422,7 +1439,13 @@ async def start_pipeline(project_id: str):
             # boundary (for example voice review) before observing that stop
             # flag, so always reconcile the durable flag when its task exits.
             try:
-                job_queue.update_job(project_id, {"running": False})
+                job_queue.update_job(
+                    project_id,
+                    {
+                        "running": False,
+                        "schedule_override_active": False,
+                    },
+                )
             except KeyError:
                 pass
             _detach_project_logger(handler)
@@ -1436,7 +1459,43 @@ async def start_pipeline(project_id: str):
     task = asyncio.create_task(run_in_background())
     running_tasks[project_id] = task
 
-    return {"status": "started", "project_id": project_id}
+    return {
+        "status": "started",
+        "project_id": project_id,
+        "schedule_overridden": override_schedule,
+    }
+
+
+def _automatic_extraction_review_pending(
+    project_id: str,
+    blocking_items: list[Any],
+) -> bool:
+    project_dir = _project_dir(project_id)
+    audit_path = project_dir / "extraction_audit.json"
+    if not audit_path.exists():
+        return False
+    try:
+        data = json.loads(audit_path.read_text(encoding="utf-8"))
+        for section in data.get("sections", []):
+            if section.get("review_required") and not section.get("external_validation_attempted"):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _automatic_pipeline_review_pending(
+    project_id: str,
+    blocking_items: list[Any],
+    state: dict[str, Any],
+    stage: PipelineStage,
+) -> bool:
+    if stage == PipelineStage.SCRIPTING and not state.get("script_completed", False):
+        return any(
+            getattr(item, "category", "") == "attribution"
+            for item in blocking_items
+        )
+    return False
 
 
 def _schedule_resume_after_reviews(project_id: str) -> bool:
@@ -1452,7 +1511,7 @@ def _schedule_resume_after_reviews(project_id: str) -> bool:
 
     async def resume() -> None:
         try:
-            await start_pipeline(project_id)
+            await start_pipeline(project_id, override_schedule=True)
         except HTTPException as exc:
             logger.warning("Automatic review resume skipped for %s: %s", project_id, exc.detail)
 
@@ -1461,7 +1520,10 @@ def _schedule_resume_after_reviews(project_id: str) -> bool:
 
 
 @app.post("/api/projects/{project_id}/stop")
-async def stop_pipeline(project_id: str):
+async def stop_pipeline(
+    project_id: str,
+    resume_on_schedule: bool = False,
+):
     """Request a cooperative stop and report a transitional PAUSING state."""
     if not pipeline or not job_queue:
         raise HTTPException(status_code=503, detail="Server not initialized")
@@ -1470,13 +1532,26 @@ async def stop_pipeline(project_id: str):
         state = job_queue.get_job(project_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Project not found")
+
+    will_resume_on_schedule = bool(
+        resume_on_schedule
+        or (pipeline and not pipeline.schedule_is_open())
+    )
+    if will_resume_on_schedule:
+        new_status = PipelineStage.PAUSED_SCHEDULED.value
+        pause_reason = "waiting for configured working hours"
+    else:
+        new_status = PipelineStage.PAUSED.value
+        pause_reason = "user requested stop"
+
     job_queue.update_job(
         project_id,
         {
-            "status": PipelineStage.PAUSED.value,
+            "status": new_status,
             "active_stage": state.get("active_stage") or state.get("status"),
-            "pause_reason": "user requested stop",
+            "pause_reason": pause_reason,
             "running": True,
+            "schedule_override_active": False,
         },
     )
 
@@ -1498,6 +1573,12 @@ async def stop_pipeline(project_id: str):
                 project_id,
                 exc,
             )
+
+    return {
+        "status": "stopping",
+        "project_id": project_id,
+        "will_resume_on_schedule": will_resume_on_schedule,
+    }
 
     return {"status": "pausing", "project_id": project_id}
 
@@ -1804,6 +1885,7 @@ async def get_pipeline_status(project_id: str):
         project_dir = _project_dir(project_id)
         workspace_dir = Path("workspace") / project_id
         script_dir = project_dir / "script"
+        manifests_dir = project_dir / "manifests"
         segments_dir = workspace_dir / "segments"
         segment_counts: collections.Counter[int] = collections.Counter()
         if segments_dir.is_dir():
@@ -1811,6 +1893,16 @@ async def get_pipeline_status(project_id: str):
                 match = re.match(r"ch(\d+)_", segment_path.name)
                 if match:
                     segment_counts[int(match.group(1))] += 1
+        if manifests_dir.is_dir():
+            for manifest_path in manifests_dir.glob("chapter_*.segments.json"):
+                match = re.match(r"chapter_(\d+)\.segments\.json", manifest_path.name)
+                if match:
+                    try:
+                        m_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+                        c_num = int(match.group(1))
+                        segment_counts[c_num] = max(segment_counts[c_num], len(m_data.get("segments", [])))
+                    except Exception:
+                        pass
 
         chapter_details = []
         total_chapters = state.get("total_chapters") or 0
@@ -1852,8 +1944,15 @@ async def get_pipeline_status(project_id: str):
 
         stage = str(state.get("active_stage") or state.get("status") or "").lower()
         scripted_chapters = set(state.get("scripted_chapters", []))
-        generated_chapters = set(state.get("generated_chapters", []))
+        generated_chapters = set(state.get("generated_chapters", [])).union(segment_counts.keys())
         mastered_chapters = set(state.get("mastered_chapters", []))
+        if manifests_dir.is_dir():
+            for master_path in manifests_dir.glob("chapter_*.master.json"):
+                match = re.match(r"chapter_(\d+)\.master\.json", master_path.name)
+                if match:
+                    mastered_chapters.add(int(match.group(1)))
+        state["generated_chapters"] = sorted(generated_chapters)
+        state["mastered_chapters"] = sorted(mastered_chapters)
         
         def _has_valid_script(c_num: int) -> tuple[bool, int, str]:
             ch_f = script_dir / f"chapter_{c_num:03d}.json"
@@ -1883,10 +1982,12 @@ async def get_pipeline_status(project_id: str):
             title = book_chapter_titles.get(ch_num) or script_title or f"Chapter {ch_num}"
 
             gen_count = segment_counts[ch_num] if total_lines > 0 else 0
+            if ch_num in generated_chapters and total_lines > 0:
+                gen_count = max(gen_count, total_lines)
             validated_count = (
-                int(state.get("lines_validated") or 0)
-                if ch_num == state.get("current_gen_chapter")
-                else total_lines if ch_num in generated_chapters else 0
+                total_lines if ch_num in generated_chapters
+                else min(int(state.get("lines_validated") or 0), gen_count) if ch_num == state.get("current_gen_chapter")
+                else min(gen_count, total_lines)
             )
 
             # Compute stage-aware progress percentage
@@ -2589,23 +2690,8 @@ async def set_chapter_selection(
         raise HTTPException(status_code=503, detail="Server not initialized")
     state = job_queue.get_job(project_id)
     selection = request.chapters
-    incremental_settings = state.get("incremental_delivery") or {}
-    if (
-        selection is not None
-        and isinstance(incremental_settings, dict)
-        and incremental_settings.get("enabled")
-    ):
-        raise HTTPException(
-            status_code=409,
-            detail="Disable incremental delivery before selecting individual chapters",
-        )
     if selection is not None:
         selection = sorted(set(selection))
-        if not selection:
-            raise HTTPException(
-                status_code=422,
-                detail="Chapter selection cannot be empty; use null for all chapters",
-            )
         total = int(state.get("total_chapters") or 0)
         invalid = [
             chapter for chapter in selection if chapter < 1 or chapter > total
@@ -2973,10 +3059,11 @@ async def get_project_voices(project_id: str):
         info = registered.get(voice_id, {})
         actual_file = info.get("file", f"{voice_id}.wav")
         preview_path = voice_dir / actual_file
+        assigned_raw = profile.get("assigned_characters", [])
         assigned_characters = sorted(
-            character_id
-            for character_id in profile.get("assigned_characters", [])
-            if character_id in speaking_ids
+            (item.get("id") or item.get("character_id") if isinstance(item, dict) else str(item))
+            for item in assigned_raw
+            if (item.get("id") or item.get("character_id") if isinstance(item, dict) else str(item)) in speaking_ids
         )
         voices.append(
             {
@@ -3885,15 +3972,28 @@ async def get_quality_review(project_id: str):
         if not details.get("selected"):
             continue
         latest_quality[row["line_id"]] = row
+    project_dir = _project_dir(project_id)
+    script_lines_by_id: dict[str, dict[str, Any]] = {}
+    for chapter_path in sorted((project_dir / "script").glob("chapter_*.json")):
+        try:
+            chapter = json.loads(chapter_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            continue
+        chapter_num = chapter.get("chapter_number")
+        for line in chapter.get("lines", []):
+            lid = str(line.get("line_id") or line.get("id") or "unknown")
+            script_lines_by_id[lid] = {**line, "chapter_number": chapter_num}
+
     segment_reviews = []
     for (item_type, item_id), review in persisted.items():
         if item_type != "segment":
             continue
         quality = latest_quality.get(item_id, {})
         details = quality.get("details", {})
+        script_line = script_lines_by_id.get(item_id, {})
         segment_reviews.append({
             "item_id": item_id,
-            "chapter_number": quality.get("chapter_number"),
+            "chapter_number": quality.get("chapter_number") or script_line.get("chapter_number"),
             "disposition": review.get("disposition", "unreviewed"),
             "review_note": review.get("note", ""),
             "reviewed_at": review.get("updated_at"),
@@ -3905,6 +4005,8 @@ async def get_quality_review(project_id: str):
             "external_validation_confidence": details.get("external_validation_confidence"),
             "reason": details.get("manual_review_reason") or review.get("note", ""),
             "audio_url": f"api/projects/{project_id}/segments/{item_id}/audio",
+            "text": script_line.get("text", ""),
+            "speaker": script_line.get("speaker", ""),
         })
     return {
         "join_warnings": joins,
@@ -4224,12 +4326,6 @@ async def update_delivery_settings(project_id: str, request: DeliverySettingsReq
                 "incremental delivery artifacts before changing them"
             ),
         )
-    if request.enabled and state.get("generation_chapter_selection") is not None:
-        raise HTTPException(
-            status_code=409,
-            detail="Clear the manual chapter selection before enabling incremental delivery",
-        )
-
     settings = dict(state.get("incremental_delivery") or {})
     settings["enabled"] = request.enabled
     settings["batch_size"] = request.batch_size

@@ -39,6 +39,20 @@ class ConfigurationValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "fallback_models"):
             validate_brain_config({"ollama": {"fallback_models": [""]}})
 
+    def test_ollama_generation_safeguards_are_bounded(self) -> None:
+        for key, value in (
+            ("max_output_tokens", 0),
+            ("max_generation_seconds", 0),
+            ("repetition_window_chars", -1),
+            ("repetition_count", 1),
+        ):
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, key):
+                validate_brain_config({"ollama": {key: value}})
+
+    def test_joint_analysis_flag_must_be_boolean(self) -> None:
+        with self.assertRaisesRegex(ValueError, "joint_analysis"):
+            validate_brain_config({"script": {"joint_analysis": "yes"}})
+
     def test_invalid_enabled_schedule_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "requires at least one window"):
             validate_brain_config({"schedule": {"enabled": True, "windows": []}})
@@ -113,6 +127,24 @@ class ReferenceSelectionTests(unittest.TestCase):
 class PerformanceSummaryTests(unittest.TestCase):
     def test_summary_uses_latest_successful_chapter_record(self) -> None:
         records = [
+            {
+                "event": "script_generation",
+                "pass1_seconds": 12.0,
+                "pass2_seconds": 30.0,
+                "total_seconds": 42.0,
+                "chapters": 2,
+                "segments": 6,
+            },
+            {
+                "event": "script_generation",
+                "director_mode": "joint",
+                "pass1_seconds": 0.0,
+                "pass2_seconds": 25.0,
+                "reconciliation_seconds": 1.0,
+                "total_seconds": 26.0,
+                "chapters": 2,
+                "segments": 6,
+            },
             {"event": "chapter_generation", "chapter_number": 1,
              "segments": 2, "synthesis_cache_misses": 2},
             {"event": "chapter_generation", "chapter_number": 1,
@@ -126,6 +158,10 @@ class PerformanceSummaryTests(unittest.TestCase):
         self.assertEqual(summary["mastered_chapters"], 1)
         self.assertEqual(summary["generation_totals"]["synthesis_cache_hits"], 2.0)
         self.assertNotIn("synthesis_cache_misses", summary["generation_totals"])
+        self.assertEqual(
+            [run["director_mode"] for run in summary["script_director_runs"]],
+            ["two_pass", "joint"],
+        )
 
     def test_reader_ignores_a_truncated_jsonl_tail(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

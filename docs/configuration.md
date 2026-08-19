@@ -22,9 +22,13 @@ The running configuration lives in `brain/config.yaml` and `voice/config.yaml`. 
 | `top_p` | Sampling nucleus |
 | `timeout` | Request timeout in seconds |
 | `max_retries` | Ollama transport/JSON retry budget |
+| `max_retry_seconds` | Total time budget for failed attempts and retry backoff |
+| `max_output_tokens` | Server and client-side output ceiling for one generation |
+| `max_generation_seconds` | Total wall-clock ceiling for one continuously active generation |
+| `repetition_window_chars`, `repetition_count` | Exact periodic-tail loop detector (maximum searched period and required repetitions); set the window to `0` only to disable it |
 | `unload_after_scripting` | Release the Ollama model before loading Qwen TTS on the same GPU |
 
-The application fingerprints the configured model and prompt. Changing them causes dependent script artifacts to be rebuilt. The default workstation configuration uses an isolated loopback port so a separately running Ollama desktop service cannot change its GPU placement. It never selects an arbitrary installed model: only entries in `fallback_models` may replace the primary model, and the checked-in configuration intentionally leaves that list empty.
+The application fingerprints the configured model and prompt. Changing them causes dependent script artifacts to be rebuilt. The default workstation configuration uses an isolated loopback port so a separately running Ollama desktop service cannot change its GPU placement. It never selects an arbitrary installed model: only entries in `fallback_models` may replace the primary model, and the checked-in configuration intentionally leaves that list empty. JSON calls also enable Ollama's structured JSON mode. Output count, total generation time, and repeated-tail detection independently terminate a response that fails to stop normally; diagnostics record only counts and the termination reason, not book text.
 
 ### `voice_server`
 
@@ -52,11 +56,29 @@ Controls front-matter/TOC/appendix filtering, reference material ingestion, and 
 | `max_chapter_words` | Target maximum chapter length before safe subdivision |
 | `chapter_detection` | Boundary detection strategy (`auto`, `heading`, `pattern`, `none`) |
 
+Short narrative headings such as prologues and interludes are retained even
+below `min_chapter_words`; other short fragments merge into an adjacent chapter
+instead of being discarded. Long chapters split at paragraph or sentence
+boundaries. Repeated running headers are removed only after exact cross-document
+detection—uppercase story text is not treated as a header.
+
 **Reference Material (Glossary & Dramatis Personae)**:
 When `skip_appendices` is enabled, sections titled *Glossary*, *Dramatis Personae*, *Character List*, or *Cast of Characters* are extracted into `ExtractedBook.reference_material`. They are excluded from narration and supplied as bounded, supplemental input to the Stage ② Character Analyzer; direct narrative evidence takes precedence if they conflict.
 
+Reference material is applied only after narrative speaker discovery. The model
+may propose a richer voice description, traits, aliases, or a missing speaking
+style for an existing speaker, but every automatic patch needs confidence of at
+least 0.90 and a verbatim excerpt from the bounded reference corpus. Unknown
+character IDs, unsupported evidence, incomplete descriptions, and gender
+conflicts are rejected and audited. If this optional pass is unavailable,
+narrative character analysis continues unchanged.
+
 ### `script`
 
+- `joint_analysis`: when enabled, character discovery and source-fragment
+  attribution share one book-text pass. Character IDs remain provisional until
+  a compact evidence-based reconciliation step completes; the attribution audit
+  and external fallback still run afterward.
 - Segment bounds: `max_segment_sentences`, `min_segment_words`
 - Default delivery: `default_speed`
 - Pause requests: narrator, dialogue, scene, chapter, and paragraph values in milliseconds
@@ -71,11 +93,14 @@ Grouping merges only adjacent fragments with the same speaker, voice, and FX. It
 
 Incremental delivery is project state, configured from project creation or the
 dashboard. `enabled` turns part publication on and `batch_size` accepts 1–20
-chapters. Manual chapter selection and incremental delivery are mutually
-exclusive because published boundaries must represent the full ordered book.
+chapters. Manual chapter selection and incremental delivery can be used
+together: when a subset is selected, parts and the combined export contain
+only those chapters in canonical book order. With no manual selection, the
+delivery plan covers the full book.
 After the first publication, the enabled state and batch size are locked until
-delivery artifacts are reset. A graceful pause request is honored only between
-parts. Stale or hash-invalid parts are never offered as downloads.
+delivery artifacts are reset; the selected chapter boundaries are locked by the
+same rule. A graceful pause request is honored only between parts. Stale or
+hash-invalid parts are never offered as downloads.
 
 ### `dashboard`
 
@@ -124,18 +149,18 @@ is never returned to the dashboard, and should be restricted to the Books API.
 When Google returns `429`, the lookup does not amplify it with immediate
 retries and reports any numeric `Retry-After` value to the user.
 
-### `external_validation`
+### `external_validation` and Gemini Services
 
-Ambiguous speaker attribution and subjective audio warnings use a confidence-
-aware escalation ladder:
+Character gender & voice augmentation (Pass 1 and Joint modes), ambiguous extraction,
+speaker attribution, and subjective audio warnings use Gemini:
 
-1. local deterministic/director result;
-2. batched Gemini Flash Lite API triage;
-3. stronger Gemini Flash API adjudication;
+1. local deterministic/director result & whole-book evidence dossier;
+2. batched Gemini 3.5 Flash Lite API triage (`gemini-3.5-flash-lite`);
+3. stronger Gemini 3.5 Flash API adjudication & character augmentation (`gemini-3.5-flash`);
 4. Gemini web Pro in a persistent project conversation;
 5. dashboard review when no result reaches `auto_accept_confidence`.
 
-Attribution and audio QA have separate saved web conversations for every
+Extraction, attribution, and audio QA have separate saved web conversations for every
 project. Their URLs are stored under `external_validation/browser_state.json`.
 The browser profile is shared only for authentication; book conversations are
 never shared between projects. A purpose chat rolls over only after

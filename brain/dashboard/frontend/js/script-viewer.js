@@ -992,7 +992,7 @@ window.ScriptViewer = (() => {
         currentData.script.chapters.forEach((ch, idx) => {
             const opt = document.createElement('option');
             opt.value = idx;
-            opt.textContent = ch.chapter_title ? `${ch.chapter_number || (idx + 1)}: ${ch.chapter_title}` : `Chapter ${ch.chapter_number || (idx + 1)}`;
+            opt.textContent = `Chapter ${ch.chapter_number || (idx + 1)}`;
             els.chapterSelect.appendChild(opt);
         });
         els.chapterSelect.value = 0;
@@ -1302,9 +1302,15 @@ window.ScriptViewer = (() => {
         const cards = rows => rows.map(item => `
             <article class="join-review-item segment-review-item" data-item-id="${escapeHtml(item.item_id)}">
                 <div class="join-review-summary">
-                    <strong>Chapter ${item.chapter_number ?? '?'} Â· ${escapeHtml(item.item_id)}</strong>
-                    <span>${escapeHtml(humanizeToken(item.status))} Â· confidence ${item.validation_confidence == null ? 'unavailable' : `${Math.round(item.validation_confidence * 100)}%`}</span>
+                    <strong>Chapter ${item.chapter_number ?? '?'} · ${escapeHtml(item.item_id)}</strong>
+                    <span>${escapeHtml(humanizeToken(item.status))} · confidence ${item.validation_confidence == null ? 'unavailable' : `${Math.round(item.validation_confidence * 100)}%`}</span>
                 </div>
+                ${item.text ? `
+                    <div class="join-review-quote">
+                        <strong>${escapeHtml(item.speaker ? (item.speaker.charAt(0).toUpperCase() + item.speaker.slice(1)) : 'Speaker')}:</strong>
+                        <span>“${escapeHtml(item.text)}”</span>
+                    </div>
+                ` : ''}
                 <p>${escapeHtml(item.reason || 'The validation ladder could not reach a safe automatic decision.')}</p>
                 <p><small>${item.external_validation_provider ? `${escapeHtml(humanizeToken(item.external_validation_provider))} / ${escapeHtml(item.external_validation_model || 'default model')} / ${escapeHtml(humanizeToken(item.external_validation_decision || 'abstain'))}` : 'No external fallback produced a usable decision'}</small></p>
                 <audio aria-label="Review ${escapeHtml(item.item_id)}" controls preload="metadata" src="${escapeHtml(item.audio_url)}"></audio>
@@ -1642,7 +1648,56 @@ window.ScriptViewer = (() => {
              .replace(/'/g, "&#039;");
     }
 
+    function revealLine(lineId) {
+        if (!lineId) return false;
+        if (!currentData.script || !currentData.script.chapters) return false;
+
+        let targetChapterIndex = -1;
+        for (let i = 0; i < currentData.script.chapters.length; i++) {
+            const ch = currentData.script.chapters[i];
+            if (ch && ch.lines && ch.lines.some(l => l.line_id === lineId)) {
+                targetChapterIndex = i;
+                break;
+            }
+        }
+
+        if (targetChapterIndex === -1) {
+            const m = lineId.match(/^ch(\d+)_/i);
+            if (m) {
+                const chNum = parseInt(m[1], 10);
+                targetChapterIndex = currentData.script.chapters.findIndex(c => c && (c.chapter_number === chNum || c.number === chNum));
+            }
+        }
+
+        if (targetChapterIndex !== -1 && targetChapterIndex < currentData.script.chapters.length) {
+            if (els.chapterSelect) {
+                els.chapterSelect.value = String(targetChapterIndex);
+            }
+            currentScriptChapter = targetChapterIndex;
+            renderScriptLines(targetChapterIndex);
+
+            setTimeout(() => {
+                const el = document.querySelector(`[data-line-id="${CSS.escape(lineId)}"]`);
+                if (el) {
+                    el.scrollIntoView({behavior: 'smooth', block: 'center'});
+                    el.classList.add('highlight-line-pulse');
+                    setTimeout(() => el.classList.remove('highlight-line-pulse'), 3000);
+                }
+            }, 120);
+            return true;
+        }
+        return false;
+    }
+
+    async function refreshVoices(projectId) {
+        if (!projectId) return;
+        await fetchVoices(projectId);
+        renderCharacters();
+    }
+
     return {
-        loadData
+        loadData,
+        refreshVoices,
+        revealLine
     };
 })();

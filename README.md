@@ -91,6 +91,7 @@ cd ..
 - [Configuration](docs/configuration.md)
 - [API reference](docs/api-reference.md)
 - [Quality assurance](docs/quality-assurance.md)
+- [Scripting quality and performance policy](docs/scripting-quality-performance-policy.md)
 - [Dashboard guide](docs/dashboard-guide.md)
 - [Voice design](docs/voice-design.md)
 - [Prompt and source-fidelity rules](docs/prompts.md)

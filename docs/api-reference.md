@@ -31,7 +31,7 @@ Uploads must have an `.epub` suffix, remain under the configured compressed/expa
 | Method | Route | Purpose |
 |---|---|---|
 | `POST` | `/api/projects/{project_id}/start` | Start/resume the project |
-| `POST` | `/api/projects/{project_id}/stop` | Immediately interrupt work and release app-owned services |
+| `POST` | `/api/projects/{project_id}/stop` | Immediately interrupt work and release app-owned services; `?resume_on_schedule=true` parks it for the next configured work window when currently outside working hours |
 | `POST` | `/api/projects/{project_id}/reset` | Reset to extracting, scripting, bootstrapping, voice_review, generating, validating, mastering, or exporting |
 | `POST` | `/api/projects/{project_id}/voice-review/approve` | Approve speaking voice cast and continue audio generation |
 | `POST` | `/api/projects/{project_id}/request-deploy` | Park at the next chapter boundary |

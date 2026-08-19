@@ -17,6 +17,7 @@ from typing import Any, Iterator, Literal
 from pydantic import BaseModel, Field
 
 from shared.single_instance import SingleInstanceLock
+from shared.artifacts import atomic_write_text
 
 logger = logging.getLogger(__name__)
 
@@ -168,19 +169,12 @@ class DeliveryManager:
         """Flush and atomically replace the index while retaining one backup."""
         self.init_storage()
         index.schema_version = DELIVERY_INDEX_SCHEMA_VERSION
-        temp_path = self.index_path.with_name("index.json.tmp")
-        try:
-            with open(temp_path, "w", encoding="utf-8") as handle:
-                handle.write(index.model_dump_json(indent=2))
-                handle.flush()
-                os.fsync(handle.fileno())
-            if self.index_path.is_file():
-                previous_temp = self.previous_index_path.with_suffix(".previous.tmp")
-                shutil.copy2(self.index_path, previous_temp)
-                os.replace(previous_temp, self.previous_index_path)
-            os.replace(temp_path, self.index_path)
-        finally:
-            temp_path.unlink(missing_ok=True)
+        if self.index_path.is_file():
+            try:
+                shutil.copy2(self.index_path, self.previous_index_path)
+            except OSError:
+                pass
+        atomic_write_text(self.index_path, index.model_dump_json(indent=2))
 
     @contextmanager
     def packaging_lock(

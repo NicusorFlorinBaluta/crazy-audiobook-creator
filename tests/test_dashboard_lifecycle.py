@@ -8,6 +8,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import brain.dashboard.api.main as dashboard
@@ -369,6 +370,138 @@ class DashboardLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             dashboard._validation_reset_targets(state),
             [1, 2, 3, 4],
+        )
+
+    async def test_empty_chapter_selection_is_saved_but_cannot_be_started(self) -> None:
+        class FakeQueue:
+            def __init__(self):
+                self.state = {
+                    "total_chapters": 4,
+                    "generation_chapter_selection": None,
+                    "incremental_delivery": {"enabled": True},
+                }
+
+            def get_job(self, project_id):
+                return dict(self.state)
+
+            def update_job(self, project_id, updates):
+                self.state.update(updates)
+
+        queue = FakeQueue()
+        request = dashboard.ChapterSelectionRequest(chapters=[])
+        with patch.object(dashboard, "job_queue", queue):
+            response = await dashboard.set_chapter_selection("book", request)
+
+        self.assertEqual(response["selection"], [])
+        self.assertEqual(queue.state["generation_chapter_selection"], [])
+
+        with (
+            patch.object(dashboard, "pipeline", object()),
+            patch.object(dashboard, "job_queue", queue),
+            patch.object(dashboard, "running_tasks", {}),
+        ):
+            with self.assertRaises(dashboard.HTTPException) as raised:
+                await dashboard.start_pipeline("book")
+
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertIn("Select at least one chapter", raised.exception.detail)
+
+    async def test_manual_start_overrides_a_closed_schedule_for_one_run(self) -> None:
+        class FakeQueue:
+            def __init__(self):
+                self.state = {
+                    "status": PipelineStage.PAUSED.value,
+                    "active_stage": PipelineStage.SCRIPTING.value,
+                    "generation_chapter_selection": None,
+                    "voice_review_policy": "grandfathered",
+                    "bootstrapping_completed": False,
+                }
+                self.updates = []
+
+            def get_job(self, project_id):
+                return dict(self.state)
+
+            def update_job(self, project_id, updates):
+                self.updates.append(dict(updates))
+                self.state.update(updates)
+
+        class FakePipeline:
+            @staticmethod
+            def schedule_is_open():
+                return False
+
+            @staticmethod
+            def run(project_id):
+                return None
+
+        queue = FakeQueue()
+        tasks = {}
+        with (
+            patch.object(dashboard, "pipeline", FakePipeline()),
+            patch.object(dashboard, "job_queue", queue),
+            patch.object(dashboard, "running_tasks", tasks),
+            patch.object(
+                dashboard,
+                "collect_review_gate",
+                return_value=SimpleNamespace(blocking_items=[]),
+            ),
+        ):
+            response = await dashboard.start_pipeline(
+                "book",
+                override_schedule=True,
+            )
+            self.assertTrue(response["schedule_overridden"])
+            self.assertTrue(queue.updates[0]["schedule_override_active"])
+            await tasks["book"]
+
+        self.assertFalse(queue.state["schedule_override_active"])
+        self.assertFalse(queue.state["running"])
+
+    async def test_stop_outside_hours_can_park_for_scheduled_resume(self) -> None:
+        class FakeQueue:
+            def __init__(self):
+                self.state = {
+                    "status": PipelineStage.SCRIPTING.value,
+                    "active_stage": PipelineStage.SCRIPTING.value,
+                    "running": True,
+                }
+
+            def get_job(self, project_id):
+                return dict(self.state)
+
+            def update_job(self, project_id, updates):
+                self.state.update(updates)
+
+        class FakePipeline:
+            stopped = False
+
+            @staticmethod
+            def schedule_is_open():
+                return False
+
+            def stop(self, project_id):
+                self.stopped = True
+
+        queue = FakeQueue()
+        fake_pipeline = FakePipeline()
+        with (
+            patch.object(dashboard, "pipeline", fake_pipeline),
+            patch.object(dashboard, "job_queue", queue),
+        ):
+            response = await dashboard.stop_pipeline(
+                "book",
+                resume_on_schedule=True,
+            )
+
+        self.assertTrue(response["will_resume_on_schedule"])
+        self.assertTrue(fake_pipeline.stopped)
+        self.assertEqual(
+            queue.state["status"],
+            PipelineStage.PAUSED_SCHEDULED.value,
+        )
+        self.assertEqual(
+            queue.state["pause_reason"],
+            "waiting for configured working hours",
         )
 
     async def test_quality_report_keeps_accepted_warnings_out_of_failures(self) -> None:

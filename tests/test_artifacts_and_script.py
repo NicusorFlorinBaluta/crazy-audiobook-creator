@@ -5,8 +5,10 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import MagicMock, patch
 
 from brain.director.character_analyzer import CharacterAnalyzer
+from brain.director.ollama_client import OllamaGenerationLimitError
 from brain.director.script_generator import (
     MetadataAttributionError,
     ScriptGenerator,
@@ -52,6 +54,35 @@ class FakeCharacterOllama:
         }
 
 
+class FakeReferenceAugmentationOllama:
+    model = "fake-reference"
+
+    def __init__(self, augmentation=None, fail_augmentation=False) -> None:
+        self.calls: list[tuple[str, dict]] = []
+        self.augmentation = augmentation or {"patches": []}
+        self.fail_augmentation = fail_augmentation
+
+    def generate_json(self, prompt, **kwargs):
+        self.calls.append((prompt, kwargs))
+        if len(self.calls) == 1:
+            return {
+                "tone": "adventurous",
+                "characters": {
+                    "mara": {
+                        "name": "Mara",
+                        "gender": "female",
+                        "age_range": "adult",
+                        "voice_description": "female speaker with a clear voice",
+                        "speaking_style": "",
+                        "dialogue_count": 4,
+                    }
+                },
+            }
+        if self.fail_augmentation:
+            raise RuntimeError("supplement unavailable")
+        return self.augmentation
+
+
 class FakeIdentityOllama:
     model = "fake"
 
@@ -91,6 +122,311 @@ class FakeScriptOllama:
 
 
 class ScriptFidelityTests(unittest.TestCase):
+    def test_pipeline_joint_mode_persists_registry_scripts_and_comparison_metrics(self) -> None:
+        source = '"We should leave," Mara said.'
+        fragments = ScriptGenerator._split_into_fragment_spans(source)
+        response = {
+            "chapter_number": 1,
+            "chapter_title": "One",
+            "chapter_summary": "Mara proposes leaving.",
+            "scenes": [],
+            "character_updates": [{
+                "character_id": "mara",
+                "name": "Mara",
+                "aliases": [],
+                "gender": "female",
+                "age_range": "adult",
+                "personality_traits": ["decisive"],
+                "voice_description": (
+                    "female speaker, adult age, medium pitch, moderate volume, "
+                    "measured speed, neutral accent, clear texture, high clarity, "
+                    "natural fluency, decisive emotion and calm tone"
+                ),
+                "speaking_style": "concise",
+                "evidence_fragment_ids": [0],
+                "discovery_confidence": 0.96,
+            }],
+            "lines": [
+                {
+                    "id": index,
+                    "speaker": (
+                        "mara"
+                        if ScriptGenerator._is_dialogue_fragment(fragment.text)
+                        else "narrator"
+                    ),
+                    "speaker_confidence": 0.96,
+                    "speaker_evidence": "Mara said",
+                    "dialogue_kind": (
+                        "spoken"
+                        if ScriptGenerator._is_dialogue_fragment(fragment.text)
+                        else None
+                    ),
+                    "emotion": "calm resolve",
+                    "speed": 1.0,
+                }
+                for index, fragment in enumerate(fragments)
+            ],
+        }
+
+        class FakeQueue:
+            def __init__(self):
+                self.state = {
+                    "force_character_analysis": False,
+                    "scripted_chapters": [],
+                    "generated_chapters": [],
+                    "mastered_chapters": [],
+                }
+
+            def get_job(self, project_id):
+                return dict(self.state)
+
+            def update_job(self, project_id, updates):
+                self.state.update(updates)
+
+            def update_progress(self, project_id, progress):
+                self.state["progress"] = progress
+
+        with TemporaryDirectory() as directory:
+            project_dir = Path(directory)
+            book = ExtractedBook(
+                metadata=BookMetadata(
+                    title="Book",
+                    author="Author",
+                    total_chapters=1,
+                    total_words=len(source.split()),
+                ),
+                chapters=[ExtractedChapter(
+                    number=1,
+                    title="One",
+                    text=source,
+                    word_count=len(source.split()),
+                )],
+            )
+            (project_dir / "book.json").write_text(
+                book.model_dump_json(indent=2), encoding="utf-8"
+            )
+            ollama = FakeScriptOllama([response])
+            pipeline = Pipeline.__new__(Pipeline)
+            pipeline.config = {"script": {"joint_analysis": True}}
+            pipeline.ollama = ollama
+            pipeline.character_analyzer = CharacterAnalyzer(ollama)
+            pipeline.script_generator = ScriptGenerator(
+                ollama,
+                group_utterances=False,
+            )
+            pipeline.job_queue = FakeQueue()
+            pipeline.external_validator = MagicMock()
+            pipeline.external_validator.resolve_attributions.return_value = {
+                "attempted": False
+            }
+            pipeline._update_stage = MagicMock()
+            pipeline._check_stop = MagicMock()
+            pipeline._check_schedule = MagicMock()
+            pipeline._check_deployment_pause = MagicMock()
+            pipeline._assert_attribution_audit = MagicMock()
+            pipeline._progress_estimator = MagicMock()
+            pipeline._progress_estimator.snapshot.return_value = {"percent": 0}
+            metrics: list[dict] = []
+            pipeline._append_performance_metric = (
+                lambda project_path, metric: metrics.append(metric)
+            )
+            pipeline.character_analyzer.analyze = MagicMock(
+                side_effect=AssertionError("legacy analyzer should not run")
+            )
+
+            with patch(
+                "brain.orchestrator.pipeline.build_pronunciation_inventory",
+                return_value={},
+            ):
+                pipeline._run_script_director("book", project_dir)
+
+            registry = CharacterRegistry.model_validate_json(
+                (project_dir / "characters.json").read_text(encoding="utf-8")
+            )
+            saved_script = ScriptChapter.model_validate_json(
+                (project_dir / "script" / "chapter_001.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertIn("mara", registry.characters)
+            self.assertEqual(
+                next(
+                    line for line in saved_script.lines
+                    if line.dialogue_kind == "spoken"
+                ).speaker,
+                "mara",
+            )
+            self.assertEqual(metrics[-1]["director_mode"], "joint")
+            self.assertEqual(metrics[-1]["pass1_seconds"], 0.0)
+            self.assertFalse(
+                (project_dir / "characters.joint.checkpoint.json").exists()
+            )
+
+    def test_joint_pass_registers_only_source_evidenced_speaker(self) -> None:
+        source = '"We should leave," Mara said.'
+        fragments = ScriptGenerator._split_into_fragment_spans(source)
+        response = {
+            "chapter_number": 1,
+            "chapter_title": "One",
+            "chapter_summary": "Mara proposes leaving.",
+            "scenes": [],
+            "character_updates": [
+                {
+                    "character_id": "mara",
+                    "name": "Mara",
+                    "aliases": [],
+                    "gender": "female",
+                    "age_range": "adult",
+                    "personality_traits": ["decisive"],
+                    "voice_description": (
+                        "female speaker, adult age, medium pitch, moderate volume, "
+                        "measured speed, neutral accent, clear texture, high clarity, "
+                        "natural fluency, decisive emotion and calm tone"
+                    ),
+                    "speaking_style": "concise and decisive",
+                    "test_sentence": "We can make a careful choice and still move forward before the weather changes.",
+                    "evidence_fragment_ids": [0],
+                    "discovery_confidence": 0.96,
+                }
+            ],
+            "lines": [
+                {
+                    "id": index,
+                    "speaker": (
+                        "mara"
+                        if ScriptGenerator._is_dialogue_fragment(fragment.text)
+                        else "narrator"
+                    ),
+                    "speaker_confidence": 0.96,
+                    "speaker_evidence": "Mara said",
+                    "dialogue_kind": (
+                        "spoken"
+                        if ScriptGenerator._is_dialogue_fragment(fragment.text)
+                        else None
+                    ),
+                    "emotion": "calm",
+                    "speed": 1.0,
+                    "pause_before_ms": 0,
+                    "pause_after_ms": 400,
+                }
+                for index, fragment in enumerate(fragments)
+            ],
+        }
+        analyzer = CharacterAnalyzer(FakeCharacterOllama())
+        book = ExtractedBook(
+            metadata=BookMetadata(title="Book", author="Author", total_chapters=1),
+            chapters=[
+                ExtractedChapter(
+                    number=1,
+                    title="One",
+                    text=source,
+                    word_count=len(source.split()),
+                )
+            ],
+        )
+        registry = analyzer.create_joint_seed_registry(book)
+        generator = ScriptGenerator(FakeScriptOllama([response]))
+
+        script = generator.generate_chapter_script(
+            book.chapters[0],
+            registry,
+            allow_character_discovery=True,
+        )
+
+        self.assertIn("mara", registry.characters)
+        self.assertAlmostEqual(
+            registry.characters["mara"].discovery_confidence,
+            0.96,
+        )
+        self.assertTrue(registry.characters["mara"].discovery_evidence)
+        self.assertEqual(
+            next(line for line in script.lines if line.dialogue_kind == "spoken").speaker,
+            "mara",
+        )
+
+    def test_joint_pass_rejects_character_without_matching_source_evidence(self) -> None:
+        fragments = [SourceFragment(text='"Hello."', start=0, end=8)]
+        registry = CharacterRegistry(
+            book_title="Book",
+            book_author="Author",
+            characters={
+                "narrator": Character(
+                    id="narrator",
+                    name="Narrator",
+                    gender=Gender.OTHER,
+                    age_range="adult",
+                    voice_description="neutral voice",
+                )
+            },
+        )
+        generator = ScriptGenerator(FakeScriptOllama([]))
+        generator._apply_joint_character_updates(
+            {
+                "character_updates": [{
+                    "character_id": "invented_person",
+                    "name": "Invented Person",
+                    "evidence_fragment_ids": [0],
+                    "discovery_confidence": 0.99,
+                }],
+                "lines": [{"id": 0, "speaker": "invented_person"}],
+            },
+            fragments,
+            registry,
+        )
+        self.assertNotIn("invented_person", registry.characters)
+
+    def test_joint_registry_reconciliation_returns_deterministic_speaker_remap(self) -> None:
+        analyzer = CharacterAnalyzer(FakeCharacterOllama())
+        registry = CharacterRegistry(
+            book_title="Book",
+            book_author="Author",
+            characters={
+                "narrator": Character(
+                    id="narrator",
+                    name="Narrator",
+                    gender=Gender.OTHER,
+                    age_range="adult",
+                    voice_description="neutral voice",
+                ),
+                "dusk": Character(
+                    id="dusk",
+                    name="Dusk",
+                    gender=Gender.MALE,
+                    age_range="adult",
+                    voice_description="measured voice",
+                    discovered_in_pass2=True,
+                    discovery_confidence=0.9,
+                ),
+                "sixth_of_dusk": Character(
+                    id="sixth_of_dusk",
+                    name="Sixth of Dusk",
+                    aliases=["Dusk"],
+                    gender=Gender.MALE,
+                    age_range="adult",
+                    voice_description="low measured voice",
+                    discovered_in_pass2=True,
+                    discovery_confidence=0.95,
+                ),
+            },
+        )
+        book = ExtractedBook(
+            metadata=BookMetadata(title="Book", author="Author", total_chapters=1),
+            chapters=[
+                ExtractedChapter(
+                    number=1,
+                    title="One",
+                    text="Sixth of Dusk listened.",
+                    word_count=4,
+                )
+            ],
+        )
+
+        reconciled, remap = analyzer.finalize_joint_registry(registry, book)
+
+        self.assertEqual(remap["dusk"], "sixth_of_dusk")
+        self.assertEqual(remap["sixth_of_dusk"], "sixth_of_dusk")
+        self.assertNotIn("dusk", reconciled.characters)
+
     def test_character_suffixes_are_not_merged_without_explicit_alias(self) -> None:
         characters = {
             "king": {"name": "King", "aliases": [], "dialogue_count": 1},
@@ -299,6 +635,7 @@ class ScriptFidelityTests(unittest.TestCase):
                             "id": 0,
                             "speaker": "speaker",
                             "speaker_confidence": 0.2,
+                            "speaker_evidence": "The local exchange indicates speaker.",
                         }
                     ]
                 },
@@ -346,6 +683,11 @@ class ScriptFidelityTests(unittest.TestCase):
                     "id": index,
                     "speaker": "dusk" if index == 0 else "narrator",
                     "speaker_confidence": 0.95,
+                    "speaker_evidence": (
+                        "The attached pronoun tag identifies the speaker."
+                        if index == 0
+                        else ""
+                    ),
                 }
                 for index in range(len(fragments))
             ]
@@ -503,6 +845,283 @@ class ScriptFidelityTests(unittest.TestCase):
             ],
         }
 
+    def test_compact_metadata_expands_to_quality_equivalent_canonical_rows(self) -> None:
+        fragments = [
+            SourceFragment("The room was still.", 0, 19),
+            SourceFragment('"Go."', 20, 25),
+            SourceFragment("The night settled.", 26, 44),
+        ]
+        compact = {
+            "chapter_number": 1,
+            "chapter_title": "One",
+            "chapter_summary": "A short exchange.",
+            "lines": [
+                {"id": 0, "scene_index": 0, "emotion": "neutral", "speed": 1.0},
+                {
+                    "id": 1,
+                    "speaker": "dusk",
+                    "speaker_confidence": 0.96,
+                    "speaker_evidence": "An explicit local cue identifies Dusk.",
+                    "emotion": "angry demand",
+                    "speed": 1.2,
+                },
+                {
+                    "id": 2,
+                    "scene_index": 1,
+                    "emotion": "somber reflection",
+                    "speed": 0.87,
+                },
+            ],
+        }
+        verbose = {
+            **{key: value for key, value in compact.items() if key != "lines"},
+            "lines": [
+                {
+                    "id": 0,
+                    "scene_index": 0,
+                    "speaker": "narrator",
+                    "speaker_confidence": None,
+                    "speaker_evidence": "",
+                    "dialogue_kind": None,
+                    "emotion": "neutral",
+                    "speed": 1.0,
+                    "pause_before_ms": 0,
+                    "pause_after_ms": 500,
+                },
+                {
+                    "id": 1,
+                    "scene_index": 0,
+                    "speaker": "dusk",
+                    "speaker_confidence": 0.96,
+                    "speaker_evidence": "An explicit local cue identifies Dusk.",
+                    "dialogue_kind": "spoken",
+                    "emotion": "angry demand",
+                    "speed": 1.2,
+                    "pause_before_ms": 0,
+                    "pause_after_ms": 250,
+                },
+                {
+                    "id": 2,
+                    "scene_index": 1,
+                    "speaker": "narrator",
+                    "speaker_confidence": None,
+                    "speaker_evidence": "",
+                    "dialogue_kind": None,
+                    "emotion": "somber reflection",
+                    "speed": 0.87,
+                    "pause_before_ms": 0,
+                    "pause_after_ms": 700,
+                },
+            ],
+        }
+        received_size = len(json.dumps(compact, separators=(",", ":")))
+
+        stats = ScriptGenerator._expand_compact_metadata(compact, fragments)
+
+        self.assertEqual(compact, verbose)
+        self.assertEqual(stats["received_characters"], received_size)
+        self.assertGreater(stats["character_savings_ratio"], 0.3)
+        parsed = ScriptGenerator._parse_script_chapter(
+            compact,
+            1,
+            "One",
+            fragments,
+            allowed_speakers={"narrator", "dusk"},
+            registry=self._attribution_registry(),
+        )
+        self.assertEqual(parsed.lines[1].speaker, "dusk")
+        self.assertEqual(parsed.lines[1].speaker_confidence, 0.96)
+        self.assertEqual(parsed.lines[1].dialogue_kind, "spoken")
+        self.assertEqual(parsed.lines[1].emotion, "angry demand")
+        self.assertEqual(parsed.lines[1].speed, 1.2)
+        self.assertEqual(parsed.lines[1].pause_after_ms, 250)
+
+    def test_compact_metadata_refuses_missing_creative_delivery_fields(self) -> None:
+        fragments = [SourceFragment("A quiet room.", 0, 13)]
+        with self.assertRaisesRegex(ValueError, "required emotion"):
+            ScriptGenerator._expand_compact_metadata(
+                {"lines": [{"id": 0, "speed": 1.0}]},
+                fragments,
+            )
+        with self.assertRaisesRegex(ValueError, "required speed"):
+            ScriptGenerator._expand_compact_metadata(
+                {"lines": [{"id": 0, "emotion": "neutral"}]},
+                fragments,
+            )
+
+    def test_compact_scene_carry_forward_uses_fragment_id_order(self) -> None:
+        fragments = [
+            SourceFragment("First.", 0, 6),
+            SourceFragment("Second.", 7, 14),
+            SourceFragment("Third.", 15, 21),
+        ]
+        raw = {
+            "lines": [
+                {"id": 2, "scene_index": 1, "emotion": "tense", "speed": 1.0},
+                {"id": 0, "scene_index": 0, "emotion": "neutral", "speed": 1.0},
+                {"id": 1, "emotion": "neutral", "speed": 1.0},
+            ]
+        }
+
+        ScriptGenerator._expand_compact_metadata(raw, fragments)
+
+        by_id = {row["id"]: row for row in raw["lines"]}
+        self.assertEqual(by_id[0]["scene_index"], 0)
+        self.assertEqual(by_id[1]["scene_index"], 0)
+        self.assertEqual(by_id[2]["scene_index"], 1)
+
+    def test_compact_model_response_preserves_delivery_and_records_savings(self) -> None:
+        source = "A quiet room remained still."
+        fragments = ScriptGenerator._split_into_fragment_spans(source)
+        response = {
+            "chapter_number": 1,
+            "chapter_title": "One",
+            "chapter_summary": "A quiet moment.",
+            "scenes": [],
+            "lines": [
+                {
+                    "id": index,
+                    "emotion": "somber reflection",
+                    "speed": 0.87,
+                    **({"scene_index": 0} if index == 0 else {}),
+                }
+                for index, _fragment in enumerate(fragments)
+            ],
+        }
+        ollama = FakeScriptOllama([response])
+        generator = ScriptGenerator(ollama=ollama, group_utterances=False)
+
+        script = generator._process_fragments(
+            fragments,
+            1,
+            "One",
+            self._attribution_registry(),
+            "",
+        )
+
+        self.assertTrue(all(line.speaker == "narrator" for line in script.lines))
+        self.assertTrue(all(line.emotion == "somber reflection" for line in script.lines))
+        self.assertTrue(all(line.speed == 0.87 for line in script.lines))
+        self.assertTrue(all(line.pause_after_ms == 700 for line in script.lines))
+        system_prompt = ollama.calls[0][1]["system"]
+        user_prompt = ollama.calls[0][0]
+        self.assertIn("Quality is the primary requirement", system_prompt)
+        self.assertIn("MINIFIED VALID JSON", user_prompt)
+        compact_metric = generator.call_metrics[-1]["requests"][0][
+            "compact_metadata"
+        ]
+        self.assertGreater(compact_metric["character_savings_ratio"], 0.25)
+
+    def test_missing_compact_speed_uses_focused_delivery_repair(self) -> None:
+        source = "A quiet room remained still."
+        fragments = ScriptGenerator._split_into_fragment_spans(source)
+        initial = {
+            "chapter_number": 1,
+            "chapter_title": "One",
+            "chapter_summary": "A quiet moment.",
+            "lines": [
+                {"id": index, "emotion": "somber reflection"}
+                for index, _fragment in enumerate(fragments)
+            ],
+        }
+        repair = {
+            "lines": [
+                {"id": index, "speed": 0.88}
+                for index, _fragment in enumerate(fragments)
+            ]
+        }
+        ollama = FakeScriptOllama([initial, repair])
+        generator = ScriptGenerator(ollama=ollama, group_utterances=False)
+
+        script = generator._process_fragments(
+            fragments,
+            1,
+            "One",
+            self._attribution_registry(),
+            "",
+        )
+
+        self.assertTrue(all(line.emotion == "somber reflection" for line in script.lines))
+        self.assertTrue(all(line.speed == 0.88 for line in script.lines))
+        metric = generator.call_metrics[-1]
+        self.assertEqual(metric["full_attempts"], 1)
+        self.assertEqual(metric["structural_retries"], 0)
+        self.assertEqual(metric["delivery_focused_rounds"], 1)
+        self.assertEqual(metric["delivery_focused_retries"], len(fragments))
+        self.assertEqual(
+            [item["request_kind"] for item in metric["requests"]],
+            ["full_chunk", "focused_delivery_batch"],
+        )
+
+    def test_narrator_spoken_dialogue_gets_one_strict_focused_retry(self) -> None:
+        source = '"Wait."'
+        fragments = ScriptGenerator._split_into_fragment_spans(source)
+        initial = self._metadata_response(fragments, "narrator")
+        initial["lines"][0]["dialogue_kind"] = "spoken"
+        ordinary_retry = {
+            "lines": [
+                {
+                    "id": 0,
+                    "speaker": "narrator",
+                    "speaker_confidence": 0.7,
+                    "speaker_evidence": "The turn remains ambiguous in isolation.",
+                    "dialogue_kind": "spoken",
+                }
+            ]
+        }
+        strict_retry = {
+            "lines": [
+                {
+                    "id": 0,
+                    "speaker": "vathi",
+                    "speaker_confidence": 0.62,
+                    "speaker_evidence": "Local turn continuity best supports Vathi.",
+                    "dialogue_kind": "spoken",
+                }
+            ]
+        }
+        ollama = FakeScriptOllama([initial, ordinary_retry, strict_retry])
+        generator = ScriptGenerator(ollama=ollama, group_utterances=False)
+
+        script = generator._process_fragments(
+            fragments,
+            1,
+            "One",
+            self._attribution_registry(),
+            "",
+        )
+
+        self.assertEqual(script.lines[0].speaker, "vathi")
+        metric = generator.call_metrics[-1]
+        self.assertEqual(metric["full_attempts"], 1)
+        self.assertEqual(metric["strict_attribution_retries"], 1)
+        self.assertEqual(metric["fragment_fallbacks"], 0)
+        self.assertEqual(
+            [item["request_kind"] for item in metric["requests"]],
+            ["full_chunk", "focused_fragment", "strict_spoken_attribution"],
+        )
+        self.assertIn("'narrator'", ollama.calls[2][0])
+        self.assertIn("forbidden", ollama.calls[2][0])
+
+    def test_spoken_dialogue_requires_meaningful_speaker_evidence(self) -> None:
+        fragment = SourceFragment(text='"Hello."', start=0, end=8)
+        with self.assertRaisesRegex(ValueError, "source-grounded"):
+            ScriptGenerator._validate_metadata_speakers(
+                {
+                    "lines": [
+                        {
+                            "id": 0,
+                            "speaker": "speaker",
+                            "speaker_confidence": 0.95,
+                            "speaker_evidence": "cue",
+                            "dialogue_kind": "spoken",
+                        }
+                    ]
+                },
+                [fragment],
+                {"narrator", "speaker"},
+            )
+
     def test_named_tag_is_repaired_without_another_full_model_call(self) -> None:
         source = '"Wait," Vathi quietly said.'
         fragments = ScriptGenerator._split_into_fragment_spans(source)
@@ -591,6 +1210,72 @@ class ScriptFidelityTests(unittest.TestCase):
         self.assertEqual(metric["full_attempts"], 1)
         self.assertEqual(metric["focused_retries"], 1)
         self.assertEqual(metric["fragment_fallbacks"], 0)
+        self.assertEqual(
+            [item["request_kind"] for item in metric["requests"]],
+            ["full_chunk", "focused_fragment"],
+        )
+
+    def test_focused_retry_accepts_chapter_global_id_and_canonicalizes_it(self) -> None:
+        source = '"Wait," she said.'
+        fragments = ScriptGenerator._split_into_fragment_spans(source)
+        initial = self._metadata_response(fragments, "dusk")
+        corrected = {
+            "lines": [
+                {
+                    "id": 40,
+                    "speaker": "vathi",
+                    "speaker_confidence": 0.95,
+                    "speaker_evidence": "Local conversation establishes Vathi.",
+                    "dialogue_kind": "spoken",
+                }
+            ]
+        }
+        ollama = FakeScriptOllama([initial, corrected])
+        generator = ScriptGenerator(ollama=ollama, group_utterances=False)
+
+        script = generator._process_fragments(
+            fragments,
+            1,
+            "One",
+            self._attribution_registry(),
+            "",
+            id_offset=40,
+        )
+
+        self.assertEqual(script.lines[0].speaker, "vathi")
+        self.assertEqual(script.lines[0].source_fragment_id, 40)
+        self.assertEqual(len(ollama.calls), 2)
+        focused_prompt = ollama.calls[1][0]
+        self.assertIn('"local_id": 0', focused_prompt)
+        self.assertIn('"chapter_fragment_id": 40', focused_prompt)
+        self.assertIn('"id":0', focused_prompt)
+
+    def test_unresolved_attribution_uses_review_fallback_without_full_retry(self) -> None:
+        source = '"Wait," she said.'
+        fragments = ScriptGenerator._split_into_fragment_spans(source)
+        initial = self._metadata_response(fragments, "dusk")
+        invalid_focused = {"lines": [{"id": 99, "speaker": "vathi"}]}
+        ollama = FakeScriptOllama([initial, invalid_focused])
+        generator = ScriptGenerator(ollama=ollama, group_utterances=False)
+
+        script = generator._process_fragments(
+            fragments,
+            1,
+            "One",
+            self._attribution_registry(),
+            "",
+        )
+
+        self.assertEqual(len(ollama.calls), 2)
+        self.assertTrue(script.lines[0].attribution_review_required)
+        self.assertLess(
+            script.lines[0].speaker_confidence,
+            generator.speaker_confidence_threshold,
+        )
+        metric = generator.call_metrics[-1]
+        self.assertEqual(metric["full_attempts"], 1)
+        self.assertEqual(metric["structural_retries"], 0)
+        self.assertEqual(metric["fragment_fallbacks"], 1)
         self.assertEqual(
             [item["request_kind"] for item in metric["requests"]],
             ["full_chunk", "focused_fragment"],
@@ -796,6 +1481,27 @@ class ScriptFidelityTests(unittest.TestCase):
         self.assertEqual(metric["structural_failures"], 1)
         self.assertEqual(metric["structural_retries"], 1)
 
+    def test_generation_limit_skips_duplicate_full_chunk_retries(self) -> None:
+        source = '"Wait," Vathi said.'
+        fragments = ScriptGenerator._split_into_fragment_spans(source)
+        ollama = FakeScriptOllama([
+            OllamaGenerationLimitError("repetition loop")
+        ])
+        generator = ScriptGenerator(ollama=ollama, group_utterances=False)
+
+        script = generator._process_fragments(
+            fragments,
+            1,
+            "One",
+            self._attribution_registry(),
+            "",
+            0,
+        )
+
+        self.assertEqual(len(ollama.calls), 1)
+        self.assertTrue(generator.call_metrics[-1]["used_fallback"])
+        self.assertTrue(script.lines)
+
     def test_explicit_boy_tag_adds_missing_male_child_role(self) -> None:
         source = '"I followed the star," the boy said, folding his arms.'
         book = ExtractedBook(
@@ -817,6 +1523,65 @@ class ScriptFidelityTests(unittest.TestCase):
         self.assertEqual(registry.characters["child_male"].gender, Gender.MALE)
         self.assertEqual(registry.characters["child_male"].voice_id, "child_male")
         self.assertEqual(registry.characters["child_male"].dialogue_count, 1)
+
+    def test_reference_augments_only_existing_speakers_with_verbatim_evidence(self) -> None:
+        evidence = "Mara, a seasoned captain, stays calm under fire."
+        description = (
+            "female speaker, adult age, medium pitch, moderate volume, measured speed, "
+            "neutral English accent, clear texture and high clarity, natural fluency, "
+            "warm emotion, decisive tone, pragmatic personality."
+        )
+        ollama = FakeReferenceAugmentationOllama({"patches": [
+            {
+                "character_id": "mara", "confidence": 0.97,
+                "evidence": evidence, "revised_voice_description": description,
+                "personality_traits": ["calm", "pragmatic"],
+                "aliases": ["Captain Mara"], "speaking_style": "Measured command speech",
+            },
+            {
+                "character_id": "glossary_only_person", "confidence": 0.99,
+                "evidence": evidence, "revised_voice_description": description,
+                "personality_traits": [], "aliases": [], "speaking_style": "",
+            },
+        ]})
+        book = ExtractedBook(
+            metadata=BookMetadata(title="Book", author="Author", total_chapters=1),
+            chapters=[ExtractedChapter(
+                number=1, title="One", text='"Steady," Mara said.', word_count=3,
+            )],
+            reference_material={"Cast": evidence + " She is also called Captain Mara."},
+        )
+        with TemporaryDirectory() as temporary:
+            audit_path = Path(temporary) / "reference-audit.json"
+            registry = CharacterAnalyzer(ollama).analyze(
+                book, reference_audit_path=audit_path,
+            )
+            audit = json.loads(audit_path.read_text(encoding="utf-8"))
+        self.assertEqual(set(registry.characters), {"mara", "narrator"})
+        self.assertEqual(registry.characters["mara"].voice_description, description)
+        self.assertIn("Captain Mara", registry.characters["mara"].aliases)
+        self.assertEqual(len(audit["accepted"]), 1)
+        self.assertEqual(audit["rejected"][0]["reason"], "unknown_or_unproven_character")
+        self.assertNotIn("AUTHOR REFERENCE", ollama.calls[0][0])
+        self.assertIn("AUTHOR REFERENCE", ollama.calls[1][0])
+
+    def test_reference_augmentation_failure_preserves_narrative_registry(self) -> None:
+        ollama = FakeReferenceAugmentationOllama(fail_augmentation=True)
+        book = ExtractedBook(
+            metadata=BookMetadata(title="Book", author="Author", total_chapters=1),
+            chapters=[ExtractedChapter(
+                number=1, title="One", text='"Steady," Mara said.', word_count=3,
+            )],
+            reference_material={"Cast": "Mara is the ship captain."},
+        )
+        with TemporaryDirectory() as temporary:
+            audit_path = Path(temporary) / "reference-audit.json"
+            registry = CharacterAnalyzer(ollama).analyze(
+                book, reference_audit_path=audit_path,
+            )
+            audit = json.loads(audit_path.read_text(encoding="utf-8"))
+        self.assertIn("mara", registry.characters)
+        self.assertEqual(audit["status"], "unavailable")
 
     def test_voice_redesign_does_not_invalidate_script_fingerprint(self) -> None:
         chapter = ExtractedChapter(

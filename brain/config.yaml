@@ -26,6 +26,10 @@ ollama:
   timeout: 600
   max_retries: 3
   max_retry_seconds: 900       # Total budget for failed attempts/backoff; healthy streams may run longer
+  max_output_tokens: 8192      # Hard server/client cap; normal chapter JSON is about 4K tokens
+  max_generation_seconds: 900  # Total wall-clock cap even while tokens keep streaming
+  repetition_window_chars: 512 # Search for repeating loop periods up to this size...
+  repetition_count: 4          # ...this many consecutive times
   unload_after_scripting: true     # Free GPU memory before Qwen TTS loads
 
 # Managed local Voice service
@@ -60,6 +64,7 @@ extraction:
   preserve_poetry: true
 # Source-preserving script construction
 script:
+  joint_analysis: true             # Discover characters while attributing scripts
   max_segment_sentences: 4
   min_segment_words: 3
   default_speed: 1.0
@@ -78,20 +83,17 @@ script:
   chapter_start_pause_ms: 1000
   chapter_end_pause_ms: 2000
   paragraph_pause_ms: 600
-  max_unique_voices: 20
+  max_unique_voices: 0            # 0 = unlimited; every named character gets their own voice
   minor_character_threshold: 3
-  group_minor_characters: true
+  group_minor_characters: false
   chunk_size_words: 1200
   chunk_overlap_words: 0
 # Local dashboard
 dashboard:
   port: 8000
-  # LAN peers must belong to trusted_lan_cidrs; callers outside those ranges
-  # require CRAZY_AUDIOBOOK_DASHBOARD_TOKEN.
   host: 0.0.0.0
   cors_origins:
-  - http://127.0.0.1:8000
-  - http://localhost:8000
+  - '*'
   api_token: ''
   static_dir: dashboard/frontend
   max_upload_size_mb: 100
@@ -114,18 +116,18 @@ external_validation:
   max_audio_regenerations: 1
   circuit_breaker:
     failure_threshold: 3
-    cooldown_seconds: 900
+    cooldown_seconds: 60
   api:
     enabled: true
     api_key_env: GEMINI_API_KEY
     triage_model: gemini-3.5-flash-lite
-    adjudication_model: gemini-3.6-flash
+    adjudication_model: gemini-3.5-flash
     timeout_seconds: 120
     max_attempts: 4
     # Leave headroom below the account limits shown in AI Studio.
     daily_request_budgets:
       gemini-3.5-flash-lite: 450
-      gemini-3.6-flash: 18
+      gemini-3.5-flash: 50
   browser:
     enabled: true
     profile_dir: brain/projects/.gemini-browser-profile
@@ -149,6 +151,16 @@ pipeline:
   batch_mode: chapter
 # Automatic safe-boundary working hours
 schedule:
-  enabled: false
+  enabled: true
   timezone: Europe/Bucharest
-  windows: []
+  windows:
+  - days:
+    - Monday
+    - Tuesday
+    - Wednesday
+    - Thursday
+    - Friday
+    - Saturday
+    - Sunday
+    start: 09:00
+    end: '18:00'

@@ -106,3 +106,35 @@ def test_schedule_time_controls_have_stable_responsive_grid_areas() -> None:
     assert 'grid-template-areas: "days start separator end remove";' in styles
     assert "grid-template-columns: minmax(250px, 1fr) 142px auto 142px 34px;" in styles
     assert "@media (max-width: 480px)" in styles
+
+
+def test_dashboard_uses_canonical_chapter_numbers_instead_of_source_headings() -> None:
+    app = _read("js/app.js")
+    script_viewer = _read("js/script-viewer.js")
+
+    assert "const title = `Chapter ${chapter}`;" in app
+    assert "const chapterTitle = currentChapter ? `Chapter ${currentChapter}` : '';" in app
+    assert "progress.current = `Scripting · Chapter ${current} of ${total}`;" in app
+    assert "const title = detail.title || `Chapter ${chapter}`;" not in app
+    assert "opt.textContent = `Chapter ${ch.chapter_number || (idx + 1)}`;" in script_viewer
+    assert "ch.chapter_title ?" not in script_viewer
+
+
+def test_empty_next_run_selection_is_not_replaced_by_stale_active_selection() -> None:
+    app = _read("js/app.js")
+
+    assert "const selectedNumbers = selectionLocked" in app
+    assert "const selection = selectedNumbers == null ? null : new Set(selectedNumbers);" in app
+    assert "const savedSelection = project.running === true" in app
+    assert "project.active_generation_chapter_selection\n        || project.generation_chapter_selection" not in app
+
+
+def test_manual_resume_requests_a_one_run_schedule_override() -> None:
+    app = _read("js/app.js")
+    pipeline = _read("js/pipeline.js")
+
+    assert "/start?override_schedule=true`" in app
+    assert "/stop?resume_on_schedule=true`" in app
+    assert "result.schedule_overridden" in app
+    assert "result.will_resume_on_schedule" in app
+    assert "outside configured working hours for this run only" in pipeline

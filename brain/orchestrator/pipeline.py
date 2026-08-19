@@ -164,7 +164,7 @@ class Pipeline:
         self.character_analyzer = CharacterAnalyzer(
             ollama=self.ollama,
             temperature=ollama_cfg.get("temperature_pass1", 0.3),
-            max_unique_voices=self.config.get("script", {}).get("max_unique_voices", 20),
+            max_unique_voices=self.config.get("script", {}).get("max_unique_voices", 0),
         )
 
         script_cfg = self.config.get("script", {})
@@ -663,6 +663,10 @@ class Pipeline:
         if not schedule_cfg.get("enabled", False):
             return
 
+        state = self.job_queue.get_job(project_id)
+        if state.get("schedule_override_active"):
+            return
+
         windows = schedule_cfg.get("windows", [])
         if not windows:
             return
@@ -674,6 +678,9 @@ class Pipeline:
             return
 
         def schedule_open() -> bool:
+            current_state = self.job_queue.get_job(project_id)
+            if current_state.get("schedule_override_active"):
+                return True
             self.config = self._load_config()
             current = self.config.get("schedule", {})
             if not current.get("enabled", False):
@@ -687,7 +694,7 @@ class Pipeline:
                 for win in current_windows
             )
 
-        managed_voice_server = self._voice_server_proc is not None
+        managed_voice_server = getattr(self, "_voice_server_proc", None) is not None
         if managed_voice_server:
             # A schedule pause may last hours. Release the GPU instead of
             # keeping the local TTS model resident while no work is allowed.
@@ -697,7 +704,7 @@ class Pipeline:
             PipelineStage.PAUSED_SCHEDULED,
             "outside configured working hours",
             schedule_open,
-            30,
+            2,
         )
         if managed_voice_server:
             self._start_voice_server()
@@ -962,7 +969,19 @@ class Pipeline:
 
             self._check_stop(project_id)
             state = self.job_queue.get_job(project_id)
-            if not state.get("bootstrapping_completed", False):
+            cast_path = project_dir / "voice_cast.json"
+            needs_bootstrap = (
+                not state.get("bootstrapping_completed", False)
+                or bool(state.get("force_voice_regeneration", False))
+            )
+            if cast_path.exists():
+                try:
+                    cast_data = json.loads(cast_path.read_text(encoding="utf-8"))
+                    if any(not v.get("ready") for v in cast_data.get("voices", {}).values()):
+                        needs_bootstrap = True
+                except Exception:
+                    needs_bootstrap = True
+            if needs_bootstrap:
                 self._run_voice_bootstrap(project_id, project_dir)
 
             state = self.job_queue.get_job(project_id)
@@ -998,11 +1017,6 @@ class Pipeline:
                 else getattr(incremental_cfg, "enabled", False)
             )
             selection = state.get("active_generation_chapter_selection")
-
-            if incremental_enabled and selection is not None:
-                raise RuntimeError(
-                    "Incremental delivery cannot run with a manual chapter selection"
-                )
 
             if incremental_enabled:
                 self._run_incremental_delivery(project_id, project_dir, current_stage)
@@ -1197,6 +1211,9 @@ class Pipeline:
             logger.exception("Could not validate script dependency fingerprints")
             return False
 
+    def _joint_script_analysis_enabled(self) -> bool:
+        return bool(self.config.get("script", {}).get("joint_analysis", False))
+
     def _run_script_director(self, project_id: str, project_dir: Path) -> None:
         """Run Stage ②: LLM character analysis + script generation."""
         self._update_stage(project_id, PipelineStage.SCRIPTING)
@@ -1235,38 +1252,47 @@ class Pipeline:
                 reuse_characters = chars_meta.get("fingerprint") == chars_fingerprint
             except Exception:
                 reuse_characters = False
-        if reuse_characters:
-            from shared.models import CharacterRegistry
-            registry = CharacterRegistry.model_validate_json(chars_path.read_text(encoding="utf-8"))
+
+        joint_discovery = self._joint_script_analysis_enabled()
+        def _analyzer_check():
+            self._check_stop(project_id)
+            self._check_schedule(project_id)
+            self._check_deployment_pause(project_id)
+
+        if joint_discovery:
+            if reuse_characters:
+                from shared.models import CharacterRegistry
+                registry = CharacterRegistry.model_validate_json(chars_path.read_text(encoding="utf-8"))
+            else:
+                registry = self.character_analyzer.create_joint_seed_registry(book)
         else:
-            def _analyzer_check():
-                self._check_stop(project_id)
-                self._check_schedule(project_id)
-                self._check_deployment_pause(project_id)
+            if reuse_characters:
+                from shared.models import CharacterRegistry
+                registry = CharacterRegistry.model_validate_json(chars_path.read_text(encoding="utf-8"))
+            else:
+                chars_ckpt_path = project_dir / "characters.checkpoint.json"
+                registry = self.character_analyzer.analyze(
+                    book,
+                    check_callback=_analyzer_check,
+                    checkpoint_path=chars_ckpt_path,
+                    checkpoint_fingerprint=chars_fingerprint,
+                )
+                pass1_elapsed = time.time() - t0
 
-            chars_ckpt_path = project_dir / "characters.checkpoint.json"
-            registry = self.character_analyzer.analyze(
-                book,
-                check_callback=_analyzer_check,
-                checkpoint_path=chars_ckpt_path,
-                checkpoint_fingerprint=chars_fingerprint,
-            )
-            pass1_elapsed = time.time() - t0
-
-            atomic_write_text(chars_path, registry.model_dump_json(indent=2))
-            atomic_write_json(
-                chars_meta_path,
-                {"fingerprint": chars_fingerprint},
-            )
-            self.job_queue.update_job(
-                project_id,
-                {
-                    "scripted_chapters": [],
-                    "bootstrapping_completed": False,
-                    "character_analysis_fingerprint": chars_fingerprint,
-                    "force_character_analysis": False,
-                },
-            )
+                atomic_write_text(chars_path, registry.model_dump_json(indent=2))
+                atomic_write_json(
+                    chars_meta_path,
+                    {"fingerprint": chars_fingerprint},
+                )
+                self.job_queue.update_job(
+                    project_id,
+                    {
+                        "scripted_chapters": [],
+                        "bootstrapping_completed": False,
+                        "character_analysis_fingerprint": chars_fingerprint,
+                        "force_character_analysis": False,
+                    },
+                )
 
         scripts_dir = project_dir / "script"
         scripts_dir.mkdir(exist_ok=True)
@@ -1372,7 +1398,37 @@ class Pipeline:
             progress_callback=on_chapter_scripted,
             chapter_start_callback=on_chapter_start,
             chunk_progress_callback=on_script_chunk,
+            allow_character_discovery=joint_discovery,
         )
+
+        if joint_discovery:
+            reconcile_started = time.time()
+            registry, speaker_remap = self.character_analyzer.finalize_joint_registry(
+                registry,
+                book,
+                check_callback=_analyzer_check if not reuse_characters else None,
+            )
+            self.script_generator.remap_reconciled_speakers(
+                chapter_scripts,
+                registry,
+                speaker_remap,
+            )
+            self.character_analyzer._assign_voice_ids(registry.characters)
+            atomic_write_text(chars_path, registry.model_dump_json(indent=2))
+            atomic_write_json(
+                chars_meta_path,
+                {"fingerprint": chars_fingerprint},
+            )
+            self.job_queue.update_job(
+                project_id,
+                {
+                    "scripted_chapters": [c.chapter_number for c in chapter_scripts],
+                    "bootstrapping_completed": False,
+                    "character_analysis_fingerprint": chars_fingerprint,
+                    "force_character_analysis": False,
+                },
+            )
+
         escalation = self.external_validator.resolve_attributions(
             project_dir=project_dir,
             chapters=chapter_scripts,
@@ -1422,6 +1478,7 @@ class Pipeline:
             project_dir,
             {
                 "event": "script_generation",
+                "director_mode": "joint" if joint_discovery else "two_pass",
                 "pass1_seconds": round(pass1_elapsed, 6),
                 "pass2_seconds": round(max(0.0, total_elapsed - pass1_elapsed), 6),
                 "total_seconds": round(total_elapsed, 6),
@@ -1593,6 +1650,7 @@ class Pipeline:
                 if not profile:
                     continue
 
+                profile["ready"] = True
                 profile["quality"] = {
                     "transcription_wer": result.transcription_wer,
                     "acoustic_metrics": result.acoustic_metrics,
@@ -1679,10 +1737,13 @@ class Pipeline:
             for path in script_files
         }
         chapter_numbers = list(scripts_by_number)
+        state = self.job_queue.get_job(project_id)
+        selection = state.get("active_generation_chapter_selection")
+        if selection is not None:
+            selected_set = set(selection)
+            chapter_numbers = [num for num in chapter_numbers if num in selected_set]
         if not chapter_numbers:
             raise RuntimeError("Incremental delivery requires at least one chapter script")
-
-        state = self.job_queue.get_job(project_id)
         incremental_cfg = state.get("incremental_delivery") or {}
         if isinstance(incremental_cfg, dict):
             batch_size = int(incremental_cfg.get("batch_size") or 5)
@@ -1837,7 +1898,15 @@ class Pipeline:
             {"active_delivery_id": None, "active_delivery_chapters": []},
         )
         # Produce the full export once every batch has been published
-        self._run_export(project_id, project_dir)
+        if selection is not None:
+            self._run_export(
+                project_id,
+                project_dir,
+                partial=True,
+                chapter_selection=set(selection),
+            )
+        else:
+            self._run_export(project_id, project_dir)
 
     def _run_generation(self, project_id: str, project_dir: Path, chapter_numbers: set[int] | None = None) -> None:
         """Run Stages ④-⑤: TTS generation with quality validation."""
@@ -2166,7 +2235,12 @@ class Pipeline:
                 )
                 expected_ids = {line.line_id for line in request_lines}
                 generated_ids = set(response.generated_line_ids)
-                failed_ids = set(response.failed_line_ids)
+                accepted_review_ids = {
+                    item_id
+                    for item_id, item in review_by_id.items()
+                    if item.get("disposition") in {"acceptable", "needs_remaster"}
+                }
+                failed_ids = set(response.failed_line_ids) - accepted_review_ids
                 if response.failed_validation > 0:
                     logger.warning(
                         "[AudioGeneration] Chapter %d generated %d/%d lines with %d WER validation warning(s) logged to database",
@@ -2175,13 +2249,16 @@ class Pipeline:
                         len(request_lines),
                         response.failed_validation,
                     )
-                if (
-                    external_review_ids
-                ):
+                active_review_ids = {
+                    result.line_id
+                    for result in response.quality_results
+                    if result.selected and result.manual_review_required
+                }
+                if active_review_ids:
                     raise _WaitingForReview(
-                        external_review_ids,
+                        sorted(active_review_ids),
                         (
-                            f"{len(external_review_ids)} audio segment(s) require review "
+                            f"{len(active_review_ids)} audio segment(s) require review "
                             "before mastering."
                         ),
                     )
@@ -2807,7 +2884,9 @@ class Pipeline:
             cast_data = json.loads(cast_file.read_text(encoding="utf-8"))
             for voice_id, profile in cast_data.get("voices", {}).items():
                 for assigned_speaker in profile.get("assigned_characters", []):
-                    speaker_to_voice[assigned_speaker] = voice_id
+                    speaker_id = assigned_speaker.get("id") if isinstance(assigned_speaker, dict) else assigned_speaker
+                    if speaker_id:
+                        speaker_to_voice[speaker_id] = voice_id
 
         for line in lines:
             spoken_text = apply_pronunciations(line.text, pronunciation_dict)

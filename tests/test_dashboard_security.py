@@ -61,6 +61,16 @@ class DashboardSecurityTests(unittest.TestCase):
             )
         )
 
+    def test_tailscale_cgnat_requests_do_not_need_a_token(self):
+        self.assertTrue(is_private_client("100.106.68.80"))
+        self.assertTrue(
+            dashboard_request_authorized(
+                client_host="100.106.68.80",
+                configured_token="",
+                presented_token=None,
+            )
+        )
+
     def test_reserved_documentation_range_is_not_trusted_lan(self):
         self.assertFalse(is_private_client("192.0.2.10"))
 

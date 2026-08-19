@@ -397,6 +397,9 @@ function activateDetailTab(targetId, remember = false) {
         content.hidden = !active;
     });
     if (remember) localStorage.setItem('projectDetailTab', targetId);
+    if (targetId === 'tab-characters' && state.currentProjectId && window.ScriptViewer) {
+        window.ScriptViewer.refreshVoices(state.currentProjectId);
+    }
 }
 
 function handleTabKeydown(event) {
@@ -555,9 +558,9 @@ async function fetchProjectDetails(projectId, isPoll = false) {
         // Let pipeline.js and script-viewer.js update their parts
         if (window.PipelineManager) {
             const stage = (data.status || '').toLowerCase();
-            const activeStages = ['extracting', 'scripting', 'bootstrapping', 'generating', 'validating', 'mastering', 'exporting', 'pausing', 'paused_scheduled', 'deploy_paused'];
-            const isDoneStage = ['complete', 'completed', 'selection_complete', 'paused', 'error'].includes(stage);
-            const isRunning = (data.running === true || activeStages.includes(stage)) && !isDoneStage;
+            const activeStages = ['extracting', 'scripting', 'bootstrapping', 'generating', 'validating', 'mastering', 'exporting', 'pausing'];
+            const isPausedOrDone = ['complete', 'completed', 'selection_complete', 'paused', 'paused_scheduled', 'deploy_paused', 'waiting_for_review', 'voice_review', 'error'].includes(stage);
+            const isRunning = (data.running === true || activeStages.includes(stage)) && !isPausedOrDone;
             const coarseStatus = isRunning ? 'running' : stage;
             window.LogConsole?.setProjectRunning(isRunning);
             
@@ -565,8 +568,16 @@ async function fetchProjectDetails(projectId, isPoll = false) {
             window.PipelineManager.toggleControls(data.status, isRunning, data);
         }
         
-        if (window.ScriptViewer && !isPoll) {
-            window.ScriptViewer.loadData(projectId);
+        if (window.ScriptViewer) {
+            if (!isPoll) {
+                window.ScriptViewer.loadData(projectId);
+            } else {
+                const charTab = document.getElementById('tab-characters');
+                const isCharTabActive = charTab && !charTab.hidden && charTab.classList.contains('active');
+                if (isCharTabActive && ['bootstrapping', 'voice_review'].includes(stage)) {
+                    window.ScriptViewer.refreshVoices(projectId);
+                }
+            }
         }
         return data;
         
@@ -752,12 +763,21 @@ async function startPipeline() {
         if (window.PipelineManager) {
             window.PipelineManager.toggleControls('generating', true);
         }
-        const response = await fetch(`api/projects/${state.currentProjectId}/start`, { method: 'POST' });
+        const response = await fetch(
+            `api/projects/${state.currentProjectId}/start?override_schedule=true`,
+            { method: 'POST' }
+        );
         if (!response.ok) {
             const err = await response.json();
             throw new Error(err.detail || 'Failed to start pipeline');
         }
-        showToast('Pipeline started', 'info');
+        const result = await response.json();
+        showToast(
+            result.schedule_overridden
+                ? 'Pipeline started — working-hours schedule overridden for this run'
+                : 'Pipeline started',
+            'info'
+        );
         setTimeout(() => fetchProjectDetails(state.currentProjectId), 500);
     } catch (error) {
         showToast(error.message, 'error');
@@ -769,12 +789,21 @@ async function pausePipeline() {
     if (!state.currentProjectId) return;
     
     try {
-        const response = await fetch(`api/projects/${state.currentProjectId}/stop`, { method: 'POST' });
+        const response = await fetch(
+            `api/projects/${state.currentProjectId}/stop?resume_on_schedule=true`,
+            { method: 'POST' }
+        );
         if (!response.ok) {
             const err = await response.json();
             throw new Error(err.detail || 'Failed to pause pipeline');
         }
-        showToast('Pipeline pausing...', 'info');
+        const result = await response.json();
+        showToast(
+            result.will_resume_on_schedule
+                ? 'Pipeline pausing — it will resume during working hours'
+                : 'Pipeline pausing...',
+            'info'
+        );
         // The pipeline thread might take a moment to gracefully stop.
         // Wait briefly before refreshing to ensure the UI reflects the PAUSED state.
         setTimeout(() => fetchProjectDetails(state.currentProjectId), 1000);
@@ -886,19 +915,28 @@ function confidenceBand(value) {
     return {key: 'low', label: `Low · ${Math.round(value * 100)}%`};
 }
 
-async function fetchAndRenderAttention(projectId, project = state.currentProject) {
+attentionState.expandedCandidates = attentionState.expandedCandidates || new Set();
+
+async function fetchAndRenderAttention(projectId, project = state.currentProject, force = false) {
     try {
         const response = await fetch(`api/projects/${encodeURIComponent(projectId)}/reviews`);
         if (!response.ok || state.currentProjectId !== projectId) return;
         const newProject = attentionState.projectId !== projectId;
-        attentionState.data = await response.json();
+        const rawJson = await response.text();
+        const data = JSON.parse(rawJson);
+        const dataChanged = newProject || attentionState.rawJson !== rawJson;
+        attentionState.rawJson = rawJson;
+        attentionState.data = data;
         attentionState.projectId = projectId;
         if (newProject) {
             document.getElementById('attention-status').value =
                 attentionState.data.blocking_count ? 'blocking' : 'all';
+            attentionState.expandedCandidates = new Set();
         }
         state.lastAttentionRefresh = Date.now();
-        renderAttentionInbox(project);
+        if (dataChanged || force) {
+            renderAttentionInbox(project);
+        }
     } catch (error) {
         console.warn('Could not refresh attention inbox', error);
     }
@@ -906,17 +944,41 @@ async function fetchAndRenderAttention(projectId, project = state.currentProject
 
 function renderAttentionInbox(project = state.currentProject) {
     const panel = document.getElementById('attention-panel');
+    const details = document.getElementById('attention-details');
+    const kicker = document.getElementById('attention-kicker');
     const data = attentionState.data;
     if (!panel || !data || (!data.total_count && project?.status !== 'waiting_for_review')) {
         panel?.classList.add('hidden');
         return;
     }
     panel.classList.remove('hidden');
-    document.getElementById('attention-summary').textContent = data.blocking_count
-        ? `${data.blocking_count} blocking decision${data.blocking_count === 1 ? '' : 's'}; the pipeline resumes automatically after the last one.`
-        : `${data.total_count} non-blocking or resolved item${data.total_count === 1 ? '' : 's'}.`;
+    const isWaitingForReview = project?.status === 'waiting_for_review';
+    const hasBlocking = (data.blocking_count || 0) > 0;
+    
+    if (hasBlocking || isWaitingForReview) {
+        panel.classList.remove('attention-panel-resolved');
+        if (kicker) {
+            kicker.textContent = isWaitingForReview ? 'Action required' : 'Attention required';
+            kicker.className = 'attention-kicker';
+        }
+        document.getElementById('attention-summary').textContent = `${data.blocking_count} blocking decision${data.blocking_count === 1 ? '' : 's'}; the pipeline resumes automatically after the last one.`;
+        if (details && !details.dataset.userToggled) {
+            details.open = true;
+        }
+    } else {
+        panel.classList.add('attention-panel-resolved');
+        if (kicker) {
+            kicker.textContent = 'Optional / Reference';
+            kicker.className = 'attention-kicker attention-kicker-optional';
+        }
+        document.getElementById('attention-summary').textContent = `✓ 0 blocking issues • ${data.total_count} non-blocking or resolved item${data.total_count === 1 ? '' : 's'} (click to view)`;
+        if (details && !details.dataset.userToggled) {
+            details.open = false;
+        }
+    }
+    
     const resume = document.getElementById('btn-resume-after-review');
-    resume.classList.toggle('hidden', project?.status !== 'waiting_for_review' || data.blocking_count !== 0);
+    resume.classList.toggle('hidden', !isWaitingForReview || data.blocking_count !== 0);
     const type = document.getElementById('attention-type').value;
     const status = document.getElementById('attention-status').value;
     const confidence = document.getElementById('attention-confidence').value;
@@ -932,34 +994,130 @@ function renderAttentionInbox(project = state.currentProject) {
     document.getElementById('attention-list').innerHTML = rows.length ? rows.map(item => {
         const band = confidenceBand(item.confidence);
         const trail = item.details?.decision_trail || [];
+        const isCandidatesExpanded = attentionState.expandedCandidates.has(item.item_id);
         return `<article class="attention-item ${item.blocking ? 'blocking' : ''}" data-line-id="${escapeHtml(item.item_id)}">
             <div class="attention-item-head"><strong>${escapeHtml(item.title)}</strong><span class="confidence-band confidence-${band.key}">${escapeHtml(band.label)}</span></div>
+            ${item.details?.text ? `
+                <div class="attention-line-quote">
+                    <strong>${escapeHtml(item.details?.speaker ? (item.details.speaker.charAt(0).toUpperCase() + item.details.speaker.slice(1)) : 'Speaker')}:</strong>
+                    <span>“${escapeHtml(item.details.text)}”</span>
+                </div>
+            ` : ''}
             <p>${escapeHtml(item.reason || '')}</p>
             <div class="attention-item-actions">
-                ${item.category === 'audio' ? `<audio controls preload="none" src="${escapeHtml(item.details?.audio_url || '')}"></audio><button class="btn btn-ghost btn-sm load-candidates">Compare attempts</button>` : ''}
+                ${item.category === 'audio' ? `
+                    <audio controls preload="none" src="${escapeHtml(item.details?.audio_url || '')}"></audio>
+                    <button class="btn btn-success btn-sm accept-audio-review" data-line-id="${escapeHtml(item.item_id)}">✓ Approve audio</button>
+                    <button class="btn btn-danger btn-sm regen-audio-review" data-line-id="${escapeHtml(item.item_id)}">↻ Regenerate</button>
+                    ${!isCandidatesExpanded ? `<button class="btn btn-ghost btn-sm load-candidates">Compare attempts</button>` : ''}
+                ` : ''}
                 ${item.category === 'attribution' ? `<button class="btn btn-ghost btn-sm reveal-context">Reveal in script editor</button>` : ''}
             </div>
-            <div class="candidate-comparison hidden"></div>
+            <div class="candidate-comparison ${isCandidatesExpanded ? '' : 'hidden'}"></div>
             ${trail.length ? `<details class="decision-trail"><summary>Decision trail (${trail.length})</summary>${trail.map(step => `<div><strong>${escapeHtml(step.provider || step.resolver || 'validator')}</strong> · ${escapeHtml(step.decision || 'unknown')} · ${step.confidence == null ? 'n/a' : `${Math.round(step.confidence * 100)}%`}<br><small>${escapeHtml(step.reason || '')}</small></div>`).join('')}</details>` : ''}
         </article>`;
     }).join('') : '<div class="review-complete-message">No items match these filters.</div>';
     document.getElementById('attention-page').textContent = `Page ${attentionState.page} of ${pages} · ${filtered.length} items`;
     document.getElementById('attention-prev').disabled = attentionState.page <= 1;
     document.getElementById('attention-next').disabled = attentionState.page >= pages;
+
+    // Load any candidate comparisons that were already expanded
+    rows.forEach(item => {
+        if (attentionState.expandedCandidates.has(item.item_id)) {
+            const row = panel.querySelector(`[data-line-id="${CSS.escape(item.item_id)}"]`);
+            if (row) {
+                const target = row.querySelector('.candidate-comparison');
+                if (target && !target.dataset.loaded) {
+                    target.dataset.loaded = 'true';
+                    fetch(`api/projects/${encodeURIComponent(attentionState.projectId)}/segments/${encodeURIComponent(item.item_id)}/candidates`)
+                        .then(res => res.ok ? res.json() : {candidates: []})
+                        .then(payload => {
+                            target.innerHTML = payload.candidates.length ? payload.candidates.map((candidate, index) => `<div><strong>${index === 0 ? 'Recommended' : 'Alternative'} · score ${Number(candidate.score).toFixed(1)}</strong><audio controls preload="metadata" src="${escapeHtml(candidate.audio_url)}"></audio><details><summary>Metrics and rationale</summary><pre>${escapeHtml(JSON.stringify(candidate.quality, null, 2))}</pre></details></div>`).join('') : '<small>No retained alternative is available yet.</small>';
+                        });
+                }
+            }
+        }
+    });
+
+    panel.querySelectorAll('.accept-audio-review').forEach(button => button.addEventListener('click', async () => {
+        const row = button.closest('.attention-item');
+        const lineId = row.dataset.lineId;
+        button.disabled = true;
+        button.textContent = 'Approving…';
+        try {
+            const response = await fetch(`api/projects/${encodeURIComponent(attentionState.projectId)}/quality/review`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    item_type: 'segment',
+                    item_id: lineId,
+                    disposition: 'acceptable',
+                    note: 'Approved in Review Inbox'
+                })
+            });
+            if (!response.ok) throw new Error(await response.text());
+            const saved = await response.json();
+            showToast(saved.auto_resuming ? 'Audio approved. Pipeline is resuming automatically.' : 'Audio approved.', 'success');
+            await fetchAndRenderAttention(attentionState.projectId, state.currentProject, true);
+            if (state.currentProjectId) fetchProjectDetails(state.currentProjectId);
+        } catch (error) {
+            showToast(`Could not approve: ${error.message}`, 'error');
+            button.disabled = false;
+            button.textContent = '✓ Approve audio';
+        }
+    }));
+    panel.querySelectorAll('.regen-audio-review').forEach(button => button.addEventListener('click', async () => {
+        const row = button.closest('.attention-item');
+        const lineId = row.dataset.lineId;
+        if (!confirm('Are you sure you want to discard this segment and regenerate it?')) return;
+        button.disabled = true;
+        button.textContent = 'Requesting…';
+        try {
+            const response = await fetch(`api/projects/${encodeURIComponent(attentionState.projectId)}/quality/review`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    item_type: 'segment',
+                    item_id: lineId,
+                    disposition: 'regenerate',
+                    note: 'Regeneration requested in Review Inbox'
+                })
+            });
+            if (!response.ok) throw new Error(await response.text());
+            showToast('Regeneration requested. Re-synthesizing segment...', 'info');
+            await fetchAndRenderAttention(attentionState.projectId, state.currentProject, true);
+            if (state.currentProjectId) fetchProjectDetails(state.currentProjectId);
+        } catch (error) {
+            showToast(`Could not request regeneration: ${error.message}`, 'error');
+            button.disabled = false;
+            button.textContent = '↻ Regenerate';
+        }
+    }));
     panel.querySelectorAll('.load-candidates').forEach(button => button.addEventListener('click', async () => {
         const row = button.closest('.attention-item');
+        const lineId = row.dataset.lineId;
         const target = row.querySelector('.candidate-comparison');
         button.disabled = true;
-        const response = await fetch(`api/projects/${encodeURIComponent(attentionState.projectId)}/segments/${encodeURIComponent(row.dataset.lineId)}/candidates`);
-        const payload = response.ok ? await response.json() : {candidates: []};
-        target.innerHTML = payload.candidates.length ? payload.candidates.map((candidate, index) => `<div><strong>${index === 0 ? 'Recommended' : 'Alternative'} · score ${Number(candidate.score).toFixed(1)}</strong><audio controls preload="metadata" src="${escapeHtml(candidate.audio_url)}"></audio><details><summary>Metrics and rationale</summary><pre>${escapeHtml(JSON.stringify(candidate.quality, null, 2))}</pre></details></div>`).join('') : '<small>No retained alternative is available yet.</small>';
-        target.classList.remove('hidden');
-        button.remove();
+        attentionState.expandedCandidates.add(lineId);
+        target.dataset.loaded = 'true';
+        try {
+            const response = await fetch(`api/projects/${encodeURIComponent(attentionState.projectId)}/segments/${encodeURIComponent(lineId)}/candidates`);
+            const payload = response.ok ? await response.json() : {candidates: []};
+            target.innerHTML = payload.candidates.length ? payload.candidates.map((candidate, index) => `<div><strong>${index === 0 ? 'Recommended' : 'Alternative'} · score ${Number(candidate.score).toFixed(1)}</strong><audio controls preload="metadata" src="${escapeHtml(candidate.audio_url)}"></audio><details><summary>Metrics and rationale</summary><pre>${escapeHtml(JSON.stringify(candidate.quality, null, 2))}</pre></details></div>`).join('') : '<small>No retained alternative is available yet.</small>';
+            target.classList.remove('hidden');
+            button.remove();
+        } catch (e) {
+            button.disabled = false;
+        }
     }));
     panel.querySelectorAll('.reveal-context').forEach(button => button.addEventListener('click', () => {
-        activateDetailTab('tab-script');
         const id = button.closest('.attention-item').dataset.lineId;
-        setTimeout(() => document.querySelector(`[data-line-id="${CSS.escape(id)}"]`)?.scrollIntoView({behavior: 'smooth', block: 'center'}), 50);
+        activateDetailTab('tab-script');
+        if (window.ScriptViewer && typeof window.ScriptViewer.revealLine === 'function') {
+            window.ScriptViewer.revealLine(id);
+        } else {
+            setTimeout(() => document.querySelector(`[data-line-id="${CSS.escape(id)}"]`)?.scrollIntoView({behavior: 'smooth', block: 'center'}), 150);
+        }
     }));
 }
 
@@ -1280,10 +1438,11 @@ function renderChapterList(project) {
     const mastered = new Set(project.mastered_chapters || []);
     const currentScript = project.current_script_chapter;
     const currentGen = project.current_gen_chapter;
-    const selectedNumbers = project.active_generation_chapter_selection
-        || project.generation_chapter_selection;
-    const selection = selectedNumbers ? new Set(selectedNumbers) : null;
     const selectionLocked = project.running === true;
+    const selectedNumbers = selectionLocked
+        ? project.active_generation_chapter_selection
+        : project.generation_chapter_selection;
+    const selection = selectedNumbers == null ? null : new Set(selectedNumbers);
     const detailsMap = new Map(
         (project.chapter_details || []).map(detail => [detail.number, detail])
     );
@@ -1293,7 +1452,7 @@ function renderChapterList(project) {
 
     for (let chapter = 1; chapter <= total; chapter++) {
         const detail = detailsMap.get(chapter) || {};
-        const title = detail.title || `Chapter ${chapter}`;
+        const title = `Chapter ${chapter}`;
         const totalLines = detail.total_lines || 0;
         const generatedLines = detail.lines_generated || 0;
         let percent = detail.progress_percent || 0;
@@ -1309,8 +1468,8 @@ function renderChapterList(project) {
         if (mastered.has(chapter)) {
             statusKey = 'done';
             statusText = 'Mastered';
-            statusBackground = 'rgba(16, 185, 129, 0.15)';
-            statusColor = '#34d399';
+            statusBackground = 'rgba(168, 85, 247, 0.15)';
+            statusColor = '#c084fc';
             percent = 100;
             download = `<a class="chapter-download" data-server-download href="api/projects/${encodeURIComponent(project.project_id)}/download/chapter/${chapter}" target="_blank" rel="noopener" aria-label="Download chapter ${chapter} mastered WAV" title="Download mastered chapter WAV">↓</a>`;
         } else if (generated.has(chapter)) {
@@ -1365,7 +1524,7 @@ function renderChapterList(project) {
         row.innerHTML = `
             <input type="checkbox" class="chapter-select-cb" data-ch="${chapter}"
                 ${isChecked ? 'checked' : ''} ${selectionLocked ? 'disabled' : ''}
-                aria-label="Include chapter ${chapter}, ${escapeHtml(title)}, in the next audio batch"
+                aria-label="Include ${escapeHtml(title)} in the next audio batch"
                 title="${selectionLocked ? 'The active batch is locked while the pipeline runs' : 'Include this chapter in the next audio batch'}">
             <div class="chapter-title-wrap">
                 <span class="chapter-number">${chapter}</span>
@@ -1489,27 +1648,31 @@ function updateSelectionSummary(project = null) {
 }
 
 function renderWorkStatus(project) {
-    const details = project.chapter_details || [];
-    const detailMap = new Map(details.map(item => [item.number, item]));
-    const selected = project.active_generation_chapter_selection
-        || project.generation_chapter_selection
-        || Array.from({length: project.total_chapters || 0}, (_, index) => index + 1);
-    const selectedSet = new Set(selected);
-    const mastered = new Set(project.mastered_chapters || []);
-    const generated = new Set(project.generated_chapters || []);
-    const currentChapter = project.current_gen_chapter || project.current_script_chapter;
-    const currentDetail = detailMap.get(currentChapter) || {};
-    const status = String(project.status || 'created').toLowerCase();
     const terminalStatuses = new Set([
         'paused', 'pausing', 'paused_scheduled', 'deploy_paused', 'waiting_for_review', 'error',
         'complete', 'completed', 'selection_complete'
     ]);
+    const details = project.chapter_details || [];
+    const detailMap = new Map(details.map(item => [item.number, item]));
+    const savedSelection = project.running === true
+        ? project.active_generation_chapter_selection
+        : project.generation_chapter_selection;
+    const selected = savedSelection == null
+        ? Array.from({length: project.total_chapters || 0}, (_, index) => index + 1)
+        : savedSelection;
+    const selectedSet = new Set(selected);
+    const mastered = new Set(project.mastered_chapters || []);
+    const generated = new Set(project.generated_chapters || []);
+    const totalSelected = selected.length;
+    const masteredInBatch = selected.filter(ch => mastered.has(ch)).length;
+    const generatedInBatch = selected.filter(ch => generated.has(ch)).length;
+    const currentChapter = project.current_gen_chapter || project.current_script_chapter;
+    const currentDetail = detailMap.get(currentChapter) || {};
+    const status = String(project.status || 'created').toLowerCase();
     const stage = terminalStatuses.has(status)
         ? status
         : String(project.active_stage || status).toLowerCase();
-    const chapterTitle = currentDetail.title || (
-        currentChapter ? `Chapter ${currentChapter}` : ''
-    );
+    const chapterTitle = currentChapter ? `Chapter ${currentChapter}` : '';
     const workProgress = project.work_progress || {};
     const progress = project.progress || null;
     const totalBookChapters = project.total_chapters || 0;
@@ -1892,17 +2055,16 @@ function deriveWorkProgress(lines, totalChapters) {
         if (match) {
             const current = Number(match[1]);
             const total = Number(match[2]) || totalChapters;
-            const title = match[3];
             progress.phase = 'chapter_scripting';
             progress.stagePercent = 20 + Math.round(80 * (current - 1) / Math.max(total, 1));
-            progress.current = `Scripting · Chapter ${current} of ${total}: ${title}`;
-            progress.detail = `Annotating dialogue, speaker attribution, and scene directions for ${title}.`;
+            progress.current = `Scripting · Chapter ${current} of ${total}`;
+            progress.detail = `Annotating dialogue, speaker attribution, and scene directions for Chapter ${current}.`;
             progress.position = `${current} / ${total}`;
             progress.chapterLabel = 'Scripting chapter';
             progress.tokens = null;
             progress.chapterIndex = current;
             progress.chapterTotal = total;
-            progress.chapterTitle = title;
+            progress.chapterTitle = `Chapter ${current}`;
             continue;
         }
 

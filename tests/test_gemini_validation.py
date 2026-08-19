@@ -7,6 +7,11 @@ from types import SimpleNamespace
 
 from brain.orchestrator.pipeline import Pipeline
 from brain.validators.gemini_validation import GeminiValidationService
+from brain.validators.gemini_validation import (
+    ExtractionBatch,
+    _extract_json,
+    _gemini_response_schema,
+)
 from shared.constants import ValidationStatus
 from shared.models import QualityResult, ScriptChapter, ScriptLine
 
@@ -49,6 +54,67 @@ def _service(root: Path) -> GeminiValidationService:
 
 
 class GeminiAttributionValidationTests(unittest.TestCase):
+    def test_web_json_parser_accepts_trailing_explanation(self) -> None:
+        self.assertEqual(
+            _extract_json('{"decisions": []}\nDone.'),
+            {"decisions": []},
+        )
+
+    def test_gemini_schema_inlines_pydantic_definitions(self) -> None:
+        schema = _gemini_response_schema(ExtractionBatch.model_json_schema())
+        encoded = str(schema)
+        self.assertNotIn("$defs", encoded)
+        self.assertNotIn("$ref", encoded)
+        self.assertEqual(
+            schema["properties"]["decisions"]["items"]["type"],
+            "object",
+        )
+
+    def test_extraction_uses_high_confidence_api_result_and_bounded_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            service = _service(root)
+            service.api = _FakeApi([{"decisions": [{
+                "item_id": "appendix-1",
+                "decision": "include",
+                "confidence": 0.96,
+                "reason": "The appendix is continuous narrative.",
+            }]}])
+            service.web = _FakeWeb()
+            result = service.resolve_extraction_sections(
+                project_dir=root,
+                sections=[{
+                    "item_id": "appendix-1", "href": "appendix.xhtml",
+                    "title": "Appendix: The Trial", "word_count": 2400,
+                    "semantics": ["appendix"], "decision": "exclude",
+                    "confidence": 0.7, "classifier_excerpt": "x" * 900,
+                }],
+            )
+            self.assertEqual(result["decisions"]["appendix-1"]["decision"], "include")
+            prompt = service.api.calls[0]["prompt"]
+            self.assertLess(prompt.count("x"), 500)
+            self.assertEqual(service.web.calls, [])
+
+    def test_extraction_browser_fallback_reuses_extraction_conversation_purpose(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            service = _service(root)
+            abstain = {"decisions": [{
+                "item_id": "section-1", "decision": "abstain",
+                "confidence": 0.7, "reason": "Unclear.",
+            }]}
+            service.api = _FakeApi([abstain, abstain])
+            service.web = _FakeWeb([{"decisions": [{
+                "item_id": "section-1", "decision": "reference",
+                "confidence": 0.95, "reason": "Glossary-like reference material.",
+            }]}])
+            result = service.resolve_extraction_sections(
+                project_dir=root,
+                sections=[{"item_id": "section-1", "title": "Names", "word_count": 800}],
+            )
+            self.assertEqual(result["decisions"]["section-1"]["decision"], "reference")
+            self.assertEqual(service.web.calls[0][1], "extraction")
+
     def test_high_confidence_api_decision_resolves_and_records_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

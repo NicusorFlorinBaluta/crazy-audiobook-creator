@@ -35,6 +35,7 @@ def audit_book_attribution(
             continue
         owners = _fragment_owners(script)
         fragments = ScriptGenerator._split_into_fragment_spans(chapter.text)
+        chapter_speakers = ScriptGenerator._get_chapter_scoped_speakers(chapter.text, registry)
         for index, fragment in enumerate(fragments):
             if not ScriptGenerator._is_dialogue_fragment(fragment.text):
                 continue
@@ -68,8 +69,13 @@ def audit_book_attribution(
                 )
                 continue
 
-            next_text = fragments[index + 1].text if index + 1 < len(fragments) else ""
-            prev_text = fragments[index - 1].text if index > 0 else ""
+            next_frag = fragments[index + 1] if index + 1 < len(fragments) else None
+            prev_frag = fragments[index - 1] if index > 0 else None
+            next_same_para = next_frag and "\n" not in chapter.text[fragment.end : next_frag.start]
+            prev_same_para = prev_frag and "\n" not in chapter.text[prev_frag.end : fragment.start]
+
+            next_text = next_frag.text if (next_frag and next_same_para) else ""
+            prev_text = prev_frag.text if (prev_frag and prev_same_para) else ""
             tag_text = (
                 next_text
                 if ScriptGenerator._is_pure_dialogue_tag(next_text)
@@ -200,6 +206,8 @@ def audit_book_attribution(
             gender_contradiction = (
                 evidence_gender is not None
                 and character is not None
+                and speaker != "narrator"
+                and kind != "non_spoken_quote"
                 and character.gender in (Gender.MALE, Gender.FEMALE)
                 and character.gender != evidence_gender
             )
@@ -219,6 +227,20 @@ def audit_book_attribution(
                         fragment.text,
                     )
                 )
+                continue
+
+            if speaker != "narrator" and speaker not in chapter_speakers:
+                issues.append(
+                    _issue(
+                        chapter.number,
+                        index,
+                        owner,
+                        "absent_character_in_chapter",
+                        f"Character '{speaker}' has no presence or mention in Chapter {chapter.number}",
+                        fragment.text,
+                    )
+                )
+                continue
 
     return {
         "audit_version": AUDIT_VERSION,

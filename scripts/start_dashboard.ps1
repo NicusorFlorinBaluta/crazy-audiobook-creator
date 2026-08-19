@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$PythonExecutable = "E:\PYTORC~1\my_venv\Scripts\python.exe"
+    [string]$PythonExecutable = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -48,37 +48,28 @@ function Test-PythonLauncher {
     }
 }
 
-$venvRoot = Split-Path -Parent (Split-Path -Parent $PythonExecutable)
 $configuredFallback = $env:CRAZY_AUDIOBOOK_DASHBOARD_PYTHON
-$bundledFallback = Join-Path $env:USERPROFILE `
-    ".cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe"
+$projectVenvPython = Join-Path $projectRoot "venv\Scripts\python.exe"
+$voiceVenvPython = "E:\PYTORC~1\my_venv\Scripts\python.exe"
 $pythonCommand = Get-Command python -ErrorAction SilentlyContinue
+
 $candidates = @(
     $PythonExecutable,
+    $projectVenvPython,
     $configuredFallback,
-    $(if ($pythonCommand) { $pythonCommand.Source }),
-    $bundledFallback
+    $voiceVenvPython,
+    $(if ($pythonCommand) { $pythonCommand.Source })
 ) | Where-Object { $_ } | Select-Object -Unique
 
 $workingPython = $candidates |
     Where-Object { Test-PythonLauncher $_ } |
     Select-Object -First 1
 if (-not $workingPython) {
-    throw (
-        "No working Python interpreter was found. Set " +
-        "CRAZY_AUDIOBOOK_DASHBOARD_PYTHON in .env to a Python 3.12 executable."
-    )
+    throw "No working Python interpreter was found."
 }
 $PythonExecutable = $workingPython
 
-# A portable fallback interpreter can reuse the already-installed packages in
-# the configured Voice virtual environment. Keep the repository first so local
-# application modules always resolve to this checkout.
 $pythonPaths = @($projectRoot)
-$sitePackages = Join-Path $venvRoot "Lib\site-packages"
-if (Test-Path -LiteralPath $sitePackages) {
-    $pythonPaths += $sitePackages
-}
 if ($env:PYTHONPATH) {
     $pythonPaths += $env:PYTHONPATH
 }

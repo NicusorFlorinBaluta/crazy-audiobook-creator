@@ -4,11 +4,15 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import httpx
 
-from brain.director.ollama_client import OllamaClient, OllamaError
+from brain.director.ollama_client import (
+    OllamaClient,
+    OllamaError,
+    OllamaGenerationLimitError,
+)
 from brain.orchestrator.pipeline import Pipeline
 
 
@@ -55,6 +59,38 @@ class _FailingHttpClient:
     def stream(self, *args, **kwargs):
         self.calls += 1
         raise httpx.ReadTimeout("stalled")
+
+    def close(self):
+        return None
+
+
+class _LinesResponse:
+    status_code = 200
+
+    def __init__(self, lines):
+        self.lines = lines
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def raise_for_status(self):
+        return None
+
+    def iter_lines(self):
+        yield from self.lines
+
+
+class _RecordingHttpClient:
+    def __init__(self, lines):
+        self.lines = lines
+        self.payloads = []
+
+    def stream(self, *args, **kwargs):
+        self.payloads.append(kwargs["json"])
+        return _LinesResponse(self.lines)
 
     def close(self):
         return None
@@ -186,7 +222,7 @@ class OllamaLifecycleTests(unittest.TestCase):
         with (
             patch(
                 "brain.director.ollama_client.time.monotonic",
-                side_effect=[0.0, 0.0, 11.0],
+                side_effect=[0.0, 0.0, 0.0, 11.0],
             ),
             self.assertRaises(OllamaError),
         ):
@@ -201,6 +237,98 @@ class OllamaLifecycleTests(unittest.TestCase):
 
         with self.assertRaisesRegex(KeyboardInterrupt, "cancelled"):
             client.generate("test")
+
+    def test_json_generation_enables_json_mode_and_bounded_output(self) -> None:
+        client = OllamaClient(max_output_tokens=321, max_retries=1)
+        client._client.close()
+        fake = _RecordingHttpClient([
+            json.dumps({
+                "message": {"content": '{"ok": true}'},
+                "done": True,
+                "done_reason": "stop",
+            })
+        ])
+        client._client = fake
+
+        self.assertEqual(client.generate_json("test"), {"ok": True})
+        self.assertEqual(fake.payloads[0]["format"], "json")
+        self.assertEqual(fake.payloads[0]["options"]["num_predict"], 321)
+
+    def test_stream_is_aborted_if_server_ignores_output_limit(self) -> None:
+        client = OllamaClient(max_output_tokens=3, max_retries=1)
+        client._client.close()
+        client._client = _RecordingHttpClient([
+            json.dumps({"message": {"content": "x"}, "done": False})
+            for _ in range(4)
+        ])
+
+        with self.assertRaisesRegex(
+            OllamaGenerationLimitError,
+            "3-token output limit",
+        ):
+            client.generate("test")
+
+        self.assertEqual(
+            client.last_generation_metrics["termination_reason"],
+            "output_token_limit",
+        )
+
+    def test_stream_is_aborted_at_wall_clock_limit(self) -> None:
+        client = OllamaClient(
+            max_output_tokens=100,
+            max_generation_seconds=5,
+            max_retries=1,
+        )
+        client._client.close()
+        client._client = _RecordingHttpClient([
+            json.dumps({"message": {"content": "x"}, "done": False})
+        ])
+
+        with (
+            patch(
+                "brain.director.ollama_client.time.monotonic",
+                side_effect=[0.0, 0.0, 1.0, 7.0],
+            ),
+            self.assertRaisesRegex(
+                OllamaGenerationLimitError,
+                "wall-clock limit",
+            ),
+        ):
+            client.generate("test")
+
+        self.assertEqual(
+            client.last_generation_metrics["termination_reason"],
+            "wall_clock_limit",
+        )
+
+    def test_repeated_tail_is_aborted(self) -> None:
+        client = OllamaClient(
+            max_output_tokens=1000,
+            repetition_window_chars=64,
+            repetition_count=3,
+            max_retries=1,
+        )
+        client._client.close()
+        client._client = _RecordingHttpClient([
+            json.dumps({
+                "message": {
+                    "content": "abcdefghijklmnopqrstuvwxyz0123456789!"
+                },
+                "done": False,
+            })
+            for _ in range(200)
+        ])
+
+        with self.assertRaisesRegex(
+            OllamaGenerationLimitError,
+            "repeated-output loop",
+        ):
+            client.generate("test")
+
+        self.assertEqual(
+            client.last_generation_metrics["termination_reason"],
+            "repetition_loop",
+        )
 
     def test_pipeline_stop_interrupts_ollama_immediately(self) -> None:
         pipeline = object.__new__(Pipeline)
@@ -220,6 +348,32 @@ class OllamaLifecycleTests(unittest.TestCase):
         self.assertTrue(pipeline._stop_flags["book"])
         self.assertTrue(pipeline.ollama.cancelled)
         self.assertTrue(pipeline.ollama.forced)
+
+    def test_manual_schedule_override_bypasses_schedule_pause(self) -> None:
+        pipeline = object.__new__(Pipeline)
+
+        class FakeQueue:
+            @staticmethod
+            def get_job(project_id):
+                return {"schedule_override_active": True}
+
+        pipeline.job_queue = FakeQueue()
+        pipeline.config = {
+            "schedule": {
+                "enabled": True,
+                "timezone": "Europe/Bucharest",
+                "windows": [{
+                    "days": ["Monday"],
+                    "start": "00:00",
+                    "end": "00:01",
+                }],
+            }
+        }
+        pipeline._pause_at_boundary = MagicMock()
+
+        pipeline._check_schedule("book")
+
+        pipeline._pause_at_boundary.assert_not_called()
 
     def test_managed_voice_server_launches_then_waits_for_readiness(self) -> None:
         class FakeVoiceClient:

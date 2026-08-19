@@ -211,6 +211,14 @@ class VoiceDesigner:
                         project_id, cand_id
                     ):
                         existing = self.library.get_voice_info(project_id, cand_id)
+                        if existing and existing.get("source_type") == "uploaded":
+                            candidates.append(VoiceCandidate(
+                                id=cand_id,
+                                file=existing.get("file", ""),
+                                duration_seconds=existing.get("duration_seconds", 0.0),
+                                sample_rate=existing.get("sample_rate", 24000),
+                            ))
+                            continue
                         expected_fingerprint = request.design_fingerprints.get(char_id, "")
                         fingerprint_matches = (
                             not expected_fingerprint

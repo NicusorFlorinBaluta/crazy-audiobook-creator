@@ -60,8 +60,11 @@ def preserve_candidate(
     })
     wavs = sorted(destination.glob("*.wav"), key=lambda path: path.stat().st_mtime, reverse=True)
     for stale in wavs[max(1, retain):]:
-        stale.unlink(missing_ok=True)
-        stale.with_suffix(".json").unlink(missing_ok=True)
+        try:
+            stale.unlink(missing_ok=True)
+            stale.with_suffix(".json").unlink(missing_ok=True)
+        except OSError:
+            pass
     return PreservedCandidate(result.line_id, saved_audio, saved_meta, score, result.model_copy(deep=True))
 
 

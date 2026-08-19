@@ -9,6 +9,11 @@ from brain.orchestrator.audio_candidates import candidate_score, list_candidates
 from brain.orchestrator.job_queue import JobQueue
 from brain.orchestrator.review_gate import collect_review_gate, write_release_report
 from brain.orchestrator.stage_runner import PipelineResumePlan
+from brain.dashboard.api.main import (
+    _automatic_extraction_review_pending,
+    _automatic_pipeline_review_pending,
+)
+import brain.dashboard.api.main as dashboard_main
 from shared.constants import PipelineStage
 from shared.models import QualityResult, ValidationStatus
 
@@ -42,6 +47,79 @@ class ReviewWorkflowTests(unittest.TestCase):
         report = write_release_report("demo", self.project, self.queue)
         self.assertTrue(report["release_ready"])
         self.assertTrue((self.project / "pre_master_release.json").is_file())
+
+    def test_ambiguous_extraction_blocks_until_include_exclude_or_reference(self) -> None:
+        (self.project / "extraction_audit.json").write_text(json.dumps({
+            "schema": 1,
+            "sections": [{
+                "item_id": "appendix-1", "title": "Appendix: The Trial",
+                "href": "appendix.xhtml", "decision": "exclude",
+                "confidence": 0.64, "word_count": 1800,
+                "reason": "Narrative appendix is ambiguous",
+                "review_required": True,
+            }],
+        }), encoding="utf-8")
+        gate = collect_review_gate("demo", self.project, self.queue)
+        self.assertEqual([item.category for item in gate.blocking_items], ["extraction"])
+        self.assertNotIn("excerpt", gate.items[0].details)
+        self.queue.set_review_item("demo", "extraction", "appendix-1", "include")
+        resolved = collect_review_gate("demo", self.project, self.queue)
+        self.assertFalse(resolved.blocking_items)
+        self.assertEqual(resolved.items[0].disposition, "include")
+
+    def test_never_attempted_extraction_can_enter_automatic_resolver_once(self) -> None:
+        audit_path = self.project / "extraction_audit.json"
+        payload = {
+            "sections": [{
+                "item_id": "unknown-1", "title": "Unknown",
+                "decision": "include", "confidence": 0.6,
+                "review_required": True,
+            }]
+        }
+        audit_path.write_text(json.dumps(payload), encoding="utf-8")
+        gate = collect_review_gate("demo", self.project, self.queue)
+        original = dashboard_main._project_dir
+        dashboard_main._project_dir = lambda _project_id: self.project
+        try:
+            self.assertTrue(_automatic_extraction_review_pending(
+                "demo", gate.blocking_items
+            ))
+            payload["sections"][0]["external_validation_attempted"] = True
+            audit_path.write_text(json.dumps(payload), encoding="utf-8")
+            self.assertFalse(_automatic_extraction_review_pending(
+                "demo", gate.blocking_items
+            ))
+        finally:
+            dashboard_main._project_dir = original
+
+    def test_incomplete_scripting_can_resume_into_automatic_attribution_validation(self) -> None:
+        (self.project / "script" / "chapter_001.json").write_text(
+            json.dumps({
+                "chapter_number": 1,
+                "lines": [{
+                    "line_id": "line-1",
+                    "speaker": "narrator",
+                    "speaker_confidence": 0.25,
+                    "attribution_review_required": True,
+                    "attribution_review_reason": "ambiguous",
+                }],
+            }),
+            encoding="utf-8",
+        )
+        gate = collect_review_gate("demo", self.project, self.queue)
+
+        self.assertTrue(_automatic_pipeline_review_pending(
+            "demo",
+            gate.blocking_items,
+            {"script_completed": False},
+            PipelineStage.SCRIPTING,
+        ))
+        self.assertFalse(_automatic_pipeline_review_pending(
+            "demo",
+            gate.blocking_items,
+            {"script_completed": True},
+            PipelineStage.BOOTSTRAPPING,
+        ))
 
     def test_ledger_calibration_is_advisory(self) -> None:
         for index in range(25):

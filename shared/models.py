@@ -107,6 +107,16 @@ class Character(BaseModel):
         default=False,
         description="True if this character was discovered during script generation, not initial analysis",
     )
+    discovery_confidence: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Confidence of the source-grounded character discovery decision",
+    )
+    discovery_evidence: list[str] = Field(
+        default_factory=list,
+        description="Short source excerpts supporting character discovery",
+    )
     voice_fx: VoiceFXSettings | None = Field(
         default=None,
         description="Voice FX settings (pitch, speed, tone) for this character",
@@ -740,6 +750,7 @@ class ProjectStatus(BaseModel):
     active_generation_chapter_selection: list[int] | None = None
     active_stage: PipelineStage | None = None
     pause_reason: str | None = None
+    schedule_override_active: bool = False
     progress: ProgressSnapshot | None = None
 
     # Incremental delivery state

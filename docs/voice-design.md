@@ -48,10 +48,19 @@ supernatural, artificial, or personified. A named entity with no spoken lines
 does not receive a voice.
 
 The final design instruction is compiled from the analyzed description plus
-explicit gender and age metadata. Contradictory register terms are repaired
+explicit gender and age metadata. Under the whole-book Gemini augmentation pass,
+descriptions are tailored across the 12-dimension TTS VoiceDesign framework
+(specific pitch registers, vocal textures like gravelly/nasal/silky, speeds, and
+archetypes). Contradictory register terms are repaired
 (for example, a female character described as a baritone becomes a contralto),
 biographical descriptions receive audible pitch/resonance/pacing guidance, and
 near-duplicate profiles receive deterministic contrasting directions.
+
+### Preservation of Custom Uploaded Voices
+Voices configured with `source_type: "uploaded"` (or backed by manual `.wav` samples)
+are strictly protected during automated cast compilation and bootstrapping. The pipeline
+preserves their custom audio files, duration, sample rate, and reference fingerprints
+while updating only metadata attributes.
 
 ### Voice Similarity & Acoustic Embeddings
 - **Boilerplate Filtering**: Text token similarity comparison (`_token_similarity`) strips out common prompt template boilerplate words (`"clearly adult speaker"`, `"maintain vocal identity..."`) to prevent false similarity warnings between distinct character prompts.

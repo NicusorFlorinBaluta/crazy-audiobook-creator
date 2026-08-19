@@ -33,11 +33,17 @@ scratch-runner concurrency.
 2. **Import / extraction**: EPUB text is extracted synchronously during project creation, chapter structure is built, cover art is saved, and the immutable upload is retained as `source.epub` for an explicit future re-extraction.
    - Non-narrative front/back matter is filtered according to the independent `skip_toc`, `skip_appendices`, `skip_front_matter`, and `skip_preface` options.
    - When appendix skipping is enabled, canonical reference sections (Glossary, Dramatis Personae, Character Lists, Cast of Characters) are captured into `reference_material` for character analysis while being excluded from narration.
-3. **Scripting** (`scripting`): LLM Pass 1 character analysis & Pass 2 text-to-script annotation.
-   - Pass 1 uses any extracted reference materials (Glossary, Dramatis Personae) to prime the character analyzer with official names, aliases, genders, and character descriptions.
-   - Dialogue attribution is model-driven and source-grounded. Unknown IDs and
-     low-confidence results trigger focused retries. Pass 2 cannot invent cast
-     members; unresolved dialogue is retained as a low-confidence review item rather than a
+   - Every spine item is recorded in `extraction_audit.json` with its navigation/landmark/markup/filename evidence, decision, confidence, word count, and reason. Large excluded shares, unresolved manifest entries, and ambiguous substantial sections are blocking.
+   - Ambiguity follows the Gemini API-to-persistent-web escalation ladder. If no decision reaches the automatic threshold, the pipeline stops before scripting and exposes include, exclude, and reference choices in **Attention required**.
+3. **Scripting** (`scripting`): joint character discovery and text-to-script annotation by default, with the legacy two-pass director retained behind `script.joint_analysis: false` for comparison and rollback.
+   - Scripting uses a quality-preserving compact response contract: the model
+     still supplies every creative delivery and dialogue-attribution decision,
+     while structurally known narrator fields, repeated scene indexes, ordinary
+     spoken labels, and routine pause defaults are restored deterministically.
+     See [Scripting quality and performance policy](scripting-quality-performance-policy.md).
+   - Joint responses may introduce a provisional speaker only with a confidence score and fragment IDs whose local source context explicitly identifies that speaker. A compact post-pass reconciles aliases, remaps completed scripts, enriches only proven speakers from Glossary/Dramatis Personae evidence, and records accepted/rejected reference patches in `character_reference_audit.json` without rereading the full book through the LLM.
+   - Dialogue attribution is model-driven and source-grounded. Unsupported IDs and
+     low-confidence results trigger focused retries. Unresolved dialogue is retained as a low-confidence review item rather than a
      release-grade guess. Scripting completes and persists `attribution_audit.json`, but
      generation/export remain blocked until every review item is resolved.
 4. **Bootstrapping** (`bootstrapping`): Speaking cast derived, voice design directions compiled, reference audio generated via Qwen VoiceDesign. Qwen speaker-encoder embeddings provide the primary distinctness signal; a 514-value normalized log-spectrogram summary provides a model-independent fallback diagnostic.
@@ -91,10 +97,21 @@ This prevents overlap duplication, silent omissions, rewritten prose, and line-c
 The character analyzer retains every speaking entity. Explicit aliases and
 exact display names may be consolidated directly. Name suffixes only create an
 identity-adjudication candidate: the model must return verbatim source evidence
-before two registry entries are merged. It assigns a unique voice to the most
-important speakers up to `script.max_unique_voices`. Less prominent speakers
-deterministically share a compatible major-character voice or the narrator;
-the character remains distinct in script and metadata through its `voice_id`.
+before two registry entries are merged.
+
+Following local identity consolidation, the analyzer executes a whole-book
+evidence extraction pass (`_build_character_evidence_dossier`) scanning pronoun
+ratios (`he/him` vs `she/her`), scene descriptions, and dialogue samples across
+all aliases. A single fast call to Gemini Flash (`_augment_characters_with_gemini`)
+enriches the deduplicated registry with canonical genders, refined age ranges,
+12-dimensional TTS voice designs (pitch, cadence, texture, archetype), and in-character
+test sentences, with automatic local fallback if offline. See
+[Character Augmentation and Gender Resolution](character-augmentation-and-gender-resolution-2026-08-19.md).
+
+It assigns a unique voice to the most important speakers up to `script.max_unique_voices`.
+Less prominent speakers deterministically share a compatible major-character voice
+or the narrator; the character remains distinct in script and metadata through its `voice_id`.
+User-uploaded custom voice samples are strictly preserved during casting and re-synthesis.
 
 A character-analysis fingerprint includes the full extracted book, model, prompt, and voice cap. A change invalidates scripts and voice bootstrap. Voice reference hashes are included in generation fingerprints, so regenerated references invalidate dependent line audio.
 

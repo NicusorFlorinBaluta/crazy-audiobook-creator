@@ -9,11 +9,13 @@ from unittest.mock import MagicMock, patch
 from fastapi import HTTPException
 
 from brain.dashboard.api.main import (
+    ChapterSelectionRequest,
     DeliverySettingsRequest,
     cancel_pause_after_delivery,
     download_delivery,
     get_deliveries,
     request_pause_after_delivery,
+    set_chapter_selection,
     update_delivery_settings,
 )
 import brain.dashboard.api.main as dashboard_main
@@ -57,6 +59,8 @@ class IncrementalDeliveryPipelineTests(unittest.TestCase):
         # Initialize Pipeline
         self.pipeline = Pipeline()
         self.pipeline.job_queue = self.job_queue
+        # Keep fixture behavior independent of the operator's live schedule.
+        self.pipeline.config.setdefault("schedule", {})["enabled"] = False
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
@@ -131,6 +135,64 @@ class IncrementalDeliveryPipelineTests(unittest.TestCase):
         self.assertEqual(state.get("published_delivery_count"), 2)
         self.assertEqual(state.get("latest_published_delivery_id"), "part-002")
         self.assertIsNone(state.get("active_delivery_id"))
+
+    def test_run_incremental_delivery_respects_selected_chapter_subset(self) -> None:
+        generated_batches: list[set[int]] = []
+        mastered_batches: list[set[int]] = []
+        exports: list[dict] = []
+
+        def mock_gen(proj_id, pdir, ch_nums=None):
+            generated_batches.append(ch_nums)
+
+        def mock_master(proj_id, pdir, ch_nums=None):
+            mastered_batches.append(ch_nums)
+            self._write_master_manifests(ch_nums)
+
+        def mock_export(
+            proj_id,
+            pdir,
+            partial=False,
+            chapter_selection=None,
+            temp_output=None,
+            **kwargs,
+        ):
+            exports.append({
+                "partial": partial,
+                "chapters": chapter_selection,
+                "temporary": temp_output is not None,
+            })
+            if temp_output is not None:
+                temp_output.write_bytes(b"selected incremental part")
+            return {"duration_seconds": 60.0}
+
+        self.pipeline._run_generation = mock_gen
+        self.pipeline._run_mastering = mock_master
+        self.pipeline._run_export = mock_export
+        self.job_queue.update_job(
+            self.project_id,
+            {
+                "incremental_delivery": {"enabled": True, "batch_size": 2},
+                "active_generation_chapter_selection": [2, 4, 5],
+            },
+        )
+
+        self.pipeline._run_incremental_delivery(
+            self.project_id, self.project_dir, PipelineStage.GENERATING
+        )
+
+        self.assertEqual(generated_batches, [{2, 4}, {5}])
+        self.assertEqual(mastered_batches, [{2, 4}, {5}])
+        self.assertEqual(exports[-1], {
+            "partial": True,
+            "chapters": {2, 4, 5},
+            "temporary": False,
+        })
+        index = DeliveryManager(self.project_dir).load_index()
+        self.assertEqual(index.chapter_numbers, [2, 4, 5])
+        self.assertEqual(
+            [part.chapter_numbers for part in index.deliveries],
+            [[2, 4], [5]],
+        )
 
     def test_run_incremental_delivery_skips_already_published_batches(self) -> None:
         dm = DeliveryManager(self.project_dir)
@@ -306,6 +368,7 @@ class IncrementalDeliveryApiTests(unittest.IsolatedAsyncioTestCase):
             self.project_id,
             {
                 "status": "idle",
+                "total_chapters": 6,
                 "incremental_delivery": {"enabled": False, "batch_size": 5},
             },
         )
@@ -387,17 +450,25 @@ class IncrementalDeliveryApiTests(unittest.IsolatedAsyncioTestCase):
             await download_delivery(self.project_id, "part-001")
         self.assertEqual(raised.exception.status_code, 404)
 
-    async def test_delivery_settings_reject_manual_selection_conflict(self) -> None:
+    async def test_delivery_settings_and_manual_selection_work_together(self) -> None:
         self.job_queue.update_job(
             self.project_id,
             {"generation_chapter_selection": [1]},
         )
-        with self.assertRaises(HTTPException) as raised:
-            await update_delivery_settings(
-                self.project_id,
-                DeliverySettingsRequest(enabled=True, batch_size=5),
-            )
-        self.assertEqual(raised.exception.status_code, 409)
+        response = await update_delivery_settings(
+            self.project_id,
+            DeliverySettingsRequest(enabled=True, batch_size=5),
+        )
+        self.assertTrue(response["settings"]["enabled"])
+
+        selection_response = await set_chapter_selection(
+            self.project_id,
+            ChapterSelectionRequest(chapters=[3, 1]),
+        )
+        self.assertEqual(selection_response["selection"], [1, 3])
+        state = self.job_queue.get_job(self.project_id)
+        self.assertEqual(state["generation_chapter_selection"], [1, 3])
+        self.assertTrue(state["incremental_delivery"]["enabled"])
 
     async def test_pause_after_delivery_toggle_endpoints(self) -> None:
         self.job_queue.update_job(

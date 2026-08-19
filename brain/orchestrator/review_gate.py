@@ -11,6 +11,7 @@ from shared.pronunciation import build_pronunciation_inventory
 
 
 RESOLVED_SEGMENT_DISPOSITIONS = {"acceptable", "regenerate"}
+RESOLVED_EXTRACTION_DISPOSITIONS = {"include", "exclude", "reference"}
 
 
 @dataclass(frozen=True)
@@ -58,34 +59,42 @@ def collect_review_gate(project_id: str, project_dir: Path, job_queue: Any) -> R
         for row in job_queue.get_review_items(project_id)
     }
 
-    quality_by_line: dict[str, dict[str, Any]] = {}
-    for row in job_queue.get_quality_report(project_id):
-        if row.get("details", {}).get("selected"):
-            quality_by_line[row["line_id"]] = row
-    for (item_type, item_id), review in persisted.items():
-        if item_type != "segment":
-            continue
-        quality = quality_by_line.get(item_id, {})
-        details = quality.get("details", {})
-        disposition = review.get("disposition", "unreviewed")
-        items.append(ReviewItem(
-            category="audio",
-            item_id=item_id,
-            title=f"Audio segment {item_id}",
-            reason=str(details.get("manual_review_reason") or review.get("note") or "Automatic validators abstained."),
-            confidence=_float_or_none(details.get("validation_confidence")),
-            disposition=disposition,
-            blocking=disposition not in RESOLVED_SEGMENT_DISPOSITIONS,
-            chapter_number=_int_or_none(quality.get("chapter_number")),
-            details={
-                "provider": details.get("external_validation_provider", ""),
-                "model": details.get("external_validation_model", ""),
-                "decision": details.get("external_validation_decision", ""),
-                "decision_trail": details.get("external_validation_history", []),
-                "audio_url": f"api/projects/{project_id}/segments/{item_id}/audio",
-            },
-        ))
+    extraction_path = project_dir / "extraction_audit.json"
+    if extraction_path.is_file():
+        try:
+            extraction = json.loads(extraction_path.read_text(encoding="utf-8"))
+            for section in extraction.get("sections", []):
+                if not section.get("review_required"):
+                    continue
+                item_id = str(section.get("item_id") or "unknown")
+                review = persisted.get(("extraction", item_id), {})
+                disposition = str(review.get("disposition", "unreviewed"))
+                items.append(ReviewItem(
+                    category="extraction",
+                    item_id=item_id,
+                    title=f"Book section: {section.get('title') or section.get('href') or item_id}",
+                    reason=str(section.get("reason") or "Section classification is ambiguous."),
+                    confidence=_float_or_none(section.get("confidence")),
+                    disposition=disposition,
+                    blocking=disposition not in RESOLVED_EXTRACTION_DISPOSITIONS,
+                    details={
+                        "decision": section.get("decision"),
+                        "word_count": section.get("word_count", 0),
+                        "href": section.get("href", ""),
+                        "semantics": section.get("semantics", []),
+                        "decision_trail": section.get("decision_trail", []),
+                    },
+                ))
+        except (OSError, ValueError, TypeError):
+            items.append(ReviewItem(
+                category="extraction",
+                item_id="audit-invalid",
+                title="Extraction audit unavailable",
+                reason="The extraction audit could not be read safely.",
+                blocking=True,
+            ))
 
+    script_lines_by_id: dict[str, dict[str, Any]] = {}
     for chapter_path in sorted((project_dir / "script").glob("chapter_*.json")):
         try:
             chapter = json.loads(chapter_path.read_text(encoding="utf-8"))
@@ -93,9 +102,10 @@ def collect_review_gate(project_id: str, project_dir: Path, job_queue: Any) -> R
             continue
         chapter_number = _int_or_none(chapter.get("chapter_number"))
         for line in chapter.get("lines", []):
+            line_id = str(line.get("line_id") or line.get("id") or "unknown")
+            script_lines_by_id[line_id] = {**line, "chapter_number": chapter_number}
             if not line.get("attribution_review_required"):
                 continue
-            line_id = str(line.get("line_id") or line.get("id") or "unknown")
             items.append(ReviewItem(
                 category="attribution",
                 item_id=line_id,
@@ -106,9 +116,41 @@ def collect_review_gate(project_id: str, project_dir: Path, job_queue: Any) -> R
                 chapter_number=chapter_number,
                 details={
                     "speaker": line.get("speaker"),
+                    "source_excerpt": line.get("text"),
                     "decision_trail": line.get("attribution_confidence_history", []),
                 },
             ))
+
+    quality_by_line: dict[str, dict[str, Any]] = {}
+    for row in job_queue.get_quality_report(project_id):
+        if row.get("details", {}).get("selected"):
+            quality_by_line[row["line_id"]] = row
+    for (item_type, item_id), review in persisted.items():
+        if item_type != "segment":
+            continue
+        quality = quality_by_line.get(item_id, {})
+        details = quality.get("details", {})
+        disposition = review.get("disposition", "unreviewed")
+        script_line = script_lines_by_id.get(item_id, {})
+        items.append(ReviewItem(
+            category="audio",
+            item_id=item_id,
+            title=f"Audio segment {item_id}",
+            reason=str(details.get("manual_review_reason") or review.get("note") or "Automatic validators abstained."),
+            confidence=_float_or_none(details.get("validation_confidence")),
+            disposition=disposition,
+            blocking=disposition not in RESOLVED_SEGMENT_DISPOSITIONS,
+            chapter_number=_int_or_none(quality.get("chapter_number")) or script_line.get("chapter_number"),
+            details={
+                "provider": details.get("external_validation_provider", ""),
+                "model": details.get("external_validation_model", ""),
+                "decision": details.get("external_validation_decision", ""),
+                "decision_trail": details.get("external_validation_history", []),
+                "audio_url": f"api/projects/{project_id}/segments/{item_id}/audio",
+                "text": script_line.get("text", ""),
+                "speaker": script_line.get("speaker", ""),
+            },
+        ))
 
     existing_attribution_ids = {
         item.item_id for item in items if item.category == "attribution"
@@ -121,15 +163,24 @@ def collect_review_gate(project_id: str, project_dir: Path, job_queue: Any) -> R
                 item_id = str(issue.get("line_id") or f"audit-{index + 1}")
                 if item_id in existing_attribution_ids:
                     continue
+                matched_line = script_lines_by_id.get(item_id, {})
+                conf = _float_or_none(issue.get("speaker_confidence"))
+                if conf is None:
+                    conf = _float_or_none(matched_line.get("speaker_confidence"))
                 items.append(ReviewItem(
                     category="attribution",
                     item_id=item_id,
                     title=f"Speaker attribution {item_id}",
                     reason=str(issue.get("message") or "Source-grounded attribution audit failed."),
-                    confidence=None,
+                    confidence=conf,
                     blocking=True,
-                    chapter_number=_int_or_none(issue.get("chapter_number")),
-                    details={"audit_kind": issue.get("kind", "unknown")},
+                    chapter_number=_int_or_none(issue.get("chapter_number") or matched_line.get("chapter_number")),
+                    details={
+                        "audit_kind": issue.get("kind", "unknown"),
+                        "speaker": issue.get("speaker") or matched_line.get("speaker"),
+                        "source_excerpt": issue.get("source_excerpt") or matched_line.get("text"),
+                        "decision_trail": matched_line.get("attribution_confidence_history", []),
+                    },
                 ))
                 existing_attribution_ids.add(item_id)
         except (OSError, ValueError, TypeError):
