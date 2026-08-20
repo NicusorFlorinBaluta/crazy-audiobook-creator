@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -239,13 +240,24 @@ class M4BExporter:
             current_time_ms = 0
             for chapter, duration in zip(chapters, durations):
                 duration_ms = int(duration * 1000)
+                formatted_title = self._format_chapter_title(chapter.number, chapter.title)
                 f.write("[CHAPTER]\n")
                 f.write("TIMEBASE=1/1000\n")
                 f.write(f"START={current_time_ms}\n")
                 f.write(f"END={current_time_ms + duration_ms}\n")
-                f.write(f"title={self._escape_ffmetadata(chapter.title)}\n")
+                f.write(f"title={self._escape_ffmetadata(formatted_title)}\n")
                 f.write("\n")
                 current_time_ms += duration_ms
+
+    @staticmethod
+    def _format_chapter_title(number: int, title: str | None) -> str:
+        """Format chapter title to include chapter number when appropriate."""
+        clean_title = (title or "").strip()
+        if not clean_title:
+            return f"Chapter {number}"
+        if re.match(rf"^(?:Chapter|Part)\s+{number}\b", clean_title, re.IGNORECASE):
+            return clean_title
+        return f"Chapter {number}: {clean_title}"
 
     @staticmethod
     def _escape_ffmetadata(value: str) -> str:

@@ -82,6 +82,7 @@ from shared.voice_casting import (
 from shared.performance import read_metrics, summarize_metrics
 from shared.runtime_preflight import collect_runtime_report
 from voice.tts_server.voice_library import VoiceLibraryManager
+from brain.dashboard.api.mobile import router as mobile_router
 
 logger = logging.getLogger(__name__)
 
@@ -930,6 +931,9 @@ async def lifespan(app: FastAPI):
     config = load_config()
     pipeline = Pipeline(config_path="brain/config.yaml")
     job_queue = pipeline.job_queue
+    app.state.pipeline = pipeline
+    app.state.job_queue = job_queue
+    app.state.running_tasks = running_tasks
     
     logging.getLogger().setLevel(logging.INFO)
     logger.info("Brain Dashboard starting...")
@@ -1036,6 +1040,7 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+app.include_router(mobile_router)
 
 _import_config = load_config()
 _dashboard_cfg = _import_config.get("dashboard", {})
@@ -1055,14 +1060,24 @@ app.add_middleware(
 @app.middleware("http")
 async def disable_api_caching(request: Request, call_next):
     response = await call_next(request)
-    response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
-    response.headers["Pragma"] = "no-cache"
-    response.headers["Expires"] = "0"
+    if not request.url.path.endswith("/stream") and "/download" not in request.url.path and not request.url.path.endswith("/cover"):
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
     return response
 
 
 @app.middleware("http")
 async def require_dashboard_token(request: Request, call_next):
+    # Allow mobile discovery, catalog, manifests, covers, streams and chapter downloads
+    if (
+        request.url.path.startswith("/api/mobile/v1/")
+        or "/stream" in request.url.path
+        or "/cover" in request.url.path
+        or "/download" in request.url.path
+    ):
+        return await call_next(request)
+
     if (
         request.url.path.startswith("/api/")
         and is_cross_site_mutation(
@@ -1848,6 +1863,36 @@ async def download_audiobook(project_id: str, delivery_id: str | None = None):
     )
 
 
+@app.get("/api/projects/{project_id}/stream")
+async def stream_audiobook(project_id: str):
+    """Stream the mastered audiobook file with byte-range support."""
+    project_dir = _project_dir(project_id)
+    workspace_dir = _workspace_project_dir(project_id)
+    m4b_path = project_dir / f"{project_id}.m4b"
+    if not m4b_path.exists():
+        m4b_path = workspace_dir / "output" / f"{project_id}.m4b"
+    if not m4b_path.exists():
+        partials = sorted(project_dir.glob("*.m4b"), key=lambda p: p.stat().st_mtime)
+        if not partials:
+            partials = sorted(
+                workspace_dir.glob("**/*.m4b"),
+                key=lambda p: p.stat().st_mtime,
+            )
+        if partials:
+            m4b_path = partials[-1]
+        else:
+            raise HTTPException(status_code=404, detail="Audiobook file not found")
+
+    return FileResponse(
+        path=m4b_path,
+        media_type="audio/mp4",
+        headers={
+            "Accept-Ranges": "bytes",
+            "Content-Disposition": f'inline; filename="{m4b_path.name}"',
+        },
+    )
+
+
 @app.get("/api/projects/{project_id}/download/chapter/{chapter_num}")
 async def download_chapter_audio(project_id: str, chapter_num: int):
     """Download the mastered WAV file for a specific chapter."""
@@ -1866,6 +1911,107 @@ async def download_chapter_audio(project_id: str, chapter_num: int):
         path=ch_file,
         filename=f"{project_id}_chapter_{chapter_num:03d}.wav",
         media_type="audio/wav"
+    )
+
+
+@app.get("/api/projects/{project_id}/stream/chapter/{chapter_num}")
+async def stream_chapter_audio(project_id: str, chapter_num: int, format: str = "aac"):
+    """Stream a specific chapter with byte ranges and optional transparent 128k AAC compression."""
+    if chapter_num < 1:
+        raise HTTPException(status_code=422, detail="Chapter number must be positive")
+
+    ch_file = (
+        _workspace_project_dir(project_id)
+        / "chapters"
+        / f"chapter_{chapter_num:03d}.wav"
+    )
+    if not ch_file.exists():
+        m4b_path = _project_dir(project_id) / f"{project_id}.m4b"
+        if not m4b_path.exists():
+            m4b_path = _workspace_project_dir(project_id) / "output" / f"{project_id}.m4b"
+        if m4b_path.exists():
+            book_json = _project_dir(project_id) / "book.json"
+            chapters = []
+            if book_json.exists():
+                try:
+                    bdata = json.loads(book_json.read_text(encoding="utf-8"))
+                    chapters = bdata.get("chapters", [])
+                except Exception:
+                    pass
+
+            start_sec = 0.0
+            dur_sec = None
+            for idx, ch in enumerate(chapters, 1):
+                ch_dur = _chapter_duration(_project_dir(project_id), _workspace_project_dir(project_id), idx) or 300.0
+                if idx == chapter_num:
+                    dur_sec = ch_dur
+                    break
+                start_sec += ch_dur
+
+            transcodes_dir = _workspace_project_dir(project_id) / "transcodes"
+            transcodes_dir.mkdir(parents=True, exist_ok=True)
+            aac_file = transcodes_dir / f"chapter_{chapter_num:03d}.m4a"
+
+            if not aac_file.exists() or aac_file.stat().st_mtime < m4b_path.stat().st_mtime:
+                import subprocess
+                cmd = ["ffmpeg", "-y", "-ss", f"{start_sec:.2f}"]
+                if dur_sec:
+                    cmd.extend(["-t", f"{dur_sec:.2f}"])
+                cmd.extend(["-i", str(m4b_path), "-c", "copy", "-movflags", "+faststart", str(aac_file)])
+                try:
+                    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                except Exception as e:
+                    logger.warning("Could not extract chapter slice from m4b: %s", e)
+
+            if aac_file.exists():
+                return FileResponse(
+                    path=aac_file,
+                    media_type="audio/mp4",
+                    headers={
+                        "Accept-Ranges": "bytes",
+                        "Content-Disposition": f'inline; filename="{project_id}_chapter_{chapter_num:03d}.m4a"',
+                    },
+                )
+        raise HTTPException(status_code=404, detail=f"Chapter {chapter_num} mastered audio not found")
+
+    if format.lower() in ("aac", "m4a", "mp4"):
+        transcodes_dir = _workspace_project_dir(project_id) / "transcodes"
+        transcodes_dir.mkdir(parents=True, exist_ok=True)
+        aac_file = transcodes_dir / f"chapter_{chapter_num:03d}.m4a"
+
+        if not aac_file.exists() or aac_file.stat().st_mtime < ch_file.stat().st_mtime:
+            import subprocess
+            try:
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-i", str(ch_file),
+                    "-c:a", "aac",
+                    "-b:a", "128k",
+                    "-movflags", "+faststart",
+                    str(aac_file)
+                ]
+                subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception as e:
+                logger.warning("AAC transcoding failed, falling back to WAV: %s", e)
+                aac_file = ch_file
+
+        if aac_file.exists() and aac_file.suffix == ".m4a":
+            return FileResponse(
+                path=aac_file,
+                media_type="audio/mp4",
+                headers={
+                    "Accept-Ranges": "bytes",
+                    "Content-Disposition": f'inline; filename="{project_id}_chapter_{chapter_num:03d}.m4a"',
+                },
+            )
+
+    return FileResponse(
+        path=ch_file,
+        media_type="audio/wav",
+        headers={
+            "Accept-Ranges": "bytes",
+            "Content-Disposition": f'inline; filename="{project_id}_chapter_{chapter_num:03d}.wav"',
+        },
     )
 
 
@@ -2791,8 +2937,53 @@ async def stream_logs(project_id: str, request: Request):
 
 @app.get("/api/projects/{project_id}/script")
 async def get_script(project_id: str):
-    """Get the generated script for a project."""
-    script_path = _project_dir(project_id) / "book_script.json"
+    """Get the generated script for a project, auto-syncing from chapter scripts if newer."""
+    from shared.artifacts import atomic_write_text
+    from shared.models import BookScript, CharacterRegistry, ExtractedBook, ScriptChapter
+
+    project_dir = _project_dir(project_id)
+    script_path = project_dir / "book_script.json"
+    scripts_dir = project_dir / "script"
+
+    if scripts_dir.exists():
+        chapter_files = [
+            p for p in sorted(scripts_dir.glob("chapter_*.json"))
+            if not p.name.endswith(".meta.json")
+        ]
+        if chapter_files:
+            needs_resync = not script_path.exists()
+            if not needs_resync:
+                bs_mtime = script_path.stat().st_mtime
+                needs_resync = any(cf.stat().st_mtime > bs_mtime for cf in chapter_files)
+            if needs_resync:
+                try:
+                    book_file = project_dir / "book.json"
+                    char_file = project_dir / "characters.json"
+                    if book_file.exists() and char_file.exists():
+                        book = ExtractedBook.model_validate_json(
+                            book_file.read_text(encoding="utf-8")
+                        )
+                        registry = CharacterRegistry.model_validate_json(
+                            char_file.read_text(encoding="utf-8")
+                        )
+                        chapter_scripts = [
+                            ScriptChapter.model_validate_json(
+                                cf.read_text(encoding="utf-8")
+                            )
+                            for cf in chapter_files
+                        ]
+                        book_script = BookScript(
+                            metadata=book.metadata,
+                            character_registry=registry,
+                            chapters=chapter_scripts,
+                        )
+                        atomic_write_text(
+                            script_path,
+                            book_script.model_dump_json(indent=2),
+                        )
+                except Exception as exc:
+                    logger.warning("Could not auto-sync book_script.json: %s", exc)
+
     if not script_path.exists():
         raise HTTPException(status_code=404, detail="Script not generated yet")
     return FileResponse(str(script_path), media_type="application/json")

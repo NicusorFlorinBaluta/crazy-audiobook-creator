@@ -109,6 +109,18 @@ class JobQueue:
                 CREATE INDEX IF NOT EXISTS idx_external_validation_project
                 ON external_validation_events(project_id, item_type, item_id)
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS playback_progress (
+                    project_id TEXT PRIMARY KEY,
+                    client_id TEXT NOT NULL DEFAULT '',
+                    chapter_number INTEGER NOT NULL DEFAULT 1,
+                    position_ms INTEGER NOT NULL DEFAULT 0,
+                    playback_speed REAL NOT NULL DEFAULT 1.0,
+                    is_completed INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (project_id) REFERENCES jobs(project_id)
+                )
+            """)
             conn.commit()
 
     @contextmanager
@@ -564,3 +576,63 @@ class JobQueue:
             "worst_wer": max(wers, default=0.0),
             "total_retries": self._quality_retry_count(logs),
         }
+
+    def set_playback_progress(
+        self,
+        project_id: str,
+        client_id: str = "",
+        chapter_number: int = 1,
+        position_ms: int = 0,
+        playback_speed: float = 1.0,
+        is_completed: bool = False,
+    ) -> dict[str, Any]:
+        """Save playback progress for a project."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO playback_progress (project_id, client_id, chapter_number, position_ms, playback_speed, is_completed, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(project_id) DO UPDATE SET
+                    client_id = excluded.client_id,
+                    chapter_number = excluded.chapter_number,
+                    position_ms = excluded.position_ms,
+                    playback_speed = excluded.playback_speed,
+                    is_completed = excluded.is_completed,
+                    updated_at = excluded.updated_at
+                """,
+                (project_id, client_id, int(chapter_number), int(position_ms), float(playback_speed), 1 if is_completed else 0, now),
+            )
+            conn.commit()
+        return {
+            "project_id": project_id,
+            "client_id": client_id,
+            "chapter_number": int(chapter_number),
+            "position_ms": int(position_ms),
+            "playback_speed": float(playback_speed),
+            "is_completed": bool(is_completed),
+            "updated_at": now,
+        }
+
+    def get_playback_progress(self, project_id: str) -> dict[str, Any] | None:
+        """Get the latest saved playback progress for a project."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT client_id, chapter_number, position_ms, playback_speed, is_completed, updated_at
+                FROM playback_progress WHERE project_id = ?
+                """,
+                (project_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "project_id": project_id,
+            "client_id": row[0],
+            "chapter_number": int(row[1]),
+            "position_ms": int(row[2]),
+            "playback_speed": float(row[3]),
+            "is_completed": bool(row[4]),
+            "updated_at": row[5],
+        }
+

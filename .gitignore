@@ -10,6 +10,7 @@ voice_library/
 *.mp3
 *.aac
 *.flac
+*.apk
 
 # Python
 __pycache__/

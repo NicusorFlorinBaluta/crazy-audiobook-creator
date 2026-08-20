@@ -36,6 +36,37 @@ def audit_book_attribution(
         owners = _fragment_owners(script)
         fragments = ScriptGenerator._split_into_fragment_spans(chapter.text)
         chapter_speakers = ScriptGenerator._get_chapter_scoped_speakers(chapter.text, registry)
+        para_groups = ScriptGenerator._group_fragments_by_paragraph(fragments, chapter.text)
+        para_dialogue_map: dict[int, list[int]] = {}
+        para_tag_map: dict[int, tuple[str | None, str | None, Gender | None]] = {}
+        for group in para_groups:
+            dlg_indices = [
+                idx for idx in group
+                if ScriptGenerator._is_dialogue_fragment(fragments[idx].text)
+            ]
+            for d_idx in dlg_indices:
+                para_dialogue_map[d_idx] = dlg_indices
+
+            for g_pos, idx in enumerate(group):
+                if (
+                    not ScriptGenerator._is_dialogue_fragment(fragments[idx].text)
+                    and ScriptGenerator._is_pure_dialogue_tag(fragments[idx].text)
+                ):
+                    exact, ekind, gender = ScriptGenerator._dialogue_tag_evidence(
+                        fragments[idx].text, registry
+                    )
+                    if exact is not None:
+                        # Split-quote connector ending with comma or colon links preceding and succeeding quotes
+                        if fragments[idx].text.strip().endswith((",", ":")):
+                            if g_pos > 0 and ScriptGenerator._is_dialogue_fragment(fragments[group[g_pos - 1]].text):
+                                para_tag_map[group[g_pos - 1]] = (exact, ekind, gender)
+                            if g_pos + 1 < len(group) and ScriptGenerator._is_dialogue_fragment(fragments[group[g_pos + 1]].text):
+                                para_tag_map[group[g_pos + 1]] = (exact, ekind, gender)
+                        else:
+                            # Trailing tag ending with period links to preceding quote
+                            if g_pos > 0 and ScriptGenerator._is_dialogue_fragment(fragments[group[g_pos - 1]].text):
+                                para_tag_map[group[g_pos - 1]] = (exact, ekind, gender)
+
         for index, fragment in enumerate(fragments):
             if not ScriptGenerator._is_dialogue_fragment(fragment.text):
                 continue
@@ -85,6 +116,19 @@ def audit_book_attribution(
                     else ""
                 )
             )
+            exact: str | None = None
+            evidence_kind: str | None = None
+            evidence_gender: Gender | None = None
+            if tag_text:
+                exact, evidence_kind, evidence_gender = ScriptGenerator._dialogue_tag_evidence(
+                    tag_text,
+                    registry,
+                )
+            if exact is None and index in para_tag_map:
+                para_exact, para_kind, para_gender = para_tag_map[index]
+                if para_exact is not None:
+                    exact, evidence_kind, evidence_gender = para_exact, para_kind, para_gender
+
             collective_tag = ScriptGenerator._is_collective_dialogue_tag(tag_text)
             embedded_term = ScriptGenerator._is_embedded_quoted_term(index, fragments)
 
@@ -195,12 +239,6 @@ def audit_book_attribution(
                 )
                 continue
 
-            if not tag_text:
-                continue
-            exact, evidence_kind, evidence_gender = ScriptGenerator._dialogue_tag_evidence(
-                tag_text,
-                registry,
-            )
             character = registry.characters.get(speaker)
             contradiction = exact is not None and exact != speaker
             gender_contradiction = (
@@ -224,6 +262,23 @@ def audit_book_attribution(
                         owner,
                         evidence_kind or "dialogue_tag_contradiction",
                         detail,
+                        fragment.text,
+                    )
+                )
+                continue
+
+            # Check evidence character contradiction
+            ev_contra, ev_speaker = ScriptGenerator._evidence_contradicts_speaker(
+                owner.speaker_evidence, speaker, registry
+            )
+            if ev_contra and ev_speaker and speaker != ev_speaker and kind == "spoken":
+                issues.append(
+                    _issue(
+                        chapter.number,
+                        index,
+                        owner,
+                        "evidence_character_contradiction",
+                        f"Reasoning evidence explicitly attributes dialogue to '{ev_speaker}'",
                         fragment.text,
                     )
                 )
