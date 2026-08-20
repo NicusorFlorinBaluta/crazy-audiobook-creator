@@ -154,7 +154,8 @@ window.ScriptViewer = (() => {
     function renderCharacters() {
         const voiceState = currentData.voices;
         const voices = voiceState?.voices || [];
-        const readyVoiceCount = voices.filter(voice => voice.ready).length;
+        const selectedVoices = voices.filter(voice => voice.ready && voice.assigned_characters && voice.assigned_characters.length > 0);
+        const readyVoiceCount = selectedVoices.length;
         if (els.downloadAllVoices) {
             const projectId = window.state?.currentProjectId;
             els.downloadAllVoices.classList.toggle(
@@ -166,6 +167,7 @@ window.ScriptViewer = (() => {
             els.downloadAllVoices.textContent = readyVoiceCount
                 ? `Download all samples (${readyVoiceCount})`
                 : 'Download all samples';
+            els.downloadAllVoices.title = 'Download selected character and narrator references as a ZIP';
         }
         const speakingCharacters = voiceState?.speaking_characters || [];
         const speakerById = new Map(
@@ -992,7 +994,15 @@ window.ScriptViewer = (() => {
         currentData.script.chapters.forEach((ch, idx) => {
             const opt = document.createElement('option');
             opt.value = idx;
-            opt.textContent = `Chapter ${ch.chapter_number || (idx + 1)}`;
+            const chNum = ch.chapter_number || (idx + 1);
+            const title = (ch.title || '').trim();
+            if (title && !title.toLowerCase().startsWith(`chapter ${chNum}`)) {
+                opt.textContent = `Chapter ${chNum}: ${title}`;
+            } else if (title) {
+                opt.textContent = title;
+            } else {
+                opt.textContent = `Chapter ${chNum}`;
+            }
             els.chapterSelect.appendChild(opt);
         });
         els.chapterSelect.value = 0;

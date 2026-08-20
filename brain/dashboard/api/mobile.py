@@ -144,10 +144,16 @@ async def get_catalog(
     if not projects_root.is_dir():
         return {"books": []}
 
+    active_job_ids = set()
+    try:
+        active_job_ids = {j.get("project_id") for j in job_queue.list_jobs() if j.get("project_id")}
+    except Exception:
+        pass
+
     books: list[dict[str, Any]] = []
 
     for project_dir in sorted(projects_root.iterdir()):
-        if not project_dir.is_dir() or project_dir.name.startswith("."):
+        if not project_dir.is_dir() or project_dir.name.startswith((".", "_")):
             continue
         project_id = project_dir.name
 
@@ -156,7 +162,11 @@ async def get_catalog(
         except KeyError:
             job_state = {}
 
+        # If project is not in job_queue and has no book.json, it is deleted/stale
         book_json_path = project_dir / "book.json"
+        if not job_state and not book_json_path.is_file():
+            continue
+
         metadata: dict[str, Any] = {}
         total_chapters = int(job_state.get("total_chapters") or 0)
         book_chapters: list[dict[str, Any]] = []
@@ -209,6 +219,10 @@ async def get_catalog(
             book_status = "in_progress"
         else:
             book_status = "queued"
+
+        # Do not expose unstarted/queued projects with 0 audio to mobile clients
+        if book_status == "queued" and not mastered_chapters and not generated_chapters:
+            continue
 
         if status == "ready_only" and book_status not in ("ready_full", "ready_partial"):
             continue
@@ -342,9 +356,18 @@ async def get_book_detail(project_id: str, request: Request) -> dict[str, Any]:
         if dur:
             cumulative_offset += dur
 
+        raw_title = (chapter_titles.get(c_num) or "").strip()
+        if not raw_title:
+            formatted_title = f"Chapter {c_num}"
+        elif re.match(rf"^(?:chapter|ch\.?)\s*{c_num}\b", raw_title, re.IGNORECASE):
+            formatted_title = raw_title
+        else:
+            formatted_title = f"Chapter {c_num}: {raw_title}"
+
         chapters_list.append({
             "number": c_num,
-            "title": chapter_titles.get(c_num) or f"Chapter {c_num}",
+            "title": formatted_title,
+            "raw_title": raw_title or f"Chapter {c_num}",
             "status": ch_status,
             "duration_seconds": dur,
             "start_ms": start_ms,

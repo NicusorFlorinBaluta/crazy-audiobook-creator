@@ -247,13 +247,35 @@ window.PipelineManager = (() => {
             els.btnStart.classList.remove('hidden');
             els.btnPause.classList.add('hidden');
             if (selectResetStage) selectResetStage.classList.remove('hidden');
-            
-            if (isDone) {
-                els.btnStart.textContent = '▶ Generate selected chapters again';
-                els.btnStart.title = 'Uses the chapter selection below and preserves the current completed audiobook until new output is ready';
-            } else if (['error', 'paused', 'paused_scheduled', 'deploy_paused', 'voice_review', 'waiting_for_review'].includes(statusLower)) {
+
+            const total = data?.total_chapters || 0;
+            const mastered = new Set(data?.mastered_chapters || []);
+            const rawSelection = data?.generation_chapter_selection;
+            const selected = (rawSelection && Array.isArray(rawSelection))
+                ? rawSelection
+                : (total ? Array.from({length: total}, (_, i) => i + 1) : []);
+            const hasCustomSelection = rawSelection && Array.isArray(rawSelection) && rawSelection.length < total;
+            const unmasteredSelected = selected.filter(ch => !mastered.has(ch));
+
+            if (['error', 'paused', 'paused_scheduled', 'deploy_paused', 'voice_review', 'waiting_for_review'].includes(statusLower)) {
                 els.btnStart.textContent = '▶ Resume Pipeline';
                 els.btnStart.title = 'A deliberate manual resume can run outside configured working hours for this run only';
+            } else if (hasCustomSelection) {
+                if (unmasteredSelected.length > 0) {
+                    els.btnStart.textContent = '▶ Generate selected chapters';
+                    els.btnStart.title = `Generate ${selected.length} selected chapter${selected.length > 1 ? 's' : ''} (${unmasteredSelected.length} unmastered)`;
+                } else {
+                    els.btnStart.textContent = '▶ Re-generate selected chapters';
+                    els.btnStart.title = `Re-generate ${selected.length} already-mastered chapter${selected.length > 1 ? 's' : ''}`;
+                }
+            } else if (isDone) {
+                if (unmasteredSelected.length > 0) {
+                    els.btnStart.textContent = '▶ Generate remaining chapters';
+                    els.btnStart.title = `Generate remaining ${unmasteredSelected.length} unmastered chapters`;
+                } else {
+                    els.btnStart.textContent = '▶ Re-generate audiobook';
+                    els.btnStart.title = 'Re-generate all chapters of the audiobook';
+                }
             } else {
                 els.btnStart.textContent = '▶ Start Pipeline';
                 els.btnStart.removeAttribute('title');

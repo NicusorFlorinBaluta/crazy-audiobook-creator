@@ -759,11 +759,15 @@ class ScriptGenerator:
             registry
             if len(allowed_speakers) >= len(registry.characters)
             else CharacterRegistry(
+                book_title=getattr(registry, "book_title", ""),
+                book_author=getattr(registry, "book_author", ""),
+                genre=getattr(registry, "genre", "fantasy"),
+                tone=getattr(registry, "tone", ""),
                 characters={
                     cid: c
                     for cid, c in registry.characters.items()
                     if cid in allowed_speakers
-                }
+                },
             )
         )
         char_summary = self._format_registry(scoped_registry)

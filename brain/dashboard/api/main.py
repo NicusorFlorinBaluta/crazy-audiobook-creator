@@ -3403,10 +3403,18 @@ async def get_project_voices(project_id: str):
 
 
 @app.get("/api/projects/{project_id}/voices/download-all")
-async def download_all_project_voices(project_id: str):
-    """Download every prepared cast reference as one reusable ZIP bundle."""
+async def download_all_project_voices(
+    project_id: str,
+    all_variants: bool = False,
+):
+    """Download selected cast voice references as one reusable ZIP bundle."""
     state = _require_job(project_id)
-    cast = _load_or_build_voice_cast(project_id)
+    try:
+        _, registry = _load_character_registry(project_id)
+    except HTTPException:
+        registry = {}
+    cast = _load_or_build_voice_cast(project_id, registry if registry else None)
+    speaking_ids = set(cast.get("speaking_characters", []))
     book_name = _download_name_component(
         str(state.get("title") or project_id),
         "Untitled book",
@@ -3416,6 +3424,15 @@ async def download_all_project_voices(project_id: str):
     used_names: set[str] = set()
     with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
         for voice_id, profile in sorted(cast.get("voices", {}).items()):
+            assigned_raw = profile.get("assigned_characters", [])
+            assigned_characters = [
+                (item.get("id") or item.get("character_id") if isinstance(item, dict) else str(item))
+                for item in assigned_raw
+                if not speaking_ids or (item.get("id") or item.get("character_id") if isinstance(item, dict) else str(item)) in speaking_ids or (item == "narrator" or (isinstance(item, dict) and item.get("id") == "narrator"))
+            ]
+            if not all_variants and not assigned_characters:
+                continue
+
             try:
                 voice_path, info = _registered_voice_path(project_id, voice_id)
             except HTTPException as exc:
@@ -3444,7 +3461,7 @@ async def download_all_project_voices(project_id: str):
                     "filename": archive_name,
                     "source_type": info.get("source_type", "generated"),
                     "reference_text": info.get("ref_text", ""),
-                    "assigned_characters": profile.get("assigned_characters", []),
+                    "assigned_characters": assigned_characters,
                 }
             )
         if not manifest:

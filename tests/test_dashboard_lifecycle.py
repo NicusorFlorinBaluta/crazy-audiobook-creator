@@ -632,22 +632,36 @@ class DashboardLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 ),
             ):
                 response = await dashboard.download_all_project_voices("book")
+                response_all = await dashboard.download_all_project_voices("book", all_variants=True)
 
             self.assertEqual(response.media_type, "application/zip")
-            self.assertEqual(response.headers["x-voice-sample-count"], "2")
+            self.assertEqual(response.headers["x-voice-sample-count"], "1")
             with zipfile.ZipFile(io.BytesIO(response.body)) as bundle:
                 names = set(bundle.namelist())
                 self.assertIn(
                     "A Book - Child Male - voice-reference.wav", names
                 )
-                self.assertIn(
+                self.assertNotIn(
                     "A Book - Child Male - Candidate 2 - voice-reference.wav",
                     names,
                 )
                 manifest = json.loads(bundle.read("voice-samples.json"))
-            self.assertEqual(len(manifest["samples"]), 2)
+            self.assertEqual(len(manifest["samples"]), 1)
+
+            self.assertEqual(response_all.headers["x-voice-sample-count"], "2")
+            with zipfile.ZipFile(io.BytesIO(response_all.body)) as bundle_all:
+                names_all = set(bundle_all.namelist())
+                self.assertIn(
+                    "A Book - Child Male - voice-reference.wav", names_all
+                )
+                self.assertIn(
+                    "A Book - Child Male - Candidate 2 - voice-reference.wav",
+                    names_all,
+                )
+                manifest_all = json.loads(bundle_all.read("voice-samples.json"))
+            self.assertEqual(len(manifest_all["samples"]), 2)
             self.assertEqual(
-                manifest["samples"][1]["reference_text"],
+                manifest_all["samples"][1]["reference_text"],
                 "A reusable reference.",
             )
 

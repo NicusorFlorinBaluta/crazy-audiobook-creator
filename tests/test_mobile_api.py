@@ -165,9 +165,11 @@ class MobileApiTests(unittest.TestCase):
             self.assertEqual(data["project_id"], project_id)
             self.assertEqual(data["title"], "Detailed Story")
             self.assertEqual(len(data["chapters"]), 2)
-            self.assertEqual(data["chapters"][0]["title"], "Prologue")
+            self.assertEqual(data["chapters"][0]["title"], "Chapter 1: Prologue")
+            self.assertEqual(data["chapters"][0]["raw_title"], "Prologue")
             self.assertEqual(data["chapters"][0]["status"], "mastered")
-            self.assertEqual(data["chapters"][1]["title"], "The Awakening")
+            self.assertEqual(data["chapters"][1]["title"], "Chapter 2: The Awakening")
+            self.assertEqual(data["chapters"][1]["raw_title"], "The Awakening")
             self.assertEqual(data["chapters"][1]["status"], "generating")
         finally:
             import shutil

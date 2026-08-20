@@ -252,13 +252,6 @@ class DeliveryManager:
             script_dependency_fingerprint=script_dependency_fingerprint,
         )
         index = self.load_index()
-        if index.deliveries and (
-            index.batch_size != batch_size
-            or (index.chapter_numbers and index.chapter_numbers != chapter_numbers)
-        ):
-            raise DeliveryPlanLockedError(
-                "Delivery chapter boundaries are locked after the first publication"
-            )
         changed = (
             index.plan_fingerprint != plan_fingerprint
             or index.batch_size != batch_size
@@ -269,12 +262,12 @@ class DeliveryManager:
             index.batch_size = batch_size
             index.chapter_numbers = list(chapter_numbers)
             index.export_revision = DELIVERY_EXPORT_REVISION
-            # A dependency change keeps files recoverable but makes every old
-            # revision ineligible for automatic reuse until republished.
+            # A dependency or batch size change keeps files recoverable but marks old
+            # revisions as stale until republished.
             for part in index.deliveries:
                 if part.plan_fingerprint != plan_fingerprint:
                     part.status = "stale"
-                    part.stale_reason = "Script or export dependencies changed"
+                    part.stale_reason = "Script, batch size, or export dependencies changed"
             self.save_index(index)
         return index, batches
 

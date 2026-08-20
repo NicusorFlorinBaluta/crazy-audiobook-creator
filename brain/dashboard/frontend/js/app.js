@@ -8,6 +8,8 @@ const state = window.state = {
     projects: [],
     currentProjectId: null,
     currentProject: null,
+    chapterSelection: null,
+    chapterSelectionProjectId: null,
     ws: null,
     voiceServerOnline: false,
     schedule: null,
@@ -304,7 +306,7 @@ function setupEventListeners() {
     const btnSelAll = document.getElementById('btn-select-all-chapters');
     if (btnSelAll) {
         btnSelAll.addEventListener('click', () => {
-            document.querySelectorAll('.chapter-select-cb').forEach(cb => cb.checked = true);
+            state.chapterSelection = null;
             updateChapterSelectionState();
         });
     }
@@ -312,7 +314,7 @@ function setupEventListeners() {
     const btnSelNone = document.getElementById('btn-select-none-chapters');
     if (btnSelNone) {
         btnSelNone.addEventListener('click', () => {
-            document.querySelectorAll('.chapter-select-cb').forEach(cb => cb.checked = false);
+            state.chapterSelection = new Set();
             updateChapterSelectionState();
         });
     }
@@ -320,16 +322,13 @@ function setupEventListeners() {
     const btnApplyRange = document.getElementById('btn-apply-range');
     if (btnApplyRange) {
         btnApplyRange.addEventListener('click', () => {
-            const input = document.getElementById('chapter-range-input').value.trim();
+            const input = document.getElementById('chapter-range-input')?.value.trim();
             const chapters = parseChapterRange(input);
             if (!chapters) {
                 showToast('Use a range such as 1-5, 8, 12-14', 'warning');
                 return;
             }
-            document.querySelectorAll('.chapter-select-cb').forEach(cb => {
-                const ch = parseInt(cb.dataset.ch, 10);
-                cb.checked = chapters.has(ch);
-            });
+            state.chapterSelection = new Set(chapters);
             updateChapterSelectionState();
         });
     }
@@ -740,8 +739,8 @@ async function handleUploadSubmit() {
 
 async function startPipeline() {
     if (!state.currentProjectId) return;
-    const chapterCheckboxes = [...document.querySelectorAll('.chapter-select-cb')];
-    if (chapterCheckboxes.length && !chapterCheckboxes.some(cb => cb.checked)) {
+    
+    if (state.chapterSelection !== null && state.chapterSelection.size === 0) {
         showToast('Select at least one chapter before starting', 'warning');
         return;
     }
@@ -751,24 +750,25 @@ async function startPipeline() {
             clearTimeout(_selectionDebounceTimer);
             _selectionDebounceTimer = null;
         }
-        if (chapterCheckboxes.length) {
-            const selected = chapterCheckboxes
-                .filter(cb => cb.checked)
-                .map(cb => parseInt(cb.dataset.ch, 10));
-            const selectionValue = selected.length === chapterCheckboxes.length
-                ? null
-                : selected;
-            await saveChapterSelection(state.currentProjectId, selectionValue);
+        
+        const selectionValue = state.chapterSelection === null
+            ? null
+            : Array.from(state.chapterSelection).sort((a, b) => a - b);
+        
+        await saveChapterSelection(state.currentProjectId, selectionValue);
+        if (state.currentProject) {
+            state.currentProject.generation_chapter_selection = selectionValue;
         }
+
         if (window.PipelineManager) {
             window.PipelineManager.toggleControls('generating', true);
         }
         const response = await fetch(
-            `api/projects/${state.currentProjectId}/start?override_schedule=true`,
+            `api/projects/${encodeURIComponent(state.currentProjectId)}/start?override_schedule=true`,
             { method: 'POST' }
         );
         if (!response.ok) {
-            const err = await response.json();
+            const err = await response.json().catch(() => ({}));
             throw new Error(err.detail || 'Failed to start pipeline');
         }
         const result = await response.json();
@@ -812,19 +812,30 @@ async function pausePipeline() {
     }
 }
 
-async function deleteProject() {
-    if (!state.currentProjectId) return;
+async function deleteProject(projectId = state.currentProjectId) {
+    if (!projectId) return;
     
-    if (!confirm('Are you sure you want to delete this project? This cannot be undone.')) {
+    const projectTitle = (projectId === state.currentProjectId && state.currentProject?.title)
+        ? state.currentProject.title
+        : projectId;
+
+    if (!confirm(`Are you sure you want to delete "${projectTitle}"?\n\nThis will permanently delete all project files and audio. This cannot be undone.`)) {
         return;
     }
     
     try {
-        const response = await fetch(`api/projects/${state.currentProjectId}`, { method: 'DELETE' });
-        if (!response.ok) throw new Error('Failed to delete project');
+        const response = await fetch(`api/projects/${encodeURIComponent(projectId)}`, { method: 'DELETE' });
+        if (!response.ok) {
+            const errData = await response.json().catch(() => ({}));
+            throw new Error(errData.detail || `Failed to delete project (${response.status})`);
+        }
         
-        showToast('Project deleted', 'success');
-        showProjectsView();
+        showToast('Project deleted successfully', 'success');
+        if (state.currentProjectId === projectId) {
+            showProjectsView();
+        } else {
+            await fetchProjects();
+        }
     } catch (error) {
         showToast(error.message, 'error');
     }
@@ -872,14 +883,16 @@ function renderProjectsList() {
     projects.forEach(project => {
         const status = String(project.status || 'created').toLowerCase();
         const statusToken = status.replace(/[^a-z_]/g, '');
-        const card = document.createElement('button');
-        card.type = 'button';
+        const card = document.createElement('div');
         card.className = 'project-card';
+        card.setAttribute('role', 'button');
+        card.setAttribute('tabindex', '0');
         card.setAttribute(
             'aria-label',
             `Open ${project.title && project.title !== 'Unknown' ? project.title : 'untitled project'}, ${formatProjectStatus(status)}`
         );
         card.innerHTML = `
+            <button class="card-btn-delete" title="Delete project" aria-label="Delete project ${escapeHtml(project.title || project.project_id)}">🗑</button>
             <div class="card-header">
                 <div class="card-emoji">📖</div>
                 <div>
@@ -903,7 +916,18 @@ function renderProjectsList() {
             </div>
         `;
         
+        card.querySelector('.card-btn-delete')?.addEventListener('click', (e) => {
+            e.stopPropagation();
+            deleteProject(project.project_id);
+        });
+
         card.addEventListener('click', () => showDetailView(project.project_id));
+        card.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                showDetailView(project.project_id);
+            }
+        });
         els.projectsGrid.appendChild(card);
     });
 }
@@ -1439,10 +1463,13 @@ function renderChapterList(project) {
     const currentScript = project.current_script_chapter;
     const currentGen = project.current_gen_chapter;
     const selectionLocked = project.running === true;
-    const selectedNumbers = selectionLocked
-        ? project.active_generation_chapter_selection
-        : project.generation_chapter_selection;
-    const selection = selectedNumbers == null ? null : new Set(selectedNumbers);
+    if (state.chapterSelectionProjectId !== project.project_id) {
+        state.chapterSelectionProjectId = project.project_id;
+        state.chapterSelection = project.generation_chapter_selection ? new Set(project.generation_chapter_selection) : null;
+    } else if (selectionLocked) {
+        state.chapterSelection = project.active_generation_chapter_selection ? new Set(project.active_generation_chapter_selection) : null;
+    }
+    const selection = state.chapterSelection;
     const detailsMap = new Map(
         (project.chapter_details || []).map(detail => [detail.number, detail])
     );
@@ -1540,7 +1567,7 @@ function renderChapterList(project) {
         `;
         row.querySelector('.chapter-select-cb').addEventListener(
             'change',
-            updateChapterSelectionState
+            (e) => onChapterCheckboxToggle(chapter, e.target.checked)
         );
         grid.appendChild(row);
     }
@@ -1639,12 +1666,13 @@ function filterChapterRows() {
 function updateSelectionSummary(project = null) {
     const summary = document.getElementById('chapter-selection-summary');
     if (!summary) return;
-    const checkboxes = [...document.querySelectorAll('.chapter-select-cb')];
-    const selected = checkboxes.filter(cb => cb.checked).length;
-    const locked = project?.running === true;
-    summary.textContent = selected === checkboxes.length
+    const current = project || state.currentProject;
+    const total = current?.total_chapters || document.querySelectorAll('.chapter-select-cb').length;
+    const selected = state.chapterSelection === null ? total : state.chapterSelection.size;
+    const locked = current?.running === true;
+    summary.textContent = selected === total
         ? `All ${selected} chapters${locked ? ' · active batch' : ''}`
-        : `${selected} of ${checkboxes.length} selected${locked ? ' · active batch' : ''}`;
+        : `${selected} of ${total} selected${locked ? ' · active batch' : ''}`;
 }
 
 function renderWorkStatus(project) {
@@ -1877,7 +1905,7 @@ function renderChapterGridLegacy(project) {
     const mastered = new Set(project.mastered_chapters || []);
     const currentScript = project.current_script_chapter;
     const currentGen = project.current_gen_chapter;
-    const selection = project.generation_chapter_selection ? new Set(project.generation_chapter_selection) : null;
+    const selection = state.chapterSelection;
     const detailsMap = {};
     if (project.chapter_details) {
         project.chapter_details.forEach(d => { detailsMap[d.number] = d; });
@@ -1975,7 +2003,7 @@ function renderChapterGridLegacy(project) {
         `;
 
         const cb = cell.querySelector('.chapter-select-cb');
-        cb.addEventListener('change', updateChapterSelectionState);
+        cb.addEventListener('change', (e) => onChapterCheckboxToggle(i, e.target.checked));
 
         grid.appendChild(cell);
     }
@@ -2105,35 +2133,69 @@ function deriveWorkProgress(lines, totalChapters) {
     return progress;
 }
 
+function onChapterCheckboxToggle(chapter, isChecked) {
+    const total = state.currentProject?.total_chapters || 0;
+    if (state.chapterSelection === null) {
+        state.chapterSelection = new Set();
+        for (let i = 1; i <= total; i++) {
+            state.chapterSelection.add(i);
+        }
+    }
+    if (isChecked) {
+        state.chapterSelection.add(chapter);
+    } else {
+        state.chapterSelection.delete(chapter);
+    }
+    if (state.chapterSelection.size === total) {
+        state.chapterSelection = null;
+    }
+    updateChapterSelectionState();
+}
+
 function updateChapterSelectionState() {
     if (!state.currentProjectId) return;
     if (_selectionDebounceTimer) clearTimeout(_selectionDebounceTimer);
 
-    const cbs = document.querySelectorAll('.chapter-select-cb');
-    const selected = [];
-    let total = cbs.length;
+    const total = state.currentProject?.total_chapters || 0;
+    const targetProjectId = state.currentProjectId;
+    const selectionValue = state.chapterSelection === null
+        ? null
+        : Array.from(state.chapterSelection).sort((a, b) => a - b);
 
-    cbs.forEach(cb => {
-        if (cb.checked) {
-            selected.push(parseInt(cb.dataset.ch, 10));
-        }
+    // Update all visible checkboxes in the DOM immediately
+    document.querySelectorAll('.chapter-select-cb').forEach(cb => {
+        const ch = parseInt(cb.dataset.ch, 10);
+        cb.checked = (state.chapterSelection === null || state.chapterSelection.has(ch));
     });
 
-    const selectionValue = selected.length === total ? null : selected;
-    const targetProjectId = state.currentProjectId;
-    updateSelectionSummary();
+    updateSelectionSummary(state.currentProject);
+
+    // Update start/pipeline button tracker instantly
+    if (window.PipelineManager && state.currentProject) {
+        const isRunning = Boolean(state.currentProject.running);
+        const coarseStatus = isRunning ? 'running' : (state.currentProject.status || 'created');
+        const projectData = {
+            ...state.currentProject,
+            generation_chapter_selection: selectionValue
+        };
+        window.PipelineManager.updateTracker(projectData.active_stage || projectData.status, coarseStatus, projectData);
+        window.PipelineManager.toggleControls(projectData.status, isRunning, projectData);
+    }
 
     _selectionDebounceTimer = setTimeout(async () => {
         try {
             await saveChapterSelection(targetProjectId, selectionValue);
-            if (selected.length === 0) {
+            if (state.currentProject && state.currentProjectId === targetProjectId) {
+                state.currentProject.generation_chapter_selection = selectionValue;
+            }
+            if (selectionValue && selectionValue.length === 0) {
                 showToast('Cleared chapter selection', 'info');
             }
         } catch (e) {
             console.error('Failed to update selection', e);
             showToast(e.message || 'Failed to save chapter selection', 'error');
         }
-    }, 300);
+    }, 200);
 }
 
 const SCHEDULE_DAYS = [
@@ -2509,22 +2571,23 @@ async function fetchAndRenderDeliveries(projectId) {
         list.innerHTML = '';
 
         // Update dashboard settings UI
-        currentDeliverySettings = data.settings || {};
+        currentDeliverySettings = data.settings || { enabled: false, batch_size: 5 };
         const incToggle = document.getElementById('dashboard-enable-incremental');
         const batchInput = document.getElementById('dashboard-delivery-batch-size');
         const opts = document.getElementById('dashboard-incremental-options');
         const saveBtn = document.getElementById('dashboard-save-delivery');
-        const settingsLocked = Boolean(state.currentProject?.running) ||
-            Boolean(data.deliveries?.length);
-        incToggle.disabled = settingsLocked;
-        batchInput.disabled = settingsLocked;
-        incToggle.title = settingsLocked
-            ? 'Stop the pipeline and reset published parts before changing delivery boundaries'
-            : '';
 
-        // Only update UI elements if the user hasn't made unsaved changes
-        if (saveBtn.style.display === 'none' || !saveBtn.style.display) {
-            incToggle.checked = currentDeliverySettings.enabled || false;
+        incToggle.disabled = false;
+        batchInput.disabled = false;
+        incToggle.title = '';
+
+        // Only update UI elements if the user is not actively editing them
+        const isEditing = document.activeElement === incToggle ||
+                          document.activeElement === batchInput ||
+                          (saveBtn && saveBtn.style.display !== 'none' && saveBtn.style.display !== '');
+
+        if (!isEditing) {
+            incToggle.checked = Boolean(currentDeliverySettings.enabled);
             batchInput.value = currentDeliverySettings.batch_size || 5;
 
             if (incToggle.checked) {
@@ -2572,7 +2635,6 @@ async function fetchAndRenderDeliveries(projectId) {
 
         summary.textContent = `${data.published_count} parts available`;
 
-
         data.deliveries.forEach((d, index) => {
             const row = document.createElement('div');
             row.style.display = 'flex';
@@ -2609,10 +2671,8 @@ async function fetchAndRenderDeliveries(projectId) {
 
 window.toggleIncrementalSettings = function(checked) {
     const opts = document.getElementById('dashboard-incremental-options');
-    if (checked) {
-        opts.style.display = 'flex';
-    } else {
-        opts.style.display = 'none';
+    if (opts) {
+        opts.style.display = checked ? 'flex' : 'none';
     }
     window.checkIncrementalSettings();
 };
@@ -2622,7 +2682,9 @@ window.checkIncrementalSettings = function() {
     const batchInput = document.getElementById('dashboard-delivery-batch-size');
     const saveBtn = document.getElementById('dashboard-save-delivery');
 
-    const changed = (incToggle.checked !== (currentDeliverySettings.enabled || false)) ||
+    if (!incToggle || !batchInput || !saveBtn) return;
+
+    const changed = (incToggle.checked !== Boolean(currentDeliverySettings.enabled)) ||
                    (parseInt(batchInput.value, 10) !== (currentDeliverySettings.batch_size || 5));
 
     if (changed) {
@@ -2637,6 +2699,11 @@ window.saveIncrementalSettings = async function() {
     const batchInput = document.getElementById('dashboard-delivery-batch-size');
     const saveBtn = document.getElementById('dashboard-save-delivery');
 
+    if (!incToggle || !batchInput || !saveBtn) return;
+
+    const newBatchSize = Math.max(1, Math.min(20, parseInt(batchInput.value, 10) || 5));
+    batchInput.value = newBatchSize;
+
     saveBtn.disabled = true;
     saveBtn.textContent = 'Saving...';
     try {
@@ -2646,14 +2713,16 @@ window.saveIncrementalSettings = async function() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 enabled: incToggle.checked,
-                batch_size: parseInt(batchInput.value, 10)
+                batch_size: newBatchSize
             })
         });
         const data = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(data.detail || 'Could not save delivery settings');
         if (state.currentProjectId !== projectId) return;
-        currentDeliverySettings = { enabled: incToggle.checked, batch_size: parseInt(batchInput.value, 10) };
+        currentDeliverySettings = { enabled: incToggle.checked, batch_size: newBatchSize };
         saveBtn.style.display = 'none';
+        showToast('Incremental delivery settings saved', 'success');
+        await fetchAndRenderDeliveries(projectId);
     } catch (e) {
         showToast(e.message, 'error');
     }

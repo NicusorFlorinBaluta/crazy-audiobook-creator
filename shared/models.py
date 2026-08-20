@@ -139,11 +139,11 @@ class Character(BaseModel):
 class CharacterRegistry(BaseModel):
     """All characters identified in a book, keyed by character ID."""
 
-    book_title: str
-    book_author: str
+    book_title: str = ""
+    book_author: str = ""
     genre: str = "fantasy"
     tone: str = ""
-    characters: dict[str, Character]
+    characters: dict[str, Character] = Field(default_factory=dict)
 
 
 # ===================================================================
