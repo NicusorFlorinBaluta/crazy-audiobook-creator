@@ -1294,6 +1294,35 @@ async def get_project(project_id: str):
         raise HTTPException(status_code=404, detail="Project not found")
 
 
+def _safe_delete_tree(path: Path) -> None:
+    """Safely delete a directory tree on Windows, clearing read-only attributes."""
+    import stat
+    if not path.exists() and not path.is_symlink():
+        return
+
+    def _remove_readonly(func, file_path, exc_info):
+        try:
+            os.chmod(file_path, stat.S_IWRITE | stat.S_IREAD)
+            func(file_path)
+        except Exception:
+            pass
+
+    if path.is_dir():
+        try:
+            shutil.rmtree(path, onexc=_remove_readonly)
+        except Exception:
+            try:
+                shutil.rmtree(path, ignore_errors=True)
+            except Exception as exc:
+                logger.warning("Could not fully delete directory %s: %s", path, exc)
+    else:
+        try:
+            os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+            path.unlink(missing_ok=True)
+        except Exception as exc:
+            logger.warning("Could not delete file %s: %s", path, exc)
+
+
 @app.delete("/api/projects/{project_id}")
 async def delete_project(project_id: str):
     """Delete a stopped project's state and local artifacts."""
@@ -1304,34 +1333,49 @@ async def delete_project(project_id: str):
             status_code=409,
             detail="Pause the pipeline before deleting this project",
         )
+
+    project_exists = False
     try:
         job_queue.get_job(project_id)
-        roots = [
-            _project_dir(project_id),
-            _workspace_project_dir(project_id),
-        ]
-        voice_project = _voice_project_dir(project_id)
-        roots.append(voice_project)
-        try:
-            _purge_project_cache(project_id, voice_project)
-        except sqlite3.Error as exc:
-            logger.warning(
-                "Could not purge cache rows for deleted project %s: %s",
-                project_id,
-                exc,
-            )
-        for root in roots:
-            if root.is_dir():
-                shutil.rmtree(root)
-            elif root.exists():
-                root.unlink()
-        job_queue.delete_job(project_id)
-        running_tasks.pop(project_id, None)
-        _project_logs.pop(project_id, None)
-        _log_subscribers.pop(project_id, None)
-        return {"status": "deleted", "project_id": project_id}
+        project_exists = True
     except KeyError:
-        raise HTTPException(status_code=404, detail="Project not found")
+        pass
+
+    roots = [
+        _project_dir(project_id),
+        _workspace_project_dir(project_id),
+        _voice_project_dir(project_id),
+    ]
+    if any(r.exists() for r in roots):
+        project_exists = True
+
+    if not project_exists:
+        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
+
+    voice_project = _voice_project_dir(project_id)
+    try:
+        _purge_project_cache(project_id, voice_project)
+    except Exception as exc:
+        logger.warning(
+            "Could not purge cache rows for deleted project %s: %s",
+            project_id,
+            exc,
+        )
+
+    for root in roots:
+        _safe_delete_tree(root)
+
+    try:
+        job_queue.delete_job(project_id)
+    except KeyError:
+        pass
+    except Exception as exc:
+        logger.warning("Error deleting job %s from database: %s", project_id, exc)
+
+    running_tasks.pop(project_id, None)
+    _project_logs.pop(project_id, None)
+    _log_subscribers.pop(project_id, None)
+    return {"status": "deleted", "project_id": project_id}
 
 
 # ---------------------------------------------------------------------------
