@@ -1808,7 +1808,7 @@ async def download_audiobook(project_id: str, delivery_id: str | None = None):
         state = job_queue.get_job(project_id) if job_queue else {}
     except KeyError:
         state = {}
-    if state.get("export_stale"):
+    if state.get("export_stale") and state.get("status") != PipelineStage.COMPLETE.value:
         raise HTTPException(
             status_code=409,
             detail="The full audiobook is stale and must be exported again",
@@ -4315,15 +4315,12 @@ async def update_delivery_settings(project_id: str, request: DeliverySettingsReq
     state = _require_project_stopped(project_id)
     project_dir = _project_dir(project_id)
     index = DeliveryManager(project_dir).load_index()
-    if index.deliveries and (
-        index.batch_size != request.batch_size
-        or not request.enabled
-    ):
+    if index.deliveries and request.enabled and index.batch_size != request.batch_size:
         raise HTTPException(
             status_code=409,
             detail=(
-                "Delivery settings are locked after the first publication; reset "
-                "incremental delivery artifacts before changing them"
+                "Batch size is locked after deliveries have been published; reset "
+                "incremental delivery artifacts before changing batch size"
             ),
         )
     settings = dict(state.get("incremental_delivery") or {})

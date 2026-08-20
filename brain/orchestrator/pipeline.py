@@ -2688,8 +2688,7 @@ class Pipeline:
                 "output_file": str(local_m4b),
             },
         )
-        if not partial:
-            self.job_queue.update_job(project_id, {"export_stale": False})
+        self.job_queue.update_job(project_id, {"export_stale": False})
         return {
             "output_file": str(local_m4b),
             "chapters": included_numbers,
