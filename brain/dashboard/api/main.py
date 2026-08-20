@@ -4547,20 +4547,23 @@ class DeliverySettingsRequest(BaseModel):
 
 @app.patch("/api/projects/{project_id}/delivery-settings")
 async def update_delivery_settings(project_id: str, request: DeliverySettingsRequest):
-    state = _require_project_stopped(project_id)
+    _require_job(project_id)
     project_dir = _project_dir(project_id)
-    index = DeliveryManager(project_dir).load_index()
-    if index.deliveries and request.enabled and index.batch_size != request.batch_size:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "Batch size is locked after deliveries have been published; reset "
-                "incremental delivery artifacts before changing batch size"
-            ),
-        )
+    state = job_queue.get_job(project_id)
+    dm = DeliveryManager(project_dir)
+    index = dm.load_index()
+
+    if index.batch_size != request.batch_size:
+        index.batch_size = request.batch_size
+        for part in index.deliveries:
+            part.status = "stale"
+            part.stale_reason = f"Batch size changed to {request.batch_size}"
+        dm.save_index(index)
+
     settings = dict(state.get("incremental_delivery") or {})
     settings["enabled"] = request.enabled
     settings["batch_size"] = request.batch_size
+
     # Also update pipeline.json on disk if present to persist settings across restarts
     state_file = project_dir / "pipeline.json"
     if state_file.is_file():
@@ -4569,10 +4572,7 @@ async def update_delivery_settings(project_id: str, request: DeliverySettingsReq
             persisted["incremental_delivery"] = settings
             atomic_write_json(state_file, persisted)
         except (OSError, ValueError, TypeError) as exc:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Could not persist delivery settings: {exc}",
-            ) from exc
+            logger.warning("Could not persist delivery settings to pipeline.json: %s", exc)
 
     job_queue.update_job(project_id, {"incremental_delivery": settings})
 
