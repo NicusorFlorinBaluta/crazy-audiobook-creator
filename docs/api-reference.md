@@ -108,6 +108,20 @@ Analysis and scripting remain book-wide. Selection controls generation, masterin
 | `POST` | `/api/projects/{project_id}/search-metadata` | Ranked manual Google Books title/author search |
 | `GET` | `/api/projects/{project_id}/metadata-candidate/cover` | Preview the cached matched cover |
 | `GET` | `/api/projects/{project_id}/cover` | Display the project's current cover |
+| `GET` | `/api/projects/{project_id}/stream` | Stream the full M4B with HTTP byte ranges |
+| `GET` | `/api/projects/{project_id}/stream/chapter/{number}` | Stream chapter audio with on-demand transparent 128k AAC compression |
+
+### Mobile Companion API (`/api/mobile/v1`)
+
+The Mobile Companion API powers the **CrazyVoice** Android app with zero-configuration discovery, incremental catalog browsing, chapter navigation, and two-way progress syncing.
+
+| Method | Route | Purpose |
+|---|---|---|
+| `GET` | `/api/mobile/v1/server-info` | Server status and client compatibility info |
+| `GET` | `/api/mobile/v1/catalog` | Catalog overview (`?status=all\|mastered\|in_progress`) with cover URLs, delivery badges, and durations |
+| `GET` | `/api/mobile/v1/books/{project_id}` | Full book detail with rich chapter manifests, narrator, series, and exact start/end millisecond offsets |
+| `POST` | `/api/mobile/v1/books/{project_id}/progress` | Persist mobile playback progress (chapter, timestamp, speed, completion) |
+| `GET` | `/api/mobile/v1/books/{project_id}/progress` | Retrieve latest saved playback position for seamless cross-device resume |
 
 Project IDs and all resolved files are constrained beneath the project/workspace roots.
 

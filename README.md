@@ -17,6 +17,7 @@ Crazy Audiobook Creator turns an EPUB into a multi-speaker, chaptered M4B on one
 - Local dashboard with scalable chapter search/filtering, explicit current-work progress, editable working hours, script, character, quality, and log views
 - Reviewed Google Books matching with manual edition search and metadata-only refresh of completed M4B packages
 - Individually named reusable voice-reference downloads plus a complete cast ZIP
+- **CrazyVoice Android App**: Seamless mobile companion with remote catalog browsing, transparent 128k AAC chapter streaming, two-way progress synchronization, background offline downloading (with Wi-Fi only toggle), and Android Auto / lockscreen metadata integration
 
 ## Partial-book workflow
 
