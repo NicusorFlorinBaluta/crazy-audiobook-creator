@@ -2828,13 +2828,18 @@ audio:hover {
 
 .attention-card-badge { margin-top: 8px; padding: 5px 8px; border-radius: 999px; color: #fecaca; background: rgba(239,68,68,.14); font-size: .68rem; font-weight: 700; }
 .attention-panel { margin: 18px 0; padding: 18px; border: 1px solid rgba(245,158,11,.45); border-radius: 14px; background: linear-gradient(145deg, rgba(245,158,11,.08), rgba(15,23,42,.92)); transition: all 0.2s ease; }
+.attention-panel.attention-panel-warning { border-color: rgba(239,68,68,.65); background: linear-gradient(145deg, rgba(239,68,68,.12), rgba(15,23,42,.95)); box-shadow: 0 0 16px rgba(239,68,68,.12); }
 .attention-panel.attention-panel-resolved { border-color: rgba(34,197,94,.35); background: linear-gradient(145deg, rgba(34,197,94,.05), rgba(15,23,42,.92)); }
-.attention-details summary { cursor: pointer; user-select: none; list-style: none; }
+.attention-details summary { cursor: pointer; user-select: none; list-style: none; position: relative; }
 .attention-details summary::-webkit-details-marker { display: none; }
 .attention-heading, .attention-item-head, .attention-pagination { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
 .attention-heading h2 { margin: 2px 0; font-size: 1.1rem; }
 .attention-heading p { margin: 0; color: var(--text-secondary); }
+.attention-warning-text { color: #fca5a5; font-size: 0.88rem; display: inline-flex; align-items: center; gap: 6px; }
+.attention-warning-text strong { color: #fecaca; font-weight: 700; }
+.attention-warning-text em { color: #94a3b8; font-style: normal; font-size: 0.8rem; }
 .attention-kicker { color: #fbbf24; font-size: .68rem; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; }
+.attention-kicker.attention-kicker-warning { color: #fca5a5; background: rgba(239,68,68,.18); padding: 3px 8px; border-radius: 999px; border: 1px solid rgba(239,68,68,.35); }
 .attention-kicker.attention-kicker-optional { color: #86efac; }
 .attention-toolbar { display: flex; flex-wrap: wrap; gap: 10px; margin: 16px 0; }
 .attention-toolbar label { display: grid; gap: 4px; color: var(--text-muted); font-size: .66rem; }

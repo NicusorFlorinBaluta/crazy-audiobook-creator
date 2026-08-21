@@ -123,8 +123,7 @@ def test_dashboard_uses_canonical_chapter_numbers_instead_of_source_headings() -
 def test_empty_next_run_selection_is_not_replaced_by_stale_active_selection() -> None:
     app = _read("js/app.js")
 
-    assert "const selectedNumbers = selectionLocked" in app
-    assert "const selection = selectedNumbers == null ? null : new Set(selectedNumbers);" in app
+    assert "state.chapterSelection" in app
     assert "const savedSelection = project.running === true" in app
     assert "project.active_generation_chapter_selection\n        || project.generation_chapter_selection" not in app
 

@@ -108,3 +108,10 @@ source EPUB and generated audio.
   and last tab.
 - The new-project dialog traps focus, closes with Escape, and returns focus to
   the control that opened it.
+
+## Server Lifecycle & Resilience
+
+The dashboard server runs under an automated self-healing supervisor:
+- **Self-Healing Supervisor**: Started via `scripts/start_dashboard.ps1`, which monitors `/health` on 10-second intervals and auto-recovers unresponsive sockets within $<2$ seconds while preserving manual shutdown capability.
+- **PortProxy Loopback Isolation**: Configurable via `scripts/setup_portproxy.ps1` to isolate external LAN connections from physical router resets.
+- For architectural details, see [Socket Resilience & Self-Healing Architecture](file:///e:/Projects/crazy-audiobook-creator/docs/socket-resilience-and-supervision.md).

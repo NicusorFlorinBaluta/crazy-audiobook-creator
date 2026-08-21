@@ -122,15 +122,21 @@ These tests verify state/artifact/source/validation logic with fake engines. The
 
 ## 6. Start the application
 
-Start the dashboard directly:
+Start the dashboard with the self-healing supervisor:
 
 ```powershell
-& $python -m uvicorn brain.dashboard.api.main:app --host 127.0.0.1 --port 8000
+powershell.exe -ExecutionPolicy Bypass -File .\scripts\start_dashboard.ps1
 ```
 
-Open `http://127.0.0.1:8000`. With `voice_server.auto_start: true`, the pipeline launches the voice service in the configured environment when needed.
+The supervisor runs the dashboard, monitors `http://127.0.0.1:8000/health` on 10-second intervals, auto-recovers from unexpected network/socket drops, and cleanly exits when you shut down via the UI or console.
 
-Alternatively run `start_app.pyw` to launch the dashboard silently and open the browser. It reuses an existing dashboard on port 8000 and does not kill unrelated processes. Closing that browser tab does not stop the background dashboard; use Pause first when you want GPU work to stop.
+To make external LAN connections immune to physical interface/router resets, optionally enable Windows PortProxy (run once as Administrator):
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File .\scripts\setup_portproxy.ps1
+```
+
+For more details, see [Socket Resilience & Supervision](file:///e:/Projects/crazy-audiobook-creator/docs/socket-resilience-and-supervision.md).
 
 After installing the `Crazy Audiobook Dashboard` scheduled task, reload code on
 port 8000 with the controlled restart helper:

@@ -180,6 +180,12 @@ async def _shutdown_dashboard_process(delay_seconds: float = 0.35) -> None:
     """
     await asyncio.sleep(delay_seconds)
     try:
+        sentinel_path = Path("brain/projects/.dashboard_shutdown")
+        sentinel_path.parent.mkdir(parents=True, exist_ok=True)
+        sentinel_path.write_text("shutdown", encoding="utf-8")
+    except Exception:
+        pass
+    try:
         await _release_gpu_resources()
     finally:
         logging.shutdown()
@@ -938,6 +944,18 @@ async def lifespan(app: FastAPI):
     logging.getLogger().setLevel(logging.INFO)
     logger.info("Brain Dashboard starting...")
 
+    # Check shutdown sentinel to distinguish intentional shutdown from unexpected drops
+    sentinel_path = Path("brain/projects/.dashboard_shutdown")
+    was_graceful_shutdown = sentinel_path.exists()
+    if was_graceful_shutdown:
+        try:
+            sentinel_path.unlink()
+        except Exception:
+            pass
+
+    auto_resume = config.get("dashboard", {}).get("auto_resume_in_flight", True)
+    jobs_to_resume: list[str] = []
+
     # A process restart cannot preserve worker threads. Convert stale running
     # state into a resumable state; scheduled jobs remain eligible for the
     # automatic scheduler below.
@@ -945,6 +963,8 @@ async def lifespan(app: FastAPI):
         if not stale_job.get("running"):
             continue
         stale_status = stale_job.get("status")
+        if auto_resume and not was_graceful_shutdown:
+            jobs_to_resume.append(stale_job["project_id"])
         replacement = (
             PipelineStage.PAUSED_SCHEDULED.value
             if stale_status == PipelineStage.PAUSED_SCHEDULED.value
@@ -958,6 +978,11 @@ async def lifespan(app: FastAPI):
                 "pause_reason": "dashboard restarted",
             },
         )
+
+    if jobs_to_resume:
+        for pid in jobs_to_resume:
+            logger.info("Auto-resuming in-flight project after unexpected restart: %s", pid)
+            asyncio.create_task(pipeline.start_async(pid, override_schedule=True))
 
     # Periodic background task to push live project updates via WebSocket
     async def ws_broadcast_loop():
@@ -1433,15 +1458,21 @@ async def start_pipeline(
             detail="Select at least one chapter before starting generation",
         )
 
-    gate = collect_review_gate(project_id, _project_dir(project_id), job_queue)
-    if gate.blocking_items:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"Resolve {len(gate.blocking_items)} blocking review item(s) "
-                "before resuming the pipeline."
-            ),
-        )
+    resume_stage = PipelineResumePlan.from_state(current).stage
+    if resume_stage not in (
+        PipelineStage.CREATED,
+        PipelineStage.EXTRACTING,
+        PipelineStage.SCRIPTING,
+    ):
+        gate = collect_review_gate(project_id, _project_dir(project_id), job_queue)
+        if gate.blocking_items:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Resolve {len(gate.blocking_items)} blocking review item(s) "
+                    "before resuming the pipeline."
+                ),
+            )
     if (
         current.get("voice_review_policy", "grandfathered")
         == "required_once"
@@ -1455,7 +1486,6 @@ async def start_pipeline(
                 "Review the speaking cast and use Approve voices & continue."
             ),
         )
-    resume_stage = PipelineResumePlan.from_state(current).stage
 
     # Clear stale terminal state synchronously so status never reports
     # error/paused while the replacement worker is already running.

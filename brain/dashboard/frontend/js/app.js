@@ -979,26 +979,34 @@ function renderAttentionInbox(project = state.currentProject) {
     const isWaitingForReview = project?.status === 'waiting_for_review';
     const hasBlocking = (data.blocking_count || 0) > 0;
     
+    if (details && !details.dataset.listenerAttached) {
+        details.dataset.listenerAttached = 'true';
+        details.addEventListener('toggle', () => {
+            details.dataset.userToggled = 'true';
+        });
+    }
+
+    if (details && !details.dataset.userToggled) {
+        details.open = false;
+    }
+
     if (hasBlocking || isWaitingForReview) {
         panel.classList.remove('attention-panel-resolved');
+        panel.classList.add('attention-panel-warning');
         if (kicker) {
-            kicker.textContent = isWaitingForReview ? 'Action required' : 'Attention required';
-            kicker.className = 'attention-kicker';
+            kicker.textContent = isWaitingForReview ? '⚠️ Action required' : '⚠️ Attention required';
+            kicker.className = 'attention-kicker attention-kicker-warning';
         }
-        document.getElementById('attention-summary').textContent = `${data.blocking_count} blocking decision${data.blocking_count === 1 ? '' : 's'}; the pipeline resumes automatically after the last one.`;
-        if (details && !details.dataset.userToggled) {
-            details.open = true;
-        }
+        const plural = data.blocking_count === 1 ? '' : 's';
+        document.getElementById('attention-summary').innerHTML = `<span class="attention-warning-text">⚠️ <strong>${data.blocking_count} high/critical item${plural} to review</strong> — pipeline resumes automatically after the last one. <em>(Click to expand)</em></span>`;
     } else {
+        panel.classList.remove('attention-panel-warning');
         panel.classList.add('attention-panel-resolved');
         if (kicker) {
             kicker.textContent = 'Optional / Reference';
             kicker.className = 'attention-kicker attention-kicker-optional';
         }
-        document.getElementById('attention-summary').textContent = `✓ 0 blocking issues • ${data.total_count} non-blocking or resolved item${data.total_count === 1 ? '' : 's'} (click to view)`;
-        if (details && !details.dataset.userToggled) {
-            details.open = false;
-        }
+        document.getElementById('attention-summary').textContent = `✓ 0 blocking issues • ${data.total_count} non-blocking or resolved item${data.total_count === 1 ? '' : 's'} (click to expand)`;
     }
     
     const resume = document.getElementById('btn-resume-after-review');

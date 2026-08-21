@@ -12,6 +12,9 @@ from shared.pronunciation import build_pronunciation_inventory
 
 RESOLVED_SEGMENT_DISPOSITIONS = {"acceptable", "regenerate"}
 RESOLVED_EXTRACTION_DISPOSITIONS = {"include", "exclude", "reference"}
+RESOLVED_ATTRIBUTION_DISPOSITIONS = {
+    "accepted", "overridden", "approved", "fixed", "acceptable"
+}
 
 
 @dataclass(frozen=True)
@@ -106,13 +109,16 @@ def collect_review_gate(project_id: str, project_dir: Path, job_queue: Any) -> R
             script_lines_by_id[line_id] = {**line, "chapter_number": chapter_number}
             if not line.get("attribution_review_required"):
                 continue
+            review = persisted.get(("attribution", line_id), {})
+            disposition = str(review.get("disposition", "unreviewed"))
             items.append(ReviewItem(
                 category="attribution",
                 item_id=line_id,
                 title=f"Speaker attribution {line_id}",
                 reason=str(line.get("attribution_review_reason") or line.get("speaker_evidence") or "Speaker could not be resolved safely."),
                 confidence=_float_or_none(line.get("speaker_confidence")),
-                blocking=True,
+                disposition=disposition,
+                blocking=disposition not in RESOLVED_ATTRIBUTION_DISPOSITIONS,
                 chapter_number=chapter_number,
                 details={
                     "speaker": line.get("speaker"),
@@ -167,13 +173,16 @@ def collect_review_gate(project_id: str, project_dir: Path, job_queue: Any) -> R
                 conf = _float_or_none(issue.get("speaker_confidence"))
                 if conf is None:
                     conf = _float_or_none(matched_line.get("speaker_confidence"))
+                review = persisted.get(("attribution", item_id), {})
+                disposition = str(review.get("disposition", "unreviewed"))
                 items.append(ReviewItem(
                     category="attribution",
                     item_id=item_id,
                     title=f"Speaker attribution {item_id}",
                     reason=str(issue.get("message") or "Source-grounded attribution audit failed."),
                     confidence=conf,
-                    blocking=True,
+                    disposition=disposition,
+                    blocking=disposition not in RESOLVED_ATTRIBUTION_DISPOSITIONS,
                     chapter_number=_int_or_none(issue.get("chapter_number") or matched_line.get("chapter_number")),
                     details={
                         "audit_kind": issue.get("kind", "unknown"),
