@@ -982,7 +982,7 @@ async def lifespan(app: FastAPI):
     if jobs_to_resume:
         for pid in jobs_to_resume:
             logger.info("Auto-resuming in-flight project after unexpected restart: %s", pid)
-            asyncio.create_task(pipeline.start_async(pid, override_schedule=True))
+            asyncio.create_task(start_pipeline(pid, override_schedule=True))
 
     # Periodic background task to push live project updates via WebSocket
     async def ws_broadcast_loop():
