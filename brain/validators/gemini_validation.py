@@ -29,6 +29,69 @@ from shared.single_instance import SingleInstanceLock
 
 logger = logging.getLogger(__name__)
 
+_GENERIC_ATTRIBUTION_IDS = {
+    "minor_male", "minor_female", "child_male", "child_female",
+    "crowd", "collective", "character_male", "character_female",
+}
+_EXPLICIT_IDENTITY_PATTERNS = (
+    re.compile(
+        r"\b(?:attributed to|spoken by|continuation of|dialogue (?:of|from))\s+"
+        r"(?:the\s+)?([A-Z][\w'-]{1,})\b"
+    ),
+    re.compile(
+        r"\b([A-Z][\w'-]{1,})(?:'s|’s)\s+(?:dialogue|speech|line|turn)\b"
+    ),
+    re.compile(
+        r"\b([A-Z][\w'-]{1,})\s+(?:said|asked|replied|whispered|shouted|"
+        r"murmured|exclaimed|noted|continued|frowned)\b"
+    ),
+)
+
+
+def _normalized_identity(value: str) -> str:
+    return re.sub(r"[^\w]+", "_", value.casefold()).strip("_")
+
+
+def _attribution_identity_conflict(
+    decision: "AttributionDecision",
+    candidates: dict[str, dict[str, Any]],
+) -> str | None:
+    """Reject a resolver that names one person but returns another/generic ID."""
+    if decision.decision != "resolved" or not decision.speaker_id:
+        return None
+    text = f"{decision.reason}\n{decision.evidence}"
+    claims = {
+        _normalized_identity(match.group(1))
+        for pattern in _EXPLICIT_IDENTITY_PATTERNS
+        for match in pattern.finditer(text)
+    }
+    claims.discard("")
+    if not claims:
+        return None
+
+    returned = str(decision.speaker_id)
+    returned_context = candidates.get(returned, {})
+    returned_identities = {
+        _normalized_identity(returned),
+        _normalized_identity(str(returned_context.get("name") or "")),
+        *{
+            _normalized_identity(str(alias))
+            for alias in returned_context.get("aliases", [])
+        },
+    }
+    returned_identities.discard("")
+    mismatches = sorted(claims - returned_identities)
+    if mismatches:
+        return (
+            "Resolver rationale names a different or missing character: "
+            + ", ".join(mismatches)
+        )
+    if returned in _GENERIC_ATTRIBUTION_IDS and claims:
+        # A proper named identity must never be collapsed into a generic voice,
+        # even if that identity is absent from the candidate registry.
+        return "Resolver mapped an explicitly named identity to a generic speaker"
+    return None
+
 
 def _lock_name(prefix: str, path: Path) -> str:
     digest = hashlib.sha256(str(path.resolve()).encode("utf-8")).hexdigest()[:16]
@@ -126,6 +189,24 @@ class ExtractionDecision(BaseModel):
 
 class ExtractionBatch(BaseModel):
     decisions: list[ExtractionDecision]
+
+
+class CharacterAugmentationDecision(BaseModel):
+    character_id: str
+    decision: Literal["update", "abstain"]
+    confidence: float = Field(ge=0.0, le=1.0)
+    reason: str = Field(max_length=1000)
+    evidence: list[str] = Field(default_factory=list, max_length=8)
+    gender: Literal["male", "female", "other"] | None = None
+    age_range: str | None = Field(default=None, max_length=100)
+    voice_description: str | None = Field(default=None, max_length=1000)
+    personality_traits: list[str] = Field(default_factory=list, max_length=20)
+    speaking_style: str | None = Field(default=None, max_length=500)
+    test_sentence: str | None = Field(default=None, max_length=500)
+
+
+class CharacterAugmentationBatch(BaseModel):
+    decisions: list[CharacterAugmentationDecision]
 
 
 def _extract_json(text: str) -> dict[str, Any]:
@@ -476,6 +557,16 @@ class GeminiValidationService:
         self.attribution_batch_size = max(1, int(config.get("attribution_batch_size", 20)))
         self.triage_model = str(config.get("api", {}).get("triage_model", "gemini-3.5-flash-lite"))
         self.adjudication_model = str(config.get("api", {}).get("adjudication_model", "gemini-3.5-flash"))
+        character_cfg = dict(config.get("character_augmentation", {}))
+        self.character_augmentation_enabled = bool(
+            character_cfg.get("enabled", False)
+        )
+        self.character_triage_model = str(
+            character_cfg.get("triage_model", self.triage_model)
+        )
+        self.character_adjudication_model = str(
+            character_cfg.get("adjudication_model", self.adjudication_model)
+        )
         circuit = dict(config.get("circuit_breaker", {}))
         self.health = _ProviderHealth(
             projects_dir / ".external_validation_health.json",
@@ -505,9 +596,19 @@ class GeminiValidationService:
                latency_ms: int | None = None, details: dict[str, Any] | None = None) -> None:
         if self.event_sink is None:
             return
+        event_details = dict(details or {})
+        event_details.setdefault(
+            "purpose_version",
+            {
+                "attribution": "speaker-attribution-v3",
+                "segment": "audio-validation-v2",
+                "extraction": "section-classification-v2",
+                "character": "character-augmentation-v1",
+            }.get(item_type, f"{item_type or 'unknown'}-legacy"),
+        )
         try:
             self.event_sink(project_dir.name, item_type, item_id, provider, model,
-                            decision, confidence, reason, latency_ms, details)
+                            decision, confidence, reason, latency_ms, event_details)
         except Exception:
             logger.warning("Could not append external validation event", exc_info=True)
 
@@ -522,6 +623,142 @@ class GeminiValidationService:
     @staticmethod
     def _extraction_schema() -> dict[str, Any]:
         return ExtractionBatch.model_json_schema()
+
+    @staticmethod
+    def _character_schema() -> dict[str, Any]:
+        return CharacterAugmentationBatch.model_json_schema()
+
+    @staticmethod
+    def _character_evidence_is_grounded(
+        decision: CharacterAugmentationDecision,
+        dossier: dict[str, Any],
+    ) -> bool:
+        source = " ".join(
+            str(value) for value in dossier.get("evidence_snippets", [])
+        )
+        normalized_source = re.sub(r"\s+", " ", source).casefold()
+        for evidence in decision.evidence:
+            normalized = re.sub(r"\s+", " ", evidence).strip()
+            if len(normalized) >= 12 and normalized.casefold() in normalized_source:
+                return True
+        return False
+
+    def augment_characters(
+        self,
+        *,
+        project_dir: Path,
+        dossier: dict[str, dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Return only high-confidence, source-grounded character enrichments."""
+        if (
+            not self.enabled
+            or not self.character_augmentation_enabled
+            or not dossier
+        ):
+            return {"accepted": {}, "review": [], "trace": []}
+
+        remaining = set(dossier)
+        accepted: dict[str, dict[str, Any]] = {}
+        review: dict[str, dict[str, Any]] = {}
+        trace: list[dict[str, Any]] = []
+        for stage, model in (
+            ("gemini_api_triage", self.character_triage_model),
+            ("gemini_api_adjudication", self.character_adjudication_model),
+            ("gemini_web", "Pro"),
+        ):
+            if not remaining:
+                break
+            stage_dossier = {key: dossier[key] for key in sorted(remaining)}
+            prompt = (
+                "Enrich an audiobook character registry using ONLY the supplied "
+                "source excerpts. Abstain when identity, gender, age, personality, "
+                "or vocal qualities are unsupported. Evidence entries must be "
+                "verbatim substrings of the supplied evidence snippets. Never "
+                "change a known male/female gender to the opposite; abstain instead. "
+                "Return one decision per character. Voice descriptions may be "
+                "distinctive but must not invent accents, disabilities, or biography. "
+                "Return JSON matching this schema: "
+                + json.dumps(self._character_schema(), ensure_ascii=False)
+                + "\nDOSSIER:\n"
+                + json.dumps(stage_dossier, ensure_ascii=False, indent=2)
+            )
+            try:
+                raw, latency_ms = self._call_stage(
+                    stage,
+                    lambda: (
+                        self.web.generate_json(
+                            project_dir,
+                            "character_augmentation_v1",
+                            prompt,
+                        )
+                        if stage == "gemini_web"
+                        else self.api.generate_json(
+                            model=model,
+                            prompt=prompt,
+                            schema=self._character_schema(),
+                        )
+                    ),
+                )
+                batch = CharacterAugmentationBatch.model_validate(raw)
+            except (ExternalValidationError, ValueError) as exc:
+                trace.append({"stage": stage, "model": model, "error": str(exc)})
+                continue
+
+            for decision in batch.decisions:
+                character_id = decision.character_id
+                if character_id not in remaining:
+                    continue
+                current = dossier[character_id]
+                grounded = self._character_evidence_is_grounded(decision, current)
+                current_gender = str(current.get("current_gender") or "other")
+                gender_conflict = bool(
+                    decision.gender
+                    and current_gender in {"male", "female"}
+                    and decision.gender != current_gender
+                )
+                record = {
+                    **decision.model_dump(mode="json"),
+                    "provider": stage,
+                    "model": model,
+                    "grounded": grounded,
+                    "gender_conflict": gender_conflict,
+                    "latency_ms": latency_ms,
+                }
+                trace.append(record)
+                if (
+                    decision.decision == "update"
+                    and decision.confidence >= self.auto_accept
+                    and grounded
+                    and not gender_conflict
+                ):
+                    accepted[character_id] = record
+                    review.pop(character_id, None)
+                    remaining.discard(character_id)
+                else:
+                    review[character_id] = record
+
+        for character_id in sorted(remaining):
+            review.setdefault(
+                character_id,
+                {
+                    "character_id": character_id,
+                    "decision": "abstain",
+                    "confidence": None,
+                    "reason": "No source-grounded high-confidence augmentation was available.",
+                    "evidence": [],
+                    "provider": "none",
+                    "model": "",
+                    "grounded": False,
+                    "gender_conflict": False,
+                },
+            )
+        result = {
+            "accepted": accepted,
+            "review": list(review.values()),
+            "trace": trace,
+        }
+        atomic_write_json(project_dir / "character_augmentation_audit.json", result)
+        return result
 
     def resolve_extraction_sections(
         self,
@@ -577,7 +814,7 @@ class GeminiValidationService:
                 raw, latency_ms = self._call_stage(
                     stage,
                     lambda: (
-                        self.web.generate_json(project_dir, "extraction", stage_prompt)
+                        self.web.generate_json(project_dir, "extraction_v1", stage_prompt)
                         if stage == "gemini_web"
                         else self.api.generate_json(
                             model=model,
@@ -624,7 +861,7 @@ class GeminiValidationService:
 
     def _run_attribution_stage(self, stage: str, model: str, prompt: str, project_dir: Path) -> AttributionBatch:
         raw = (
-            self.web.generate_json(project_dir, "attribution", prompt)
+            self.web.generate_json(project_dir, "attribution_v2", prompt)
             if stage == "gemini_web"
             else self.api.generate_json(model=model, prompt=prompt, schema=self._attribution_schema())
         )
@@ -739,12 +976,21 @@ class GeminiValidationService:
                 staged = dict(case)
                 staged["prior_decisions"] = by_id[case["item_id"]].attribution_confidence_history
                 stage_cases.append(staged)
-            for start in range(0, len(stage_cases), self.attribution_batch_size):
-                batch = stage_cases[start : start + self.attribution_batch_size]
-                batch_chapters = {case.get("chapter") for case in batch if case.get("chapter")}
-                batch_candidates = {}
-                for ch_num in batch_chapters:
-                    batch_candidates.update(chapter_candidates.get(ch_num, candidates))
+            cases_by_chapter: dict[int, list[dict[str, Any]]] = {}
+            for case in stage_cases:
+                cases_by_chapter.setdefault(
+                    int(case.get("chapter") or 0), []
+                ).append(case)
+            stage_batches = [
+                chapter_cases[start : start + self.attribution_batch_size]
+                for chapter_cases in cases_by_chapter.values()
+                for start in range(0, len(chapter_cases), self.attribution_batch_size)
+            ]
+            for batch in stage_batches:
+                batch_chapter = int(batch[0].get("chapter") or 0)
+                batch_candidates = dict(
+                    chapter_candidates.get(batch_chapter, candidates)
+                )
                 if not batch_candidates:
                     batch_candidates = candidates
 
@@ -807,10 +1053,38 @@ class GeminiValidationService:
                                 latency_ms, {"speaker_id": decision.speaker_id,
                                              "evidence": decision.evidence})
                     is_quoted_dialogue = line.text.strip().startswith(('"', '“', '‘', "'"))
-                    if is_quoted_dialogue and decision.speaker_id == "narrator" and stage == "gemini_api_triage":
+                    case = next(
+                        (
+                            item
+                            for item in batch
+                            if item["item_id"] == decision.item_id
+                        ),
+                        {},
+                    )
+                    allowed_ids = set(
+                        chapter_candidates.get(
+                            int(case.get("chapter") or 0),
+                            candidates,
+                        )
+                    )
+                    identity_conflict = _attribution_identity_conflict(
+                        decision,
+                        batch_candidates,
+                    )
+                    if is_quoted_dialogue and decision.speaker_id == "narrator":
                         valid = False
                     else:
-                        valid = decision.decision == "resolved" and decision.speaker_id in character_ids
+                        valid = (
+                            decision.decision == "resolved"
+                            and decision.speaker_id in character_ids
+                            and decision.speaker_id in allowed_ids
+                            and identity_conflict is None
+                        )
+                    if identity_conflict:
+                        line.attribution_confidence_history[-1][
+                            "validation_error"
+                        ] = identity_conflict
+                        trace[-1]["validation_error"] = identity_conflict
                     if valid and decision.confidence >= self.auto_accept:
                         line.speaker = str(decision.speaker_id)
                         line.speaker_confidence = decision.confidence
@@ -820,11 +1094,19 @@ class GeminiValidationService:
                         line.attribution_review_reason = ""
                         remaining.discard(line.line_id)
                     else:
-                        line.speaker_confidence = decision.confidence
                         line.attribution_resolver = stage
-                        line.attribution_review_reason = (
-                            f"{stage} {decision.decision} at {decision.confidence:.0%}: {decision.reason}"
-                        )
+                        if identity_conflict:
+                            line.speaker_confidence = min(
+                                float(line.speaker_confidence or 0.0),
+                                max(0.0, self.manual_threshold - 0.01),
+                            )
+                            line.attribution_review_reason = identity_conflict
+                        else:
+                            line.speaker_confidence = decision.confidence
+                            line.attribution_review_reason = (
+                                f"{stage} {decision.decision} at "
+                                f"{decision.confidence:.0%}: {decision.reason}"
+                            )
         for line_id in remaining:
             line = by_id[line_id]
             line.attribution_review_required = True
@@ -895,7 +1177,7 @@ class GeminiValidationService:
                     stage,
                     lambda: (
                         self.web.generate_json(
-                            project_dir, "audio_qa", prompt, audio_path=audio_path,
+                            project_dir, "audio_qa_v1", prompt, audio_path=audio_path,
                             reference_audio_path=reference_audio_path,
                         ) if stage == "gemini_web" else self.api.generate_json(
                             model=model, prompt=prompt, schema=self._audio_schema(),

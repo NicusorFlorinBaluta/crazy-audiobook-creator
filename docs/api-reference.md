@@ -98,6 +98,7 @@ Analysis and scripting remain book-wide. Selection controls generation, masterin
 | `GET` | `/api/projects/{project_id}/voices/download-all` | Download all prepared character and narrator references as a ZIP |
 | `GET` | `/api/projects/{project_id}/voices/{voice_id}/preview` | Stream a reference-voice WAV |
 | `PATCH` | `/api/projects/{project_id}/characters/{character_id}/voice` | Reassign a character to a voice |
+| `PATCH` | `/api/projects/{project_id}/characters/{character_id}/profile` | Save a persistent human correction to voice-relevant character metadata and invalidate only dependent chapters |
 | `POST` | `/api/projects/{project_id}/voices/{voice_id}/regenerate` | Redesign and validate one reference voice |
 | `POST` | `/api/projects/{project_id}/voices/{voice_id}/upload` | Import a recorded reference plus exact transcript |
 | `POST` | `/api/projects/{project_id}/voice-review/approve` | Approve a new project's cast and optionally continue |
@@ -113,7 +114,7 @@ Analysis and scripting remain book-wide. Selection controls generation, masterin
 
 ### Mobile Companion API (`/api/mobile/v1`)
 
-The Mobile Companion API powers the **CrazyVoice** Android app with zero-configuration discovery, incremental catalog browsing, chapter navigation, and two-way progress syncing.
+The Mobile Companion API powers the **CrazyVoice** Android app with compatibility discovery, incremental catalog browsing, chapter navigation, and two-way progress syncing. `server-info` is public; every catalog, manifest, media, download, and progress route uses the dashboard LAN/token authorization policy described above. Remote clients send `X-API-Token`.
 
 | Method | Route | Purpose |
 |---|---|---|

@@ -135,33 +135,82 @@ class AttributionGuardrailsEnhancedTests(unittest.TestCase):
         self.assertIn(2, issue_fragments)
         self.assertEqual(issue_fragments[2].exact_speaker, "drominadian")
 
+    def test_period_ending_tag_carries_across_split_quote(self) -> None:
+        source = '"First half," Vathi said. "Second half."\n\n"New turn," Soil said.'
+        fragments = ScriptGenerator._split_into_fragment_spans(source)
+        dialogue_indexes = [
+            index
+            for index, fragment in enumerate(fragments)
+            if ScriptGenerator._is_dialogue_fragment(fragment.text)
+        ]
+        raw_metadata = {
+            "lines": [
+                {
+                    "id": dialogue_indexes[0],
+                    "speaker": "vathi",
+                    "dialogue_kind": "spoken",
+                    "speaker_evidence": "The adjacent named tag identifies Vathi.",
+                    "speaker_confidence": 0.99,
+                },
+                {
+                    "id": dialogue_indexes[1],
+                    "speaker": "soil",
+                    "dialogue_kind": "spoken",
+                    "speaker_evidence": "Incorrect generic conversation context.",
+                    "speaker_confidence": 0.95,
+                },
+                {
+                    "id": dialogue_indexes[2],
+                    "speaker": "soil",
+                    "dialogue_kind": "spoken",
+                    "speaker_evidence": "The adjacent named tag identifies Soil.",
+                    "speaker_confidence": 0.99,
+                },
+            ]
+        }
+
+        issues = ScriptGenerator._collect_metadata_speaker_issues(
+            raw_metadata,
+            fragments,
+            allowed_speakers=set(self.registry.characters),
+            registry=self.registry,
+            chapter_text=source,
+        )
+
+        issue_by_fragment = {issue.fragment_index: issue for issue in issues}
+        self.assertEqual(
+            issue_by_fragment[dialogue_indexes[1]].exact_speaker,
+            "vathi",
+        )
+        self.assertNotIn(dialogue_indexes[2], issue_by_fragment)
+
     def test_m4b_chapter_title_formatting(self) -> None:
-        # Numbered chapters with text titles
+        # Source headings never override stable sequence numbering.
         self.assertEqual(
             M4BExporter._format_chapter_title(8, "Chapter Seven"),
-            "Chapter 8: Chapter Seven",
+            "Chapter 8",
         )
         self.assertEqual(
             M4BExporter._format_chapter_title(9, "Five Years Ago"),
-            "Chapter 9: Five Years Ago",
+            "Chapter 9",
         )
         self.assertEqual(
             M4BExporter._format_chapter_title(10, "Chapter Nine"),
-            "Chapter 10: Chapter Nine",
+            "Chapter 10",
         )
         # Empty title defaults to Chapter {N}
         self.assertEqual(
             M4BExporter._format_chapter_title(3, ""),
             "Chapter 3",
         )
-        # Title already starting with Chapter {N} preserves exact title
+        # Even matching or decorated source titles remain metadata only.
         self.assertEqual(
             M4BExporter._format_chapter_title(5, "Chapter 5"),
             "Chapter 5",
         )
         self.assertEqual(
             M4BExporter._format_chapter_title(5, "Chapter 5: The Meeting"),
-            "Chapter 5: The Meeting",
+            "Chapter 5",
         )
 
 

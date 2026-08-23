@@ -239,7 +239,11 @@ class OllamaLifecycleTests(unittest.TestCase):
             client.generate("test")
 
     def test_json_generation_enables_json_mode_and_bounded_output(self) -> None:
-        client = OllamaClient(max_output_tokens=321, max_retries=1)
+        client = OllamaClient(
+            max_output_tokens=321,
+            max_retries=1,
+            think=False,
+        )
         client._client.close()
         fake = _RecordingHttpClient([
             json.dumps({
@@ -253,6 +257,7 @@ class OllamaLifecycleTests(unittest.TestCase):
         self.assertEqual(client.generate_json("test"), {"ok": True})
         self.assertEqual(fake.payloads[0]["format"], "json")
         self.assertEqual(fake.payloads[0]["options"]["num_predict"], 321)
+        self.assertIs(fake.payloads[0]["think"], False)
 
     def test_stream_is_aborted_if_server_ignores_output_limit(self) -> None:
         client = OllamaClient(max_output_tokens=3, max_retries=1)

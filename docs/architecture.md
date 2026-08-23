@@ -35,7 +35,11 @@ scratch-runner concurrency.
    - When appendix skipping is enabled, canonical reference sections (Glossary, Dramatis Personae, Character Lists, Cast of Characters) are captured into `reference_material` for character analysis while being excluded from narration.
    - Every spine item is recorded in `extraction_audit.json` with its navigation/landmark/markup/filename evidence, decision, confidence, word count, and reason. Large excluded shares, unresolved manifest entries, and ambiguous substantial sections are blocking.
    - Ambiguity follows the Gemini API-to-persistent-web escalation ladder. If no decision reaches the automatic threshold, the pipeline stops before scripting and exposes include, exclude, and reference choices in **Attention required**.
-3. **Scripting** (`scripting`): joint character discovery and text-to-script annotation by default, with the legacy two-pass director retained behind `script.joint_analysis: false` for comparison and rollback.
+3. **Scripting** (`scripting`): a quality-first book-wide character pass followed
+   by source-fragment attribution. Joint discovery remains available behind
+   `script.joint_analysis: true` for experiments, but is not the production
+   default because a missed identity can contaminate both the registry and every
+   later attribution decision.
    - Scripting uses a quality-preserving compact response contract: the model
      still supplies every creative delivery and dialogue-attribution decision,
      while structurally known narrator fields, repeated scene indexes, ordinary
@@ -78,7 +82,7 @@ Audio work is chapter-selectable. `generation_chapter_selection` has two meaning
 - `null`: all chapters; after missing chapters are complete, create the canonical full M4B.
 - Nonempty list: generate/master those chapters and create a partial M4B named with the actual chapter set.
 
-An empty list is invalid. Completed chapters remain usable while later batches run. Selecting a chapter again is safe: current fingerprints allow reuse, while any changed dependency invalidates the relevant artifact.
+An empty list is invalid. Completed chapters remain usable while later batches run. Selecting a chapter again is safe: chapter-local fingerprints reuse unaffected scripts, while a source, prompt, model, relevant speaker/alias, joint-analysis revision, or dialogue-delivery policy revision invalidates only the dependent chapter. Joint discovery persists a character-registry checkpoint after each completed chapter.
 
 ## Source-fidelity invariant
 
@@ -99,14 +103,21 @@ exact display names may be consolidated directly. Name suffixes only create an
 identity-adjudication candidate: the model must return verbatim source evidence
 before two registry entries are merged.
 
-Following local identity consolidation, the analyzer executes a whole-book
-evidence extraction pass (`_build_character_evidence_dossier`) scanning pronoun
-ratios (`he/him` vs `she/her`), scene descriptions, and dialogue samples across
-all aliases. A single fast call to Gemini Flash (`_augment_characters_with_gemini`)
-enriches the deduplicated registry with canonical genders, refined age ranges,
-12-dimensional TTS voice designs (pitch, cadence, texture, archetype), and in-character
-test sentences, with automatic local fallback if offline. See
+Following local identity consolidation, the analyzer builds a bounded evidence
+dossier. Configured Gemini API triage, adjudication, and optional browser
+fallback may propose profile enrichment. Only high-confidence proposals with
+verbatim source evidence are applied; conflicts and abstentions remain visible
+for Voice Review. Provider models, budgets, retries, and circuit breaking come
+from `external_validation`; the presence of an API key alone never enables this
+pass. See
 [Character Augmentation and Gender Resolution](character-augmentation-and-gender-resolution-2026-08-19.md).
+
+Human corrections made in Voice Review are stored separately in
+`character_overrides.json`. The pipeline reapplies these corrections after
+automated analysis and joint reconciliation, so a forced re-analysis cannot
+silently undo an operator decision. A correction invalidates only chapters in
+which that character speaks and requires renewed voice approval; changing the
+owner of a generated design also marks its preview for regeneration.
 
 It assigns a unique voice to the most important speakers up to `script.max_unique_voices`.
 Less prominent speakers deterministically share a compatible major-character voice
@@ -119,7 +130,8 @@ A character-analysis fingerprint includes the full extracted book, model, prompt
 
 File existence is never sufficient evidence of completion.
 
-- Script metadata records a dependency fingerprint and schema version.
+- Script metadata records chapter-local speaker dependencies, a dependency
+  fingerprint, and schema version.
 - A generated-chapter manifest records every expected line ID, text hash, voice ID, source span, and generation fingerprint.
 - A mastered-chapter manifest records the source segment-manifest hash and output hash.
 - Output audio is checked for a readable, nonzero waveform.
@@ -272,3 +284,7 @@ When modifying or introducing new pipeline features, developers and AI agents MU
    - `voice_cast.json` (in `brain/projects/<id>/`) is the **authoritative speaker → voice mapping** during generation. The narrator's approved candidate (e.g. `narrator_male`) is stored there under `assigned_characters` and is **not** written back to `characters.json`.
    - Any code that resolves which voice to use for a script line MUST read `voice_cast.json` first (via `assigned_characters`), then fall back to `characters.json`'s `voice_id` field, then fall back to the raw speaker ID. See `_prepare_generation_lines` in `pipeline.py`.
    - `VoiceLibraryManager.get_voice_path` consults `voices.json` to find the actual hashed WAV filename. Do not construct voice file paths by hand as `<voice_id>.wav` — they are content-hashed and registered in the voice library registry.
+
+The 2026-08-21 attribution, sparse scripting, cast-distinctness,
+cross-chapter drift, resilience, and confidence-calibration rationale is recorded
+in [quality-performance-hardening-2026-08-21.md](quality-performance-hardening-2026-08-21.md).

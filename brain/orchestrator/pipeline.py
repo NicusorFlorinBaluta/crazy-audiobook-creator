@@ -28,7 +28,11 @@ from brain.director.character_analyzer import (
     _SYSTEM_PROMPT as CHARACTER_SYSTEM_PROMPT,
 )
 from brain.director.ollama_client import OllamaClient
-from brain.director.attribution_audit import audit_book_attribution
+from brain.director.attribution_audit import (
+    audit_book_attribution,
+    queue_attribution_audit_issues,
+    repair_deterministic_named_attribution,
+)
 from brain.director.script_generator import ScriptGenerator
 from brain.extractor.epub_parser import EpubParser
 from brain.orchestrator.delivery_manager import DeliveryManager
@@ -136,6 +140,15 @@ class Pipeline:
             max_retries=ollama_cfg.get("max_retries", 3),
             max_retry_seconds=ollama_cfg.get("max_retry_seconds", 900),
             context_window=int(ollama_cfg.get("context_window", 8192)),
+            max_output_tokens=int(ollama_cfg.get("max_output_tokens", 8192)),
+            max_generation_seconds=int(
+                ollama_cfg.get("max_generation_seconds", 600)
+            ),
+            repetition_window_chars=int(
+                ollama_cfg.get("repetition_window_chars", 512)
+            ),
+            repetition_count=int(ollama_cfg.get("repetition_count", 4)),
+            think=ollama_cfg.get("think"),
         )
 
         voice_cfg = self.config.get("voice_server", {})
@@ -160,11 +173,18 @@ class Pipeline:
             preserve_poetry=extract_cfg.get("preserve_poetry", True),
         )
 
+        self.external_validator = GeminiValidationService(
+            dict(self.config.get("external_validation", {})),
+            self.projects_dir,
+            event_sink=self.job_queue.log_external_validation,
+        )
+
         # Director config
         self.character_analyzer = CharacterAnalyzer(
             ollama=self.ollama,
             temperature=ollama_cfg.get("temperature_pass1", 0.3),
             max_unique_voices=self.config.get("script", {}).get("max_unique_voices", 0),
+            external_validator=self.external_validator,
         )
 
         script_cfg = self.config.get("script", {})
@@ -174,6 +194,18 @@ class Pipeline:
             chunk_size_words=script_cfg.get("chunk_size_words", 450),
             chunk_overlap_words=script_cfg.get("chunk_overlap_words", 0),
             max_fragments_per_chunk=script_cfg.get("max_fragments_per_chunk", 60),
+            adaptive_split_enabled=script_cfg.get(
+                "adaptive_split_enabled", True
+            ),
+            adaptive_split_max_depth=script_cfg.get(
+                "adaptive_split_max_depth", 2
+            ),
+            adaptive_split_min_fragments=script_cfg.get(
+                "adaptive_split_min_fragments", 8
+            ),
+            dialogue_focused_schema=script_cfg.get(
+                "dialogue_focused_schema", False
+            ),
             group_utterances=script_cfg.get("group_utterances", True),
             utterance_target_chars=script_cfg.get(
                 "utterance_target_chars", 260
@@ -193,12 +225,6 @@ class Pipeline:
                 "speaker_confidence_threshold", 0.55
             ),
         )
-        self.external_validator = GeminiValidationService(
-            dict(self.config.get("external_validation", {})),
-            self.projects_dir,
-            event_sink=self.job_queue.log_external_validation,
-        )
-
         self._stop_flags: dict[str, bool] = {}
         self._ollama_server_proc = None
         self._ollama_server_log_handle = None
@@ -627,6 +653,26 @@ class Pipeline:
             )
         return report
 
+    def _update_long_form_audio_quality(
+        self,
+        project_id: str,
+        project_dir: Path,
+    ) -> dict[str, Any]:
+        """Persist book-level voice drift/prosody trends from paid-for metrics."""
+        from brain.orchestrator.quality_trends import build_long_form_quality_report
+        from shared.models import ScriptChapter
+
+        scripts = [
+            ScriptChapter.model_validate_json(path.read_text(encoding="utf-8"))
+            for path in self._script_files(project_dir / "script")
+        ]
+        report = build_long_form_quality_report(
+            self.job_queue.get_quality_report(project_id),
+            scripts,
+        )
+        atomic_write_json(project_dir / "long_form_audio_quality.json", report)
+        return report
+
     def _stop_voice_server(self) -> None:
         """Stop Voice Server subprocess if managed by this pipeline."""
         if getattr(self, "_voice_server_proc", None) is not None:
@@ -918,12 +964,16 @@ class Pipeline:
         self._stop_flags[project_id] = False
         self.ollama.begin_run()
         ollama_used = False
+        active_selection = (
+            state.get("active_generation_chapter_selection")
+            if state.get("resume_after_restart")
+            else state.get("generation_chapter_selection")
+        )
         self.job_queue.update_job(
             project_id,
             {
-                "active_generation_chapter_selection": state.get(
-                    "generation_chapter_selection"
-                ),
+                "active_generation_chapter_selection": active_selection,
+                "resume_after_restart": False,
                 "last_run_started_at": datetime.now(timezone.utc).isoformat(),
                 "elapsed_seconds": prev_elapsed,
                 "error_message": None,
@@ -953,6 +1003,36 @@ class Pipeline:
                 self._start_ollama_server()
                 ollama_used = True
                 self._run_script_director(project_id, project_dir)
+
+                # Do not spend time designing voices for a script that already
+                # contradicts explicit source attribution. The review queue is
+                # persisted by _run_script_director; this gate parks the worker
+                # before the voice service is started.
+                attribution_audit = self._assert_attribution_audit(
+                    project_dir,
+                    enforce=False,
+                )
+                if not attribution_audit["passed"]:
+                    attribution_items = [
+                        item.item_id
+                        for item in collect_review_gate(
+                            project_id, project_dir, self.job_queue
+                        ).blocking_items
+                        if item.category == "attribution"
+                    ]
+                    if not attribution_items:
+                        attribution_items = sorted(
+                            {
+                                str(issue.get("line_id"))
+                                for issue in attribution_audit.get("issues", [])
+                                if issue.get("line_id")
+                            }
+                        )
+                    raise _WaitingForReview(
+                        attribution_items,
+                        f"{len(attribution_items)} speaker attribution(s) "
+                        "require review before voice bootstrapping.",
+                    )
 
             # Ollama and Qwen TTS share the GPU on the local setup. Do not load
             # the TTS model until book-wide LLM scripting has released its
@@ -1184,14 +1264,11 @@ class Pipeline:
             registry = CharacterRegistry.model_validate_json(
                 chars_path.read_text(encoding="utf-8")
             )
+            character_source_fingerprint = self._character_source_fingerprint(book)
             expected_character_fingerprint = fingerprint(
                 {
-                    "book": book.model_dump(mode="json"),
+                    "source_fingerprint": character_source_fingerprint,
                     "model": self.ollama.model,
-                    "prompt": CHARACTER_SYSTEM_PROMPT,
-                    "analysis_revision": CHARACTER_ANALYSIS_REVISION,
-                    "max_unique_voices": self.character_analyzer.max_unique_voices,
-                    "single_pass_threshold": self.character_analyzer.single_pass_threshold,
                 }
             )
             character_metadata = json.loads(
@@ -1214,6 +1291,95 @@ class Pipeline:
     def _joint_script_analysis_enabled(self) -> bool:
         return bool(self.config.get("script", {}).get("joint_analysis", False))
 
+    def _character_augmentation_dependency(self) -> dict[str, Any]:
+        """Return serializable configuration that can change character output."""
+        external = dict(self.config.get("external_validation", {}))
+        api = dict(external.get("api", {}))
+        character = dict(external.get("character_augmentation", {}))
+        return {
+            "enabled": bool(external.get("enabled", False)),
+            "character_enabled": bool(character.get("enabled", False)),
+            "auto_accept": float(external.get("auto_accept_confidence", 0.9)),
+            "triage_model": str(
+                character.get(
+                    "triage_model",
+                    api.get("triage_model", "gemini-3.5-flash-lite"),
+                )
+            ),
+            "adjudication_model": str(
+                character.get(
+                    "adjudication_model",
+                    api.get("adjudication_model", "gemini-3.5-flash"),
+                )
+            ),
+            "policy": "source-grounded-confidence-v1",
+        }
+
+    def _character_source_fingerprint(self, book) -> str:
+        """Fingerprint character inputs independently of the runtime model.
+
+        An in-progress joint-analysis checkpoint is a transaction boundary: a
+        model/runtime migration may continue from it when the book and every
+        character-analysis policy input are unchanged. Keeping this provenance
+        separate avoids either discarding completed chapter work or pretending
+        that an old registry was produced by the newly configured model.
+        """
+        return fingerprint(
+            {
+                "book": book.model_dump(mode="json"),
+                "prompt": CHARACTER_SYSTEM_PROMPT,
+                "analysis_revision": CHARACTER_ANALYSIS_REVISION,
+                "max_unique_voices": self.character_analyzer.max_unique_voices,
+                "single_pass_threshold": self.character_analyzer.single_pass_threshold,
+                "character_augmentation": self._character_augmentation_dependency(),
+            }
+        )
+
+    @staticmethod
+    def _joint_checkpoint_is_compatible(
+        checkpoint: dict[str, Any],
+        *,
+        character_fingerprint: str,
+        source_fingerprint: str,
+    ) -> bool:
+        """Accept exact checkpoints or source-equivalent runtime migrations."""
+        return bool(
+            checkpoint.get("fingerprint") == character_fingerprint
+            or checkpoint.get("source_fingerprint") == source_fingerprint
+        )
+
+    @staticmethod
+    def _apply_character_overrides(project_dir: Path, registry) -> bool:
+        """Reapply explicit human corrections after automated analysis."""
+        overrides_path = project_dir / "character_overrides.json"
+        if not overrides_path.is_file():
+            return False
+        try:
+            overrides = json.loads(overrides_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            logger.warning("Ignoring invalid character overrides: %s", overrides_path)
+            return False
+        allowed = {"gender", "age_range", "voice_description", "speaking_style"}
+        changed = False
+        for character_id, fields in overrides.get("characters", {}).items():
+            character = registry.characters.get(character_id)
+            if character is None or not isinstance(fields, dict):
+                continue
+            safe_fields = {key: value for key, value in fields.items() if key in allowed}
+            if not safe_fields:
+                continue
+            try:
+                registry.characters[character_id] = type(character).model_validate(
+                    {**character.model_dump(mode="json"), **safe_fields}
+                )
+                changed = True
+            except ValueError:
+                logger.warning(
+                    "Ignoring invalid override fields for character '%s'",
+                    character_id,
+                )
+        return changed
+
     def _run_script_director(self, project_id: str, project_dir: Path) -> None:
         """Run Stage ②: LLM character analysis + script generation."""
         self._update_stage(project_id, PipelineStage.SCRIPTING)
@@ -1227,14 +1393,11 @@ class Pipeline:
 
         chars_path = project_dir / "characters.json"
         chars_meta_path = project_dir / "characters.meta.json"
+        chars_source_fingerprint = self._character_source_fingerprint(book)
         chars_fingerprint = fingerprint(
             {
-                "book": book.model_dump(mode="json"),
+                "source_fingerprint": chars_source_fingerprint,
                 "model": self.ollama.model,
-                "prompt": CHARACTER_SYSTEM_PROMPT,
-                "analysis_revision": CHARACTER_ANALYSIS_REVISION,
-                "max_unique_voices": self.character_analyzer.max_unique_voices,
-                "single_pass_threshold": self.character_analyzer.single_pass_threshold,
             }
         )
         reuse_characters = False
@@ -1254,6 +1417,8 @@ class Pipeline:
                 reuse_characters = False
 
         joint_discovery = self._joint_script_analysis_enabled()
+        joint_checkpoint_path = project_dir / "characters.joint.checkpoint.json"
+        discovery_checkpoint_chapters: set[int] = set()
         def _analyzer_check():
             self._check_stop(project_id)
             self._check_schedule(project_id)
@@ -1264,7 +1429,43 @@ class Pipeline:
                 from shared.models import CharacterRegistry
                 registry = CharacterRegistry.model_validate_json(chars_path.read_text(encoding="utf-8"))
             else:
+                from shared.models import CharacterRegistry
                 registry = self.character_analyzer.create_joint_seed_registry(book)
+                if joint_checkpoint_path.is_file():
+                    try:
+                        checkpoint = json.loads(
+                            joint_checkpoint_path.read_text(encoding="utf-8")
+                        )
+                        if self._joint_checkpoint_is_compatible(
+                            checkpoint,
+                            character_fingerprint=chars_fingerprint,
+                            source_fingerprint=chars_source_fingerprint,
+                        ):
+                            registry = CharacterRegistry.model_validate(
+                                checkpoint["registry"]
+                            )
+                            discovery_checkpoint_chapters = {
+                                int(number)
+                                for number in checkpoint.get(
+                                    "completed_chapters",
+                                    [],
+                                )
+                            }
+                            logger.info(
+                                "Loaded source-compatible joint character checkpoint "
+                                "through chapter %d%s",
+                                max(discovery_checkpoint_chapters, default=0),
+                                (
+                                    " after a runtime-model migration"
+                                    if checkpoint.get("fingerprint") != chars_fingerprint
+                                    else ""
+                                ),
+                            )
+                    except (OSError, ValueError, TypeError, KeyError):
+                        logger.warning(
+                            "Ignoring invalid joint character checkpoint for '%s'",
+                            project_id,
+                        )
         else:
             if reuse_characters:
                 from shared.models import CharacterRegistry
@@ -1276,6 +1477,10 @@ class Pipeline:
                     check_callback=_analyzer_check,
                     checkpoint_path=chars_ckpt_path,
                     checkpoint_fingerprint=chars_fingerprint,
+                    reference_audit_path=(
+                        project_dir / "character_reference_audit.json"
+                    ),
+                    project_dir=project_dir,
                 )
                 pass1_elapsed = time.time() - t0
 
@@ -1293,6 +1498,9 @@ class Pipeline:
                         "force_character_analysis": False,
                     },
                 )
+
+        if self._apply_character_overrides(project_dir, registry):
+            atomic_write_text(chars_path, registry.model_dump_json(indent=2))
 
         scripts_dir = project_dir / "script"
         scripts_dir.mkdir(exist_ok=True)
@@ -1391,6 +1599,21 @@ class Pipeline:
                     "current_script_chapter": chapter_script.chapter_number,
                 })
 
+        def on_registry_progress(
+            current_registry,
+            chapter_number: int,
+        ) -> None:
+            discovery_checkpoint_chapters.add(chapter_number)
+            atomic_write_json(
+                joint_checkpoint_path,
+                {
+                    "fingerprint": chars_fingerprint,
+                    "source_fingerprint": chars_source_fingerprint,
+                    "completed_chapters": sorted(discovery_checkpoint_chapters),
+                    "registry": current_registry.model_dump(mode="json"),
+                },
+            )
+
         chapter_scripts = self.script_generator.generate_all_chapters(
             book.chapters,
             registry,
@@ -1399,6 +1622,12 @@ class Pipeline:
             chapter_start_callback=on_chapter_start,
             chunk_progress_callback=on_script_chunk,
             allow_character_discovery=joint_discovery,
+            discovery_checkpoint_chapters=(
+                discovery_checkpoint_chapters if joint_discovery else None
+            ),
+            registry_progress_callback=(
+                on_registry_progress if joint_discovery else None
+            ),
         )
 
         if joint_discovery:
@@ -1407,7 +1636,12 @@ class Pipeline:
                 registry,
                 book,
                 check_callback=_analyzer_check if not reuse_characters else None,
+                reference_audit_path=(
+                    project_dir / "character_reference_audit.json"
+                ),
+                project_dir=project_dir,
             )
+            self._apply_character_overrides(project_dir, registry)
             self.script_generator.remap_reconciled_speakers(
                 chapter_scripts,
                 registry,
@@ -1419,6 +1653,7 @@ class Pipeline:
                 chars_meta_path,
                 {"fingerprint": chars_fingerprint},
             )
+            joint_checkpoint_path.unlink(missing_ok=True)
             self.job_queue.update_job(
                 project_id,
                 {
@@ -1427,6 +1662,35 @@ class Pipeline:
                     "character_analysis_fingerprint": chars_fingerprint,
                     "force_character_analysis": False,
                 },
+            )
+
+        deterministic_before = repair_deterministic_named_attribution(
+            book,
+            registry,
+            chapter_scripts,
+            confidence_threshold=self.script_generator.speaker_confidence_threshold,
+        )
+        if deterministic_before["repaired"]:
+            logger.info(
+                "[AttributionRepair] Corrected %d line(s) from explicit named tags",
+                len(deterministic_before["repaired"]),
+            )
+
+        post_repair_audit = audit_book_attribution(
+            book,
+            registry,
+            chapter_scripts,
+            confidence_threshold=self.script_generator.speaker_confidence_threshold,
+        )
+        queued_audit_lines = queue_attribution_audit_issues(
+            post_repair_audit,
+            chapter_scripts,
+            confidence_threshold=self.script_generator.speaker_confidence_threshold,
+        )
+        if queued_audit_lines:
+            logger.info(
+                "[AttributionEscalation] Queued %d deterministic audit contradiction(s)",
+                len(queued_audit_lines),
             )
 
         escalation = self.external_validator.resolve_attributions(
@@ -1444,10 +1708,37 @@ class Pipeline:
         if escalation["attempted"]:
             logger.info("[AttributionEscalation] %s", escalation)
 
+        # External validation cannot override an unambiguous registered name in
+        # the source. Re-run the deterministic pass defensively before saving.
+        deterministic_after = repair_deterministic_named_attribution(
+            book,
+            registry,
+            chapter_scripts,
+            confidence_threshold=self.script_generator.speaker_confidence_threshold,
+        )
+        if deterministic_after["repaired"]:
+            logger.warning(
+                "[AttributionRepair] Reverted %d externally introduced named-tag contradiction(s)",
+                len(deterministic_after["repaired"]),
+            )
+
         total_lines = 0
         for script in chapter_scripts:
             script_path = scripts_dir / f"chapter_{script.chapter_number:03d}.json"
             atomic_write_text(script_path, script.model_dump_json(indent=2))
+            source_chapter = next(
+                chapter
+                for chapter in book.chapters
+                if chapter.number == script.chapter_number
+            )
+            atomic_write_json(
+                scripts_dir / f"chapter_{script.chapter_number:03d}.meta.json",
+                self.script_generator.chapter_dependency_metadata(
+                    source_chapter,
+                    registry,
+                    script,
+                ),
+            )
             total_lines += script.total_lines
 
         # Persist unresolved attribution as a review queue without discarding
@@ -1607,6 +1898,8 @@ class Pipeline:
                 "used_seed_text": reference_selection.used_seed_text,
                 "text_score": reference_selection.score,
             }
+            profile["importance"] = effective_importance
+            profile["dialogue_turns"] = dialogue_turns
             profile["design_fingerprint"] = fingerprint(
                 {
                     "schema": profile.get("schema", cast.get("schema", "1")),
@@ -1688,6 +1981,8 @@ class Pipeline:
                     cast["voices"][cand.id] = cand_profile
 
             cast["quality"] = {
+                "distinctness_status": "current",
+                "stale_voice_ids": [],
                 "cast_pair_diagnostics": [
                     item.model_dump() for item in response.cast_diagnostics
                 ],
@@ -1715,6 +2010,11 @@ class Pipeline:
                     "bootstrapping_completed": True,
                     "bootstrapping_fingerprint": cast["fingerprint"],
                     "voice_cast_revision": cast["fingerprint"],
+                    # Keep the job-state view used by /status in lockstep with
+                    # the durable post-bootstrap artifact.  Otherwise the UI
+                    # can keep presenting the previous cast until a separate
+                    # project-details request happens to refresh it.
+                    "voice_cast": cast,
                     "voice_review_status": review_status,
                     "force_voice_regeneration": False,
                 },
@@ -2230,6 +2530,7 @@ class Pipeline:
                         status=result.status.value,
                         details=result.model_dump(mode="json"),
                     )
+                self._update_long_form_audio_quality(project_id, project_dir)
                 quality_summary = (
                     self.job_queue.get_project_quality_summary(project_id)
                 )

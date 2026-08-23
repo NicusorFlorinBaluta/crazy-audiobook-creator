@@ -16,13 +16,12 @@
 - **Live Status Indicators**: Displays `⚡ IN PRODUCTION`, `☁️ STREAM`, and `📥 OFFLINE` status badges.
 - **Unclipped Cover Display**: Book covers scale using centered aspect-ratio fitting with smooth rounded borders across both list and player screens.
 
-### 3. Accurate Chapter Numbering & Manuscript Titles
-- **The Challenge**: In complex novels with prologues, named chapters, and interludes (e.g. Brandon Sanderson's *Isles of the Emberdark*), manuscript titles frequently diverge from sequential file indices (e.g. Chapter 1 is titled *"Fifty-Seven Years Ago"*, Chapter 2 is titled *"Chapter One"*, Chapter 3 is titled *"Five Years Ago"*, and Chapter 8 is titled *"Chapter Seven"*). When mastering a partial batch (e.g. Chapters 8–13), generic 1-based track lists can mislead listeners.
-- **Unified Formatting Architecture**:
-  - **Server Manifest (`/api/mobile/v1/books/{id}`)**: Standardizes chapter titles into the format `Chapter {number}: {title}` (e.g. `Chapter 8: Chapter Seven`, `Chapter 9: Five Years Ago`, `Chapter 10: Chapter Nine`), while also providing `raw_title`.
-  - **Mobile Database (`CrazyBookSyncService`)**: Syncs chapter names and chapter marks using the prefixed format.
-  - **Player & Chapter Picker (`BookPlayViewModel`)**: The chapter selection dialog and player header extract the true book chapter number and display the correct sequential numbering (**8, 9, 10, 11, 12, 13**) alongside the author's title.
-  - **Creator Web Dashboard (`script-viewer.js`)**: Displays the chapter number and title in script dropdowns and progress cards.
+### 3. Stable Chapter Numbering
+- The pipeline sequence number is the chapter identity used by the server,
+  mobile player, dashboard, partial deliveries, and M4B chapter marks.
+- User-facing titles are always `Chapter {number}`. EPUB headings are preserved
+  separately as `source_heading`/`raw_title`; they never create contradictory
+  labels such as `Chapter 8: Chapter Seven`.
 
 ### 4. Two-Way Progress Synchronization
 - Persists chapter number, millisecond offset, playback speed, and completion status to `/api/mobile/v1/books/{id}/progress` in real time.
@@ -67,6 +66,10 @@
 3. Enter your server connection address:
    - **Local LAN**: `http://192.168.x.x:8000`
    - **Tailscale VPN**: `http://100.x.x.x:8000`
-   - **Domain / Reverse Proxy**: `https://user:password@audiobook.yourdomain.com` (HTTP Basic Auth is supported)
+   - **Domain / Reverse Proxy**: use HTTPS and configure the dashboard API token
+     as `X-API-Token` in the companion client or trusted reverse proxy.
+   - Only `/api/mobile/v1/server-info` is public. Catalogs, covers, streams,
+     downloads, logs, and progress synchronization follow the dashboard's
+     LAN/token authorization boundary.
 4. Tap **"Test Connection"** to verify server reachability and API version compatibility.
 5. Tap **"Sync Audiobooks"** to synchronize all available books, chapters, and progress.

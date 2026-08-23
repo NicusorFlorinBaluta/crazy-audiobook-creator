@@ -113,7 +113,7 @@ QUALITY_SCORE_PASS_THRESHOLD = 0.7
 
 # Bump these when a change intentionally invalidates previously generated
 # metadata or audio. They are included in artifact fingerprints.
-SCRIPT_SCHEMA_VERSION = "3"
+SCRIPT_SCHEMA_VERSION = "4"
 GENERATION_SCHEMA_VERSION = "3"
 VALIDATION_SCHEMA_VERSION = "3"
 MASTERING_SCHEMA_VERSION = "2"

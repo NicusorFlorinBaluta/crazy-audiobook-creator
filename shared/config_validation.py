@@ -49,6 +49,14 @@ def validate_brain_config(config: dict[str, Any]) -> dict[str, Any]:
         _number(errors, ollama, "max_generation_seconds", minimum=1, maximum=7200)
         _number(errors, ollama, "repetition_window_chars", minimum=0, maximum=8192)
         _number(errors, ollama, "repetition_count", minimum=2, maximum=20)
+        think = ollama.get("think")
+        if think is not None and not (
+            isinstance(think, bool)
+            or (isinstance(think, str) and think in {"low", "medium", "high", "max"})
+        ):
+            errors.append(
+                "ollama.think must be boolean or one of low, medium, high, max"
+            )
     voice = config.get("voice_server", {})
     host = str(voice.get("host", "http://127.0.0.1:8100"))
     parsed = urlsplit(host)
@@ -66,8 +74,20 @@ def validate_brain_config(config: dict[str, Any]) -> dict[str, Any]:
         and not isinstance(script["joint_analysis"], bool)
     ):
         errors.append("script.joint_analysis must be boolean")
+    if (
+        "adaptive_split_enabled" in script
+        and not isinstance(script["adaptive_split_enabled"], bool)
+    ):
+        errors.append("script.adaptive_split_enabled must be boolean")
+    if (
+        "dialogue_focused_schema" in script
+        and not isinstance(script["dialogue_focused_schema"], bool)
+    ):
+        errors.append("script.dialogue_focused_schema must be boolean")
     _number(errors, script, "chunk_size_words", minimum=50)
     _number(errors, script, "max_fragments_per_chunk", minimum=1)
+    _number(errors, script, "adaptive_split_max_depth", minimum=0, maximum=6)
+    _number(errors, script, "adaptive_split_min_fragments", minimum=2)
     _number(errors, script, "speaker_confidence_threshold", minimum=0, maximum=1)
     metadata = config.get("metadata", {})
     if not isinstance(metadata, dict):

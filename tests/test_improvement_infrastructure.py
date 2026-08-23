@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import yaml
 
@@ -12,6 +13,7 @@ from shared.performance import read_metrics, summarize_metrics
 from shared.progress import ProgressEstimator
 from shared.reference_selection import reference_line_score, select_reference_text
 from shared.logging_utils import rotate_file
+from brain.orchestrator.pipeline import Pipeline
 from scripts.benchmark_support import balanced_order, summarize_tts_runs
 from scripts.benchmark_tts_fixture import _deep_update
 from scripts.benchmark_script_chunks import _parse_configs
@@ -52,6 +54,54 @@ class ConfigurationValidationTests(unittest.TestCase):
     def test_joint_analysis_flag_must_be_boolean(self) -> None:
         with self.assertRaisesRegex(ValueError, "joint_analysis"):
             validate_brain_config({"script": {"joint_analysis": "yes"}})
+
+    def test_adaptive_split_settings_are_bounded(self) -> None:
+        invalid = (
+            ({"adaptive_split_enabled": "yes"}, "adaptive_split_enabled"),
+            ({"dialogue_focused_schema": "yes"}, "dialogue_focused_schema"),
+            ({"adaptive_split_max_depth": 7}, "adaptive_split_max_depth"),
+            ({"adaptive_split_min_fragments": 1}, "adaptive_split_min_fragments"),
+        )
+        for script, field in invalid:
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, field):
+                validate_brain_config({"script": script})
+
+    def test_pipeline_wires_generation_limits_and_adaptive_split_config(self) -> None:
+        config = {
+            "ollama": {
+                "host": "http://127.0.0.1:11435",
+                "model": "test-model",
+                "max_output_tokens": 4321,
+                "max_generation_seconds": 321,
+                "repetition_window_chars": 222,
+                "repetition_count": 5,
+            },
+            "script": {
+                "adaptive_split_enabled": True,
+                "adaptive_split_max_depth": 3,
+                "adaptive_split_min_fragments": 10,
+                "dialogue_focused_schema": True,
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "config.yaml"
+            config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+            with patch("brain.orchestrator.pipeline.OllamaClient") as client_type:
+                pipeline = Pipeline(
+                    config_path=config_path,
+                    projects_dir=root / "projects",
+                )
+
+        client_kwargs = client_type.call_args.kwargs
+        self.assertEqual(client_kwargs["max_output_tokens"], 4321)
+        self.assertEqual(client_kwargs["max_generation_seconds"], 321)
+        self.assertEqual(client_kwargs["repetition_window_chars"], 222)
+        self.assertEqual(client_kwargs["repetition_count"], 5)
+        self.assertTrue(pipeline.script_generator.adaptive_split_enabled)
+        self.assertEqual(pipeline.script_generator.adaptive_split_max_depth, 3)
+        self.assertEqual(pipeline.script_generator.adaptive_split_min_fragments, 10)
+        self.assertTrue(pipeline.script_generator.dialogue_focused_schema)
 
     def test_invalid_enabled_schedule_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "requires at least one window"):

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -39,6 +40,34 @@ class MobileApiTests(unittest.TestCase):
         self.assertTrue(data["capabilities"]["wav_chapter_streaming"])
         self.assertTrue(data["capabilities"]["progress_sync"])
         self.assertFalse(data["is_busy"])
+
+    def test_remote_mobile_routes_require_token_but_discovery_is_public(self):
+        remote = TestClient(app, client=("192.0.2.10", 50000))
+        with patch.dict(
+            "os.environ",
+            {"CRAZY_AUDIOBOOK_DASHBOARD_TOKEN": "mobile-secret"},
+            clear=False,
+        ):
+            self.assertEqual(
+                remote.get("/api/mobile/v1/server-info").status_code,
+                200,
+            )
+            self.assertEqual(remote.get("/api/mobile/v1/catalog").status_code, 401)
+            self.assertEqual(
+                remote.get(
+                    "/api/mobile/v1/catalog",
+                    headers={"X-API-Token": "mobile-secret"},
+                ).status_code,
+                200,
+            )
+
+    def test_cross_site_progress_mutation_is_rejected(self):
+        response = self.client.post(
+            "/api/mobile/v1/books/example/progress",
+            headers={"Sec-Fetch-Site": "cross-site"},
+            json={"chapter_number": 1, "position_ms": 0},
+        )
+        self.assertEqual(response.status_code, 403)
 
     def test_progress_save_and_get(self):
         # Create a test project directory
@@ -165,12 +194,46 @@ class MobileApiTests(unittest.TestCase):
             self.assertEqual(data["project_id"], project_id)
             self.assertEqual(data["title"], "Detailed Story")
             self.assertEqual(len(data["chapters"]), 2)
-            self.assertEqual(data["chapters"][0]["title"], "Chapter 1: Prologue")
+            self.assertEqual(data["chapters"][0]["title"], "Chapter 1")
+            self.assertEqual(data["chapters"][0]["source_heading"], "Prologue")
             self.assertEqual(data["chapters"][0]["raw_title"], "Prologue")
             self.assertEqual(data["chapters"][0]["status"], "mastered")
-            self.assertEqual(data["chapters"][1]["title"], "Chapter 2: The Awakening")
+            self.assertEqual(data["chapters"][1]["title"], "Chapter 2")
             self.assertEqual(data["chapters"][1]["raw_title"], "The Awakening")
             self.assertEqual(data["chapters"][1]["status"], "generating")
+        finally:
+            import shutil
+            if project_dir.exists():
+                shutil.rmtree(project_dir)
+
+    def test_export_manifest_does_not_mark_unexported_chapters_mastered(self):
+        project_id = "test_partial_manifest"
+        project_dir = Path("brain/projects") / project_id
+        project_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            (project_dir / "book.json").write_text(json.dumps({
+                "metadata": {"title": "Subset", "author": "Author"},
+                "chapters": [
+                    {"title": "One"}, {"title": "Two"}, {"title": "Three"},
+                ],
+            }), encoding="utf-8")
+            (project_dir / f"{project_id}.m4b").write_bytes(b"audio")
+            (project_dir / "export_quality.json").write_text(json.dumps({
+                "partial": True,
+                "chapters": [2],
+                "output_file": str(project_dir / f"{project_id}.m4b"),
+            }), encoding="utf-8")
+            self.job_queue.create_job(project_id, {
+                "title": "Subset", "status": "complete", "total_chapters": 3,
+                "mastered_chapters": [], "generated_chapters": [],
+            })
+
+            response = self.client.get(f"/api/mobile/v1/books/{project_id}")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(
+                [chapter["status"] for chapter in response.json()["chapters"]],
+                ["pending", "mastered", "pending"],
+            )
         finally:
             import shutil
             if project_dir.exists():

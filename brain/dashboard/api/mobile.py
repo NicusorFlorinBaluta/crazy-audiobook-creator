@@ -209,9 +209,25 @@ async def get_catalog(
             full_m4b = workspace_dir / "output" / f"{project_id}.m4b"
 
         has_full_m4b = full_m4b.is_file() and full_m4b.stat().st_size > 0
+        complete_export = has_full_m4b
+        export_manifest = project_dir / "export_quality.json"
+        if has_full_m4b and export_manifest.is_file():
+            try:
+                exported = json.loads(
+                    export_manifest.read_text(encoding="utf-8")
+                )
+                exported_chapters = {
+                    int(number) for number in exported.get("chapters", [])
+                }
+                complete_export = (
+                    not bool(exported.get("partial"))
+                    and exported_chapters == set(range(1, total_chapters + 1))
+                )
+            except (OSError, ValueError, TypeError):
+                complete_export = False
         is_stale = bool(job_state.get("export_stale"))
 
-        if has_full_m4b and not is_stale:
+        if complete_export and not is_stale:
             book_status = "ready_full"
         elif mastered_chapters or full_m4b.is_file():
             book_status = "ready_partial"
@@ -320,14 +336,25 @@ async def get_book_detail(project_id: str, request: Request) -> dict[str, Any]:
     full_m4b = project_dir / f"{project_id}.m4b"
     if not full_m4b.is_file():
         full_m4b = workspace_dir / "output" / f"{project_id}.m4b"
-    if full_m4b.is_file() and full_m4b.stat().st_size > 0 and total_chapters > 0:
-        for c_num in range(1, total_chapters + 1):
-            mastered_set.add(c_num)
+    if full_m4b.is_file() and full_m4b.stat().st_size > 0:
+        export_manifest = project_dir / "export_quality.json"
+        if export_manifest.is_file():
+            try:
+                exported = json.loads(
+                    export_manifest.read_text(encoding="utf-8")
+                )
+                mastered_set.update(
+                    int(number) for number in exported.get("chapters", [])
+                )
+            except (OSError, ValueError, TypeError):
+                pass
 
     chapter_titles: dict[int, str] = {}
     for idx, ch in enumerate(book_chapters, 1):
-        if isinstance(ch, dict) and ch.get("title"):
-            chapter_titles[idx] = ch["title"]
+        if isinstance(ch, dict):
+            source_heading = ch.get("source_heading") or ch.get("title")
+            if source_heading:
+                chapter_titles[idx] = str(source_heading)
 
     narrator = str(metadata.get("narrator") or "")
     if not narrator:
@@ -357,17 +384,13 @@ async def get_book_detail(project_id: str, request: Request) -> dict[str, Any]:
             cumulative_offset += dur
 
         raw_title = (chapter_titles.get(c_num) or "").strip()
-        if not raw_title:
-            formatted_title = f"Chapter {c_num}"
-        elif re.match(rf"^(?:chapter|ch\.?)\s*{c_num}\b", raw_title, re.IGNORECASE):
-            formatted_title = raw_title
-        else:
-            formatted_title = f"Chapter {c_num}: {raw_title}"
+        formatted_title = f"Chapter {c_num}"
 
         chapters_list.append({
             "number": c_num,
             "title": formatted_title,
             "raw_title": raw_title or f"Chapter {c_num}",
+            "source_heading": raw_title,
             "status": ch_status,
             "duration_seconds": dur,
             "start_ms": start_ms,

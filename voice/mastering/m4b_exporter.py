@@ -251,13 +251,8 @@ class M4BExporter:
 
     @staticmethod
     def _format_chapter_title(number: int, title: str | None) -> str:
-        """Format chapter title to include chapter number when appropriate."""
-        clean_title = (title or "").strip()
-        if not clean_title:
-            return f"Chapter {number}"
-        if re.match(rf"^(?:Chapter|Part)\s+{number}\b", clean_title, re.IGNORECASE):
-            return clean_title
-        return f"Chapter {number}: {clean_title}"
+        """Use stable sequence numbering rather than ambiguous source headings."""
+        return f"Chapter {number}"
 
     @staticmethod
     def _escape_ffmetadata(value: str) -> str:

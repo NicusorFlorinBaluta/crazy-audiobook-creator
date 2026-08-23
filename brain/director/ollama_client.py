@@ -37,6 +37,7 @@ class OllamaClient:
         max_generation_seconds: int = 900,
         repetition_window_chars: int = 512,
         repetition_count: int = 4,
+        think: bool | str | None = None,
     ):
         self.host = host.rstrip("/")
         self.model = model
@@ -49,6 +50,7 @@ class OllamaClient:
         self.max_generation_seconds = max(1, max_generation_seconds)
         self.repetition_window_chars = max(0, repetition_window_chars)
         self.repetition_count = max(2, repetition_count)
+        self.think = think
         self._client_lock = threading.Lock()
         self._client = self._new_client()
         self._cancel_event = threading.Event()
@@ -139,6 +141,8 @@ class OllamaClient:
         }
         if format:
             payload["format"] = format
+        if self.think is not None:
+            payload["think"] = self.think
 
         last_error: Exception | None = None
         retry_started = time.monotonic()

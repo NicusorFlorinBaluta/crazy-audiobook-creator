@@ -342,26 +342,11 @@ class JobQueue:
             result.append(item)
         return result
 
-    def external_validation_calibration(self, project_id: str, minimum_samples: int = 25) -> dict[str, Any]:
-        """Compute passive agreement metrics; never mutates configured thresholds."""
-        events = [event for event in self.get_external_validation_events(project_id) if event["human_disposition"]]
-        outcomes: list[tuple[float, bool]] = []
-        seen_items: set[tuple[str, str]] = set()
-        for event in events:
-            item_key = (event["item_type"], event["item_id"])
-            if item_key in seen_items:
-                continue
-            confidence = event.get("confidence")
-            if confidence is None:
-                continue
-            decision = str(event.get("decision", "")).lower()
-            human = str(event.get("human_disposition", "")).lower()
-            agrees = (
-                (decision in {"accept", "accepted", "resolved"} and human in {"acceptable", "resolved"})
-                or (decision in {"reject", "regenerate"} and human in {"regenerate", "source_tts_issue"})
-            )
-            outcomes.append((float(confidence), agrees))
-            seen_items.add(item_key)
+    @staticmethod
+    def _calibration_summary(
+        outcomes: list[tuple[float, bool]], minimum_samples: int,
+    ) -> dict[str, Any]:
+        """Summarize confidence-versus-human agreement without tuning policy."""
         sample_count = len(outcomes)
         bins = []
         for low in (0.0, 0.5, 0.7, 0.85):
@@ -379,11 +364,109 @@ class JobQueue:
                 if len(rows) >= 10 and sum(rows) / len(rows) >= 0.95:
                     recommended = threshold
                     break
+        brier_score = (
+            sum((confidence - float(agrees)) ** 2 for confidence, agrees in outcomes)
+            / sample_count
+            if sample_count else None
+        )
+        populated_bins = [row for row in bins if row["samples"]]
+        expected_calibration_error = (
+            sum(
+                row["samples"]
+                / sample_count
+                * abs(
+                    sum(
+                        confidence
+                        for confidence, _ in outcomes
+                        if row["low"] <= confidence < (row["high"] if row["high"] < 1 else 1.01)
+                    )
+                    / row["samples"]
+                    - float(row["agreement"])
+                )
+                for row in populated_bins
+            )
+            if sample_count else None
+        )
         return {"sample_count": sample_count, "minimum_samples": minimum_samples,
                 "samples_needed": max(0, minimum_samples - sample_count),
                 "ready": sample_count >= minimum_samples, "bins": bins,
+                "brier_score": brier_score,
+                "expected_calibration_error": expected_calibration_error,
                 "recommended_auto_accept_threshold": recommended,
                 "applied_automatically": False}
+
+    def external_validation_calibration(self, project_id: str, minimum_samples: int = 25) -> dict[str, Any]:
+        """Compute project and purpose-matched pooled calibration metrics.
+
+        Pooling is deliberately segmented by provider, model, item purpose, and
+        schema/prompt revision so an accurate audio validator cannot lend false
+        confidence to a different attribution workflow. Recommendations remain
+        advisory and never alter configured thresholds.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT project_id,item_type,item_id,provider,model,decision,
+                confidence,details,human_disposition,id
+                FROM external_validation_events
+                WHERE human_disposition IS NOT NULL
+                ORDER BY id DESC"""
+            ).fetchall()
+
+        groups: dict[tuple[str, str, str, str], list[tuple[float, bool]]] = {}
+        project_outcomes: list[tuple[float, bool]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for row in rows:
+            (
+                event_project, item_type, item_id, provider, model, decision,
+                confidence, details_json, human, _event_id,
+            ) = row
+            item_key = (str(event_project), str(item_type), str(item_id))
+            if item_key in seen or confidence is None:
+                continue
+            seen.add(item_key)
+            decision_norm = str(decision or "").lower()
+            human_norm = str(human or "").lower()
+            agrees = (
+                decision_norm in {"accept", "accepted", "resolved"}
+                and human_norm in {"acceptable", "resolved"}
+            ) or (
+                decision_norm in {"reject", "regenerate"}
+                and human_norm in {"regenerate", "source_tts_issue"}
+            )
+            outcome = (max(0.0, min(1.0, float(confidence))), agrees)
+            if event_project == project_id:
+                project_outcomes.append(outcome)
+            try:
+                details = json.loads(details_json or "{}")
+            except (TypeError, json.JSONDecodeError):
+                details = {}
+            revision = str(
+                details.get("purpose_version")
+                or details.get("schema_revision")
+                or details.get("schema")
+                or "legacy"
+            )
+            key = (
+                str(provider or "unknown"),
+                str(model or "unknown"),
+                str(item_type or "unknown"),
+                revision,
+            )
+            groups.setdefault(key, []).append(outcome)
+
+        result = self._calibration_summary(project_outcomes, minimum_samples)
+        result["pooled_groups"] = [
+            {
+                "provider": key[0],
+                "model": key[1],
+                "purpose": key[2],
+                "revision": key[3],
+                **self._calibration_summary(outcomes, minimum_samples),
+            }
+            for key, outcomes in sorted(groups.items())
+        ]
+        result["pooling_policy"] = "provider_model_purpose_revision"
+        return result
 
     def get_review_items(
         self,
@@ -635,4 +718,3 @@ class JobQueue:
             "is_completed": bool(row[4]),
             "updated_at": row[5],
         }
-

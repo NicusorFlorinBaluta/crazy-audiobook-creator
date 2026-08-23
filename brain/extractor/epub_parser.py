@@ -581,6 +581,8 @@ class EpubParser:
                     "review_required": classification["word_count"] >= 300,
                 })
             self.last_audit["sections"].append(classification)
+            classification["extracted_word_count"] = 0
+            classification["coverage_ratio"] = 0.0
 
             if classification["decision"] == "reference":
                 raw_ref_text = self._extract_text(soup)
@@ -591,9 +593,21 @@ class EpubParser:
                 if cleaned_ref.strip():
                     reference_material[doc_title or item.get_name()] = cleaned_ref
                     logger.info("Captured reference section: '%s' (%d words)", doc_title, len(cleaned_ref.split()))
+                classification["extracted_word_count"] = len(cleaned_ref.split())
+                classified_words = int(classification.get("word_count", 0) or 0)
+                classification["coverage_ratio"] = (
+                    round(
+                        classification["extracted_word_count"] / classified_words,
+                        4,
+                    )
+                    if classified_words
+                    else 1.0
+                )
+                classification["drop_reason"] = "reference_material"
                 continue
 
             if classification["decision"] == "exclude":
+                classification["drop_reason"] = "classified_exclude"
                 logger.debug("Skipping document: %s", item.get_name())
                 continue
 
@@ -612,19 +626,14 @@ class EpubParser:
                     chapters = self._split_by_patterns(soup)
 
             reference_material.update(ref_sections)
-            heading_fallback_blocked = (
-                had_headings
-                and self.chapter_detection in {"auto", "heading"}
-            )
-
             if (
                 not chapters
                 and self.chapter_detection != "none"
                 and not ref_sections
-                and not heading_fallback_blocked
             ):
                 text = self._extract_text(soup)
                 if text.strip():
+                    classification["extracted_word_count"] = len(text.split())
                     if raw_chapters:
                         raw_chapters[-1]["text"] += "\n\n" + text
                     else:
@@ -632,6 +641,34 @@ class EpubParser:
                         raw_chapters.extend(chapters)
             else:
                 raw_chapters.extend(chapters)
+                classification["extracted_word_count"] = sum(
+                    len(str(chapter.get("text") or "").split())
+                    for chapter in chapters
+                )
+
+            classified_words = int(classification.get("word_count", 0) or 0)
+            extracted_words = int(
+                classification.get("extracted_word_count", 0) or 0
+            )
+            classification["coverage_ratio"] = (
+                round(extracted_words / classified_words, 4)
+                if classified_words
+                else 1.0
+            )
+            if (
+                classification.get("decision") == "include"
+                and classified_words >= self.min_chapter_words
+                and extracted_words == 0
+            ):
+                classification["review_required"] = True
+                classification.setdefault("anomalies", []).append(
+                    "included_document_without_extracted_text"
+                )
+                classification["reason"] = (
+                    f"{classification.get('reason', 'Included locally')}; "
+                    "included document produced no narrative text"
+                )
+                classification["drop_reason"] = "included_without_extracted_text"
 
         return raw_chapters, reference_material
 
@@ -841,6 +878,16 @@ class EpubParser:
                 ExtractedChapter(
                     number=chapter_number,
                     title=title,
+                    source_heading=title_raw,
+                    book_chapter_label=(
+                        title_raw
+                        if re.match(
+                            r"^(?:chapter|ch\.?|part)\b",
+                            title_raw,
+                            re.IGNORECASE,
+                        )
+                        else ""
+                    ),
                     text=text,
                     word_count=word_count,
                 )
@@ -859,6 +906,7 @@ class EpubParser:
                 finalized.append(ExtractedChapter(
                     number=1,
                     title=pending_short[0][0] or "Full Text",
+                    source_heading=pending_short[0][0],
                     text=suffix,
                     word_count=len(suffix.split()),
                 ))
@@ -874,6 +922,7 @@ class EpubParser:
                     ExtractedChapter(
                         number=1,
                         title="Full Text",
+                        source_heading="",
                         text=all_text,
                         word_count=len(all_text.split()),
                     )
@@ -919,6 +968,16 @@ class EpubParser:
                 ExtractedChapter(
                     number=start_number + part_num,
                     title=part_title,
+                    source_heading=title,
+                    book_chapter_label=(
+                        title
+                        if re.match(
+                            r"^(?:chapter|ch\.?|part)\b",
+                            title,
+                            re.IGNORECASE,
+                        )
+                        else ""
+                    ),
                     text=chunk_text.strip(),
                     word_count=word_count,
                 )

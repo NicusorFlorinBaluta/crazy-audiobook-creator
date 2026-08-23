@@ -110,10 +110,11 @@ A mismatch raises an error. This catches omissions, duplications, reorderings, a
 A script fingerprint covers:
 
 - exact chapter source
-- relevant character registry, including voice assignments
+- chapter-relevant character attribution fields and aliases
 - Ollama model
 - system prompt
 - script schema version
+- joint-analysis and dialogue-delivery policy revisions
 - chunk size
 
 A matching script file without matching metadata is not reused.

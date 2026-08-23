@@ -7,7 +7,7 @@ ollama:
   # Use an app-owned port so the pipeline can enforce the discrete Vulkan GPU
   # even when the Ollama desktop service is also running on its default port.
   host: http://127.0.0.1:11435
-  model: qwen2.5:32b
+  model: qwen3.8:27b
   # Never substitute an arbitrary installed model. Add exact Ollama tags here
   # only after validating them for the script-director prompts.
   fallback_models: []
@@ -22,12 +22,13 @@ ollama:
   temperature_pass1: 0.3
   temperature_pass2: 0.2
   top_p: 0.9
+  think: false              # Structured audiobook metadata; avoid hidden reasoning-token overhead
   context_window: 16384
   timeout: 600
   max_retries: 3
   max_retry_seconds: 900       # Total budget for failed attempts/backoff; healthy streams may run longer
   max_output_tokens: 8192      # Hard server/client cap; normal chapter JSON is about 4K tokens
-  max_generation_seconds: 900  # Total wall-clock cap even while tokens keep streaming
+  max_generation_seconds: 600  # Split oversized metadata batches after 10 minutes
   repetition_window_chars: 512 # Search for repeating loop periods up to this size...
   repetition_count: 4          # ...this many consecutive times
   unload_after_scripting: true     # Free GPU memory before Qwen TTS loads
@@ -64,7 +65,7 @@ extraction:
   preserve_poetry: true
 # Source-preserving script construction
 script:
-  joint_analysis: true             # Discover characters while attributing scripts
+  joint_analysis: false            # Quality-first: finish the book-wide cast before attribution
   max_segment_sentences: 4
   min_segment_words: 3
   default_speed: 1.0
@@ -76,7 +77,11 @@ script:
   expressive_target_chars: 180    # Keep intense/whispered delivery controllable
   expressive_max_words: 30
   speaker_confidence_threshold: 0.55
-  max_fragments_per_chunk: 40
+  max_fragments_per_chunk: 60
+  adaptive_split_enabled: true      # Retry a timed-out batch as smaller contiguous ranges
+  adaptive_split_max_depth: 2       # 60 -> about 30 -> about 15 fragments, then safe fallback
+  adaptive_split_min_fragments: 8   # Avoid tiny recursive requests with little quality upside
+  dialogue_focused_schema: false     # Experimental v5; enable only after quality benchmark promotion
   narrator_pause_ms: 500
   dialogue_pause_ms: 300
   scene_transition_pause_ms: 1500
@@ -101,6 +106,7 @@ dashboard:
   projects_dir: projects
   max_projects: 50
   auto_cleanup_days: 0
+  auto_resume_in_flight: true
 # External metadata lookup is opt-in
 metadata:
   auto_fetch_external: false
@@ -114,6 +120,10 @@ external_validation:
   manual_review_confidence: 0.75
   attribution_batch_size: 20
   max_audio_regenerations: 1
+  character_augmentation:
+    enabled: true
+    triage_model: gemini-3.5-flash-lite
+    adjudication_model: gemini-3.5-flash
   circuit_breaker:
     failure_threshold: 3
     cooldown_seconds: 60

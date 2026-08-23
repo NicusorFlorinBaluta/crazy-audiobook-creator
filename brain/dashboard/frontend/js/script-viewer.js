@@ -322,6 +322,33 @@ window.ScriptViewer = (() => {
                     </select>
                     <button class="btn btn-secondary char-voice-save"
                             ${voiceState.editable ? '' : 'disabled'}>Assign</button>
+                    <details class="character-profile-editor">
+                        <summary>Correct character profile</summary>
+                        <div class="character-profile-fields">
+                            <label>Gender
+                                <select class="character-profile-gender" ${voiceState.editable ? '' : 'disabled'}>
+                                    ${['male', 'female', 'other'].map(value => `
+                                        <option value="${value}" ${character.gender === value ? 'selected' : ''}>${value}</option>
+                                    `).join('')}
+                                </select>
+                            </label>
+                            <label>Age range
+                                <input class="character-profile-age" maxlength="80"
+                                       value="${escapeHtml(character.age_range || 'unknown')}"
+                                       ${voiceState.editable ? '' : 'disabled'}>
+                            </label>
+                            <label class="character-profile-wide">Speaking style
+                                <textarea class="character-profile-style" rows="2" maxlength="500"
+                                          ${voiceState.editable ? '' : 'disabled'}>${escapeHtml(character.speaking_style || '')}</textarea>
+                            </label>
+                            <label class="character-profile-wide">Voice description
+                                <textarea class="character-profile-description" rows="3" maxlength="1000"
+                                          ${voiceState.editable ? '' : 'disabled'}>${escapeHtml(character.voice_description || '')}</textarea>
+                            </label>
+                            <button class="btn btn-secondary character-profile-save"
+                                    ${voiceState.editable ? '' : 'disabled'}>Save correction</button>
+                        </div>
+                    </details>
                 </div>
             `).join('');
 
@@ -392,6 +419,15 @@ window.ScriptViewer = (() => {
                 const saveButton = row.querySelector('.char-voice-save');
                 saveButton?.addEventListener('click', () =>
                     saveVoiceAssignment(row.dataset.characterId, select.value, saveButton)
+                );
+                const profileButton = row.querySelector('.character-profile-save');
+                profileButton?.addEventListener('click', () =>
+                    saveCharacterProfile(row.dataset.characterId, {
+                        gender: row.querySelector('.character-profile-gender').value,
+                        age_range: row.querySelector('.character-profile-age').value,
+                        speaking_style: row.querySelector('.character-profile-style').value,
+                        voice_description: row.querySelector('.character-profile-description').value
+                    }, profileButton)
                 );
             });
             const regenerateButton = card.querySelector('.voice-regenerate');
@@ -948,6 +984,19 @@ window.ScriptViewer = (() => {
     async function approveVoiceCast() {
         const projectId = window.state?.currentProjectId;
         if (!projectId) return;
+        const similarPairs = (currentData.voices?.quality?.cast_pair_diagnostics || [])
+            .filter(item => item.status === 'similar' && !item.warning_suppressed);
+        const distinctnessStale = currentData.voices?.quality?.distinctness_status === 'stale';
+        let acknowledgeSimilarPairs = false;
+        if (similarPairs.length || distinctnessStale) {
+            acknowledgeSimilarPairs = window.confirm(
+                (similarPairs.length
+                    ? `${similarPairs.length} voice pair(s) sound unusually similar. `
+                    : 'One or more voices changed after the last distinctness comparison. ') +
+                'Preview the cast before continuing. Continue with this cast anyway?'
+            );
+            if (!acknowledgeSimilarPairs) return;
+        }
         const button = els.voiceReviewBanner?.querySelector('.voice-approve');
         if (button) button.disabled = true;
         try {
@@ -956,7 +1005,10 @@ window.ScriptViewer = (() => {
                 {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({continue_pipeline: true})
+                    body: JSON.stringify({
+                        continue_pipeline: true,
+                        acknowledge_similar_pairs: acknowledgeSimilarPairs
+                    })
                 }
             );
             const data = await response.json().catch(() => ({}));
@@ -995,14 +1047,7 @@ window.ScriptViewer = (() => {
             const opt = document.createElement('option');
             opt.value = idx;
             const chNum = ch.chapter_number || (idx + 1);
-            const title = (ch.title || '').trim();
-            if (title && !title.toLowerCase().startsWith(`chapter ${chNum}`)) {
-                opt.textContent = `Chapter ${chNum}: ${title}`;
-            } else if (title) {
-                opt.textContent = title;
-            } else {
-                opt.textContent = `Chapter ${chNum}`;
-            }
+            opt.textContent = `Chapter ${chNum}`;
             els.chapterSelect.appendChild(opt);
         });
         els.chapterSelect.value = 0;
@@ -1141,6 +1186,51 @@ window.ScriptViewer = (() => {
             }
             els.scriptViewer.appendChild(div);
         });
+    }
+
+    async function saveCharacterProfile(characterId, profile, button = null) {
+        const projectId = window.state?.currentProjectId;
+        if (!projectId) return;
+        const payload = Object.fromEntries(
+            Object.entries(profile).map(([key, value]) => [key, value.trim()])
+        );
+        if (!payload.age_range || !payload.voice_description || payload.voice_description.length < 12) {
+            showToast('Provide an age range and a voice description of at least 12 characters', 'warning');
+            return;
+        }
+        const previousText = button?.textContent;
+        if (button) {
+            button.disabled = true;
+            button.textContent = 'Saving...';
+        }
+        try {
+            const response = await fetch(
+                `api/projects/${encodeURIComponent(projectId)}/characters/${encodeURIComponent(characterId)}/profile`,
+                {
+                    method: 'PATCH',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(payload)
+                }
+            );
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(data.detail || 'Could not save character profile');
+            const affected = data.affected_chapters || [];
+            showToast(
+                data.status === 'unchanged'
+                    ? 'Character profile unchanged'
+                    : `Correction saved${data.requires_voice_regeneration ? '; regenerate the voice preview' : ''}${affected.length ? `; ${affected.length} chapter${affected.length === 1 ? '' : 's'} marked stale` : ''}`,
+                'success'
+            );
+            await Promise.all([fetchCharacters(projectId), fetchVoices(projectId)]);
+            renderCharacters();
+        } catch (error) {
+            showToast(error.message, 'error');
+        } finally {
+            if (button?.isConnected) {
+                button.disabled = false;
+                button.textContent = previousText;
+            }
+        }
     }
 
     function jumpToScriptLine(chapterNumber, lineId) {

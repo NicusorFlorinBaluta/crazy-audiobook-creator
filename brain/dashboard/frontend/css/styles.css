@@ -1626,6 +1626,52 @@ audio:hover {
     gap: 7px;
 }
 
+.character-profile-editor {
+    grid-column: 1 / -1;
+    padding: 3px 0 6px;
+}
+
+.character-profile-editor summary {
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: .69rem;
+}
+
+.character-profile-fields {
+    display: grid;
+    grid-template-columns: minmax(100px, .45fr) minmax(120px, 1fr);
+    gap: 8px;
+    margin-top: 8px;
+}
+
+.character-profile-fields label {
+    display: grid;
+    gap: 4px;
+    color: var(--text-muted);
+    font-size: .68rem;
+}
+
+.character-profile-fields select,
+.character-profile-fields input,
+.character-profile-fields textarea {
+    width: 100%;
+    color: var(--text-primary);
+    background: rgba(10, 10, 18, .5);
+    border: 1px solid var(--glass-border);
+    border-radius: 8px;
+    padding: 7px 9px;
+    font: inherit;
+}
+
+.character-profile-wide,
+.character-profile-save {
+    grid-column: 1 / -1;
+}
+
+.character-profile-save {
+    justify-self: start;
+}
+
 .voice-speaker-name {
     overflow: hidden;
     text-overflow: ellipsis;

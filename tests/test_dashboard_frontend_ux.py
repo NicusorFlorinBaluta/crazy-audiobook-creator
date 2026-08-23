@@ -116,7 +116,8 @@ def test_dashboard_uses_canonical_chapter_numbers_instead_of_source_headings() -
     assert "const chapterTitle = currentChapter ? `Chapter ${currentChapter}` : '';" in app
     assert "progress.current = `Scripting · Chapter ${current} of ${total}`;" in app
     assert "const title = detail.title || `Chapter ${chapter}`;" not in app
-    assert "opt.textContent = `Chapter ${chNum}: ${title}`;" in script_viewer
+    assert "opt.textContent = `Chapter ${chNum}`;" in script_viewer
+    assert "opt.textContent = `Chapter ${chNum}: ${title}`;" not in script_viewer
     assert "ch.chapter_title ?" not in script_viewer
 
 

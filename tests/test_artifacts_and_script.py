@@ -122,6 +122,33 @@ class FakeScriptOllama:
 
 
 class ScriptFidelityTests(unittest.TestCase):
+    def test_joint_checkpoint_allows_only_exact_or_source_compatible_runtime_migration(self) -> None:
+        exact = {"fingerprint": "current", "source_fingerprint": "source"}
+        migrated = {"fingerprint": "previous", "source_fingerprint": "source"}
+        stale_source = {"fingerprint": "previous", "source_fingerprint": "other"}
+
+        self.assertTrue(
+            Pipeline._joint_checkpoint_is_compatible(
+                exact,
+                character_fingerprint="current",
+                source_fingerprint="source",
+            )
+        )
+        self.assertTrue(
+            Pipeline._joint_checkpoint_is_compatible(
+                migrated,
+                character_fingerprint="current",
+                source_fingerprint="source",
+            )
+        )
+        self.assertFalse(
+            Pipeline._joint_checkpoint_is_compatible(
+                stale_source,
+                character_fingerprint="current",
+                source_fingerprint="source",
+            )
+        )
+
     def test_pipeline_joint_mode_persists_registry_scripts_and_comparison_metrics(self) -> None:
         source = '"We should leave," Mara said.'
         fragments = ScriptGenerator._split_into_fragment_spans(source)
@@ -943,6 +970,136 @@ class ScriptFidelityTests(unittest.TestCase):
                 {"lines": [{"id": 0, "speed": 1.0}]},
                 fragments,
             )
+
+    def test_compact_metadata_inherits_explicit_scene_narration_defaults(self) -> None:
+        fragments = [SourceFragment("A quiet room.", 0, 13)]
+        raw = {
+            "scenes": [{
+                "narrator_emotion": "hushed suspense",
+                "narrator_pace": 0.92,
+            }],
+            "lines": [{"id": 0, "scene_index": 0}],
+        }
+
+        issues = ScriptGenerator._collect_delivery_metadata_issues(raw, fragments)
+        self.assertEqual(issues, [])
+        stats = ScriptGenerator._expand_compact_metadata(raw, fragments)
+
+        self.assertEqual(raw["lines"][0]["emotion"], "hushed suspense")
+        self.assertEqual(raw["lines"][0]["speed"], 0.92)
+        self.assertGreater(stats["character_savings_ratio"], 0.0)
+
+    def test_dialogue_focused_schema_reconstructs_only_omitted_narration(self) -> None:
+        fragments = [
+            SourceFragment("The room was still.", 0, 19),
+            SourceFragment('"Go."', 20, 25),
+            SourceFragment("The night settled.", 26, 44),
+        ]
+        raw = {
+            "scenes": [
+                {
+                    "start_id": 0,
+                    "narrator_emotion": "neutral",
+                    "narrator_pace": 1.0,
+                },
+                {
+                    "start_id": 2,
+                    "narrator_emotion": "somber reflection",
+                    "narrator_pace": 0.87,
+                },
+            ],
+            "lines": [{
+                "id": 1,
+                "speaker": "dusk",
+                "speaker_confidence": 0.96,
+                "speaker_evidence": "An explicit local cue identifies Dusk.",
+                "emotion": "angry demand",
+                "speed": 1.2,
+            }],
+        }
+
+        sparse = ScriptGenerator._inflate_dialogue_focused_metadata(raw, fragments)
+        self.assertEqual(sparse["received_rows"], 1)
+        self.assertEqual(sparse["synthesized_narration_rows"], 2)
+        self.assertEqual([row["id"] for row in raw["lines"]], [0, 1, 2])
+        self.assertEqual([row["scene_index"] for row in raw["lines"]], [0, 0, 1])
+        self.assertNotIn("start_id", raw["scenes"][0])
+        self.assertEqual(
+            ScriptGenerator._collect_delivery_metadata_issues(raw, fragments),
+            [],
+        )
+        ScriptGenerator._expand_compact_metadata(raw, fragments)
+        self.assertEqual(raw["lines"][0]["speaker"], "narrator")
+        self.assertEqual(raw["lines"][2]["emotion"], "somber reflection")
+
+    def test_dialogue_focused_schema_refuses_missing_dialogue(self) -> None:
+        fragments = [SourceFragment('"Go."', 0, 5)]
+        raw = {
+            "scenes": [{
+                "start_id": 0,
+                "narrator_emotion": "neutral",
+                "narrator_pace": 1.0,
+            }],
+            "lines": [],
+        }
+        with self.assertRaisesRegex(ValueError, "mandatory dialogue IDs"):
+            ScriptGenerator._inflate_dialogue_focused_metadata(raw, fragments)
+
+    def test_dialogue_focused_model_response_expands_before_validation(self) -> None:
+        source = "A quiet room remained still."
+        fragments = ScriptGenerator._split_into_fragment_spans(source)
+        response = {
+            "chapter_number": 1,
+            "chapter_title": "One",
+            "chapter_summary": "A quiet moment.",
+            "scenes": [{
+                "start_id": 0,
+                "mood": "quiet",
+                "tension": "low",
+                "narrator_emotion": "somber reflection",
+                "narrator_pace": 0.87,
+                "character_state": "calm",
+                "transition_intent": "continue",
+            }],
+            "lines": [],
+        }
+        ollama = FakeScriptOllama([response])
+        generator = ScriptGenerator(
+            ollama=ollama,
+            group_utterances=False,
+            dialogue_focused_schema=True,
+        )
+
+        script = generator._process_fragments(
+            fragments,
+            1,
+            "One",
+            self._attribution_registry(),
+            "",
+        )
+
+        self.assertTrue(all(line.speaker == "narrator" for line in script.lines))
+        self.assertTrue(all(line.emotion == "somber reflection" for line in script.lines))
+        self.assertIn("Dialogue-Focused Output Schema v5", ollama.calls[0][1]["system"])
+        sparse = generator.call_metrics[-1]["requests"][0][
+            "dialogue_focused_metadata"
+        ]
+        self.assertEqual(sparse["received_rows"], 0)
+        self.assertEqual(sparse["canonical_rows"], len(fragments))
+
+    def test_dialogue_cannot_inherit_narrator_scene_delivery(self) -> None:
+        fragments = [SourceFragment('"Go."', 0, 5)]
+        raw = {
+            "scenes": [{
+                "narrator_emotion": "neutral",
+                "narrator_pace": 1.0,
+            }],
+            "lines": [{"id": 0, "scene_index": 0, "speaker": "dusk"}],
+        }
+        fields = ScriptGenerator._collect_delivery_metadata_issues(
+            raw, fragments
+        )[0].fields
+        self.assertEqual(fields, ("emotion", "speed"))
         with self.assertRaisesRegex(ValueError, "required speed"):
             ScriptGenerator._expand_compact_metadata(
                 {"lines": [{"id": 0, "emotion": "neutral"}]},
@@ -1011,6 +1168,46 @@ class ScriptFidelityTests(unittest.TestCase):
             "compact_metadata"
         ]
         self.assertGreater(compact_metric["character_savings_ratio"], 0.25)
+
+    def test_prompt_lists_dialogue_ids_with_mandatory_delivery(self) -> None:
+        source = '"Go," Dusk said.'
+        fragments = ScriptGenerator._split_into_fragment_spans(source)
+        dialogue_ids = [
+            index for index, fragment in enumerate(fragments)
+            if ScriptGenerator._is_dialogue_fragment(fragment.text)
+        ]
+        response = {
+            "chapter_number": 1,
+            "chapter_title": "One",
+            "chapter_summary": "A brief exchange.",
+            "scenes": [],
+            "lines": [
+                {
+                    "id": index,
+                    "emotion": "firm",
+                    "speed": 1.0,
+                    **(
+                        {
+                            "speaker": "dusk",
+                            "speaker_confidence": 0.99,
+                            "speaker_evidence": "The adjacent named tag identifies Dusk.",
+                        }
+                        if index in dialogue_ids else {}
+                    ),
+                }
+                for index, _fragment in enumerate(fragments)
+            ],
+        }
+        ollama = FakeScriptOllama([response])
+        generator = ScriptGenerator(ollama=ollama, group_utterances=False)
+
+        generator._process_fragments(
+            fragments, 1, "One", self._attribution_registry(), ""
+        )
+
+        prompt = ollama.calls[0][0]
+        self.assertIn("MANDATORY DIALOGUE DELIVERY IDS", prompt)
+        self.assertIn(json.dumps(dialogue_ids), prompt)
 
     def test_missing_compact_speed_uses_focused_delivery_repair(self) -> None:
         source = "A quiet room remained still."
@@ -1502,6 +1699,56 @@ class ScriptFidelityTests(unittest.TestCase):
         self.assertTrue(generator.call_metrics[-1]["used_fallback"])
         self.assertTrue(script.lines)
 
+    def test_generation_limit_adaptively_splits_before_fallback(self) -> None:
+        source = "One. Two. Three. Four. Five. Six. Seven. Eight."
+        fragments = ScriptGenerator._split_into_fragment_spans(source)
+        generator = ScriptGenerator(
+            ollama=None,
+            group_utterances=False,
+            adaptive_split_min_fragments=8,
+        )
+        split_index = generator._adaptive_fragment_split_index(fragments)
+        ollama = FakeScriptOllama([
+            OllamaGenerationLimitError("wall-clock limit"),
+            self._metadata_response(fragments[:split_index], "vathi"),
+            self._metadata_response(fragments[split_index:], "vathi"),
+        ])
+        generator.ollama = ollama
+
+        script = generator._process_fragments(
+            fragments,
+            1,
+            "One",
+            self._attribution_registry(),
+            "",
+            chapter_text=source,
+        )
+
+        self.assertEqual(len(ollama.calls), 3)
+        assert_script_covers_source(script, source)
+        self.assertEqual(
+            [line.source_fragment_id for line in script.lines],
+            list(range(len(fragments))),
+        )
+        self.assertTrue(generator.call_metrics[0]["adaptive_split_triggered"])
+        self.assertFalse(any(
+            metric["used_fallback"] for metric in generator.call_metrics
+        ))
+
+    def test_adaptive_split_avoids_dialogue_tag_boundary(self) -> None:
+        fragments = [
+            SourceFragment("Before. ", 0, 8),
+            SourceFragment('"Wait." ', 8, 16),
+            SourceFragment("Vathi said. ", 16, 28),
+            SourceFragment("After.", 28, 34),
+        ]
+        split_index = ScriptGenerator._adaptive_fragment_split_index(fragments)
+        self.assertFalse(
+            ScriptGenerator._is_dialogue_fragment(
+                fragments[split_index - 1].text
+            )
+        )
+
     def test_explicit_boy_tag_adds_missing_male_child_role(self) -> None:
         source = '"I followed the star," the boy said, folding his arms.'
         book = ExtractedBook(
@@ -1587,7 +1834,7 @@ class ScriptFidelityTests(unittest.TestCase):
         chapter = ExtractedChapter(
             number=1,
             title="One",
-            text='"Hello," she said.',
+            text='"Hello," Speaker said.',
         )
         registry = CharacterRegistry(
             book_title="Test",
@@ -1620,6 +1867,141 @@ class ScriptFidelityTests(unittest.TestCase):
             original,
             generator.chapter_fingerprint(chapter, attribution_changed),
         )
+
+    def test_scripting_policy_revision_invalidates_chapter_fingerprint(self) -> None:
+        chapter = ExtractedChapter(
+            number=1,
+            title="One",
+            text='"Hello," Speaker said.',
+        )
+        registry = CharacterRegistry(
+            characters={
+                "speaker": Character(
+                    id="speaker",
+                    name="Speaker",
+                    gender=Gender.FEMALE,
+                    age_range="adult",
+                    voice_description="clear voice",
+                    speaking_style="measured",
+                )
+            }
+        )
+        generator = ScriptGenerator(ollama=None)
+        original = generator.chapter_fingerprint(chapter, registry)
+
+        with patch(
+            "brain.director.script_generator.JOINT_SCRIPT_ANALYSIS_REVISION",
+            5,
+        ):
+            self.assertNotEqual(
+                original,
+                generator.chapter_fingerprint(chapter, registry),
+            )
+
+        with patch(
+            "brain.director.script_generator.DIALOGUE_DELIVERY_POLICY_REVISION",
+            2,
+        ):
+            self.assertNotEqual(
+                original,
+                generator.chapter_fingerprint(chapter, registry),
+            )
+
+        row_tuned = ScriptGenerator(
+            ollama=None,
+            max_fragments_per_chunk=20,
+        )
+        self.assertNotEqual(
+            original,
+            row_tuned.chapter_fingerprint(chapter, registry),
+        )
+        adaptive_tuned = ScriptGenerator(
+            ollama=None,
+            adaptive_split_max_depth=3,
+        )
+        self.assertNotEqual(
+            original,
+            adaptive_tuned.chapter_fingerprint(chapter, registry),
+        )
+        schema_v5 = ScriptGenerator(
+            ollama=None,
+            dialogue_focused_schema=True,
+        )
+        self.assertNotEqual(
+            original,
+            schema_v5.chapter_fingerprint(chapter, registry),
+        )
+
+    def test_unrelated_character_does_not_invalidate_chapter_fingerprint(self) -> None:
+        chapter = ExtractedChapter(
+            number=1,
+            title="One",
+            text='"Hello," Alice said.',
+        )
+        registry = CharacterRegistry(characters={
+            "alice": Character(
+                id="alice", name="Alice", gender=Gender.FEMALE,
+                age_range="adult", voice_description="clear voice",
+                speaking_style="measured",
+            ),
+        })
+        generator = ScriptGenerator(ollama=None)
+        original = generator.chapter_fingerprint(chapter, registry)
+        expanded = registry.model_copy(deep=True)
+        expanded.characters["bob"] = Character(
+            id="bob", name="Bob", gender=Gender.MALE,
+            age_range="adult", voice_description="low voice",
+            speaking_style="brisk",
+        )
+        self.assertEqual(original, generator.chapter_fingerprint(chapter, expanded))
+        expanded.characters["alice"].aliases.append("Captain Alice")
+        self.assertNotEqual(original, generator.chapter_fingerprint(chapter, expanded))
+
+    def test_chunked_processing_reuses_full_chapter_speaker_scope(self) -> None:
+        generator = ScriptGenerator(
+            ollama=None,
+            chunk_size_words=10_000,
+            max_fragments_per_chunk=1,
+        )
+        registry = CharacterRegistry(characters={
+            "alice": Character(
+                id="alice", name="Alice", gender=Gender.FEMALE,
+                age_range="adult", voice_description="clear", speaking_style="measured",
+            ),
+            "bob": Character(
+                id="bob", name="Bob", gender=Gender.MALE,
+                age_range="adult", voice_description="low", speaking_style="brisk",
+            ),
+        })
+        captured: list[set[str]] = []
+
+        def fake_process(fragments, chapter_number, chapter_title, registry, previous_summary, **kwargs):
+            captured.append(set(kwargs["allowed_speakers"]))
+            return ScriptChapter(
+                chapter_number=chapter_number,
+                chapter_title=chapter_title,
+                lines=[ScriptLine(
+                    line_id=f"line-{len(captured)}",
+                    speaker="narrator",
+                    text=fragments[0].text,
+                    source_start=fragments[0].start,
+                    source_end=fragments[0].end,
+                )],
+            )
+
+        generator._process_fragments = fake_process
+        generator.generate_chapter_script(
+            ExtractedChapter(
+                number=1,
+                title="One",
+                text='Alice entered. "I am ready," she said.',
+            ),
+            registry,
+            "",
+        )
+        self.assertGreater(len(captured), 1)
+        self.assertTrue(all("alice" in speakers for speakers in captured))
+        self.assertTrue(all("bob" not in speakers for speakers in captured))
 
     def test_fragment_chunks_have_an_independent_row_limit(self) -> None:
         generator = ScriptGenerator(
@@ -2118,6 +2500,46 @@ class PartialGenerationTests(unittest.TestCase):
         self.assertFalse(Pipeline._window_contains(
             window, datetime(2026, 7, 20, 12, 0)
         ))
+
+    def test_character_overrides_reapply_after_analysis(self) -> None:
+        registry = CharacterRegistry(
+            characters={
+                "speaker": Character(
+                    id="speaker",
+                    name="Speaker",
+                    gender=Gender.OTHER,
+                    age_range="adult",
+                    voice_description="A neutral speaking voice",
+                    speaking_style="measured",
+                )
+            }
+        )
+        with TemporaryDirectory() as directory:
+            project_dir = Path(directory)
+            (project_dir / "character_overrides.json").write_text(
+                json.dumps(
+                    {
+                        "schema": 1,
+                        "characters": {
+                            "speaker": {
+                                "gender": "female",
+                                "age_range": "30s",
+                                "speaking_style": "calm and deliberate",
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            changed = Pipeline._apply_character_overrides(project_dir, registry)
+
+        self.assertTrue(changed)
+        self.assertEqual(registry.characters["speaker"].gender, Gender.FEMALE)
+        self.assertEqual(registry.characters["speaker"].age_range, "30s")
+        self.assertEqual(
+            registry.characters["speaker"].speaking_style,
+            "calm and deliberate",
+        )
 
 
 if __name__ == "__main__":

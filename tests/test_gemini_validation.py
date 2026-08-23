@@ -42,6 +42,7 @@ def _service(root: Path) -> GeminiValidationService:
             "enabled": True,
             "auto_accept_confidence": 0.9,
             "manual_review_confidence": 0.75,
+            "character_augmentation": {"enabled": True},
             "api": {
                 "enabled": True,
                 "triage_model": "lite",
@@ -113,7 +114,7 @@ class GeminiAttributionValidationTests(unittest.TestCase):
                 sections=[{"item_id": "section-1", "title": "Names", "word_count": 800}],
             )
             self.assertEqual(result["decisions"]["section-1"]["decision"], "reference")
-            self.assertEqual(service.web.calls[0][1], "extraction")
+            self.assertEqual(service.web.calls[0][1], "extraction_v1")
 
     def test_high_confidence_api_decision_resolves_and_records_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -154,6 +155,65 @@ class GeminiAttributionValidationTests(unittest.TestCase):
             self.assertEqual(line.attribution_confidence_history[-1]["confidence"], 0.97)
             self.assertTrue((root / "external_validation" / "attribution.json").is_file())
 
+    def test_named_identity_cannot_be_auto_mapped_to_generic_speaker(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            invalid = {
+                "decisions": [{
+                    "item_id": "ch01_0001",
+                    "decision": "resolved",
+                    "speaker_id": "minor_female",
+                    "confidence": 1.0,
+                    "reason": "The line is attributed to Tuka.",
+                    "evidence": '"Wait," Tuka said.',
+                }]
+            }
+            service = _service(root)
+            service.api = _FakeApi([invalid, invalid])
+            service.web = _FakeWeb([invalid])
+            line = ScriptLine(
+                line_id="ch01_0001",
+                speaker="minor_female",
+                speaker_confidence=0.3,
+                attribution_review_required=True,
+                attribution_review_reason="Missing named candidate",
+                text='"Wait," Tuka said.',
+            )
+
+            summary = service.resolve_attributions(
+                project_dir=root,
+                chapters=[
+                    ScriptChapter(
+                        chapter_number=1,
+                        chapter_title="One",
+                        lines=[line],
+                    )
+                ],
+                character_ids={"narrator", "minor_female"},
+                character_context={
+                    "narrator": {"id": "narrator", "name": "Narrator"},
+                    "minor_female": {
+                        "id": "minor_female",
+                        "name": "Unnamed Woman",
+                    },
+                },
+            )
+
+            self.assertEqual(summary["resolved"], 0)
+            self.assertEqual(summary["manual_review"], 1)
+            self.assertTrue(line.attribution_review_required)
+            self.assertEqual(line.speaker, "minor_female")
+            self.assertIn(
+                "different or missing character",
+                line.attribution_review_reason,
+            )
+            self.assertTrue(
+                all(
+                    "validation_error" in entry
+                    for entry in line.attribution_confidence_history[1:]
+                )
+            )
+
     def test_inconclusive_api_stages_use_persistent_web_purpose_then_stay_manual(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -184,7 +244,86 @@ class GeminiAttributionValidationTests(unittest.TestCase):
             self.assertTrue(line.attribution_review_required)
             self.assertEqual(len(line.attribution_confidence_history), 4)
             self.assertEqual(line.attribution_confidence_history[0]["resolver"], "local")
-            self.assertEqual(service.web.calls[0][1], "attribution")
+            self.assertEqual(service.web.calls[0][1], "attribution_v2")
+
+    def test_attribution_batches_and_candidates_stay_chapter_local(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            service = _service(root)
+            service.api = _FakeApi([
+                {"decisions": [{
+                    "item_id": "ch01_0001", "decision": "resolved",
+                    "speaker_id": "alice", "confidence": 0.96,
+                    "reason": "Alice is named.", "evidence": "Alice said",
+                }]},
+                {"decisions": [{
+                    "item_id": "ch02_0001", "decision": "resolved",
+                    "speaker_id": "bob", "confidence": 0.96,
+                    "reason": "Bob is named.", "evidence": "Bob said",
+                }]},
+            ])
+            service.web = _FakeWeb()
+            chapters = [
+                ScriptChapter(chapter_number=1, chapter_title="One", lines=[
+                    ScriptLine(
+                        line_id="ch01_0001", speaker="narrator",
+                        attribution_review_required=True, text='"Wait," Alice said.',
+                    )
+                ]),
+                ScriptChapter(chapter_number=2, chapter_title="Two", lines=[
+                    ScriptLine(
+                        line_id="ch02_0001", speaker="narrator",
+                        attribution_review_required=True, text='"Go," Bob said.',
+                    )
+                ]),
+            ]
+            result = service.resolve_attributions(
+                project_dir=root,
+                chapters=chapters,
+                character_ids={"narrator", "alice", "bob"},
+                character_context={
+                    "alice": {"id": "alice", "name": "Alice", "aliases": []},
+                    "bob": {"id": "bob", "name": "Bob", "aliases": []},
+                    "narrator": {"id": "narrator", "name": "Narrator", "aliases": []},
+                },
+            )
+            self.assertEqual(result["resolved"], 2)
+            self.assertEqual(len(service.api.calls), 2)
+            self.assertIn('"alice"', service.api.calls[0]["prompt"])
+            self.assertNotIn('"bob"', service.api.calls[0]["prompt"])
+            self.assertIn('"bob"', service.api.calls[1]["prompt"])
+            self.assertNotIn('"alice"', service.api.calls[1]["prompt"])
+
+    def test_character_augmentation_requires_verbatim_grounding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            service = _service(root)
+            ungrounded = {"decisions": [{
+                "character_id": "alice", "decision": "update",
+                "confidence": 0.99, "reason": "Inferred",
+                "evidence": ["This sentence is not in the source."],
+                "gender": "female", "voice_description": "bright precise voice",
+            }]}
+            grounded = {"decisions": [{
+                "character_id": "alice", "decision": "update",
+                "confidence": 0.96, "reason": "Grounded",
+                "evidence": ["Alice answered in a clear, deliberate voice."],
+                "gender": "female", "voice_description": "bright precise voice",
+            }]}
+            service.api = _FakeApi([ungrounded, grounded])
+            service.web = _FakeWeb()
+            result = service.augment_characters(
+                project_dir=root,
+                dossier={"alice": {
+                    "current_gender": "other",
+                    "evidence_snippets": [
+                        "Alice answered in a clear, deliberate voice."
+                    ],
+                }},
+            )
+            self.assertIn("alice", result["accepted"])
+            self.assertEqual(result["review"], [])
+            self.assertTrue((root / "character_augmentation_audit.json").is_file())
 
 
 class GeminiAudioValidationTests(unittest.TestCase):

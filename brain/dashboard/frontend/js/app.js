@@ -2729,7 +2729,12 @@ window.saveIncrementalSettings = async function() {
         if (state.currentProjectId !== projectId) return;
         currentDeliverySettings = { enabled: incToggle.checked, batch_size: newBatchSize };
         saveBtn.style.display = 'none';
-        showToast('Incremental delivery settings saved', 'success');
+        showToast(
+            data.applies_after_current_run
+                ? `Settings saved for the next run; the active run remains on ${data.active_batch_size} chapters per part.`
+                : 'Incremental delivery settings saved',
+            data.applies_after_current_run ? 'info' : 'success'
+        );
         await fetchAndRenderDeliveries(projectId);
     } catch (e) {
         showToast(e.message, 'error');

@@ -134,6 +134,36 @@ class ReviewWorkflowTests(unittest.TestCase):
         self.assertTrue(calibration["ready"])
         self.assertEqual(calibration["recommended_auto_accept_threshold"], .95)
         self.assertFalse(calibration["applied_automatically"])
+        self.assertEqual(calibration["pooling_policy"], "provider_model_purpose_revision")
+        self.assertEqual(calibration["pooled_groups"][0]["purpose"], "segment")
+        self.assertAlmostEqual(calibration["brier_score"], 0.0025)
+
+    def test_calibration_does_not_pool_different_models_or_purposes(self) -> None:
+        self.queue.create_job("other", {"status": "waiting_for_review"})
+        for project, item_type, provider, model, revision in (
+            ("demo", "segment", "gemini", "flash", "audio-v2"),
+            ("other", "segment", "gemini", "flash", "audio-v2"),
+            ("other", "attribution", "gemini", "flash", "speaker-v3"),
+            ("other", "segment", "gemini", "pro", "audio-v2"),
+        ):
+            self.queue.log_external_validation(
+                project, item_type, f"{project}-{item_type}-{model}",
+                provider, model, "accept", .9, "clear", 10,
+                {"purpose_version": revision},
+            )
+            self.queue.reconcile_external_validation(
+                project, item_type, f"{project}-{item_type}-{model}",
+                "acceptable",
+            )
+
+        calibration = self.queue.external_validation_calibration("demo")
+        groups = calibration["pooled_groups"]
+        self.assertEqual(len(groups), 3)
+        audio_flash = next(
+            group for group in groups
+            if group["model"] == "flash" and group["purpose"] == "segment"
+        )
+        self.assertEqual(audio_flash["sample_count"], 2)
 
     def test_candidate_ranking_and_retention(self) -> None:
         audio = self.root / "source.wav"

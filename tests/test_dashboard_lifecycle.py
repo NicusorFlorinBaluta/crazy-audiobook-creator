@@ -71,6 +71,42 @@ class DashboardLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.status_code, 503)
         self.assertIsNone(dashboard._dashboard_shutdown_task)
 
+    async def test_partial_project_delete_retains_job_for_safe_retry(self) -> None:
+        class FakeQueue:
+            deleted = False
+
+            @staticmethod
+            def get_job(project_id):
+                return {"project_id": project_id, "running": False}
+
+            def delete_job(self, project_id):
+                self.deleted = True
+
+        queue = FakeQueue()
+        with tempfile.TemporaryDirectory() as directory:
+            roots = [Path(directory) / name for name in ("brain", "workspace", "voice")]
+            for root in roots:
+                root.mkdir()
+            with (
+                patch.object(dashboard, "job_queue", queue),
+                patch.object(dashboard, "running_tasks", {}),
+                patch.object(dashboard, "_project_dir", return_value=roots[0]),
+                patch.object(dashboard, "_workspace_project_dir", return_value=roots[1]),
+                patch.object(dashboard, "_voice_project_dir", return_value=roots[2]),
+                patch.object(
+                    dashboard,
+                    "_safe_delete_tree",
+                    side_effect=[True, False, True],
+                ),
+                patch.object(dashboard, "_purge_project_cache") as purge,
+            ):
+                with self.assertRaises(dashboard.HTTPException) as raised:
+                    await dashboard.delete_project("book")
+
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertFalse(queue.deleted)
+        purge.assert_not_called()
+
     async def test_metadata_preview_is_cached_and_explicit_apply_sets_reviewed_identity(self) -> None:
         png = b"\x89PNG\r\n\x1a\n" + b"\0" * 8 + (320).to_bytes(4, "big") + (480).to_bytes(4, "big")
         fetched = FetchedMetadata(
@@ -457,6 +493,86 @@ class DashboardLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(queue.state["schedule_override_active"])
         self.assertFalse(queue.state["running"])
 
+    async def test_manual_start_wakes_an_existing_scheduled_pause_task(self) -> None:
+        class FakeQueue:
+            def __init__(self):
+                self.state = {
+                    "status": PipelineStage.PAUSED_SCHEDULED.value,
+                    "active_stage": PipelineStage.SCRIPTING.value,
+                    "running": True,
+                    "pause_reason": "outside configured working hours",
+                }
+
+            def get_job(self, project_id):
+                return dict(self.state)
+
+            def update_job(self, project_id, updates):
+                self.state.update(updates)
+
+        queue = FakeQueue()
+        parked_task = asyncio.create_task(asyncio.sleep(60))
+        try:
+            with (
+                patch.object(dashboard, "pipeline", object()),
+                patch.object(dashboard, "job_queue", queue),
+                patch.object(dashboard, "running_tasks", {"book": parked_task}),
+            ):
+                response = await dashboard.start_pipeline(
+                    "book",
+                    override_schedule=True,
+                )
+
+            self.assertEqual(response["status"], "resumed")
+            self.assertTrue(queue.state["schedule_override_active"])
+            self.assertIsNone(queue.state["pause_reason"])
+        finally:
+            parked_task.cancel()
+            await asyncio.gather(parked_task, return_exceptions=True)
+
+    async def test_status_reconciles_post_bootstrap_voice_cast_revision(self) -> None:
+        class FakeQueue:
+            def __init__(self) -> None:
+                self.state = {
+                    "project_id": "voice-cast-reconcile-test",
+                    "status": PipelineStage.VOICE_REVIEW.value,
+                    "active_stage": PipelineStage.VOICE_REVIEW.value,
+                    "total_chapters": 0,
+                    "voice_cast_revision": "current-revision",
+                    "voice_cast": {
+                        "fingerprint": "stale-revision",
+                        "voices": {"stale": {}},
+                    },
+                }
+
+            def get_job(self, project_id):
+                return dict(self.state)
+
+            def update_job(self, project_id, updates):
+                self.state.update(updates)
+
+        queue = FakeQueue()
+        current_cast = {
+            "fingerprint": "current-revision",
+            "voices": {"current": {"ready": True}},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            project_dir = Path(directory)
+            (project_dir / "voice_cast.json").write_text(
+                json.dumps(current_cast),
+                encoding="utf-8",
+            )
+            with (
+                patch.object(dashboard, "job_queue", queue),
+                patch.object(dashboard, "running_tasks", {}),
+                patch.object(dashboard, "_project_dir", return_value=project_dir),
+            ):
+                response = await dashboard.get_pipeline_status(
+                    "voice-cast-reconcile-test"
+                )
+
+        self.assertEqual(response["voice_cast"], current_cast)
+        self.assertEqual(queue.state["voice_cast"], current_cast)
+
     async def test_stop_outside_hours_can_park_for_scheduled_resume(self) -> None:
         class FakeQueue:
             def __init__(self):
@@ -576,6 +692,82 @@ class DashboardLifecycleTests(unittest.IsolatedAsyncioTestCase):
             # Windows runners may expose the same temp directory through its
             # long name in one path and its 8.3 alias (RUNNER~1) in another.
             self.assertTrue(os.path.samefile(response.path, sample))
+
+    async def test_character_profile_correction_is_persistent_and_scoped(self) -> None:
+        class FakeQueue:
+            def __init__(self) -> None:
+                self.updates = []
+
+            @staticmethod
+            def get_job(project_id):
+                return {"project_id": project_id, "running": False}
+
+            def update_job(self, project_id, updates):
+                self.updates.append(updates)
+
+        registry = {
+            "book_title": "Book",
+            "book_author": "Author",
+            "characters": {
+                "speaker": {
+                    "id": "speaker",
+                    "name": "Speaker",
+                    "gender": "other",
+                    "age_range": "adult",
+                    "voice_description": "A neutral speaking voice",
+                    "speaking_style": "measured",
+                }
+            },
+        }
+        cast = {
+            "voices": {
+                "speaker": {
+                    "voice_id": "speaker",
+                    "owner_character_id": "speaker",
+                    "assigned_characters": ["speaker"],
+                    "warnings": [],
+                }
+            }
+        }
+        queue = FakeQueue()
+        with tempfile.TemporaryDirectory() as directory:
+            project_dir = Path(directory)
+            chars_path = project_dir / "characters.json"
+            chars_path.write_text(json.dumps(registry), encoding="utf-8")
+            with (
+                patch.object(dashboard, "job_queue", queue),
+                patch.object(dashboard, "_project_dir", return_value=project_dir),
+                patch.object(
+                    dashboard,
+                    "_load_character_registry",
+                    return_value=(chars_path, registry),
+                ),
+                patch.object(dashboard, "_load_or_build_voice_cast", return_value=cast),
+                patch.object(dashboard, "_save_voice_cast") as save_cast,
+                patch.object(dashboard, "_chapters_for_speakers", return_value=[2, 7]),
+                patch.object(dashboard, "_mark_voice_chapters_stale") as mark_stale,
+            ):
+                result = await dashboard.update_character_profile(
+                    "book",
+                    "speaker",
+                    dashboard.CharacterProfileUpdate(
+                        gender="female",
+                        age_range="30s",
+                        voice_description="A warm, precise speaking voice",
+                        speaking_style="calm and deliberate",
+                    ),
+                )
+
+            overrides = json.loads(
+                (project_dir / "character_overrides.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(overrides["characters"]["speaker"]["gender"], "female")
+            self.assertEqual(result["affected_chapters"], [2, 7])
+            self.assertTrue(result["requires_voice_regeneration"])
+            self.assertEqual(cast["voices"]["speaker"]["design_fingerprint"], "")
+            mark_stale.assert_called_once_with("book", [2, 7])
+            save_cast.assert_called_once()
+            self.assertTrue(any(update.get("voice_review_status") == "pending" for update in queue.updates))
 
     async def test_voice_download_rejects_registry_path_escape(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

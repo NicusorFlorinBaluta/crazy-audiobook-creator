@@ -86,7 +86,7 @@ from brain.dashboard.api.mobile import router as mobile_router
 
 logger = logging.getLogger(__name__)
 
-FRONTEND_BUILD = "2026.08.19.1"
+FRONTEND_BUILD = "2026.08.21.2"
 
 
 class AsyncioConnectionResetFilter(logging.Filter):
@@ -232,8 +232,18 @@ class VoiceRegenerationRequest(BaseModel):
     voice_description: str = Field(min_length=12, max_length=1000)
 
 
+class CharacterProfileUpdate(BaseModel):
+    """Human correction for voice-relevant character metadata."""
+
+    gender: Literal["male", "female", "other"] | None = None
+    age_range: str | None = Field(default=None, min_length=1, max_length=80)
+    voice_description: str | None = Field(default=None, min_length=12, max_length=1000)
+    speaking_style: str | None = Field(default=None, max_length=500)
+
+
 class VoiceApprovalRequest(BaseModel):
     continue_pipeline: bool = True
+    acknowledge_similar_pairs: bool = False
 
 
 class ReviewItemRequest(BaseModel):
@@ -604,6 +614,44 @@ def _save_voice_cast(project_id: str, cast: dict[str, Any]) -> None:
     atomic_write_json(_project_dir(project_id) / "voice_cast.json", payload)
 
 
+def _mark_cast_distinctness_stale(
+    cast: dict[str, Any],
+    *voice_ids: str,
+) -> None:
+    """Invalidate pair evidence whenever a reference or assignment changes."""
+    quality = cast.setdefault("quality", {})
+    stale = set(quality.get("stale_voice_ids", []))
+    stale.update(voice_id for voice_id in voice_ids if voice_id)
+    quality["distinctness_status"] = "stale"
+    quality["stale_voice_ids"] = sorted(stale)
+    quality["cast_pair_diagnostics"] = [
+        item
+        for item in quality.get("cast_pair_diagnostics", [])
+        if item.get("left_voice_id") not in stale
+        and item.get("right_voice_id") not in stale
+    ]
+    quality["similar_pairs"] = sum(
+        item.get("status") == "similar"
+        for item in quality["cast_pair_diagnostics"]
+    )
+
+
+def _cast_distinctness_review(
+    cast: dict[str, Any],
+    required_voice_ids: set[str],
+) -> tuple[list[dict[str, Any]], bool]:
+    quality = cast.get("quality", {})
+    pairs = [
+        diagnostic
+        for diagnostic in quality.get("cast_pair_diagnostics", [])
+        if diagnostic.get("status") == "similar"
+        and not diagnostic.get("warning_suppressed", False)
+        and diagnostic.get("left_voice_id") in required_voice_ids
+        and diagnostic.get("right_voice_id") in required_voice_ids
+    ]
+    return pairs, quality.get("distinctness_status") == "stale"
+
+
 def _inspect_pcm_voice(path: Path) -> dict[str, float | int]:
     """Validate the canonical PCM WAV without loading optional audio packages."""
     with wave.open(str(path), "rb") as audio:
@@ -790,20 +838,25 @@ def _validate_epub_archive(path: Path, max_expanded_mb: int) -> None:
         raise ValueError("Uploaded file is not a valid EPUB/ZIP archive") from exc
 
 
-def _purge_project_cache(project_id: str, voice_project: Path) -> None:
+def _purge_project_cache(
+    project_id: str,
+    voice_project: Path,
+    reference_hashes: list[str] | None = None,
+) -> None:
     """Remove project-scoped cache rows and clone prompts for its references."""
     cache_path = Path("voice_cache.db")
     if not cache_path.is_file():
         return
-    reference_hashes = [
-        digest
-        for digest in (
-            hash_file(path)
-            for path in voice_project.glob("*.wav")
-            if path.is_file()
-        )
-        if digest
-    ]
+    if reference_hashes is None:
+        reference_hashes = [
+            digest
+            for digest in (
+                hash_file(path)
+                for path in voice_project.glob("*.wav")
+                if path.is_file()
+            )
+            if digest
+        ]
     with sqlite3.connect(cache_path, timeout=10) as connection:
         connection.execute("BEGIN IMMEDIATE")
         connection.execute(
@@ -976,13 +1029,14 @@ async def lifespan(app: FastAPI):
                 "status": replacement,
                 "running": False,
                 "pause_reason": "dashboard restarted",
+                "resume_after_restart": True,
             },
         )
 
     if jobs_to_resume:
         for pid in jobs_to_resume:
             logger.info("Auto-resuming in-flight project after unexpected restart: %s", pid)
-            asyncio.create_task(start_pipeline(pid, override_schedule=True))
+            asyncio.create_task(start_pipeline(pid))
 
     # Periodic background task to push live project updates via WebSocket
     async def ws_broadcast_loop():
@@ -1094,13 +1148,8 @@ async def disable_api_caching(request: Request, call_next):
 
 @app.middleware("http")
 async def require_dashboard_token(request: Request, call_next):
-    # Allow mobile discovery, catalog, manifests, covers, streams and chapter downloads
-    if (
-        request.url.path.startswith("/api/mobile/v1/")
-        or "/stream" in request.url.path
-        or "/cover" in request.url.path
-        or "/download" in request.url.path
-    ):
+    # Compatibility discovery contains no catalog, media, logs, or mutable state.
+    if request.url.path == "/api/mobile/v1/server-info":
         return await call_next(request)
 
     if (
@@ -1319,11 +1368,11 @@ async def get_project(project_id: str):
         raise HTTPException(status_code=404, detail="Project not found")
 
 
-def _safe_delete_tree(path: Path) -> None:
+def _safe_delete_tree(path: Path) -> bool:
     """Safely delete a directory tree on Windows, clearing read-only attributes."""
     import stat
     if not path.exists() and not path.is_symlink():
-        return
+        return True
 
     def _remove_readonly(func, file_path, exc_info):
         try:
@@ -1346,6 +1395,7 @@ def _safe_delete_tree(path: Path) -> None:
             path.unlink(missing_ok=True)
         except Exception as exc:
             logger.warning("Could not delete file %s: %s", path, exc)
+    return not path.exists() and not path.is_symlink()
 
 
 @app.delete("/api/projects/{project_id}")
@@ -1378,17 +1428,40 @@ async def delete_project(project_id: str):
         raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
 
     voice_project = _voice_project_dir(project_id)
+    reference_hashes = [
+        digest
+        for digest in (
+            hash_file(path)
+            for path in voice_project.glob("*.wav")
+            if path.is_file()
+        )
+        if digest
+    ]
+    remaining = [root for root in roots if not _safe_delete_tree(root)]
+    if remaining:
+        logger.error(
+            "Project deletion incomplete for %s; retained job state. Remaining: %s",
+            project_id,
+            remaining,
+        )
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": (
+                    "Project cleanup is incomplete; retry after releasing locked files"
+                ),
+                "remaining_roots": [str(path) for path in remaining],
+            },
+        )
+
     try:
-        _purge_project_cache(project_id, voice_project)
+        _purge_project_cache(project_id, voice_project, reference_hashes)
     except Exception as exc:
         logger.warning(
             "Could not purge cache rows for deleted project %s: %s",
             project_id,
             exc,
         )
-
-    for root in roots:
-        _safe_delete_tree(root)
 
     try:
         job_queue.delete_job(project_id)
@@ -1418,7 +1491,10 @@ async def start_pipeline(
 
     if project_id in running_tasks and not running_tasks[project_id].done():
         current = job_queue.get_job(project_id)
-        if current.get("status") in (PipelineStage.PAUSED_SCHEDULED.value, PipelineStage.PAUSED_DEPLOYMENT.value):
+        if current.get("status") in (
+            PipelineStage.PAUSED_SCHEDULED.value,
+            PipelineStage.DEPLOY_PAUSED.value,
+        ):
             if override_schedule and current.get("status") == PipelineStage.PAUSED_SCHEDULED.value:
                 job_queue.update_job(
                     project_id,
@@ -2103,6 +2179,31 @@ async def get_pipeline_status(project_id: str):
 
         # Enrich state with per-chapter progress details
         project_dir = _project_dir(project_id)
+        cached_cast = state.get("voice_cast")
+        cast_revision = str(state.get("voice_cast_revision") or "")
+        cached_revision = (
+            str(cached_cast.get("fingerprint") or "")
+            if isinstance(cached_cast, dict)
+            else ""
+        )
+        if cast_revision and cached_revision != cast_revision:
+            # Bootstrapping writes voice_cast.json atomically before advancing
+            # the durable revision.  Reconcile a stale cached job payload so
+            # direct /status polling cannot show the cast from a previous run.
+            cast_path = project_dir / "voice_cast.json"
+            try:
+                persisted_cast = json.loads(
+                    cast_path.read_text(encoding="utf-8")
+                )
+                if str(persisted_cast.get("fingerprint") or "") == cast_revision:
+                    state["voice_cast"] = persisted_cast
+                    job_queue.update_job(project_id, {"voice_cast": persisted_cast})
+            except (OSError, json.JSONDecodeError, AttributeError):
+                logger.warning(
+                    "Could not reconcile voice cast revision for project %s",
+                    project_id,
+                    exc_info=True,
+                )
         workspace_dir = Path("workspace") / project_id
         script_dir = project_dir / "script"
         manifests_dir = project_dir / "manifests"
@@ -2131,7 +2232,6 @@ async def get_pipeline_status(project_id: str):
         book_json_path = project_dir / "book.json"
         if book_json_path.exists():
             try:
-                import json
                 bdata = json.loads(book_json_path.read_text(encoding="utf-8"))
                 meta = bdata.get("metadata", {})
                 b_chaps = bdata.get("chapters", [])
@@ -3379,6 +3479,10 @@ async def get_project_voices(project_id: str):
             "name": characters[character_id].get("name") or character_id,
             "gender": characters[character_id].get("gender", "other"),
             "age_range": characters[character_id].get("age_range", "unknown"),
+            "voice_description": characters[character_id].get(
+                "voice_description", ""
+            ),
+            "speaking_style": characters[character_id].get("speaking_style", ""),
             "voice_id": (
                 characters[character_id].get("voice_id") or character_id
             ),
@@ -3396,6 +3500,7 @@ async def get_project_voices(project_id: str):
     return {
         "cast_schema": VOICE_CAST_SCHEMA_VERSION,
         "voices": voices,
+        "quality": cast.get("quality", {}),
         "speaking_characters": speaking_characters,
         "non_speaking_count": len(set(characters) - speaking_ids),
         "narrator_choice": (
@@ -3618,6 +3723,7 @@ async def assign_character_voice(
         if profile.get("voice_id") == request.voice_id:
             assigned.append(character_id)
         profile["assigned_characters"] = sorted(set(assigned))
+    _mark_cast_distinctness_stale(cast, previous_voice_id, request.voice_id)
     _save_voice_cast(project_id, cast)
     affected = _chapters_for_speakers(project_id, {character_id})
     _mark_voice_chapters_stale(project_id, affected)
@@ -3636,6 +3742,120 @@ async def assign_character_voice(
         "voice_id": request.voice_id,
         "previous_voice_id": previous_voice_id,
         "affected_chapters": affected,
+    }
+
+
+@app.patch("/api/projects/{project_id}/characters/{character_id}/profile")
+async def update_character_profile(
+    project_id: str,
+    character_id: str,
+    request: CharacterProfileUpdate,
+):
+    """Persist a human character correction and invalidate dependent audio."""
+    _ensure_voice_editable(project_id)
+    updates = request.model_dump(exclude_none=True)
+    if not updates:
+        raise HTTPException(status_code=422, detail="Provide at least one profile field")
+    updates = {
+        key: value.strip() if isinstance(value, str) else value
+        for key, value in updates.items()
+    }
+    if any(value == "" for value in updates.values()):
+        raise HTTPException(status_code=422, detail="Profile fields cannot be blank")
+
+    chars_path, registry = _load_character_registry(project_id)
+    character = registry["characters"].get(character_id)
+    if not character:
+        raise HTTPException(status_code=404, detail="Character not found")
+    changed = {
+        key: value
+        for key, value in updates.items()
+        if character.get(key) != value
+    }
+    if not changed:
+        return {
+            "status": "unchanged",
+            "character_id": character_id,
+            "affected_chapters": [],
+        }
+
+    character.update(changed)
+    atomic_write_json(chars_path, registry)
+    project_dir = _project_dir(project_id)
+    overrides_path = project_dir / "character_overrides.json"
+    try:
+        overrides = (
+            json.loads(overrides_path.read_text(encoding="utf-8"))
+            if overrides_path.is_file()
+            else {"schema": 1, "characters": {}}
+        )
+    except (OSError, json.JSONDecodeError):
+        overrides = {"schema": 1, "characters": {}}
+    overrides.setdefault("characters", {}).setdefault(character_id, {}).update(changed)
+    atomic_write_json(overrides_path, overrides)
+
+    merged_path = project_dir / "book_script.json"
+    if merged_path.is_file():
+        try:
+            merged = json.loads(merged_path.read_text(encoding="utf-8"))
+            merged_character = (
+                merged.get("character_registry", {})
+                .get("characters", {})
+                .get(character_id)
+            )
+            if isinstance(merged_character, dict):
+                merged_character.update(changed)
+                atomic_write_json(merged_path, merged)
+        except (OSError, json.JSONDecodeError):
+            logger.warning("Could not update merged character profile for %s", project_id)
+
+    cast = _load_or_build_voice_cast(project_id, registry)
+    profile_updated = False
+    for profile in cast.get("voices", {}).values():
+        if profile.get("owner_character_id", profile.get("voice_id")) != character_id:
+            continue
+        for key in ("gender", "age_range", "voice_description", "speaking_style"):
+            if key not in changed:
+                continue
+            target_key = "source_description" if key == "voice_description" else key
+            profile[target_key] = changed[key]
+        profile["design_fingerprint"] = ""
+        warnings = list(profile.get("warnings", []))
+        warning = "Character profile changed; regenerate this voice preview."
+        if warning not in warnings:
+            warnings.append(warning)
+        profile["warnings"] = warnings
+        profile_updated = True
+    if profile_updated:
+        _mark_cast_distinctness_stale(
+            cast,
+            *[
+                str(profile.get("voice_id") or "")
+                for profile in cast.get("voices", {}).values()
+                if profile.get("owner_character_id", profile.get("voice_id"))
+                == character_id
+            ],
+        )
+    _save_voice_cast(project_id, cast)
+
+    affected = _chapters_for_speakers(project_id, {character_id})
+    _mark_voice_chapters_stale(project_id, affected)
+    if job_queue:
+        job_queue.update_job(
+            project_id,
+            {
+                "voice_review_status": "pending",
+                "voice_review_approved": False,
+                "voice_review_approved_at": None,
+                "voice_review_approved_revision": None,
+            },
+        )
+    return {
+        "status": "updated",
+        "character_id": character_id,
+        "changed_fields": sorted(changed),
+        "affected_chapters": affected,
+        "requires_voice_regeneration": profile_updated,
     }
 
 
@@ -3742,6 +3962,7 @@ async def regenerate_project_voice(
             "source_type": "generated",
         }
     )
+    _mark_cast_distinctness_stale(cast, voice_id)
     _save_voice_cast(project_id, cast)
     dependent_speakers = set(profile.get("assigned_characters", []))
     affected = _chapters_for_speakers(project_id, dependent_speakers)
@@ -3951,6 +4172,7 @@ except Exception as e:
         backup_path.unlink(missing_ok=True)
         profile["source_type"] = "uploaded"
         profile["design_fingerprint"] = reference_fingerprint
+        _mark_cast_distinctness_stale(cast, voice_id)
         _save_voice_cast(project_id, cast)
 
         dependent_speakers = set(profile.get("assigned_characters", []))
@@ -4018,6 +4240,30 @@ async def approve_voice_cast(
                 "Every speaking voice needs a valid preview before approval. "
                 f"Missing: {', '.join(sorted(missing))}"
             ),
+        )
+
+    required_pairs, distinctness_stale = _cast_distinctness_review(
+        cast,
+        required_voice_ids,
+    )
+    if (required_pairs or distinctness_stale) and not request.acknowledge_similar_pairs:
+        pair_labels = [
+            f"{item['left_voice_id']} / {item['right_voice_id']}"
+            for item in required_pairs[:8]
+        ]
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "similar_cast_pairs_require_acknowledgement",
+                "message": (
+                    "Cast distinctness needs explicit review because required "
+                    "voices are acoustically similar or changed after the last "
+                    "comparison. Preview or replace them, or explicitly "
+                    "acknowledge the cast before continuing."
+                ),
+                "pairs": pair_labels,
+                "distinctness_stale": distinctness_stale,
+            },
         )
 
     approved_at = datetime.now(timezone.utc).isoformat()
@@ -4600,7 +4846,10 @@ async def update_delivery_settings(project_id: str, request: DeliverySettingsReq
     dm = DeliveryManager(project_dir)
     index = dm.load_index()
 
-    if index.batch_size != request.batch_size:
+    is_running = bool(state.get("running")) or (
+        project_id in running_tasks and not running_tasks[project_id].done()
+    )
+    if index.batch_size != request.batch_size and not is_running:
         index.batch_size = request.batch_size
         for part in index.deliveries:
             part.status = "stale"
@@ -4623,7 +4872,12 @@ async def update_delivery_settings(project_id: str, request: DeliverySettingsReq
 
     job_queue.update_job(project_id, {"incremental_delivery": settings})
 
-    return {"status": "success", "settings": settings}
+    return {
+        "status": "success",
+        "settings": settings,
+        "applies_after_current_run": is_running,
+        "active_batch_size": index.batch_size if is_running else request.batch_size,
+    }
 
 
 @app.get("/api/projects/{project_id}/deliveries")

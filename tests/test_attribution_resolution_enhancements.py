@@ -205,7 +205,7 @@ class DialogueSpeakerResolutionTests(unittest.TestCase):
 
 
 class SampleBookAttributionAuditTests(unittest.TestCase):
-    def test_sample_book_14_attribution_audit_passes(self) -> None:
+    def test_sample_book_14_legacy_collective_assignment_is_detected(self) -> None:
         project_dir = Path("brain/projects/sample_book-14")
         if not project_dir.exists() or not (project_dir / "book.json").exists():
             self.skipTest("sample_book-14 not present in workspace")
@@ -226,11 +226,18 @@ class SampleBookAttributionAuditTests(unittest.TestCase):
         ]
 
         audit_report = audit_book_attribution(extracted_book, registry, scripts)
-        self.assertTrue(
-            audit_report.get("passed", False),
-            f"Attribution audit failed with issues: {audit_report.get('issues')}",
+        issues = audit_report.get("issues", [])
+        issues_by_kind = {issue["kind"]: issue for issue in issues}
+        self.assertEqual(
+            set(issues_by_kind),
+            {"generic_role_tag", "self_identified_generic_speaker"},
         )
-        self.assertEqual(audit_report.get("summary", {}).get("blocking_issues"), 0)
+        self.assertEqual(issues_by_kind["generic_role_tag"]["speaker"], "children")
+        self.assertIn("child_male", issues_by_kind["generic_role_tag"]["message"])
+        self.assertEqual(
+            issues_by_kind["self_identified_generic_speaker"]["expected_speaker"],
+            "vathi",
+        )
         self.assertEqual(audit_report.get("summary", {}).get("chapters"), 8)
 
 

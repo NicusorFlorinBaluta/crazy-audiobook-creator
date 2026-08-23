@@ -290,6 +290,28 @@ class EpubGoldenStructureTests(unittest.TestCase):
             self.assertIn("large_excluded_word_ratio", appendix["anomalies"])
             self.assertGreater(parser.last_audit["anomalies"]["excluded_ratio"], 0.9)
 
+    def test_nested_heading_wrapper_falls_back_without_dropping_story(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "nested-heading.epub"
+            story = " ".join(["MARKER nested narrative remains intact"] * 30)
+            self._write_book(path, [{
+                "title": "Chapter One",
+                "html": (
+                    "<section><header><h1>Chapter One</h1></header>"
+                    f"<article><p>{story}</p></article></section>"
+                ),
+            }])
+            parser = EpubParser(min_chapter_words=5)
+            extracted = parser.parse(path)
+            combined = "\n".join(chapter.text for chapter in extracted.chapters)
+            self.assertIn("MARKER", combined)
+            section = next(
+                item for item in parser.last_audit["sections"]
+                if item.get("title") == "Chapter One"
+            )
+            self.assertGreater(section["extracted_word_count"], 0)
+            self.assertGreater(section["coverage_ratio"], 0.5)
+
 
 if __name__ == "__main__":
     unittest.main()

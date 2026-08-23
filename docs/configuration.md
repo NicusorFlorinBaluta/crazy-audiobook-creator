@@ -16,7 +16,7 @@ The running configuration lives in `brain/config.yaml` and `voice/config.yaml`. 
 | `models_dir` | Existing Ollama model store passed as `OLLAMA_MODELS` |
 | `vulkan_visible_devices` | Vulkan device IDs exposed to managed Ollama, such as `0` for the discrete GPU |
 | `startup_timeout_seconds` | Maximum wait for the managed server and configured model |
-| `context_window` | Per-request context tokens; reduce cautiously when VRAM is tight |
+| `context_window` | Per-request context tokens; size from measured prompt plus response headroom, then reduce cautiously when VRAM is tight |
 | `temperature_pass1` | Character-analysis temperature |
 | `temperature_pass2` | Script-annotation temperature |
 | `top_p` | Sampling nucleus |
@@ -75,24 +75,48 @@ narrative character analysis continues unchanged.
 
 ### `script`
 
-- `joint_analysis`: when enabled, character discovery and source-fragment
-  attribution share one book-text pass. Character IDs remain provisional until
-  a compact evidence-based reconciliation step completes; the attribution audit
-  and external fallback still run afterward.
+- `joint_analysis`: experimental combined character discovery and attribution.
+  Production keeps this `false`, completing and fingerprinting a book-wide cast
+  before scripts may select speakers. This costs an additional analysis pass but
+  prevents an early generic identity from becoming the only candidate available
+  to scripting and external validation.
 - Segment bounds: `max_segment_sentences`, `min_segment_words`
 - Default delivery: `default_speed`
 - Pause requests: narrator, dialogue, scene, chapter, and paragraph values in milliseconds
 - Voice assignment: `max_unique_voices`, `minor_character_threshold`, `group_minor_characters`
-- LLM batching: `chunk_size_words`
+- LLM batching: `chunk_size_words` and `max_fragments_per_chunk`; both limits
+  are enforced independently, including on short but dialogue-dense chapters.
+  The validated Qwen 3.8 production profile uses 60 fragments with 16K context;
+  8K remained structurally valid in the benchmark but became slower and much
+  more verbose on a 60-fragment response. Larger batches still split adaptively
+  on generation safeguards, so this is a ceiling rather than a forced size.
+- Reasoning control: `ollama.think` is sent explicitly to thinking-capable
+  models. Structured audiobook metadata uses `false` to avoid hidden reasoning
+  tokens consuming context and wall time.
+- Runaway recovery: `adaptive_split_enabled`, `adaptive_split_max_depth`, and
+  `adaptive_split_min_fragments`. A generation-limit failure retries smaller
+  contiguous ranges before conservative fallback.
+- Experimental metadata: `dialogue_focused_schema` enables sparse schema v5.
+  Keep it `false` until a representative quality benchmark is approved.
 - TTS-call grouping: `group_utterances`, `utterance_target_chars`, and `utterance_max_words`
 
 `chunk_overlap_words` is retained for configuration compatibility but current source-fragment batching is non-overlapping by design.
 Grouping merges only adjacent fragments with the same speaker, voice, and FX. It never crosses a blank paragraph and preserves all source fragment IDs and the exact combined source span.
+Speaker candidates are calculated from the complete chapter once and reused by
+every fragment batch. Joint discovery checkpoints its registry after each
+chapter, and saved script metadata fingerprints only chapter-relevant speakers.
+After scripting, attached registered-name tags are repaired deterministically.
+An external resolver response is rejected when its rationale names one identity
+but returns another or maps that name to a generic speaker. The final attribution
+audit is enforced before voice bootstrapping; unresolved contradictions park the
+project in review without generating voices or audio.
 
 ### Incremental delivery
 
 Incremental delivery is project state, configured from project creation or the
 dashboard. `enabled` turns part publication on and `batch_size` accepts 1–20
+chapters. Changes made during an active run are saved for the next run; the
+current publication plan and fingerprint remain immutable through completion.
 chapters. Manual chapter selection and incremental delivery can be used
 together: when a subset is selected, parts and the combined export contain
 only those chapters in canonical book order. With no manual selection, the

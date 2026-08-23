@@ -97,6 +97,45 @@ def collect_review_gate(project_id: str, project_dir: Path, job_queue: Any) -> R
                 blocking=True,
             ))
 
+    character_audit_path = project_dir / "character_augmentation_audit.json"
+    if character_audit_path.is_file():
+        try:
+            character_audit = json.loads(
+                character_audit_path.read_text(encoding="utf-8")
+            )
+            for candidate in character_audit.get("review", []):
+                character_id = str(candidate.get("character_id") or "unknown")
+                items.append(ReviewItem(
+                    category="character",
+                    item_id=character_id,
+                    title=f"Character profile: {character_id}",
+                    reason=str(
+                        candidate.get("reason")
+                        or "External character enrichment abstained."
+                    ),
+                    confidence=_float_or_none(candidate.get("confidence")),
+                    blocking=False,
+                    details={
+                        "provider": candidate.get("provider", ""),
+                        "model": candidate.get("model", ""),
+                        "grounded": bool(candidate.get("grounded", False)),
+                        "gender_conflict": bool(
+                            candidate.get("gender_conflict", False)
+                        ),
+                        "manual_action": (
+                            "Review or edit this profile in Voice Review before approval."
+                        ),
+                    },
+                ))
+        except (OSError, ValueError, TypeError):
+            items.append(ReviewItem(
+                category="character",
+                item_id="audit-invalid",
+                title="Character augmentation audit unavailable",
+                reason="The character augmentation audit could not be read safely.",
+                blocking=False,
+            ))
+
     script_lines_by_id: dict[str, dict[str, Any]] = {}
     for chapter_path in sorted((project_dir / "script").glob("chapter_*.json")):
         try:
@@ -157,6 +196,37 @@ def collect_review_gate(project_id: str, project_dir: Path, job_queue: Any) -> R
                 "speaker": script_line.get("speaker", ""),
             },
         ))
+
+    trend_path = project_dir / "long_form_audio_quality.json"
+    if trend_path.is_file():
+        try:
+            trend_report = json.loads(trend_path.read_text(encoding="utf-8"))
+            for index, warning in enumerate(trend_report.get("warnings", [])):
+                kind = str(warning.get("kind") or "audio_consistency")
+                items.append(ReviewItem(
+                    category="audio_trend",
+                    item_id=(
+                        f"{kind}:{warning.get('voice_id', 'unknown')}:"
+                        f"{warning.get('chapter_number', index + 1)}"
+                    ),
+                    title=(
+                        "Cross-chapter voice consistency"
+                        if kind == "cross_chapter_voice_drift"
+                        else "Sustained chapter prosody"
+                    ),
+                    reason=(
+                        "This voice differs materially from its book-wide "
+                        "identity baseline. Listen before final release."
+                        if kind == "cross_chapter_voice_drift"
+                        else "A sustained share of this voice's lines were "
+                        "flagged as monotone. Listen before final release."
+                    ),
+                    blocking=False,
+                    chapter_number=_int_or_none(warning.get("chapter_number")),
+                    details=warning,
+                ))
+        except (OSError, ValueError, TypeError):
+            pass
 
     existing_attribution_ids = {
         item.item_id for item in items if item.category == "attribution"

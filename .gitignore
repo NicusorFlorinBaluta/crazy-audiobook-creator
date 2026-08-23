@@ -69,4 +69,9 @@ scratch/run_e2e_test.py
 .gitignore
 
 scratch/
+
+# Raw assistant/IDE transcripts may contain source-book excerpts, local paths,
+# operational logs, and credentials. Preserve decisions in docs/decisions/.
+/*chat*.md
+/cahtgpt_chat.md
 cahtgpt_chat.md

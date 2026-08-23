@@ -48,6 +48,14 @@ class ExtractedChapter(BaseModel):
 
     number: int
     title: str
+    source_heading: str = Field(
+        default="",
+        description="Heading preserved from the EPUB; never used as sequence identity.",
+    )
+    book_chapter_label: str = Field(
+        default="",
+        description="Optional printed chapter label parsed from the source heading.",
+    )
     text: str
     word_count: int = 0
 

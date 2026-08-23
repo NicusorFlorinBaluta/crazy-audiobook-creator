@@ -404,6 +404,24 @@ class IncrementalDeliveryApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state["incremental_delivery"]["enabled"], True)
         self.assertEqual(state["incremental_delivery"]["batch_size"], 10)
 
+    async def test_active_delivery_plan_is_not_mutated_by_next_run_settings(self) -> None:
+        dm = DeliveryManager(self.project_dir)
+        dm.ensure_plan([1, 2, 3, 4], 2, script_dependency_fingerprint="scripts")
+        self.job_queue.update_job(self.project_id, {"running": True})
+
+        response = await update_delivery_settings(
+            self.project_id,
+            DeliverySettingsRequest(enabled=True, batch_size=4),
+        )
+
+        self.assertTrue(response["applies_after_current_run"])
+        self.assertEqual(response["active_batch_size"], 2)
+        self.assertEqual(dm.load_index().batch_size, 2)
+        self.assertEqual(
+            self.job_queue.get_job(self.project_id)["incremental_delivery"]["batch_size"],
+            4,
+        )
+
     async def test_get_deliveries_endpoint(self) -> None:
         dm = DeliveryManager(self.project_dir)
         temp_art = self.project_dir / "temp.m4b"
