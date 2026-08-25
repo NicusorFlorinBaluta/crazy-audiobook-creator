@@ -149,10 +149,11 @@ def test_dashboard_uses_chapter_titles_with_numeric_fallback() -> None:
 
     # Chapter rows use real title from data with a numeric fallback
     assert "const title = detail.title || `Chapter ${chapter}`;" in app
-    # Scripting progress banner still uses a short chapter number label
-    assert "const chapterTitle = currentChapter ? `Chapter ${currentChapter}` : '';" in app
-    # Scripting stage progress line uses numeric label
-    assert "progress.current = `Scripting \u00b7 Chapter ${current} of ${total}`;" in app
+    # chapterTitle now resolved from detailMap using the real book title
+    assert "currentChapterDetail.title || `Chapter ${currentChapter}`" in app
+    # Scripting log parser uses real title from chapterTitleMap
+    assert "const realTitle = chapterTitleMap.get(current) || `Chapter ${current}`;" in app
+    assert "`Scripting" in app and "${realTitle}`;" in app
 
 
 def test_empty_next_run_selection_is_not_replaced_by_stale_active_selection() -> None:

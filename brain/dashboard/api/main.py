@@ -2276,13 +2276,20 @@ async def get_pipeline_status(project_id: str):
 
         stage = str(state.get("active_stage") or state.get("status") or "").lower()
         scripted_chapters = set(state.get("scripted_chapters", []))
-        mastered_chapters = set(state.get("mastered_chapters", []))
+        # Chapters queued for voice re-generation should not be shown as generated/mastered
+        # even if their audio segment files / master manifests are still on disk (they are stale).
+        voice_revision_pending = set(state.get("voice_revision_pending_chapters", []))
+
+        mastered_chapters = set(state.get("mastered_chapters", [])) - voice_revision_pending
+        # Re-add from disk only for chapters NOT pending voice revision
         if manifests_dir.is_dir():
             for master_path in manifests_dir.glob("chapter_*.master.json"):
                 match = re.match(r"chapter_(\d+)\.master\.json", master_path.name)
                 if match:
-                    mastered_chapters.add(int(match.group(1)))
-        
+                    c = int(match.group(1))
+                    if c not in voice_revision_pending:
+                        mastered_chapters.add(c)
+
         def _has_valid_script(c_num: int) -> tuple[bool, int, str]:
             ch_f = script_dir / f"chapter_{c_num:03d}.json"
             if not ch_f.is_file():
@@ -2294,11 +2301,20 @@ async def get_pipeline_status(project_id: str):
             except Exception:
                 return False, 0, ""
 
-        generated_chapters = set(state.get("generated_chapters", []))
+        generated_chapters = set(state.get("generated_chapters", [])) - voice_revision_pending
         for c_num, count in segment_counts.items():
+            if c_num in voice_revision_pending:
+                continue
             has_s, t_lines, _ = _has_valid_script(c_num)
             if has_s and t_lines > 0 and count >= t_lines:
                 generated_chapters.add(c_num)
+
+        # If the pipeline is actively re-scripting a chapter, demote it from generated/mastered
+        # regardless of what files are on disk — the pipeline has declared it stale.
+        active_script_ch = state.get("current_script_chapter")
+        if active_script_ch and stage and "script" in stage:
+            generated_chapters.discard(int(active_script_ch))
+            mastered_chapters.discard(int(active_script_ch))
 
         state["generated_chapters"] = sorted(generated_chapters)
         state["mastered_chapters"] = sorted(mastered_chapters)

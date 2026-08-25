@@ -597,7 +597,8 @@ async function fetchProjectDetails(projectId, isPoll = false) {
             const logData = await logsResponse.json();
             data.work_progress = deriveWorkProgress(
                 logData.lines || [],
-                data.total_chapters || 0
+                data.total_chapters || 0,
+                new Map((data.chapter_details || []).map(d => [d.number, d.title]))
             );
         }
         renderProjectDetails(data);
@@ -1911,7 +1912,10 @@ function renderWorkStatus(project) {
     const stage = terminalStatuses.has(status)
         ? status
         : String(project.active_stage || status).toLowerCase();
-    const chapterTitle = currentChapter ? `Chapter ${currentChapter}` : '';
+    const currentChapterDetail = currentChapter ? (detailMap.get(currentChapter) || {}) : {};
+    const chapterTitle = currentChapter
+        ? (currentChapterDetail.title || `Chapter ${currentChapter}`)
+        : '';
     const workProgress = project.work_progress || {};
     const progress = project.progress || null;
     const totalBookChapters = project.total_chapters || 0;
@@ -2267,7 +2271,7 @@ async function saveChapterSelection(projectId, chapters) {
     }
 }
 
-function deriveWorkProgress(lines, totalChapters) {
+function deriveWorkProgress(lines, totalChapters, chapterTitleMap = new Map()) {
     const progress = {
         phase: null,
         stagePercent: null,
@@ -2314,16 +2318,17 @@ function deriveWorkProgress(lines, totalChapters) {
         if (match) {
             const current = Number(match[1]);
             const total = Number(match[2]) || totalChapters;
+            const realTitle = chapterTitleMap.get(current) || `Chapter ${current}`;
             progress.phase = 'chapter_scripting';
             progress.stagePercent = 20 + Math.round(80 * (current - 1) / Math.max(total, 1));
-            progress.current = `Scripting · Chapter ${current} of ${total}`;
-            progress.detail = `Annotating dialogue, speaker attribution, and scene directions for Chapter ${current}.`;
+            progress.current = `Scripting \u00b7 ${realTitle}`;
+            progress.detail = `Annotating dialogue, speaker attribution, and scene directions for ${realTitle}.`;
             progress.position = `${current} / ${total}`;
             progress.chapterLabel = 'Scripting chapter';
             progress.tokens = null;
             progress.chapterIndex = current;
             progress.chapterTotal = total;
-            progress.chapterTitle = `Chapter ${current}`;
+            progress.chapterTitle = realTitle;
             continue;
         }
 
