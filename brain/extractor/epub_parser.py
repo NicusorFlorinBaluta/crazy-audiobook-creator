@@ -703,12 +703,40 @@ class EpubParser:
                     preamble_parts.append(text)
         preamble = "\n\n".join(preamble_parts)
         preamble_attached = False
-
-        for i, heading in enumerate(heading_tags):
+        i = 0
+        while i < len(heading_tags):
+            heading = heading_tags[i]
             title = heading.get_text(strip=True)
+            subtitle_parts: list[str] = []
 
-            # Collect all content between this heading and the next
+            # Look ahead for immediately consecutive headings with no narrative content in between.
+            # The primary heading becomes the chapter title; any consecutive sub-headings are
+            # treated as time-marker / exposition text that the narrator reads as chapter content.
+            while i + 1 < len(heading_tags):
+                next_heading = heading_tags[i + 1]
+                has_intervening_content = False
+                cur = heading.next_sibling
+                while cur is not None and cur != next_heading:
+                    if isinstance(cur, Tag):
+                        if self._extract_element_text(cur).strip():
+                            has_intervening_content = True
+                            break
+                    cur = cur.next_sibling
+
+                if not has_intervening_content:
+                    next_text = next_heading.get_text(strip=True)
+                    if next_text:
+                        subtitle_parts.append(next_text)
+                    i += 1
+                    heading = next_heading
+                else:
+                    break
+
+            # Collect all body content after the last consecutive heading
             content_parts: list[str] = []
+            # Prepend any subtitle/time-marker text so the narrator reads it
+            if subtitle_parts:
+                content_parts.extend(subtitle_parts)
             sibling = heading.next_sibling
 
             while sibling is not None:
@@ -730,10 +758,12 @@ class EpubParser:
                 )
                 if cleaned_ref.strip():
                     reference_sections[title] = cleaned_ref
+                i += 1
                 continue
 
             # Skip if title matches a skip pattern
             if self._is_skippable_title(title):
+                i += 1
                 continue
 
             if text.strip():
@@ -741,6 +771,8 @@ class EpubParser:
                     text = preamble + "\n\n" + text
                     preamble_attached = True
                 chapters.append({"title": title, "text": text})
+
+            i += 1
 
         return chapters, reference_sections
 
@@ -882,7 +914,7 @@ class EpubParser:
                     book_chapter_label=(
                         title_raw
                         if re.match(
-                            r"^(?:chapter|ch\.?|part)\b",
+                            r"^(?:chapter|ch\.?|part|prologue|epilogue|interlude)\b",
                             title_raw,
                             re.IGNORECASE,
                         )
@@ -972,7 +1004,7 @@ class EpubParser:
                     book_chapter_label=(
                         title
                         if re.match(
-                            r"^(?:chapter|ch\.?|part)\b",
+                            r"^(?:chapter|ch\.?|part|prologue|epilogue|interlude)\b",
                             title,
                             re.IGNORECASE,
                         )

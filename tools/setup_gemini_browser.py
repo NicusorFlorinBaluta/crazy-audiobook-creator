@@ -14,7 +14,14 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _project_python() -> Path | None:
-    """Return the recorded project interpreter without importing project dependencies."""
+    """Return the dashboard interpreter where browser escalation actually runs."""
+    dashboard_python = REPO_ROOT / "venv" / "Scripts" / "python.exe"
+    if dashboard_python.is_file():
+        return dashboard_python
+
+    # Older installations may not have the lightweight dashboard venv. The
+    # recorded runtime is a safe fallback, but is normally the separate voice
+    # environment and therefore must not take precedence over ``venv``.
     runtime_path = REPO_ROOT / "runtime-environment.json"
     if runtime_path.is_file():
         try:

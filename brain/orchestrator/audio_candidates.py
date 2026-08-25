@@ -41,15 +41,21 @@ def candidate_score(result: Any) -> float:
 
 def preserve_candidate(
     project_dir: Path, audio_path: Path, result: Any, *, retain: int = 2
-) -> PreservedCandidate:
+) -> PreservedCandidate | None:
     """Copy a candidate into a bounded review area with its full decision trail."""
+    audio_file = Path(audio_path)
+    if not audio_file.is_file():
+        return None
     destination = project_dir / "review_candidates" / result.line_id
     destination.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     stem = f"{stamp}-attempt-{int(result.attempt)}"
     saved_audio = destination / f"{stem}.wav"
     saved_meta = destination / f"{stem}.json"
-    shutil.copy2(audio_path, saved_audio)
+    try:
+        shutil.copy2(audio_file, saved_audio)
+    except OSError:
+        return None
     score = candidate_score(result)
     atomic_write_json(saved_meta, {
         "schema": 1,
@@ -60,11 +66,12 @@ def preserve_candidate(
     })
     wavs = sorted(destination.glob("*.wav"), key=lambda path: path.stat().st_mtime, reverse=True)
     for stale in wavs[max(1, retain):]:
-        try:
-            stale.unlink(missing_ok=True)
-            stale.with_suffix(".json").unlink(missing_ok=True)
-        except OSError:
-            pass
+        if stale != saved_audio:
+            try:
+                stale.unlink(missing_ok=True)
+                stale.with_suffix(".json").unlink(missing_ok=True)
+            except OSError:
+                pass
     return PreservedCandidate(result.line_id, saved_audio, saved_meta, score, result.model_copy(deep=True))
 
 

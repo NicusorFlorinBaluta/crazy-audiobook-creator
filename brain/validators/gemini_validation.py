@@ -935,24 +935,48 @@ class GeminiValidationService:
         # Build chapter-scoped candidates map
         chapter_candidates: dict[int, dict[str, Any]] = {}
         for chapter in chapters:
-            ch_text = "".join(l.text for l in chapter.lines)
-            active_ids = set()
+            chapter_evidence = " ".join(
+                part
+                for line in chapter.lines
+                for part in (
+                    line.text,
+                    line.speaker_evidence,
+                    line.attribution_review_reason,
+                )
+                if part
+            ).casefold()
+            # A character who already owns another turn in this chapter must
+            # remain selectable even if the unresolved quote does not repeat
+            # their name. This is especially important for pronoun-only and
+            # alternating dialogue scenes.
+            active_ids = {
+                speaker_id
+                for line in chapter.lines
+                for speaker_id in (line.speaker, line.voice_id)
+                if speaker_id in candidates
+            }
             generics = {"narrator", "minor_male", "minor_female", "child_male", "child_female", "crowd", "collective", "character_male", "character_female"}
             for cid, c in candidates.items():
                 if cid in generics:
                     active_ids.add(cid)
                     continue
-                c_name = str(c.get("name", "")).lower()
-                if c_name and c_name in ch_text.lower():
+                c_name = str(c.get("name", "")).strip().casefold()
+                if len(c_name) >= 2 and c_name in chapter_evidence:
                     active_ids.add(cid)
                     continue
-                c_aliases = [str(a).strip().lower() for a in c.get("aliases", [])]
-                if any(len(a) >= 3 and a in ch_text.lower() for a in c_aliases):
+                c_aliases = [
+                    str(alias).strip().casefold()
+                    for alias in c.get("aliases", [])
+                ]
+                if any(
+                    len(alias) >= 3 and alias in chapter_evidence
+                    for alias in c_aliases
+                ):
                     active_ids.add(cid)
                     continue
                 # ID parts (e.g. 'dusk' from 'sixth_of_dusk')
-                id_parts = [p.lower() for p in cid.split("_") if len(p) >= 4]
-                if any(p in ch_text.lower() for p in id_parts):
+                id_parts = [p.casefold() for p in cid.split("_") if len(p) >= 4]
+                if any(part in chapter_evidence for part in id_parts):
                     active_ids.add(cid)
                     continue
             chapter_candidates[chapter.chapter_number] = {

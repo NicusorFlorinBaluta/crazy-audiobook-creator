@@ -57,10 +57,38 @@ class ReviewGate:
 def collect_review_gate(project_id: str, project_dir: Path, job_queue: Any) -> ReviewGate:
     """Collect all known review work without exposing source text by default."""
     items: list[ReviewItem] = []
+    try:
+        state = job_queue.get_job(project_id)
+        if (
+            "generated_chapters" in state
+            or "mastered_chapters" in state
+        ):
+            current_audio_chapters: set[int] | None = set(
+                state.get("generated_chapters", [])
+            ).union(state.get("mastered_chapters", []))
+        else:
+            current_audio_chapters = None
+    except (AttributeError, KeyError, TypeError):
+        current_audio_chapters = None
+    review_rows = job_queue.get_review_items(project_id)
     persisted = {
         (row["item_type"], row["item_id"]): row
-        for row in job_queue.get_review_items(project_id)
+        for row in review_rows
     }
+    active_audio_review_ids: set[str] = set()
+    if current_audio_chapters is not None:
+        stage = str(state.get("active_stage") or state.get("status") or "")
+        if stage == "waiting_for_review":
+            blocking = {
+                str(item_id)
+                for item_id in state.get("review_blocking_item_ids", [])
+            }
+            persisted_segments = {
+                str(row.get("item_id"))
+                for row in review_rows
+                if row.get("item_type") == "segment"
+            }
+            active_audio_review_ids = blocking.intersection(persisted_segments)
 
     extraction_path = project_dir / "extraction_audit.json"
     if extraction_path.is_file():
@@ -168,12 +196,20 @@ def collect_review_gate(project_id: str, project_dir: Path, job_queue: Any) -> R
 
     quality_by_line: dict[str, dict[str, Any]] = {}
     for row in job_queue.get_quality_report(project_id):
+        if (
+            current_audio_chapters is not None
+            and row.get("chapter_number") not in current_audio_chapters
+            and str(row.get("line_id")) not in active_audio_review_ids
+        ):
+            continue
         if row.get("details", {}).get("selected"):
             quality_by_line[row["line_id"]] = row
     for (item_type, item_id), review in persisted.items():
         if item_type != "segment":
             continue
         quality = quality_by_line.get(item_id, {})
+        if current_audio_chapters is not None and not quality:
+            continue
         details = quality.get("details", {})
         disposition = review.get("disposition", "unreviewed")
         script_line = script_lines_by_id.get(item_id, {})
@@ -202,6 +238,12 @@ def collect_review_gate(project_id: str, project_dir: Path, job_queue: Any) -> R
         try:
             trend_report = json.loads(trend_path.read_text(encoding="utf-8"))
             for index, warning in enumerate(trend_report.get("warnings", [])):
+                if (
+                    current_audio_chapters is not None
+                    and warning.get("chapter_number")
+                    not in current_audio_chapters
+                ):
+                    continue
                 kind = str(warning.get("kind") or "audio_consistency")
                 items.append(ReviewItem(
                     category="audio_trend",
@@ -278,6 +320,7 @@ def collect_review_gate(project_id: str, project_dir: Path, job_queue: Any) -> R
                 reason="Recurring name or term has no verified pronunciation mapping.",
                 blocking=False,
                 details={
+                    "term": term,
                     "occurrences": candidate.get("occurrences", 0),
                     "chapters": candidate.get("chapters", []),
                 },

@@ -2448,9 +2448,10 @@ class Pipeline:
                             preserved = preserve_candidate(
                                 project_dir, candidate_audio, candidate_result, retain=2
                             )
-                            pool = candidate_pool.setdefault(candidate_result.line_id, [])
-                            pool.append(preserved)
-                            candidate_pool[candidate_result.line_id] = pool[-2:]
+                            if preserved is not None:
+                                pool = candidate_pool.setdefault(candidate_result.line_id, [])
+                                pool.append(preserved)
+                                candidate_pool[candidate_result.line_id] = pool[-2:]
                     if not auto_regenerate_ids or external_audio_retry >= max_external_audio_retries:
                         break
                     for line_id in auto_regenerate_ids:
@@ -2473,15 +2474,26 @@ class Pipeline:
                 # Gemini confidence. Restore the strongest artifact before logs
                 # and mastering consume it.
                 for line_id, candidates in candidate_pool.items():
-                    winner = max(candidates, key=lambda candidate: candidate.score)
+                    valid_candidates = [
+                        c for c in candidates
+                        if c is not None and Path(c.audio_path).is_file()
+                    ]
+                    if not valid_candidates:
+                        continue
+                    winner = max(valid_candidates, key=lambda candidate: candidate.score)
                     final_audio = Path(response.segment_files_dir) / f"{line_id}.wav"
+                    final_audio.parent.mkdir(parents=True, exist_ok=True)
                     current = next(
                         (item for item in response.quality_results if item.line_id == line_id and item.selected),
                         None,
                     )
-                    current_candidate = candidates[-1]
+                    current_candidate = valid_candidates[-1]
                     if current is None or winner.score > current_candidate.score:
-                        shutil.copy2(winner.audio_path, final_audio)
+                        if Path(winner.audio_path).is_file() and final_audio != Path(winner.audio_path):
+                            try:
+                                shutil.copy2(winner.audio_path, final_audio)
+                            except OSError as copy_exc:
+                                logger.warning("Could not restore winning candidate %s: %s", winner.audio_path, copy_exc)
                         for item in response.quality_results:
                             if item.line_id == line_id:
                                 item.selected = False

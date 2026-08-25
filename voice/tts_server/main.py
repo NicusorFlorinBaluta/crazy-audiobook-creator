@@ -416,6 +416,16 @@ async def health_check() -> VoiceHealthResponse:
 @app.post("/voices/bootstrap")
 def bootstrap_voices(request: BootstrapVoicesRequest) -> BootstrapVoicesResponse:
     """Generate voice reference clips for all characters."""
+    return _run_voice_bootstrap(request)
+
+
+def _run_voice_bootstrap(
+    request: BootstrapVoicesRequest,
+    *,
+    progress_callback=None,
+    cancel_check=None,
+) -> BootstrapVoicesResponse:
+    """Run one serialized bootstrap request with guaranteed model cleanup."""
     if not designer or not engine:
         raise HTTPException(status_code=503, detail="Server not initialized")
     with gpu_job():
@@ -423,7 +433,11 @@ def bootstrap_voices(request: BootstrapVoicesRequest) -> BootstrapVoicesResponse
         # together.
         engine.unload()
         try:
-            return designer.bootstrap_voices(request)
+            return designer.bootstrap_voices(
+                request,
+                progress_callback=progress_callback,
+                cancel_check=cancel_check,
+            )
         except Exception as e:
             import traceback
             with open("voice_crash.log", "a") as f:
@@ -432,6 +446,75 @@ def bootstrap_voices(request: BootstrapVoicesRequest) -> BootstrapVoicesResponse
         finally:
             if designer.validator and designer.validator.is_loaded:
                 designer.validator.unload()
+
+
+@app.post("/voices/bootstrap/stream")
+def bootstrap_voices_stream(
+    request: BootstrapVoicesRequest,
+    fast_req: Request,
+):
+    """Bootstrap voices with NDJSON phase progress and disconnect handling."""
+    if not designer or not engine:
+        raise HTTPException(status_code=503, detail="Server not initialized")
+
+    import json
+    import queue
+
+    cancellation = threading.Event()
+    with run_state_lock:
+        if request.project_id in active_project_runs:
+            raise HTTPException(
+                status_code=409,
+                detail="A voice request is already active for this project",
+            )
+        active_project_runs[request.project_id] = cancellation
+    events: queue.Queue[dict[str, Any]] = queue.Queue()
+
+    def on_progress(message: dict[str, Any]) -> None:
+        payload = {"project_id": request.project_id, **message}
+        events.put({"type": "progress", "data": payload})
+        _progress_from_worker(payload)
+
+    def worker() -> None:
+        try:
+            result = _run_voice_bootstrap(
+                request,
+                progress_callback=on_progress,
+                cancel_check=cancellation.is_set,
+            )
+            events.put({"type": "result", "data": result.model_dump()})
+        except Exception as exc:
+            logger.exception("Voice bootstrap stream failed")
+            events.put(
+                {"type": "error", "error": "exception", "detail": str(exc)}
+            )
+        finally:
+            with run_state_lock:
+                if active_project_runs.get(request.project_id) is cancellation:
+                    active_project_runs.pop(request.project_id, None)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    async def event_generator():
+        try:
+            while True:
+                if await fast_req.is_disconnected():
+                    cancellation.set()
+                    break
+                try:
+                    message = await asyncio.to_thread(events.get, True, 1.0)
+                    yield json.dumps(message) + "\n"
+                    if message.get("type") in {"result", "error"}:
+                        break
+                except queue.Empty:
+                    yield "\n"
+        finally:
+            if await fast_req.is_disconnected():
+                cancellation.set()
+
+    return StreamingResponse(
+        event_generator(), media_type="application/x-ndjson"
+    )
 
 
 @app.post("/voices/regenerate")

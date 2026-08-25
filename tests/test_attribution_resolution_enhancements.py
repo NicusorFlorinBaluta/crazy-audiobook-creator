@@ -230,7 +230,7 @@ class SampleBookAttributionAuditTests(unittest.TestCase):
         issues_by_kind = {issue["kind"]: issue for issue in issues}
         self.assertEqual(
             set(issues_by_kind),
-            {"generic_role_tag", "self_identified_generic_speaker"},
+            {"generic_role_tag", "self_identified_generic_speaker", "pronoun_gender"},
         )
         self.assertEqual(issues_by_kind["generic_role_tag"]["speaker"], "children")
         self.assertIn("child_male", issues_by_kind["generic_role_tag"]["message"])

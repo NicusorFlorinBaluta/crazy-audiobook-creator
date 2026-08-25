@@ -99,8 +99,17 @@ window.PipelineManager = (() => {
                             || Array.from({length: totalCh}, (_, index) => index + 1);
                         const selectedSet = new Set(selected);
                         const batchTotal = selectedSet.size || totalCh;
+                        const canonicalProgress = data.progress || null;
+                        const canonicalStage = String(
+                            canonicalProgress?.stage || ''
+                        ).toUpperCase();
                         
-                        if (stage === 'SCRIPTING' && data.scripted_chapters) {
+                        if (
+                            canonicalStage === stage
+                            && Number.isFinite(canonicalProgress?.percent)
+                        ) {
+                            pct = canonicalProgress.percent;
+                        } else if (stage === 'SCRIPTING' && data.scripted_chapters) {
                             pct = Number.isFinite(data.work_progress?.stagePercent)
                                 ? data.work_progress.stagePercent
                                 : (
@@ -152,24 +161,14 @@ window.PipelineManager = (() => {
         }
     }
 
-    let _etaState = { startMs: 0, lastPct: 0, phaseKey: '' };
-
     function updateLiveProgress(data) {
         if (!data || !data.message) {
             els.live.classList.remove('active');
             els.live.innerHTML = '';
-            _etaState = { startMs: 0, lastPct: 0, phaseKey: '' };
             return;
         }
 
-        const now = Date.now();
         const percent = Number.isFinite(data.percent) ? data.percent : 0;
-        const phaseKey = data.phase || data.stage || 'work';
-        if (phaseKey !== _etaState.phaseKey || percent < _etaState.lastPct) {
-            _etaState = { startMs: now, lastPct: percent, phaseKey };
-        } else {
-            _etaState.lastPct = percent;
-        }
 
         let etaStr = '';
         if (Number.isFinite(data.eta_seconds)) {
@@ -177,20 +176,6 @@ window.PipelineManager = (() => {
             etaStr = remainingSec > 60
                 ? ` ~${Math.ceil(remainingSec / 60)} min remaining`
                 : ` ~${remainingSec} sec remaining`;
-        } else if (_etaState.startMs && data.percent > 0 && data.percent < 100) {
-            const elapsed = now - _etaState.startMs;
-            const msPerPercent = elapsed / data.percent;
-            const remainingPercent = 100 - data.percent;
-            const remainingMs = remainingPercent * msPerPercent;
-            
-            if (elapsed > 3000) { // Wait 3s before showing ETA
-                const remainingSec = Math.round(remainingMs / 1000);
-                if (remainingSec > 60) {
-                    etaStr = ` ~${Math.ceil(remainingSec / 60)} min remaining`;
-                } else {
-                    etaStr = ` ~${remainingSec} sec remaining`;
-                }
-            }
         }
 
         els.live.classList.add('active');

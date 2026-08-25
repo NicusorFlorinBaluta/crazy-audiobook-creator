@@ -57,22 +57,32 @@ class AttributionGuardrailsEnhancedTests(unittest.TestCase):
             },
         )
 
-    def test_evidence_contradicts_speaker_detection(self) -> None:
-        # LLM evidence mentions alien's dialogue while assigning soil
-        evidence = "Continuation of the alien's dialogue, maintaining the same voice and tone as Second of the Soil."
-        contra, implied = ScriptGenerator._evidence_contradicts_speaker(
-            evidence, "soil", self.registry
+    def test_same_paragraph_split_turn_continuity(self) -> None:
+        fragments = [
+            SourceFragment('"Progress is always sad,"', 0, 25),
+            SourceFragment("he said.", 26, 34),
+            SourceFragment('"There is no new life without death."', 35, 72),
+        ]
+        # "he said." establishes Gender.MALE in paragraph
+        dialogue_map, tag_map = ScriptGenerator._paragraph_attribution_maps(
+            fragments, self.registry
         )
-        self.assertTrue(contra)
-        self.assertEqual(implied, "drominadian")
+        self.assertIn(0, tag_map)
+        self.assertIn(2, tag_map)
+        _, _, g0 = tag_map[0]
+        _, _, g2 = tag_map[2]
+        self.assertEqual(g0, Gender.MALE)
+        self.assertEqual(g2, Gender.MALE)
 
-        # LLM evidence consistent with speaker
-        clean_evidence = "Vathi speaks directly to Dusk about the treaty."
-        contra_clean, implied_clean = ScriptGenerator._evidence_contradicts_speaker(
-            clean_evidence, "vathi", self.registry
+        resolved = ScriptGenerator._resolve_dialogue_speaker(
+            2,
+            fragments,
+            {0: {"speaker": "soil"}},
+            {"soil", "vathi"},
+            registry=self.registry,
+            target_gender=Gender.MALE,
         )
-        self.assertFalse(contra_clean)
-        self.assertIsNone(implied_clean)
+        self.assertEqual(resolved, "soil")
 
     def test_dialogue_tag_evidence_expanded_verbs_and_bidirectional(self) -> None:
         # Tag with descriptive alias and verb: "the armored alien said,"
@@ -185,32 +195,31 @@ class AttributionGuardrailsEnhancedTests(unittest.TestCase):
         self.assertNotIn(dialogue_indexes[2], issue_by_fragment)
 
     def test_m4b_chapter_title_formatting(self) -> None:
-        # Source headings never override stable sequence numbering.
+        # Book chapter titles are preserved for rich audio track navigation.
         self.assertEqual(
-            M4BExporter._format_chapter_title(8, "Chapter Seven"),
-            "Chapter 8",
+            M4BExporter._format_chapter_title(1, "Prologue: Fifty-Seven Years Ago"),
+            "Prologue: Fifty-Seven Years Ago",
         )
         self.assertEqual(
-            M4BExporter._format_chapter_title(9, "Five Years Ago"),
-            "Chapter 9",
+            M4BExporter._format_chapter_title(2, "Chapter One"),
+            "Chapter One",
         )
         self.assertEqual(
-            M4BExporter._format_chapter_title(10, "Chapter Nine"),
-            "Chapter 10",
+            M4BExporter._format_chapter_title(3, "Chapter Two: Five Years Ago"),
+            "Chapter Two: Five Years Ago",
         )
         # Empty title defaults to Chapter {N}
         self.assertEqual(
             M4BExporter._format_chapter_title(3, ""),
             "Chapter 3",
         )
-        # Even matching or decorated source titles remain metadata only.
         self.assertEqual(
             M4BExporter._format_chapter_title(5, "Chapter 5"),
             "Chapter 5",
         )
         self.assertEqual(
             M4BExporter._format_chapter_title(5, "Chapter 5: The Meeting"),
-            "Chapter 5",
+            "Chapter 5: The Meeting",
         )
 
 

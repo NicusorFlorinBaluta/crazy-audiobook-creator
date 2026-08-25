@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -18,7 +19,9 @@ from shared.models import (
     QualityResult,
     MasterChapterResponse,
     VoiceFXSettings,
+    BootstrapVoicesRequest,
 )
+from brain.orchestrator.voice_client import VoiceClient
 from brain.orchestrator.job_queue import JobQueue
 from brain.orchestrator.pipeline import Pipeline
 from voice.tts_server.qwen3_engine import Qwen3TTSEngine
@@ -68,6 +71,56 @@ class VoiceModelResidencyTests(unittest.TestCase):
             engine.load.assert_not_called()
             self.assertEqual(result.id, "speaker")
             self.assertIsNotNone(library.registered)
+
+    def test_bootstrap_client_consumes_progress_stream(self) -> None:
+        client = VoiceClient(retries=1)
+        response = Mock()
+        response.raise_for_status = Mock()
+        response.iter_lines.return_value = [
+            json.dumps(
+                {
+                    "type": "progress",
+                    "data": {
+                        "phase": "designing_references",
+                        "completed": 1,
+                        "total": 2,
+                        "message": "Prepared 1 of 2 voice candidates",
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "result",
+                    "data": {
+                        "status": "success",
+                        "project_id": "book",
+                        "voices_generated": {},
+                        "cast_diagnostics": [],
+                    },
+                }
+            ),
+        ]
+        stream_context = Mock()
+        stream_context.__enter__ = Mock(return_value=response)
+        stream_context.__exit__ = Mock(return_value=False)
+        http_client = Mock()
+        http_client.__enter__ = Mock(return_value=http_client)
+        http_client.__exit__ = Mock(return_value=False)
+        http_client.stream.return_value = stream_context
+        progress = []
+
+        with patch(
+            "brain.orchestrator.voice_client.httpx.Client",
+            return_value=http_client,
+        ):
+            result = client.bootstrap_voices(
+                BootstrapVoicesRequest(project_id="book", characters={}),
+                progress_callback=progress.append,
+            )
+
+        self.assertEqual(result.project_id, "book")
+        self.assertEqual(progress[0]["phase"], "designing_references")
+        self.assertEqual(progress[0]["completed"], 1)
 
 
 class CleanAudioPolicyTests(unittest.TestCase):

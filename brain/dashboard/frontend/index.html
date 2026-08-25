@@ -167,13 +167,33 @@
                         <button class="btn btn-success hidden" id="btn-resume-after-review" onclick="event.stopPropagation()">Resume pipeline</button>
                     </summary>
                     <div class="attention-body" id="attention-body">
+                        <div class="attention-pills" id="attention-pills">
+                            <button type="button" class="attention-pill" data-filter="blocking">⚠️ Action Required (<span id="pill-count-blocking">0</span>)</button>
+                            <button type="button" class="attention-pill" data-filter="pronunciation">📖 Pronunciation Terms (<span id="pill-count-pronunciation">0</span>)</button>
+                            <button type="button" class="attention-pill" data-filter="character">👤 Character Notes (<span id="pill-count-character">0</span>)</button>
+                            <button type="button" class="attention-pill" data-filter="resolved">✅ Auto-Resolved / Fixed (<span id="pill-count-resolved">0</span>)</button>
+                            <button type="button" class="attention-pill active" data-filter="all">📋 All (<span id="pill-count-all">0</span>)</button>
+                        </div>
                         <div class="attention-toolbar">
-                            <label>Type<select class="input-sm" id="attention-type"><option value="all">All</option><option value="extraction">Book sections</option><option value="audio">Audio</option><option value="attribution">Speaker</option><option value="pronunciation">Pronunciation</option></select></label>
-                            <label>Status<select class="input-sm" id="attention-status"><option value="blocking">Blocking</option><option value="all">All</option><option value="resolved">Resolved</option></select></label>
+                            <label>Type<select class="input-sm" id="attention-type"><option value="all">All types</option><option value="extraction">Book sections</option><option value="audio">Audio</option><option value="attribution">Speaker</option><option value="pronunciation">Pronunciation</option><option value="character">Character notes</option></select></label>
+                            <label>Status<select class="input-sm" id="attention-status"><option value="all">All statuses</option><option value="blocking">Blocking only</option><option value="optional">Optional / Info</option><option value="resolved">Resolved / Approved</option></select></label>
                             <label>Confidence<select class="input-sm" id="attention-confidence"><option value="all">All bands</option><option value="low">Low</option><option value="review">Review</option><option value="high">High</option></select></label>
+                            <label class="attention-search-label">Search<input type="text" class="input-sm" id="attention-search" placeholder="Filter terms or text..."></label>
                         </div>
                         <div class="attention-list" id="attention-list"></div>
-                        <div class="attention-pagination"><button class="btn btn-ghost btn-sm" id="attention-prev">Previous</button><span id="attention-page"></span><button class="btn btn-ghost btn-sm" id="attention-next">Next</button></div>
+                        <div class="attention-pagination">
+                            <button class="btn btn-ghost btn-sm" id="attention-prev">Previous</button>
+                            <span id="attention-page"></span>
+                            <button class="btn btn-ghost btn-sm" id="attention-next">Next</button>
+                            <label class="visually-hidden" for="attention-page-size">Items per page</label>
+                            <select id="attention-page-size" class="input-sm" style="margin-left: 8px;">
+                                <option value="10">10 per page</option>
+                                <option value="25">25 per page</option>
+                                <option value="50">50 per page</option>
+                                <option value="100">100 per page</option>
+                                <option value="all">Show all</option>
+                            </select>
+                        </div>
                     </div>
                 </details>
             </section>

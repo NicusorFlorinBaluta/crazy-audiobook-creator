@@ -251,7 +251,10 @@ class M4BExporter:
 
     @staticmethod
     def _format_chapter_title(number: int, title: str | None) -> str:
-        """Use stable sequence numbering rather than ambiguous source headings."""
+        """Format chapter title for M4B metadata using the book chapter title."""
+        clean_title = (title or "").strip()
+        if clean_title:
+            return clean_title
         return f"Chapter {number}"
 
     @staticmethod

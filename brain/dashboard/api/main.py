@@ -81,6 +81,12 @@ from shared.voice_casting import (
 )
 from shared.performance import read_metrics, summarize_metrics
 from shared.runtime_preflight import collect_runtime_report
+from shared.pronunciation import (
+    build_pronunciation_inventory,
+    apply_pronunciations,
+    load_pronunciation_dictionary,
+)
+from shared.models import GenerateLineRequest, ScriptLine
 from voice.tts_server.voice_library import VoiceLibraryManager
 from brain.dashboard.api.mobile import router as mobile_router
 
@@ -271,6 +277,18 @@ class MetadataFetchRequest(BaseModel):
 class MetadataSearchRequest(BaseModel):
     title: str = Field(min_length=1, max_length=300)
     author: str = Field(default="", max_length=300)
+
+
+class PronunciationRequest(BaseModel):
+    term: str = Field(min_length=1, max_length=120)
+    spoken_text: str = Field(default="", max_length=240)
+
+
+class PronunciationPreviewRequest(BaseModel):
+    term: str = Field(default="", max_length=120)
+    spoken_text: str = Field(default="", max_length=240)
+    voice_id: str | None = Field(default=None, max_length=120)
+
 
 
 def _require_job(project_id: str) -> dict[str, Any]:
@@ -2177,34 +2195,38 @@ async def get_pipeline_status(project_id: str):
             and not running_tasks[project_id].done()
         )
 
-        # Enrich state with per-chapter progress details
         project_dir = _project_dir(project_id)
         cached_cast = state.get("voice_cast")
         cast_revision = str(state.get("voice_cast_revision") or "")
-        cached_revision = (
-            str(cached_cast.get("fingerprint") or "")
-            if isinstance(cached_cast, dict)
-            else ""
-        )
-        if cast_revision and cached_revision != cast_revision:
-            # Bootstrapping writes voice_cast.json atomically before advancing
-            # the durable revision.  Reconcile a stale cached job payload so
-            # direct /status polling cannot show the cast from a previous run.
-            cast_path = project_dir / "voice_cast.json"
+        persisted_cast = None
+        cast_path = project_dir / "voice_cast.json"
+        if cast_path.is_file():
             try:
-                persisted_cast = json.loads(
-                    cast_path.read_text(encoding="utf-8")
-                )
-                if str(persisted_cast.get("fingerprint") or "") == cast_revision:
-                    state["voice_cast"] = persisted_cast
-                    job_queue.update_job(project_id, {"voice_cast": persisted_cast})
+                persisted_cast = json.loads(cast_path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError, AttributeError):
-                logger.warning(
-                    "Could not reconcile voice cast revision for project %s",
-                    project_id,
-                    exc_info=True,
-                )
-        workspace_dir = Path("workspace") / project_id
+                persisted_cast = None
+        if (
+            persisted_cast
+            and str(persisted_cast.get("fingerprint") or "") == cast_revision
+        ):
+            active_cast = persisted_cast
+        elif isinstance(cached_cast, dict):
+            active_cast = cached_cast
+        else:
+            active_cast = persisted_cast
+
+        if active_cast:
+            state["voice_cast_summary"] = {
+                "fingerprint": str(active_cast.get("fingerprint") or ""),
+                "schema_version": active_cast.get("schema_version"),
+                "voice_count": len(active_cast.get("voices", {})),
+            }
+        if "voice_cast" in state:
+            state.pop("voice_cast", None)
+            if cached_cast is not None:
+                job_queue.update_job(project_id, {"voice_cast": None})
+
+        workspace_dir = _workspace_project_dir(project_id)
         script_dir = project_dir / "script"
         manifests_dir = project_dir / "manifests"
         segments_dir = workspace_dir / "segments"
@@ -2214,16 +2236,6 @@ async def get_pipeline_status(project_id: str):
                 match = re.match(r"ch(\d+)_", segment_path.name)
                 if match:
                     segment_counts[int(match.group(1))] += 1
-        if manifests_dir.is_dir():
-            for manifest_path in manifests_dir.glob("chapter_*.segments.json"):
-                match = re.match(r"chapter_(\d+)\.segments\.json", manifest_path.name)
-                if match:
-                    try:
-                        m_data = json.loads(manifest_path.read_text(encoding="utf-8"))
-                        c_num = int(match.group(1))
-                        segment_counts[c_num] = max(segment_counts[c_num], len(m_data.get("segments", [])))
-                    except Exception:
-                        pass
 
         chapter_details = []
         total_chapters = state.get("total_chapters") or 0
@@ -2258,21 +2270,18 @@ async def get_pipeline_status(project_id: str):
 
                 for idx, ch in enumerate(b_chaps, 1):
                     if isinstance(ch, dict) and ch.get("title"):
-                        book_chapter_titles[idx] = ch.get("title")
+                        book_chapter_titles[idx] = ch["title"]
             except Exception:
                 pass
 
         stage = str(state.get("active_stage") or state.get("status") or "").lower()
         scripted_chapters = set(state.get("scripted_chapters", []))
-        generated_chapters = set(state.get("generated_chapters", [])).union(segment_counts.keys())
         mastered_chapters = set(state.get("mastered_chapters", []))
         if manifests_dir.is_dir():
             for master_path in manifests_dir.glob("chapter_*.master.json"):
                 match = re.match(r"chapter_(\d+)\.master\.json", master_path.name)
                 if match:
                     mastered_chapters.add(int(match.group(1)))
-        state["generated_chapters"] = sorted(generated_chapters)
-        state["mastered_chapters"] = sorted(mastered_chapters)
         
         def _has_valid_script(c_num: int) -> tuple[bool, int, str]:
             ch_f = script_dir / f"chapter_{c_num:03d}.json"
@@ -2284,6 +2293,15 @@ async def get_pipeline_status(project_id: str):
                 return len(lines) > 0, len(lines), str(sdata.get("chapter_title") or "")
             except Exception:
                 return False, 0, ""
+
+        generated_chapters = set(state.get("generated_chapters", []))
+        for c_num, count in segment_counts.items():
+            has_s, t_lines, _ = _has_valid_script(c_num)
+            if has_s and t_lines > 0 and count >= t_lines:
+                generated_chapters.add(c_num)
+
+        state["generated_chapters"] = sorted(generated_chapters)
+        state["mastered_chapters"] = sorted(mastered_chapters)
 
         # Dynamically infer the next active scripting chapter if existing valid scripts exist
         existing_scripted = [
@@ -4606,6 +4624,172 @@ async def update_quality_review(project_id: str, request: ReviewItemRequest):
     return result
 
 
+@app.get("/api/projects/{project_id}/pronunciations")
+async def get_pronunciations(project_id: str):
+    """Return the book pronunciation inventory and custom mappings."""
+    _require_job(project_id)
+    project_dir = _project_dir(project_id)
+    return build_pronunciation_inventory(project_dir)
+
+
+@app.post("/api/projects/{project_id}/pronunciations")
+async def update_pronunciation(project_id: str, request: PronunciationRequest):
+    """Save or delete a custom pronunciation mapping and mark affected chapters stale."""
+    _require_job(project_id)
+    project_dir = _project_dir(project_id)
+    dict_path = project_dir / "pronunciation_dict.json"
+
+    current_dict: dict[str, str] = {}
+    if dict_path.is_file():
+        try:
+            current_dict = json.loads(dict_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            current_dict = {}
+
+    term = request.term.strip()
+    spoken = request.spoken_text.strip()
+    if spoken:
+        current_dict[term] = spoken
+    else:
+        current_dict.pop(term, None)
+
+    atomic_write_json(dict_path, current_dict)
+
+    affected_chapters: set[int] = set()
+    term_pattern = re.compile(
+        rf"(?<!\w){re.escape(term)}(?!\w)", re.IGNORECASE
+    )
+    for chapter_path in sorted((project_dir / "script").glob("chapter_*.json")):
+        if chapter_path.name.endswith(".meta.json"):
+            continue
+        try:
+            chapter = json.loads(chapter_path.read_text(encoding="utf-8"))
+            ch_num = int(chapter.get("chapter_number") or 0)
+            for line in chapter.get("lines", []):
+                txt = line.get("text", "")
+                if term_pattern.search(txt):
+                    affected_chapters.add(ch_num)
+                    break
+        except Exception:
+            pass
+
+    if affected_chapters:
+        DeliveryManager(project_dir).mark_stale_for_chapters(
+            affected_chapters,
+            f"Pronunciation updated for '{term}'",
+        )
+
+    return {
+        "status": "success",
+        "inventory": build_pronunciation_inventory(project_dir),
+        "affected_chapters": sorted(affected_chapters),
+    }
+
+
+@app.post("/api/projects/{project_id}/pronunciations/preview")
+async def preview_pronunciation(project_id: str, request: PronunciationPreviewRequest):
+    """Generate a high-quality TTS audio preview for a pronunciation candidate."""
+    _require_job(project_id)
+    project_dir = _project_dir(project_id)
+    workspace_dir = _workspace_project_dir(project_id)
+    raw_spoken = request.spoken_text.strip() or request.term.strip()
+    spoken = re.sub(r"^(?:pronunciation\s*:\s*)+", "", raw_spoken, flags=re.IGNORECASE).strip()
+    if not spoken:
+        raise HTTPException(status_code=400, detail="Text to preview cannot be empty")
+
+    preview_hash = hashlib.sha256(spoken.encode("utf-8")).hexdigest()[:16]
+    previews_dir = workspace_dir / "previews"
+    previews_dir.mkdir(parents=True, exist_ok=True)
+    audio_path = previews_dir / f"pron_{preview_hash}.wav"
+
+    # If already generated and cached, return immediately
+    if audio_path.is_file() and audio_path.stat().st_size > 44:
+        return {
+            "status": "success",
+            "audio_url": f"api/projects/{project_id}/pronunciations/preview/{preview_hash}/audio",
+            "spoken_text": spoken,
+            "has_tts": True,
+            "cached": True,
+        }
+
+    # If pipeline is initialized and has a voice_client, try generating via TTS server
+    has_tts = False
+    if pipeline and getattr(pipeline, "voice_client", None):
+        try:
+            # Fast check if voice server is responding
+            await asyncio.to_thread(
+                pipeline.voice_client.health_check_once, 0.8
+            )
+            voice_id = request.voice_id
+            if not voice_id:
+                # Pick the narrator voice or the first available voice
+                cast_path = project_dir / "voice_cast.json"
+                if cast_path.is_file():
+                    try:
+                        cast_data = json.loads(cast_path.read_text(encoding="utf-8"))
+                        voices = cast_data.get("voices", {})
+                        voice_id = next(
+                            (vid for vid in voices if "narrator" in vid.lower()),
+                            next(iter(voices.keys()), None),
+                        )
+                    except Exception:
+                        voice_id = None
+            voice_id = voice_id or "narrator"
+
+            line_req = GenerateLineRequest(
+                project_id=project_id,
+                line=ScriptLine(
+                    line_id=f"preview_pron_{preview_hash}",
+                    speaker=voice_id,
+                    voice_id=voice_id,
+                    text=spoken,
+                ),
+            )
+            await asyncio.to_thread(pipeline.voice_client.generate_line, line_req)
+            seg_path = workspace_dir / "segments" / f"preview_pron_{preview_hash}.wav"
+            if seg_path.is_file() and seg_path.stat().st_size > 44:
+                shutil.copyfile(seg_path, audio_path)
+                has_tts = True
+        except Exception as exc:
+            logger.info("TTS voice server preview not available: %s", exc)
+            has_tts = False
+
+    if has_tts and audio_path.is_file():
+        return {
+            "status": "success",
+            "audio_url": f"api/projects/{project_id}/pronunciations/preview/{preview_hash}/audio",
+            "spoken_text": spoken,
+            "has_tts": True,
+        }
+
+    # Return fallback status for frontend Web Speech audio
+    return {
+        "status": "fallback_webspeech",
+        "audio_url": None,
+        "spoken_text": spoken,
+        "has_tts": False,
+        "message": "TTS server offline. Playing preview via Web Speech.",
+    }
+
+
+@app.get("/api/projects/{project_id}/pronunciations/preview/{preview_id}/audio")
+async def get_pronunciation_preview_audio(project_id: str, preview_id: str):
+    """Serve the generated pronunciation preview audio."""
+    _require_job(project_id)
+    safe_id = re.sub(r"[^a-zA-Z0-9_-]", "", preview_id)
+    audio_path = _workspace_project_dir(project_id) / "previews" / f"pron_{safe_id}.wav"
+    if not audio_path.is_file():
+        raise HTTPException(status_code=404, detail="Preview audio not found")
+    return FileResponse(
+        path=audio_path,
+        media_type="audio/wav",
+        headers={
+            "Accept-Ranges": "bytes",
+            "Content-Disposition": f'inline; filename="preview_{safe_id}.wav"',
+        },
+    )
+
+
 @app.get("/api/projects/{project_id}/reviews")
 async def get_attention_reviews(project_id: str):
     """Return the unified, privacy-conscious Attention Required inbox."""
@@ -4641,6 +4825,41 @@ async def get_quality_report(project_id: str):
     if not job_queue:
         raise HTTPException(status_code=503, detail="Server not initialized")
     logs = job_queue.get_quality_report(project_id)
+
+    current_chapters: set[int] | None = None
+    active_review_item_ids: set[str] = set()
+    try:
+        job = job_queue.get_job(project_id)
+        if isinstance(job, dict) and ("generated_chapters" in job or "mastered_chapters" in job):
+            current_chapters = set(
+                int(ch) for ch in (
+                    job.get("generated_chapters", []) + job.get("mastered_chapters", [])
+                )
+            )
+        if hasattr(job_queue, "get_review_items"):
+            active_review_item_ids = {
+                item["item_id"]
+                for item in job_queue.get_review_items(project_id)
+                if item.get("item_type") == "segment"
+                and item.get("disposition") in {"unreviewed", "flagged"}
+            }
+        if isinstance(job, dict):
+            active_review_item_ids.update(
+                str(item_id) for item_id in job.get("review_blocking_item_ids", [])
+            )
+    except Exception:
+        current_chapters = None
+        active_review_item_ids = set()
+
+    stale_line_ids: set[str] = set()
+    filtered_logs = []
+    for log in logs:
+        ch_num = int(log.get("chapter_number", 0))
+        lid = log.get("line_id", "")
+        if current_chapters is not None and ch_num not in current_chapters and lid not in active_review_item_ids:
+            stale_line_ids.add(lid)
+        else:
+            filtered_logs.append(log)
     
     summary = {
         "total_segments": 0,
@@ -4654,14 +4873,67 @@ async def get_quality_report(project_id: str):
         "failed_clipping": 0,
         "final_attempts": [],
         "attempts": [],
+        "stale_records": len(stale_line_ids),
+        "stale": bool(stale_line_ids),
     }
     
-    if not logs:
+    if not filtered_logs:
         return summary
 
-    # Group by line_id to get the final attempt
+    def _attempt_payload(
+        log: dict[str, Any], *, include_audio: bool = False
+    ) -> dict[str, Any]:
+        details = log.get("details", {})
+        payload = {
+            "line_id": log["line_id"],
+            "chapter_number": log["chapter_number"],
+            "attempt": log["attempt"],
+            "status": log["status"],
+            "wer": log["wer"],
+            "quality_score": log["quality_score"],
+            "acceptance_reason": details.get("acceptance_reason", ""),
+            "transcribed_text": details.get("transcribed_text", ""),
+            "duration_seconds": details.get("duration_seconds"),
+            "noise_floor_db": details.get("noise_floor_db"),
+            "speaker_similarity": details.get("speaker_similarity"),
+            "prosody_warning": details.get("prosody_warning", False),
+            "selected": bool(details.get("selected", False)),
+            "validation_confidence": details.get("validation_confidence"),
+            "external_validation_provider": details.get(
+                "external_validation_provider", ""
+            ),
+            "external_validation_model": details.get(
+                "external_validation_model", ""
+            ),
+            "external_validation_decision": details.get(
+                "external_validation_decision", ""
+            ),
+            "external_validation_confidence": details.get(
+                "external_validation_confidence"
+            ),
+            "external_validation_reason": details.get(
+                "external_validation_reason", ""
+            ),
+            "manual_review_required": bool(
+                details.get("manual_review_required", False)
+            ),
+            "manual_review_reason": details.get(
+                "manual_review_reason", ""
+            ),
+            "external_validation_history": details.get(
+                "external_validation_history", []
+            ),
+        }
+        if include_audio:
+            payload["audio_url"] = (
+                f"api/projects/{project_id}/segments/"
+                f"{log['line_id']}/audio"
+            )
+        return payload
+
     lines = {}
-    for log in logs:
+    retried_ids: set[str] = set()
+    for log in filtered_logs:
         line_id = log["line_id"]
         is_selected = bool(log.get("details", {}).get("selected"))
         current_selected = bool(
@@ -4678,33 +4950,13 @@ async def get_quality_report(project_id: str):
             lines[line_id] = log
         if log["attempt"] > 1:
             summary["retries_triggered"] += 1
-        details = log.get("details", {})
-        summary["attempts"].append(
-            {
-                "line_id": log["line_id"],
-                "chapter_number": log["chapter_number"],
-                "attempt": log["attempt"],
-                "status": log["status"],
-                "wer": log["wer"],
-                "quality_score": log["quality_score"],
-                "acceptance_reason": details.get("acceptance_reason", ""),
-                "transcribed_text": details.get("transcribed_text", ""),
-                "duration_seconds": details.get("duration_seconds"),
-                "noise_floor_db": details.get("noise_floor_db"),
-                "speaker_similarity": details.get("speaker_similarity"),
-                "prosody_warning": details.get("prosody_warning", False),
-                "selected": bool(details.get("selected", False)),
-                "validation_confidence": details.get("validation_confidence"),
-                "external_validation_provider": details.get("external_validation_provider", ""),
-                "external_validation_model": details.get("external_validation_model", ""),
-                "external_validation_decision": details.get("external_validation_decision", ""),
-                "external_validation_confidence": details.get("external_validation_confidence"),
-                "external_validation_reason": details.get("external_validation_reason", ""),
-                "manual_review_required": bool(details.get("manual_review_required", False)),
-                "manual_review_reason": details.get("manual_review_reason", ""),
-                "external_validation_history": details.get("external_validation_history", []),
-            }
-        )
+            retried_ids.add(line_id)
+
+    summary["attempts"] = [
+        _attempt_payload(log)
+        for log in filtered_logs
+        if log["line_id"] in retried_ids
+    ]
             
     summary["total_segments"] = len(lines)
     total_wer = 0.0
@@ -4725,35 +4977,14 @@ async def get_quality_report(project_id: str):
             summary["failed_silence"] += 1
         if details.get("clipping_detected", False):
             summary["failed_clipping"] += 1
-        summary["final_attempts"].append(
-            {
-                "line_id": line["line_id"],
-                "chapter_number": line["chapter_number"],
-                "attempt": line["attempt"],
-                "status": line["status"],
-                "wer": line["wer"],
-                "quality_score": line["quality_score"],
-                "acceptance_reason": details.get("acceptance_reason", ""),
-                "transcribed_text": details.get("transcribed_text", ""),
-                "duration_seconds": details.get("duration_seconds"),
-                "noise_floor_db": details.get("noise_floor_db"),
-                "speaker_similarity": details.get("speaker_similarity"),
-                "prosody_warning": details.get("prosody_warning", False),
-                "validation_confidence": details.get("validation_confidence"),
-                "external_validation_provider": details.get("external_validation_provider", ""),
-                "external_validation_model": details.get("external_validation_model", ""),
-                "external_validation_decision": details.get("external_validation_decision", ""),
-                "external_validation_confidence": details.get("external_validation_confidence"),
-                "external_validation_reason": details.get("external_validation_reason", ""),
-                "manual_review_required": bool(details.get("manual_review_required", False)),
-                "manual_review_reason": details.get("manual_review_reason", ""),
-                "external_validation_history": details.get("external_validation_history", []),
-                "audio_url": (
-                    f"api/projects/{project_id}/segments/"
-                    f"{line['line_id']}/audio"
-                ),
-            }
-        )
+        if (
+            line["status"] != "pass"
+            or line["attempt"] > 1
+            or details.get("manual_review_required", False)
+        ):
+            summary["final_attempts"].append(
+                _attempt_payload(line, include_audio=True)
+            )
             
     if summary["total_segments"] > 0:
         summary["average_wer"] = total_wer / summary["total_segments"]

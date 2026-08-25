@@ -50,7 +50,7 @@ scratch-runner concurrency.
      low-confidence results trigger focused retries. Unresolved dialogue is retained as a low-confidence review item rather than a
      release-grade guess. Scripting completes and persists `attribution_audit.json`, but
      generation/export remain blocked until every review item is resolved.
-4. **Bootstrapping** (`bootstrapping`): Speaking cast derived, voice design directions compiled, reference audio generated via Qwen VoiceDesign. Qwen speaker-encoder embeddings provide the primary distinctness signal; a 514-value normalized log-spectrogram summary provides a model-independent fallback diagnostic.
+4. **Bootstrapping** (`bootstrapping`): Speaking cast derived, voice design directions compiled, reference audio generated via Qwen VoiceDesign. The long request streams phase/count events for model loading, reference design, transcript validation, acoustic measurement, and cast comparison; the orchestrator maps those events into the canonical progress schema. Qwen speaker-encoder embeddings provide the primary distinctness signal; a 514-value normalized log-spectrogram summary provides a model-independent fallback diagnostic.
 5. **Voice Review** (`voice_review`): Automated pause gate for user approval. Displays voice cards, preview players, and `[Approve voices & continue]` action banner.
 6. **Generating** (`generating`): Qwen3-TTS synthesizes chapter audio line by line with dynamic contextual pauses (250ms same speaker, 380ms narrator, 400ms quote-to-action, 450ms turn change, 900ms paragraph break).
 7. **Validating** (`validating`): Whisper Speech-to-Text transcribes audio to verify Word Error Rate (WER), acoustic clipping, and length bounds.
@@ -147,6 +147,29 @@ remains the completeness boundary.
 Pipeline state also carries a versioned progress snapshot alongside temporary
 legacy fields. The snapshot names the stage/phase, stable line ID and ordinal,
 cache state, elapsed time, server-derived ETA/confidence, and update timestamp.
+Frequent status responses carry only a compact `voice_cast_summary`; the full
+cast and pairwise diagnostic matrix remain atomic in `voice_cast.json`. The
+dedicated voice-review endpoint returns only approval-relevant similarity pairs.
+The quality endpoint retains aggregate evidence for every segment while sending
+detailed final records only for warnings, failures, and retries, plus complete
+history for lines that actually retried. These are transport optimizations, not
+quality-gate reductions. Quality and review endpoints scope audio evidence to
+the reconciled generated/mastered chapter sets. Older results remain on disk as
+an audit trail but are labeled archived and cannot block or misrepresent the
+current generation.
+
+At run start, the pipeline's full artifact reconciler verifies dependency,
+voice-reference, manifest, and output hashes before updating generated/mastered
+chapter state. Frequent status polling trusts those reconciled sets; partial WAV
+presence is progress evidence, never completion evidence, and a stale manifest
+is never promoted by a weaker dashboard-only check.
+
+Gemini web escalation runs in the dashboard Python environment and uses the
+dedicated authenticated Chrome profile. Readiness reports dependency and
+profile state separately. Production requests reuse one saved conversation per
+validation purpose until its configured turn limit; API triage/adjudication
+remain earlier, cheaper steps in the ladder.
+
 Performance JSONL records use schema version 2 and are summarized by selecting
 the latest successful record for each chapter. TTS segment measurements include
 model load, reference-prompt/cache work, autoregressive generation, decoding,

@@ -111,6 +111,10 @@ _SPEECH_VERBS = (
 
 _SPEECH_VERB_PATTERN = "|".join(re.escape(item) for item in _SPEECH_VERBS)
 _SPEECH_VERB_SET = frozenset(_SPEECH_VERBS)
+_PREPOSITIONS_OBJECTS = frozenset({
+    "to", "toward", "towards", "at", "from", "with", "for",
+    "about", "against", "of", "into", "onto", "like", "by", "near",
+})
 _WORD_RE = re.compile(r"\w+", re.UNICODE)
 
 
@@ -2744,6 +2748,20 @@ class ScriptGenerator:
                 )
 
     @staticmethod
+    def sync_dialogue_counts(
+        scripts: list[ScriptChapter],
+        registry: CharacterRegistry,
+    ) -> None:
+        """Synchronize character registry dialogue counts with actual script lines."""
+        for character in registry.characters.values():
+            character.dialogue_count = 0
+        for script in scripts:
+            for line in script.lines:
+                speaker = ScriptGenerator._normalize_speaker_id(line.speaker)
+                if speaker != "narrator" and speaker in registry.characters:
+                    registry.characters[speaker].dialogue_count += 1
+
+    @staticmethod
     def remap_reconciled_speakers(
         scripts: list[ScriptChapter],
         registry: CharacterRegistry,
@@ -3190,7 +3208,7 @@ class ScriptGenerator:
                 exact, kind, gender = ScriptGenerator._dialogue_tag_evidence(
                     text, registry
                 )
-                if exact is None:
+                if exact is None and gender is None:
                     continue
                 previous_index = group[position - 1] if position > 0 else None
                 next_index = (
@@ -3210,11 +3228,11 @@ class ScriptGenerator:
                         fragments[next_index].text
                     )
                 )
-                if previous_is_dialogue:
+                if previous_is_dialogue and previous_index not in tag_map:
                     tag_map[previous_index] = (exact, kind, gender)
-                # A named tag between two quotes in one paragraph carries
+                # A named or pronoun tag between two quotes in one paragraph carries
                 # across a split turn even when the tag ends with a period:
-                # "First half," A said. "Second half."
+                # "First half," A said / he said. "Second half."
                 if next_is_dialogue and (
                     previous_is_dialogue
                     or text.strip().endswith((",", ":"))
@@ -3282,10 +3300,10 @@ class ScriptGenerator:
                 )
             if exact_speaker is None and i in para_tag_map:
                 para_exact, para_kind, para_gender = para_tag_map[i]
-                if para_exact is not None:
-                    exact_speaker, evidence_kind, evidence_gender = (
-                        para_exact, para_kind, para_gender
-                    )
+                if para_exact is not None or para_gender is not None:
+                    exact_speaker = exact_speaker or para_exact
+                    evidence_kind = evidence_kind or para_kind
+                    evidence_gender = evidence_gender or para_gender
 
             collective_tag = ScriptGenerator._is_collective_dialogue_tag(tag_text)
             embedded_term = ScriptGenerator._is_embedded_quoted_term(i, fragments)
@@ -3527,26 +3545,6 @@ class ScriptGenerator:
                 metadata_map.get(i, {}).get("speaker_evidence") or ""
             ).strip()
 
-            # Check if reasoning evidence contradicts the submitted speaker
-            ev_contra, ev_speaker = ScriptGenerator._evidence_contradicts_speaker(
-                evidence, speaker, registry
-            )
-            if ev_contra and ev_speaker and speaker != ev_speaker and dialogue_kind == "spoken":
-                issues.append(
-                    AttributionIssue(
-                        kind="evidence_character_contradiction",
-                        fragment_index=i,
-                        fragment_id=fragment_id,
-                        submitted_speaker=speaker,
-                        exact_speaker=ev_speaker,
-                        message=(
-                            f"Fragment {fragment_id} assigns '{speaker}', but its "
-                            f"reasoning evidence explicitly attributes dialogue to '{ev_speaker}'"
-                        ),
-                    )
-                )
-                continue
-
             if dialogue_kind == "spoken" and len(evidence) < 8:
                 issues.append(
                     AttributionIssue(
@@ -3665,18 +3663,22 @@ class ScriptGenerator:
         registry: CharacterRegistry | None,
     ) -> tuple[str | None, str | None, Gender | None]:
         """Resolve only explicit, unique speaker evidence from a dialogue tag."""
-        if registry is None:
+        if registry is None or not tag_text.strip():
             return None, None, None
 
         tag = tag_text.casefold()
         tag_tokens = _word_tokens(tag)
-        speech_positions = {
+        speech_positions = [
             index
             for index, token in enumerate(tag_tokens)
             if token in _SPEECH_VERB_SET
-        }
-        speech_verbs = _SPEECH_VERB_PATTERN
-        named_matches: list[tuple[int, str]] = []
+        ]
+        if not speech_positions:
+            return None, None, None
+
+        pre_verbal_matches: list[tuple[int, int, str]] = []
+        post_verbal_matches: list[tuple[int, int, str]] = []
+
         for character_id, candidate in registry.characters.items():
             if character_id == "narrator":
                 continue
@@ -3689,34 +3691,57 @@ class ScriptGenerator:
             }
             for name in names:
                 name_tokens = _word_tokens(name)
+                if not name_tokens:
+                    continue
                 starts = _subsequence_starts(tag_tokens, name_tokens)
-                name_is_near_speech = any(
-                    (
-                        0 <= verb_index - (start + len(name_tokens)) <= 3
-                        or 0 <= start - (verb_index + 1) <= 3
-                    )
-                    for start in starts
-                    for verb_index in speech_positions
-                )
-                if name_is_near_speech:
-                    named_matches.append((len(name), character_id))
+                for start in starts:
+                    name_end = start + len(name_tokens)
+                    for verb_index in speech_positions:
+                        # Case 1: Pre-verbal subject (Candidate before SpeechVerb)
+                        if 0 <= verb_index - name_end <= 3:
+                            intervening = tag_tokens[name_end:verb_index]
+                            if not any(t in _PREPOSITIONS_OBJECTS for t in intervening):
+                                proximity = verb_index - name_end
+                                pre_verbal_matches.append((proximity, len(name), character_id))
+                        # Case 2: Post-verbal inverted subject (SpeechVerb before Candidate)
+                        elif 0 <= start - (verb_index + 1) <= 2:
+                            intervening = tag_tokens[verb_index + 1:start]
+                            has_prep = any(t in _PREPOSITIONS_OBJECTS for t in intervening)
+                            has_participle = any(t.endswith("ing") and len(t) > 3 for t in intervening)
+                            if not has_prep and not has_participle:
+                                proximity = start - (verb_index + 1)
+                                post_verbal_matches.append((proximity, len(name), character_id))
 
-        if named_matches:
-            longest = max(length for length, _ in named_matches)
-            named_speakers = {
-                character_id
-                for length, character_id in named_matches
-                if length == longest
-            }
-            if len(named_speakers) == 1:
-                return next(iter(named_speakers)), "named_tag", None
+        if pre_verbal_matches:
+            pre_verbal_matches.sort(key=lambda m: (m[0], -m[1]))
+            best_proximity = pre_verbal_matches[0][0]
+            closest = [m for m in pre_verbal_matches if m[0] == best_proximity]
+            max_len = max(m[1] for m in closest)
+            best_speakers = {m[2] for m in closest if m[1] == max_len}
+            if len(best_speakers) == 1:
+                return next(iter(best_speakers)), "named_tag", None
 
+        if post_verbal_matches:
+            post_verbal_matches.sort(key=lambda m: (m[0], -m[1]))
+            best_proximity = post_verbal_matches[0][0]
+            closest = [m for m in post_verbal_matches if m[0] == best_proximity]
+            max_len = max(m[1] for m in closest)
+            best_speakers = {m[2] for m in closest if m[1] == max_len}
+            if len(best_speakers) == 1:
+                return next(iter(best_speakers)), "named_tag", None
+
+        speech_verbs = _SPEECH_VERB_PATTERN
         generic_match = re.search(
             r"\b(?:the|a)\s+(boy|girl|man|woman)\b(?:\s+\w+){0,2}\s+(?:"
             + speech_verbs
             + r")\b",
             tag,
         )
+        if not generic_match:
+            generic_match = re.search(
+                r"\b(?:" + speech_verbs + r")\s+(?:the|a)\s+(boy|girl|man|woman)\b",
+                tag,
+            )
         if generic_match:
             noun = generic_match.group(1)
             role_specs = {
@@ -3762,49 +3787,39 @@ class ScriptGenerator:
         return None, None, None
 
     @staticmethod
-    def _evidence_contradicts_speaker(
-        evidence: str,
-        submitted_speaker: str,
-        registry: CharacterRegistry | None,
-    ) -> tuple[bool, str | None]:
-        """Check if the reasoning evidence explicitly attributes dialogue to a different character."""
-        if not evidence or registry is None or submitted_speaker == "narrator":
-            return False, None
+    def _resolve_dialogue_speaker(
+        fragment_index: int,
+        fragments: list[SourceFragment],
+        metadata_map: dict[int, dict[str, Any]],
+        allowed_speakers: set[str],
+        *,
+        registry: CharacterRegistry,
+        target_gender: Gender | None = None,
+    ) -> str | None:
+        """Resolve a candidate speaker matching a target gender from paragraph or nearby context."""
+        if target_gender is None:
+            return None
 
-        ev_lower = evidence.casefold()
-        submitted_char = registry.characters.get(submitted_speaker)
-        submitted_names = {
-            name.strip().casefold().replace("_", " ")
-            for name in [
-                submitted_speaker,
-                (submitted_char.name if submitted_char else ""),
-                *(submitted_char.aliases if submitted_char else []),
-            ]
-            if name.strip()
-            and name.strip().casefold().replace("_", " ") not in _UNSAFE_SPEAKER_ALIASES
-        }
+        # 1. Look within nearby dialogue fragments for a character of matching gender
+        for offset in (-2, -1, 1, 2):
+            neighbor_idx = fragment_index + offset
+            if 0 <= neighbor_idx < len(fragments):
+                meta = metadata_map.get(neighbor_idx, {})
+                sp = meta.get("speaker")
+                if sp and sp != "narrator" and sp in allowed_speakers and sp in registry.characters:
+                    char = registry.characters[sp]
+                    if char.gender == target_gender:
+                        return sp
 
-        for other_id, other_char in registry.characters.items():
-            if other_id in ("narrator", submitted_speaker):
-                continue
-            other_names = {
-                name.strip().casefold().replace("_", " ")
-                for name in [other_id, other_char.name, *other_char.aliases]
-                if name.strip()
-                and name.strip().casefold().replace("_", " ") not in _UNSAFE_SPEAKER_ALIASES
-            }
-            for name in other_names:
-                if len(name) < 3:
-                    continue
-                for pattern in _evidence_name_patterns(name):
-                    if pattern.search(ev_lower):
-                        if not any(
-                            sub_name in pattern.pattern
-                            for sub_name in submitted_names
-                            if len(sub_name) >= 3
-                        ):
-                            return True, other_id
-        return False, None
+        # 2. Check characters matching target_gender in allowed_speakers
+        matching_chars = [
+            cid for cid in allowed_speakers
+            if cid != "narrator" and cid in registry.characters and registry.characters[cid].gender == target_gender
+        ]
+        if len(matching_chars) == 1:
+            return matching_chars[0]
+
+        return None
 
     @staticmethod
     def _validate_dialogue_tag_attribution(
@@ -3844,18 +3859,36 @@ class ScriptGenerator:
 
     @staticmethod
     def _is_pure_dialogue_tag(text: str) -> bool:
-        """Check if narrative text is a short dialogue tag attached to speech."""
+        """Check if narrative text is or starts/ends with a dialogue tag attached to speech."""
         val = text.strip()
         words = val.split()
-        if len(words) > 12:
+        if not words:
             return False
-        return bool(
-            re.search(
-                rf"\b(?:{_SPEECH_VERB_PATTERN})\b",
-                val,
-                re.IGNORECASE,
+        if len(words) <= 12:
+            return bool(
+                re.search(
+                    rf"\b(?:{_SPEECH_VERB_PATTERN})\b",
+                    val,
+                    re.IGNORECASE,
+                )
             )
-        )
+        first_sentence = re.split(r"[.!?\n]", val)[0].strip()
+        first_words = first_sentence.split()[:10]
+        if re.search(
+            rf"\b(?:{_SPEECH_VERB_PATTERN})\b",
+            " ".join(first_words),
+            re.IGNORECASE,
+        ):
+            return True
+        last_sentence = re.split(r"[.!?\n]", val)[-1].strip()
+        last_words = last_sentence.split()[-10:]
+        if re.search(
+            rf"\b(?:{_SPEECH_VERB_PATTERN})\b",
+            " ".join(last_words),
+            re.IGNORECASE,
+        ):
+            return True
+        return False
 
     @staticmethod
     def _is_collective_dialogue_tag(text: str) -> bool:

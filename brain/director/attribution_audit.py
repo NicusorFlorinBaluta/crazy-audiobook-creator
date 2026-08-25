@@ -11,7 +11,7 @@ from shared.constants import Gender
 from shared.models import CharacterRegistry, ExtractedBook, ScriptChapter, ScriptLine
 
 
-AUDIT_VERSION = "speaker-attribution-v4"
+AUDIT_VERSION = "speaker-attribution-v5"
 
 _GENERIC_SPEAKER_IDS = {
     "minor_female",
@@ -339,23 +339,7 @@ def audit_book_attribution(
                 )
                 continue
 
-            # Check evidence character contradiction
-            ev_contra, ev_speaker = ScriptGenerator._evidence_contradicts_speaker(
-                owner.speaker_evidence, speaker, registry
-            )
-            if ev_contra and ev_speaker and speaker != ev_speaker and kind == "spoken":
-                issues.append(
-                    _issue(
-                        chapter.number,
-                        index,
-                        owner,
-                        "evidence_character_contradiction",
-                        f"Reasoning evidence explicitly attributes dialogue to '{ev_speaker}'",
-                        fragment.text,
-                        expected_speaker=ev_speaker,
-                    )
-                )
-                continue
+
 
             if speaker != "narrator" and speaker not in chapter_speakers:
                 issues.append(
@@ -537,6 +521,8 @@ def repair_deterministic_named_attribution(
                 }
             )
             repaired.append({"line_id": line.line_id, "from": previous, "to": target})
+    if repaired:
+        ScriptGenerator.sync_dialogue_counts(scripts, registry)
     return {
         "attempted": len(targets_by_line) + sum(
             len(lines)

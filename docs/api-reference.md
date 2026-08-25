@@ -22,7 +22,7 @@ FastAPI’s generated OpenAPI schema at `/docs` is the definitive field-level re
 | `POST` | `/api/projects` | Upload an EPUB as multipart field `file` |
 | `GET` | `/api/projects/{project_id}` | Get stored state |
 | `DELETE` | `/api/projects/{project_id}` | Delete stopped project state, artifacts, and voice references |
-| `GET` | `/api/projects/{project_id}/status` | State plus per-chapter progress |
+| `GET` | `/api/projects/{project_id}/status` | State, compact cast summary, and per-chapter progress (full cast intentionally omitted) |
 
 Uploads must have an `.epub` suffix, remain under the configured compressed/expanded limits, and pass ZIP traversal/compression checks.
 
@@ -64,9 +64,9 @@ Accepts `{"stage": "<stage_name>"}` where `<stage_name>` is one of 8 supported s
 - **`scripting`**: Clears script JSONs and character cast, keeping extracted EPUB text. Forces fresh LLM character analysis.
 - **`bootstrapping`**: Clears `voice_cast.json`, marks reference generation as forced, and regenerates voice profiles on resume.
 - **`voice_review`**: Resets `voice_review_status` to `"pending"` and sets `active_stage = voice_review`, re-opening the Voice Review banner in the UI.
-- **`generating`**: Clears generated segment WAV files and resets `mastered_chapters = []`. Keeps script and voice cast intact.
-- **`validating`**: Preserves segment WAVs, changes the validation revision, removes segment/master manifests, and re-runs Whisper/speaker/audio checks without re-synthesizing unchanged lines.
-- **`mastering`**: Clears `mastered/` WAV files and `.m4b` export. Re-runs ffmpeg/sox chapter mastering.
+- **`generating`**: Clears generated segment WAV files, segment/master manifests, current audio-quality/review evidence, and mastered chapter WAVs. Keeps script and voice cast intact.
+- **`validating`**: Preserves segment WAVs, changes the validation revision, removes segment/master manifests and current audio-quality/review evidence, then re-runs Whisper/speaker/audio checks without re-synthesizing unchanged lines.
+- **`mastering`**: Clears current mastered chapter WAVs under `workspace/{project_id}/chapters`, master manifests, join-review evidence, and `.m4b` export. Re-runs ffmpeg/sox chapter mastering.
 - **`exporting`**: Removes `.m4b` export file to re-run M4B packaging.
 
 ### Chapter selection
@@ -102,7 +102,7 @@ Analysis and scripting remain book-wide. Selection controls generation, masterin
 | `POST` | `/api/projects/{project_id}/voices/{voice_id}/regenerate` | Redesign and validate one reference voice |
 | `POST` | `/api/projects/{project_id}/voices/{voice_id}/upload` | Import a recorded reference plus exact transcript |
 | `POST` | `/api/projects/{project_id}/voice-review/approve` | Approve a new project's cast and optionally continue |
-| `GET` | `/api/projects/{project_id}/quality` | Aggregate quality results |
+| `GET` | `/api/projects/{project_id}/quality` | Aggregate current-generation quality results, noteworthy final attempts, retried-line history, and stale-result count |
 | `GET` | `/api/projects/{project_id}/logs` | Recent project log lines |
 | `GET` | `/api/projects/{project_id}/logs/stream` | SSE project log stream |
 | `POST` | `/api/projects/{project_id}/fetch-metadata` | Explicit Google Books lookup |
@@ -237,6 +237,14 @@ Chapter generation accepts:
 
 `POST /generate/chapter` returns `application/x-ndjson`. Each line is an object with `type = progress`, `result`, or `error`. Progress data includes `phase` (`synthesis` or `validation`), `line_id`, `completed`, `total`, `percent`, `cache_hit`, and `attempt`. A client disconnect cooperatively cancels the run; a second overlapping request for the same project returns `409`.
 
+`POST /voices/bootstrap/stream` uses the same NDJSON envelope for long-running
+voice preparation. Its privacy-safe progress data contains only `phase`,
+`completed`, `total`, and a generic message; it never includes reference text.
+Phases are `loading_voice_design`, `designing_references`,
+`validating_transcripts`, `measuring_references`, `comparing_cast`, and
+`complete`. The non-streaming `/voices/bootstrap` endpoint remains available
+for compatibility.
+
 The terminal result includes `generated_line_ids`, `failed_line_ids`, and every `quality_results` attempt. `validation_terms` comes from character and pronunciation dictionaries and only scopes fuzzy fantasy-name matching. Success requires an exact one-to-one match with the request’s unique script line IDs. A partial/misaligned response is not a successful chapter.
 
 ### Mastering and export
@@ -272,7 +280,7 @@ Clients should treat only an explicit success response with complete artifact ID
 | `GET` | `/api/projects/{id}/quality/review` | Join warnings and low-confidence/rejected segment audio with saved dispositions |
 | `POST` | `/api/projects/{id}/quality/review` | Save a review disposition; segment `regenerate` safely invalidates only that WAV and its dependent chapter outputs |
 | `GET` | `/api/projects/{id}/segments/{line_id}/audio` | Stream one segment for local quality review |
-| `GET` | `/api/projects/{id}/external-validation/status` | Read Gemini API/browser readiness and persistent-chat purposes without secrets or URLs |
+| `GET` | `/api/projects/{id}/external-validation/status` | Read Gemini API/browser dependency/profile readiness and persistent-chat purposes without secrets or URLs |
 | `GET` | `/api/projects/{id}/voices/{voice_id}/download` | Download a reusable reference WAV named with its book and character |
 
 Quality attempts include `selected`. This identifies the artifact that was

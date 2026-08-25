@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -111,6 +112,8 @@ class VoiceDesigner:
     def bootstrap_voices(
         self,
         request: BootstrapVoicesRequest,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        cancel_check: Callable[[], bool] | None = None,
     ) -> BootstrapVoicesResponse:
         """Generate voice reference clips for all characters in a project.
 
@@ -129,6 +132,55 @@ class VoiceDesigner:
         """
         project_id = request.project_id
         voices_generated: dict[str, BootstrapVoiceResult] = {}
+
+        def emit(
+            phase: str,
+            completed: int,
+            total: int,
+            message: str,
+        ) -> None:
+            if progress_callback is None:
+                return
+            try:
+                progress_callback(
+                    {
+                        "phase": phase,
+                        "completed": max(0, int(completed)),
+                        "total": max(1, int(total)),
+                        "message": message,
+                    }
+                )
+            except Exception:
+                logger.warning("Voice bootstrap progress callback failed", exc_info=True)
+
+        def check_cancelled() -> None:
+            if cancel_check is not None and cancel_check():
+                raise RuntimeError("Voice bootstrapping cancelled")
+
+        candidate_total = sum(
+            max(
+                1,
+                min(
+                    3,
+                    int(
+                        request.candidate_counts.get(
+                            char_id,
+                            3
+                            if char_id == "narrator"
+                            or getattr(character, "importance", "minor") == "major"
+                            else 1,
+                        )
+                    ),
+                ),
+            )
+            for char_id, character in request.characters.items()
+        )
+        emit(
+            "loading_voice_design",
+            0,
+            1,
+            "Loading the voice-design model",
+        )
 
         import httpx
         
@@ -166,6 +218,7 @@ class VoiceDesigner:
         try:
             # Allow up to 10 minutes for a first-time model download.
             for _ in range(300):
+                check_cancelled()
                 if design_proc.poll() is not None:
                     raise RuntimeError(
                         "Qwen VoiceDesign Microservice exited during startup; "
@@ -181,6 +234,12 @@ class VoiceDesigner:
                         and resp.json().get("model_loaded") is True
                     ):
                         logger.info("Qwen VoiceDesign Microservice is ready!")
+                        emit(
+                            "designing_references",
+                            0,
+                            candidate_total,
+                            f"Preparing {candidate_total} voice reference candidates",
+                        )
                         break
                 except Exception:
                     pass
@@ -191,7 +250,9 @@ class VoiceDesigner:
                     "see qwen-voice-design.log"
                 )
 
+            designed_candidates = 0
             for char_id, character in request.characters.items():
+                check_cancelled()
                 importance = getattr(character, "importance", "minor")
                 default_count = 3 if char_id == "narrator" or importance == "major" else 1
                 num_candidates = max(
@@ -201,6 +262,7 @@ class VoiceDesigner:
 
                 candidates = []
                 for cand_idx in range(1, num_candidates + 1):
+                    check_cancelled()
                     # Candidate one is the canonical, initially assigned profile.
                     # Additional candidates are optional alternatives.  Keeping a
                     # real registry entry under char_id makes a newly bootstrapped
@@ -218,6 +280,13 @@ class VoiceDesigner:
                                 duration_seconds=existing.get("duration_seconds", 0.0),
                                 sample_rate=existing.get("sample_rate", 24000),
                             ))
+                            designed_candidates += 1
+                            emit(
+                                "designing_references",
+                                designed_candidates,
+                                candidate_total,
+                                f"Prepared {designed_candidates} of {candidate_total} voice candidates",
+                            )
                             continue
                         expected_fingerprint = request.design_fingerprints.get(char_id, "")
                         fingerprint_matches = (
@@ -232,6 +301,13 @@ class VoiceDesigner:
                                 duration_seconds=existing.get("duration_seconds", 0.0),
                                 sample_rate=existing.get("sample_rate", 24000),
                             ))
+                            designed_candidates += 1
+                            emit(
+                                "designing_references",
+                                designed_candidates,
+                                candidate_total,
+                                f"Prepared {designed_candidates} of {candidate_total} voice candidates",
+                            )
                             continue
 
                     result = self._generate_voice(
@@ -266,6 +342,13 @@ class VoiceDesigner:
                         result.warnings.append("Automatically redesigned once after an acoustic register mismatch.")
                     
                     candidates.append(result)
+                    designed_candidates += 1
+                    emit(
+                        "designing_references",
+                        designed_candidates,
+                        candidate_total,
+                        f"Prepared {designed_candidates} of {candidate_total} voice candidates",
+                    )
 
                 voices_generated[char_id] = BootstrapVoiceResult(
                     id=char_id,
@@ -292,12 +375,25 @@ class VoiceDesigner:
         # Validate only after VoiceDesign has released VRAM.
         if self.validator:
             validation_failures: list[str] = []
+            validation_total = sum(
+                len(result.candidates)
+                for result in voices_generated.values()
+            )
+            validation_completed = 0
+            emit(
+                "validating_transcripts",
+                0,
+                validation_total,
+                "Checking reference transcripts",
+            )
             for char_id, result in voices_generated.items():
+                check_cancelled()
                 character = request.characters[char_id]
                 expected = self._build_test_sentence(char_id, character)
 
                 validated_candidates: list[VoiceCandidate] = []
                 for candidate_index, candidate in enumerate(result.candidates):
+                    check_cancelled()
                     transcribed = self.validator.transcribe(candidate.file)
                     wer = self.validator.calculate_wer(expected, transcribed)
                     candidate.transcription_wer = float(wer)
@@ -318,8 +414,15 @@ class VoiceDesigner:
                                 "Discarding optional candidate '%s' after transcript failure",
                                 candidate.id,
                             )
-                        continue
-                    validated_candidates.append(candidate)
+                    else:
+                        validated_candidates.append(candidate)
+                    validation_completed += 1
+                    emit(
+                        "validating_transcripts",
+                        validation_completed,
+                        validation_total,
+                        f"Checked {validation_completed} of {validation_total} reference transcripts",
+                    )
                 result.candidates = validated_candidates
                 if not validated_candidates:
                     continue
@@ -335,14 +438,34 @@ class VoiceDesigner:
                 )
 
         embeddings: dict[str, Any] = {}
+        acoustic_total = sum(
+            len(result.candidates)
+            for result in voices_generated.values()
+        )
+        acoustic_completed = 0
+        emit(
+            "measuring_references",
+            0,
+            acoustic_total,
+            "Measuring reference audio quality",
+        )
         for char_id, result in voices_generated.items():
+            check_cancelled()
             character = request.characters[char_id]
             for cand in result.candidates:
+                check_cancelled()
                 metrics, warnings = self._acoustic_diagnostics(
                     Path(cand.file), character
                 )
                 cand.acoustic_metrics = metrics
                 cand.warnings.extend(warnings)
+                acoustic_completed += 1
+                emit(
+                    "measuring_references",
+                    acoustic_completed,
+                    acoustic_total,
+                    f"Measured {acoustic_completed} of {acoustic_total} references",
+                )
             if result.candidates:
                 result.acoustic_metrics = result.candidates[0].acoustic_metrics
                 result.warnings = list(result.candidates[0].warnings)
@@ -360,8 +483,17 @@ class VoiceDesigner:
 
         cast_diagnostics: list[CastPairDiagnostic] = []
         voice_ids = list(embeddings)
+        pair_total = len(voice_ids) * max(0, len(voice_ids) - 1) // 2
+        pair_completed = 0
+        emit(
+            "comparing_cast",
+            0,
+            max(1, pair_total),
+            "Comparing cast distinctness",
+        )
         for index, left_id in enumerate(voice_ids):
             for right_id in voice_ids[index + 1:]:
+                check_cancelled()
                 similarity = self.engine.embedding_similarity(
                     embeddings[left_id],
                     embeddings[right_id],
@@ -377,6 +509,14 @@ class VoiceDesigner:
                     self.similarity_warning_threshold,
                 )
                 cast_diagnostics.append(diagnostic)
+                pair_completed += 1
+                if pair_completed % 25 == 0 or pair_completed == pair_total:
+                    emit(
+                        "comparing_cast",
+                        pair_completed,
+                        max(1, pair_total),
+                        f"Compared {pair_completed} of {pair_total} cast pairs",
+                    )
                 if diagnostic.status == "similar":
                     warning = (
                         f"Sounds very similar to {right_id} "
@@ -399,6 +539,12 @@ class VoiceDesigner:
                     # attempt an impossible late fallback generation here; the
                     # warning is surfaced for an explicit user redesign instead.
 
+        emit(
+            "complete",
+            1,
+            1,
+            "Voice references are ready for review",
+        )
         return BootstrapVoicesResponse(
             status="success",
             project_id=project_id,

@@ -18,7 +18,22 @@ const state = window.state = {
     metadataCandidate: null
 };
 
-const attentionState = {data: null, page: 1, pageSize: 10, projectId: null};
+const savedAttentionPageSize = (() => {
+    try { return localStorage.getItem('crazy_audiobook_attention_page_size') || '10'; } catch (_) { return '10'; }
+})();
+const savedAttentionPill = (() => {
+    try { return localStorage.getItem('crazy_audiobook_attention_pill') || 'all'; } catch (_) { return 'all'; }
+})();
+const attentionState = {
+    data: null,
+    page: 1,
+    pageSize: savedAttentionPageSize === 'all' ? 999999 : parseInt(savedAttentionPageSize, 10) || 10,
+    pageSizeSetting: savedAttentionPageSize,
+    activePill: savedAttentionPill,
+    projectId: null,
+    expandedCandidates: new Set(),
+    searchQuery: '',
+};
 
 // DOM Elements
 const els = {
@@ -256,6 +271,29 @@ function setupEventListeners() {
             renderAttentionInbox();
         });
     });
+    document.getElementById('attention-search')?.addEventListener('input', (e) => {
+        attentionState.searchQuery = (e.target.value || '').trim().toLowerCase();
+        attentionState.page = 1;
+        renderAttentionInbox();
+    });
+    document.getElementById('attention-page-size')?.addEventListener('change', (e) => {
+        const val = e.target.value;
+        attentionState.pageSizeSetting = val;
+        attentionState.pageSize = val === 'all' ? 999999 : parseInt(val, 10) || 10;
+        attentionState.page = 1;
+        try { localStorage.setItem('crazy_audiobook_attention_page_size', val); } catch (_) {}
+        renderAttentionInbox();
+    });
+    document.getElementById('attention-pills')?.addEventListener('click', (e) => {
+        const pill = e.target.closest('.attention-pill');
+        if (!pill) return;
+        document.querySelectorAll('.attention-pill').forEach(p => p.classList.remove('active'));
+        pill.classList.add('active');
+        attentionState.activePill = pill.dataset.filter || 'all';
+        attentionState.page = 1;
+        try { localStorage.setItem('crazy_audiobook_attention_pill', attentionState.activePill); } catch (_) {}
+        renderAttentionInbox();
+    });
     document.getElementById('attention-prev')?.addEventListener('click', () => {
         attentionState.page = Math.max(1, attentionState.page - 1);
         renderAttentionInbox();
@@ -346,6 +384,7 @@ function setupEventListeners() {
     document.getElementById('select-page-size')?.addEventListener('change', (e) => {
         chapterPaginationState.pageSize = e.target.value;
         chapterPaginationState.currentPage = 1;
+        try { localStorage.setItem('crazy_audiobook_chapter_page_size', e.target.value); } catch (_) {}
         filterChapterRows();
     });
     document.getElementById('btn-prev-page')?.addEventListener('click', () => {
@@ -485,12 +524,7 @@ async function showDetailView(projectId, isHashLoad = false) {
             : defaultTab
     );
 
-    if (detailPollTimer) clearInterval(detailPollTimer);
-    detailPollTimer = setInterval(() => {
-        if (state.currentProjectId) {
-            fetchProjectDetails(state.currentProjectId, true);
-        }
-    }, 2000);
+    scheduleDetailPoll();
 
     // Connect log console in background (non-blocking)
     if (window.LogConsole) {
@@ -499,6 +533,32 @@ async function showDetailView(projectId, isHashLoad = false) {
             && !terminal.includes(String(project?.status || '').toLowerCase());
         window.LogConsole.openForProject(projectId, running);
     }
+}
+
+function scheduleDetailPoll() {
+    if (detailPollTimer) clearTimeout(detailPollTimer);
+    if (!state.currentProjectId) return;
+    const project = state.currentProject || {};
+    const stage = String(project.active_stage || project.status || '').toLowerCase();
+    const status = String(project.status || '').toLowerCase();
+    const rapidStages = new Set([
+        'extracting', 'scripting', 'bootstrapping', 'generating',
+        'validating', 'mastering', 'exporting', 'pausing'
+    ]);
+    const terminalOrWaiting = new Set([
+        'complete', 'completed', 'selection_complete', 'paused',
+        'paused_scheduled', 'deploy_paused', 'waiting_for_review',
+        'voice_review', 'error'
+    ]);
+    const delay = !terminalOrWaiting.has(status)
+        && (project.running === true || rapidStages.has(stage))
+        ? 2000
+        : 10000;
+    detailPollTimer = setTimeout(async () => {
+        if (!state.currentProjectId) return;
+        await fetchProjectDetails(state.currentProjectId, true);
+        scheduleDetailPoll();
+    }, delay);
 }
 
 // ============================================================================
@@ -555,12 +615,13 @@ async function fetchProjectDetails(projectId, isPoll = false) {
         }
         
         // Let pipeline.js and script-viewer.js update their parts
+        const stage = String(data.active_stage || data.status || '').toLowerCase();
         if (window.PipelineManager) {
-            const stage = (data.status || '').toLowerCase();
+            const status = String(data.status || '').toLowerCase();
             const activeStages = ['extracting', 'scripting', 'bootstrapping', 'generating', 'validating', 'mastering', 'exporting', 'pausing'];
-            const isPausedOrDone = ['complete', 'completed', 'selection_complete', 'paused', 'paused_scheduled', 'deploy_paused', 'waiting_for_review', 'voice_review', 'error'].includes(stage);
+            const isPausedOrDone = ['complete', 'completed', 'selection_complete', 'paused', 'paused_scheduled', 'deploy_paused', 'waiting_for_review', 'voice_review', 'error'].includes(status);
             const isRunning = (data.running === true || activeStages.includes(stage)) && !isPausedOrDone;
-            const coarseStatus = isRunning ? 'running' : stage;
+            const coarseStatus = isRunning ? 'running' : status;
             window.LogConsole?.setProjectRunning(isRunning);
             
             window.PipelineManager.updateTracker(data.active_stage || data.status, isRunning ? 'running' : coarseStatus, data);
@@ -570,12 +631,22 @@ async function fetchProjectDetails(projectId, isPoll = false) {
         if (window.ScriptViewer) {
             if (!isPoll) {
                 window.ScriptViewer.loadData(projectId);
+                state.lastVoiceRevision = String(data.voice_cast_revision || '');
+                state.lastVoiceRefresh = Date.now();
             } else {
                 const charTab = document.getElementById('tab-characters');
                 const isCharTabActive = charTab && !charTab.hidden && charTab.classList.contains('active');
-                if (isCharTabActive && ['bootstrapping', 'voice_review'].includes(stage)) {
+                const revision = String(data.voice_cast_revision || '');
+                const revisionChanged = Boolean(
+                    revision && revision !== state.lastVoiceRevision
+                );
+                const bootstrapRefreshDue = stage === 'bootstrapping'
+                    && Date.now() - state.lastVoiceRefresh > 10000;
+                if (isCharTabActive && (revisionChanged || bootstrapRefreshDue)) {
+                    state.lastVoiceRefresh = Date.now();
                     window.ScriptViewer.refreshVoices(projectId);
                 }
+                state.lastVoiceRevision = revision;
             }
         }
         return data;
@@ -977,7 +1048,33 @@ function renderAttentionInbox(project = state.currentProject) {
     }
     panel.classList.remove('hidden');
     const isWaitingForReview = project?.status === 'waiting_for_review';
-    const hasBlocking = (data.blocking_count || 0) > 0;
+    const items = data.items || [];
+    const blockingItems = items.filter(item => Boolean(item.blocking));
+    const pronunciationItems = items.filter(item => item.category === 'pronunciation');
+    const characterItems = items.filter(item => item.category === 'character');
+    const resolvedItems = items.filter(item => (
+        item.disposition === 'acceptable' ||
+        item.disposition === 'resolved' ||
+        item.status === 'verified' ||
+        (!item.blocking && (item.category === 'attribution' || item.category === 'extraction'))
+    ));
+
+    const blockingCount = blockingItems.length;
+    const pronunciationCount = pronunciationItems.length;
+    const characterCount = characterItems.length;
+    const resolvedCount = resolvedItems.length;
+    const hasBlocking = blockingCount > 0;
+
+    const countBlockingEl = document.getElementById('pill-count-blocking');
+    const countPronEl = document.getElementById('pill-count-pronunciation');
+    const countCharEl = document.getElementById('pill-count-character');
+    const countResEl = document.getElementById('pill-count-resolved');
+    const countAllEl = document.getElementById('pill-count-all');
+    if (countBlockingEl) countBlockingEl.textContent = blockingCount;
+    if (countPronEl) countPronEl.textContent = pronunciationCount;
+    if (countCharEl) countCharEl.textContent = characterCount;
+    if (countResEl) countResEl.textContent = resolvedCount;
+    if (countAllEl) countAllEl.textContent = items.length;
     
     if (details && !details.dataset.listenerAttached) {
         details.dataset.listenerAttached = 'true';
@@ -997,38 +1094,94 @@ function renderAttentionInbox(project = state.currentProject) {
             kicker.textContent = isWaitingForReview ? '⚠️ Action required' : '⚠️ Attention required';
             kicker.className = 'attention-kicker attention-kicker-warning';
         }
-        const plural = data.blocking_count === 1 ? '' : 's';
-        document.getElementById('attention-summary').innerHTML = `<span class="attention-warning-text">⚠️ <strong>${data.blocking_count} high/critical item${plural} to review</strong> — pipeline resumes automatically after the last one. <em>(Click to expand)</em></span>`;
+        const plural = blockingCount === 1 ? '' : 's';
+        document.getElementById('attention-summary').innerHTML = `<span class="attention-warning-text">⚠️ <strong>${blockingCount} Action Required item${plural}</strong> • ${pronunciationCount} Pronunciation Terms • ${characterCount} Character Notes <em>(Click to expand)</em></span>`;
     } else {
         panel.classList.remove('attention-panel-warning');
         panel.classList.add('attention-panel-resolved');
         if (kicker) {
-            kicker.textContent = 'Optional / Reference';
+            kicker.textContent = 'Project Clear / Optional Tools';
             kicker.className = 'attention-kicker attention-kicker-optional';
         }
-        document.getElementById('attention-summary').textContent = `✓ 0 blocking issues • ${data.total_count} non-blocking or resolved item${data.total_count === 1 ? '' : 's'} (click to expand)`;
+        document.getElementById('attention-summary').innerHTML = `<span><strong style="color:#86efac">✓ 0 Blocking Issues (Pipeline Clear)</strong> • ${pronunciationCount} Optional Pronunciation Terms • ${characterCount} Character Notes <em>(Click to expand)</em></span>`;
     }
     
-    const resume = document.getElementById('btn-resume-after-review');
-    resume.classList.toggle('hidden', !isWaitingForReview || data.blocking_count !== 0);
-    const type = document.getElementById('attention-type').value;
-    const status = document.getElementById('attention-status').value;
-    const confidence = document.getElementById('attention-confidence').value;
-    const filtered = data.items.filter(item => {
-        const band = confidenceBand(item.confidence).key;
-        return (type === 'all' || item.category === type)
-            && (status === 'all' || (status === 'blocking' ? item.blocking : !item.blocking))
-            && (confidence === 'all' || band === confidence);
+    const activePill = attentionState.activePill || 'all';
+    document.querySelectorAll('.attention-pill').forEach(p => {
+        p.classList.toggle('active', (p.dataset.filter || 'all') === activePill);
     });
+    const attentionPageSizeSelect = document.getElementById('attention-page-size');
+    if (attentionPageSizeSelect && attentionState.pageSizeSetting) {
+        attentionPageSizeSelect.value = attentionState.pageSizeSetting;
+    }
+
+    const type = document.getElementById('attention-type')?.value || 'all';
+    const status = document.getElementById('attention-status')?.value || 'all';
+    const confidence = document.getElementById('attention-confidence')?.value || 'all';
+    const query = (attentionState.searchQuery || '').toLowerCase();
+
+    const filtered = items.filter(item => {
+        const band = confidenceBand(item.confidence).key;
+        
+        // Pill filter logic
+        if (activePill === 'blocking' && !item.blocking) return false;
+        if (activePill === 'pronunciation' && item.category !== 'pronunciation') return false;
+        if (activePill === 'character' && item.category !== 'character') return false;
+        if (activePill === 'resolved' && !resolvedItems.includes(item)) return false;
+
+        // Dropdown filters
+        if (type !== 'all' && item.category !== type) return false;
+        if (status === 'blocking' && !item.blocking) return false;
+        if (status === 'optional' && (item.blocking || resolvedItems.includes(item))) return false;
+        if (status === 'resolved' && !resolvedItems.includes(item)) return false;
+        if (confidence !== 'all' && band !== confidence) return false;
+
+        // Search query filter
+        if (query) {
+            const matchTitle = (item.title || '').toLowerCase().includes(query);
+            const matchReason = (item.reason || '').toLowerCase().includes(query);
+            const matchText = (item.details?.text || '').toLowerCase().includes(query);
+            const matchSpeaker = (item.details?.speaker || '').toLowerCase().includes(query);
+            const matchTerm = (item.details?.term || '').toLowerCase().includes(query);
+            if (!matchTitle && !matchReason && !matchText && !matchSpeaker && !matchTerm) return false;
+        }
+
+        return true;
+    });
+
     const pages = Math.max(1, Math.ceil(filtered.length / attentionState.pageSize));
     attentionState.page = Math.min(attentionState.page, pages);
     const rows = filtered.slice((attentionState.page - 1) * attentionState.pageSize, attentionState.page * attentionState.pageSize);
+
     document.getElementById('attention-list').innerHTML = rows.length ? rows.map(item => {
         const band = confidenceBand(item.confidence);
         const trail = item.details?.decision_trail || [];
         const isCandidatesExpanded = attentionState.expandedCandidates.has(item.item_id);
-        return `<article class="attention-item ${item.blocking ? 'blocking' : ''}" data-line-id="${escapeHtml(item.item_id)}">
-            <div class="attention-item-head"><strong>${escapeHtml(item.title)}</strong><span class="confidence-band confidence-${band.key}">${escapeHtml(band.label)}</span></div>
+
+        let categoryBadge = '';
+        if (item.blocking) {
+            categoryBadge = `<span class="attention-item-category-badge badge-blocking">⚠️ Action Required</span>`;
+        } else if (item.category === 'pronunciation') {
+            categoryBadge = `<span class="attention-item-category-badge badge-pronunciation">📖 Optional Pronunciation</span>`;
+        } else if (item.category === 'character') {
+            categoryBadge = `<span class="attention-item-category-badge badge-character">👤 Character Note</span>`;
+        } else if (resolvedItems.includes(item)) {
+            categoryBadge = `<span class="attention-item-category-badge badge-resolved">✅ Auto-Resolved</span>`;
+        } else {
+            categoryBadge = `<span class="attention-item-category-badge badge-info">${escapeHtml(item.category || 'Info')}</span>`;
+        }
+
+        const isPronunciation = item.category === 'pronunciation';
+        const termName = (item.details?.term || (item.title || '')).replace(/^Pronunciation:\s*/i, '').trim();
+
+        return `<article class="attention-item ${item.blocking ? 'blocking' : ''}" data-line-id="${escapeHtml(item.item_id)}" data-term="${escapeHtml(termName)}">
+            <div class="attention-item-head">
+                <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                    <strong>${escapeHtml(item.title)}</strong>
+                    ${categoryBadge}
+                </div>
+                <span class="confidence-band confidence-${band.key}">${escapeHtml(band.label)}</span>
+            </div>
             ${item.details?.text ? `
                 <div class="attention-line-quote">
                     <strong>${escapeHtml(item.details?.speaker ? (item.details.speaker.charAt(0).toUpperCase() + item.details.speaker.slice(1)) : 'Speaker')}:</strong>
@@ -1036,6 +1189,14 @@ function renderAttentionInbox(project = state.currentProject) {
                 </div>
             ` : ''}
             <p>${escapeHtml(item.reason || '')}</p>
+            ${isPronunciation ? `
+                <div class="attention-quick-pronunciation">
+                    <input type="text" placeholder="Phonetic spoken form (e.g. Pah-chee)" value="${escapeHtml(item.details?.spoken_text || '')}" class="quick-spoken-input" data-term="${escapeHtml(termName)}">
+                    <button type="button" class="btn btn-ghost btn-sm btn-quick-pronunciation-preview" data-term="${escapeHtml(termName)}" title="Test audio preview">▶ Preview</button>
+                    <button type="button" class="btn btn-secondary btn-sm btn-quick-pronunciation-save" data-term="${escapeHtml(termName)}">Save Pronunciation</button>
+                    <button type="button" class="btn btn-ghost btn-sm btn-open-lexicon">Open Lexicon</button>
+                </div>
+            ` : ''}
             <div class="attention-item-actions">
                 ${item.category === 'audio' ? `
                     <audio controls preload="none" src="${escapeHtml(item.details?.audio_url || '')}"></audio>
@@ -1049,6 +1210,7 @@ function renderAttentionInbox(project = state.currentProject) {
             ${trail.length ? `<details class="decision-trail"><summary>Decision trail (${trail.length})</summary>${trail.map(step => `<div><strong>${escapeHtml(step.provider || step.resolver || 'validator')}</strong> · ${escapeHtml(step.decision || 'unknown')} · ${step.confidence == null ? 'n/a' : `${Math.round(step.confidence * 100)}%`}<br><small>${escapeHtml(step.reason || '')}</small></div>`).join('')}</details>` : ''}
         </article>`;
     }).join('') : '<div class="review-complete-message">No items match these filters.</div>';
+
     document.getElementById('attention-page').textContent = `Page ${attentionState.page} of ${pages} · ${filtered.length} items`;
     document.getElementById('attention-prev').disabled = attentionState.page <= 1;
     document.getElementById('attention-next').disabled = attentionState.page >= pages;
@@ -1142,14 +1304,46 @@ function renderAttentionInbox(project = state.currentProject) {
             button.disabled = false;
         }
     }));
-    panel.querySelectorAll('.reveal-context').forEach(button => button.addEventListener('click', () => {
-        const id = button.closest('.attention-item').dataset.lineId;
-        activateDetailTab('tab-script');
-        if (window.ScriptViewer && typeof window.ScriptViewer.revealLine === 'function') {
-            window.ScriptViewer.revealLine(id);
-        } else {
-            setTimeout(() => document.querySelector(`[data-line-id="${CSS.escape(id)}"]`)?.scrollIntoView({behavior: 'smooth', block: 'center'}), 150);
+    panel.querySelectorAll('.btn-quick-pronunciation-preview').forEach(button => button.addEventListener('click', () => {
+        const row = button.closest('.attention-item');
+        const term = (button.dataset.term || row.dataset.term || '').replace(/^Pronunciation:\s*/i, '').trim();
+        const spoken = (row.querySelector('.quick-spoken-input')?.value.trim() || term).replace(/^Pronunciation:\s*/i, '').trim();
+        if (window.ScriptViewer && window.ScriptViewer.previewPronunciation) {
+            window.ScriptViewer.previewPronunciation(term, spoken, button);
         }
+    }));
+    panel.querySelectorAll('.btn-quick-pronunciation-save').forEach(button => button.addEventListener('click', async () => {
+        const row = button.closest('.attention-item');
+        const term = (button.dataset.term || row.dataset.term || '').replace(/^Pronunciation:\s*/i, '').trim();
+        const spoken = (row.querySelector('.quick-spoken-input')?.value.trim() || '').replace(/^Pronunciation:\s*/i, '').trim();
+        if (!spoken) {
+            showToast('Enter the phonetic spoken form first', 'warning');
+            return;
+        }
+        button.disabled = true;
+        button.textContent = 'Saving…';
+        try {
+            const response = await fetch(`api/projects/${encodeURIComponent(attentionState.projectId)}/pronunciations`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({term, spoken_text: spoken})
+            });
+            if (!response.ok) throw new Error(await response.text());
+            const saved = await response.json();
+            showToast(`Pronunciation for "${term}" saved! (${saved.affected_chapters.length} chapter${saved.affected_chapters.length === 1 ? '' : 's'} marked for update)`, 'success');
+            await fetchAndRenderAttention(attentionState.projectId, state.currentProject, true);
+        } catch (err) {
+            showToast(`Could not save: ${err.message}`, 'error');
+            button.disabled = false;
+            button.textContent = 'Save Pronunciation';
+        }
+    }));
+    panel.querySelectorAll('.btn-open-lexicon').forEach(button => button.addEventListener('click', () => {
+        activateDetailTab('tab-quality');
+        setTimeout(() => {
+            const lex = document.querySelector('.pronunciation-review');
+            if (lex) lex.scrollIntoView({behavior: 'smooth', block: 'start'});
+        }, 150);
     }));
 }
 
@@ -1487,7 +1681,7 @@ function renderChapterList(project) {
 
     for (let chapter = 1; chapter <= total; chapter++) {
         const detail = detailsMap.get(chapter) || {};
-        const title = `Chapter ${chapter}`;
+        const title = detail.title || `Chapter ${chapter}`;
         const totalLines = detail.total_lines || 0;
         const generatedLines = detail.lines_generated || 0;
         let percent = detail.progress_percent || 0;
@@ -1609,13 +1803,22 @@ function parseChapterRange(value) {
     return result.size ? result : null;
 }
 
+const savedChapterPageSize = (() => {
+    try { return localStorage.getItem('crazy_audiobook_chapter_page_size') || '15'; } catch (_) { return '15'; }
+})();
+
 const chapterPaginationState = {
     currentPage: 1,
-    pageSize: '15',
+    pageSize: savedChapterPageSize,
     projectId: null
 };
 
 function filterChapterRows() {
+    const selectPageSize = document.getElementById('select-page-size');
+    if (selectPageSize && chapterPaginationState.pageSize && selectPageSize.value !== chapterPaginationState.pageSize) {
+        selectPageSize.value = chapterPaginationState.pageSize;
+    }
+
     const search = (document.getElementById('chapter-search-input')?.value || '')
         .trim().toLowerCase();
     const status = document.getElementById('chapter-status-filter')?.value || 'all';
@@ -1861,10 +2064,23 @@ function renderWorkStatus(project) {
         : '—';
     const updatedAt = progress?.updated_at || (project.running ? (project.last_run_started_at || new Date().toISOString()) : (project.last_activity_at || project.updated_at));
     let freshness = 'No activity recorded yet.';
+    let progressAgeSeconds = null;
+    if (updatedAt && Number.isFinite(Date.parse(updatedAt))) {
+        progressAgeSeconds = Math.max(
+            0,
+            Math.round((Date.now() - Date.parse(updatedAt)) / 1000)
+        );
+    }
     if (project.running) {
-        freshness = 'Active · Running live';
+        if (progressAgeSeconds == null || progressAgeSeconds < 30) {
+            freshness = 'Active · Running live';
+        } else if (progressAgeSeconds < 120) {
+            freshness = `Active · Updated ${progressAgeSeconds} seconds ago`;
+        } else {
+            freshness = `No progress update for ${Math.round(progressAgeSeconds / 60)} minutes`;
+        }
     } else if (updatedAt) {
-        const ageSeconds = Math.max(0, Math.round((Date.now() - Date.parse(updatedAt)) / 1000));
+        const ageSeconds = progressAgeSeconds || 0;
         freshness = ageSeconds < 10
             ? 'Updated just now'
             : ageSeconds < 120
@@ -1883,11 +2099,18 @@ function renderWorkStatus(project) {
     document.getElementById('work-line-label').textContent = lineLabel;
     document.getElementById('work-eta').textContent = etaText;
     document.getElementById('work-eta-label').textContent = progress?.eta_confidence
+        && progress.eta_confidence !== 'none'
         ? `ETA · ${progress.eta_confidence} confidence`
         : 'Estimated remaining';
     const isComplete = ['complete', 'completed'].includes(stage);
     const workPanel = document.getElementById('work-status-panel');
     workPanel.classList.toggle('terminal', isComplete);
+    workPanel.classList.toggle(
+        'stale',
+        project.running === true
+            && progressAgeSeconds != null
+            && progressAgeSeconds >= 120
+    );
     document.getElementById('work-status-freshness').textContent = isComplete
         ? 'No pipeline work is active.'
         : freshness;

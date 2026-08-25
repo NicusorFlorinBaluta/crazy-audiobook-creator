@@ -294,6 +294,63 @@ class GeminiAttributionValidationTests(unittest.TestCase):
             self.assertIn('"bob"', service.api.calls[1]["prompt"])
             self.assertNotIn('"alice"', service.api.calls[1]["prompt"])
 
+    def test_existing_chapter_speaker_remains_an_allowed_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            service = _service(root)
+            service.api = _FakeApi([{"decisions": [{
+                "item_id": "ch01_0002",
+                "decision": "resolved",
+                "speaker_id": "alice",
+                "confidence": 0.97,
+                "reason": "The turn alternates back to Alice.",
+                "evidence": "Alice owns the preceding side of the exchange.",
+            }]}])
+            service.web = _FakeWeb()
+            chapter = ScriptChapter(
+                chapter_number=1,
+                chapter_title="One",
+                lines=[
+                    ScriptLine(
+                        line_id="ch01_0001",
+                        speaker="alice",
+                        text='"I understand."',
+                    ),
+                    ScriptLine(
+                        line_id="ch01_0002",
+                        speaker="minor_female",
+                        speaker_confidence=0.4,
+                        attribution_review_required=True,
+                        text='"Then we agree."',
+                    ),
+                    ScriptLine(
+                        line_id="ch01_0003",
+                        speaker="narrator",
+                        text="Bob left the room.",
+                    ),
+                ],
+            )
+
+            result = service.resolve_attributions(
+                project_dir=root,
+                chapters=[chapter],
+                character_ids={"narrator", "alice", "bob", "minor_female"},
+                character_context={
+                    "alice": {"id": "alice", "name": "Alice", "aliases": []},
+                    "bob": {"id": "bob", "name": "Bob", "aliases": []},
+                    "narrator": {"id": "narrator", "name": "Narrator", "aliases": []},
+                    "minor_female": {
+                        "id": "minor_female",
+                        "name": "Unnamed Woman",
+                        "aliases": [],
+                    },
+                },
+            )
+
+            self.assertEqual(result["resolved"], 1)
+            self.assertEqual(chapter.lines[1].speaker, "alice")
+            self.assertIn('"alice"', service.api.calls[0]["prompt"])
+
     def test_character_augmentation_requires_verbatim_grounding(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

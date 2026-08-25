@@ -127,6 +127,20 @@ class JobQueueTests(unittest.TestCase):
             self.assertEqual(items[0]["disposition"], "needs_remaster")
             self.assertEqual(items[0]["note"], "Level jump")
 
+    def test_review_items_can_be_cleared_by_artifact_type(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            queue = JobQueue(str(Path(directory) / "state.db"))
+            queue.create_job("book", {"status": "created"})
+            queue.set_review_item("book", "segment", "line-1", "acceptable")
+            queue.set_review_item("book", "join", "join-1", "acceptable")
+
+            queue.clear_review_items("book", "segment")
+
+            self.assertEqual(
+                [(item["item_type"], item["item_id"]) for item in queue.get_review_items("book")],
+                [("join", "join-1")],
+            )
+
 
 class VoiceDiagnosticTests(unittest.TestCase):
     def test_obvious_pitch_mismatch_is_reported_as_warning(self) -> None:

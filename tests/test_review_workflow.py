@@ -37,6 +37,11 @@ class ReviewWorkflowTests(unittest.TestCase):
                        "speaker_confidence": .4, "attribution_review_required": True,
                        "attribution_review_reason": "ambiguous"}],
         }), encoding="utf-8")
+        self.queue.update_job("demo", {"generated_chapters": [1]})
+        self.queue.log_quality(
+            "demo", "audio-1", 1, 1, 0.05, 0.9, "flagged",
+            details={"selected": True, "manual_review_reason": "uncertain"},
+        )
         self.queue.set_review_item("demo", "segment", "audio-1", "unreviewed", "uncertain")
         gate = collect_review_gate("demo", self.project, self.queue)
         self.assertEqual(len(gate.blocking_items), 2)
@@ -47,6 +52,43 @@ class ReviewWorkflowTests(unittest.TestCase):
         report = write_release_report("demo", self.project, self.queue)
         self.assertTrue(report["release_ready"])
         self.assertTrue((self.project / "pre_master_release.json").is_file())
+
+    def test_stale_audio_reviews_do_not_block_a_reconciled_generation(self) -> None:
+        self.queue.update_job(
+            "demo", {"generated_chapters": [], "mastered_chapters": []}
+        )
+        self.queue.log_quality(
+            "demo", "old-line", 1, 1, 0.2, 0.5, "flagged",
+            details={"selected": True, "manual_review_reason": "old result"},
+        )
+        self.queue.set_review_item(
+            "demo", "segment", "old-line", "unreviewed", "old result"
+        )
+
+        gate = collect_review_gate("demo", self.project, self.queue)
+
+        self.assertFalse(gate.blocking_items)
+        self.assertFalse(any(item.item_id == "old-line" for item in gate.items))
+
+    def test_active_incomplete_chapter_audio_review_remains_blocking(self) -> None:
+        self.queue.update_job("demo", {
+            "status": "waiting_for_review",
+            "active_stage": "waiting_for_review",
+            "generated_chapters": [],
+            "mastered_chapters": [],
+            "review_blocking_item_ids": ["current-line"],
+        })
+        self.queue.log_quality(
+            "demo", "current-line", 2, 1, 0.2, 0.5, "flagged",
+            details={"selected": True, "manual_review_reason": "listen"},
+        )
+        self.queue.set_review_item(
+            "demo", "segment", "current-line", "unreviewed", "listen"
+        )
+
+        gate = collect_review_gate("demo", self.project, self.queue)
+
+        self.assertEqual([item.item_id for item in gate.blocking_items], ["current-line"])
 
     def test_ambiguous_extraction_blocks_until_include_exclude_or_reference(self) -> None:
         (self.project / "extraction_audit.json").write_text(json.dumps({

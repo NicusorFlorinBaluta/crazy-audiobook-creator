@@ -505,6 +505,26 @@ class JobQueue:
             )
             conn.commit()
 
+    def clear_review_items(
+        self,
+        project_id: str,
+        item_type: str | None = None,
+    ) -> None:
+        """Clear review decisions whose underlying artifacts were invalidated."""
+        with self._connect() as conn:
+            if item_type is None:
+                conn.execute(
+                    "DELETE FROM review_items WHERE project_id = ?",
+                    (project_id,),
+                )
+            else:
+                conn.execute(
+                    "DELETE FROM review_items "
+                    "WHERE project_id = ? AND item_type = ?",
+                    (project_id, item_type),
+                )
+            conn.commit()
+
     # ------------------------------------------------------------------
     # Quality logging
     # ------------------------------------------------------------------

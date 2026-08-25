@@ -110,6 +110,46 @@
   runtime smoke tests.
 - Do not commit or push this second batch.
 
+### Approved implementation shortlist from the fresh audit
+
+1. Treat only a finalized segment manifest, never the mere presence of one WAV
+   file, as recovery evidence that a chapter finished generation.
+2. Keep the full durable voice cast in `voice_cast.json`, but omit it from the
+   two-second status response and return only actionable similarity diagnostics
+   from the dedicated voice-review endpoint.
+3. Poll rapidly only while work is active, stop refetching an unchanged cast at
+   the voice-review gate, and throttle secondary attention/delivery requests.
+4. Stream privacy-safe voice-bootstrap phase/count events and translate them to
+   the canonical progress schema, including a keepalive and safe cancellation
+   boundary for the long-running request.
+5. Make canonical backend progress authoritative in both dashboard progress
+   views, remove the competing browser-only ETA estimate, and surface stale
+   progress timestamps instead of claiming every running job is live.
+6. Return only noteworthy final audio attempts plus the complete history for
+   actually retried lines; retain aggregate counts for every segment.
+7. Present historical voice-design contrast directions as notes, not active
+   acoustic warnings, while preserving the real similarity acknowledgement
+   gate and full diagnostics on disk.
+8. Fix visible UTF-8 mojibake and avoid rounding a sub-100% acceptance rate up
+   to a misleading `100%`.
+9. Include registered speakers already present in the chapter's script and
+   attribution evidence in Gemini's chapter candidate set, so a correct but
+   locally unnamed speaker is not accidentally made impossible to select.
+10. Treat generated/mastered chapter state as authoritative for audio quality
+    and review data, archive stale diagnostics in the UI, and invalidate the
+    matching reports/review rows whenever their audio stage is reset.
+11. Make Gemini browser setup target the same lightweight Python environment
+    used by the dashboard, expose dependency readiness separately from profile
+    readiness, and verify the Pro profile, audio upload, JSON response, and
+    persistent-conversation behavior with spoiler-free synthetic data.
+
+Automatic per-segment loudness leveling is deliberately deferred: the current
+join diagnostics show a useful opportunity, but changing dynamics without a
+listening A/B could reduce performance nuance. Qwen 3.8 also remains confined
+to character analysis and scripting because metadata retrieval, deterministic
+gates, TTS, mastering, and export do not gain a justified quality advantage
+from adding another text-model dependency.
+
 ## Final report
 
 - Bootstrapping outcome and any recovery action.
@@ -118,3 +158,14 @@
 - Fresh audit findings, including rejected or deferred ideas and why.
 - Exact uncommitted changes made in the second batch, verification results,
   residual risks, and recommended operator checks.
+
+## Execution record
+
+- The validated pre-audit batch was committed as `debd457` and pushed to
+  `origin/dev`.
+- The second batch remains uncommitted and unpushed by design.
+- Focused regressions: 110 passed.
+- Full suite: 410 passed, 2 skipped, 10 subtests passed.
+- Frontend syntax, Python compilation, and whitespace checks passed.
+- Gemini web Pro opened from the dashboard interpreter; a synthetic two-turn
+  run successfully reused one conversation and accepted synthetic audio.

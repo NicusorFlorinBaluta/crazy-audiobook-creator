@@ -570,8 +570,249 @@ class DashboardLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     "voice-cast-reconcile-test"
                 )
 
-        self.assertEqual(response["voice_cast"], current_cast)
-        self.assertEqual(queue.state["voice_cast"], current_cast)
+        self.assertNotIn("voice_cast", response)
+        self.assertEqual(
+            response["voice_cast_summary"]["fingerprint"],
+            "current-revision",
+        )
+        self.assertIsNone(queue.state["voice_cast"])
+
+    async def test_status_does_not_treat_partial_segments_as_generated(self) -> None:
+        class FakeQueue:
+            def __init__(self) -> None:
+                self.state = {
+                    "project_id": "partial-generation-test",
+                    "status": PipelineStage.GENERATING.value,
+                    "active_stage": PipelineStage.GENERATING.value,
+                    "total_chapters": 1,
+                    "current_gen_chapter": 1,
+                    "generated_chapters": [],
+                    "scripted_chapters": [1],
+                }
+
+            def get_job(self, project_id):
+                return dict(self.state)
+
+            def update_job(self, project_id, updates):
+                self.state.update(updates)
+
+        queue = FakeQueue()
+        active_task = asyncio.create_task(asyncio.sleep(60))
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                project_dir = root / "project"
+                workspace_dir = root / "workspace"
+                (project_dir / "script").mkdir(parents=True)
+                (project_dir / "manifests").mkdir(parents=True)
+                (workspace_dir / "segments").mkdir(parents=True)
+                (project_dir / "script" / "chapter_001.json").write_text(
+                    json.dumps(
+                        {
+                            "chapter_number": 1,
+                            "chapter_title": "One",
+                            "lines": [
+                                {"line_id": "ch01_0000"},
+                                {"line_id": "ch01_0001"},
+                            ],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                (workspace_dir / "segments" / "ch01_0000.wav").write_bytes(
+                    b"partial"
+                )
+                manifest_path = (
+                    project_dir
+                    / "manifests"
+                    / "chapter_001.segments.json"
+                )
+                manifest_path.write_text(
+                    json.dumps(
+                        {
+                            "segments": [
+                                {"line_id": "ch01_0000"},
+                                {"line_id": "ch01_0001"},
+                            ]
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                with (
+                    patch.object(dashboard, "job_queue", queue),
+                    patch.object(
+                        dashboard,
+                        "running_tasks",
+                        {"partial-generation-test": active_task},
+                    ),
+                    patch.object(
+                        dashboard, "_project_dir", return_value=project_dir
+                    ),
+                    patch.object(
+                        dashboard,
+                        "_workspace_project_dir",
+                        return_value=workspace_dir,
+                    ),
+                ):
+                    partial = await dashboard.get_pipeline_status(
+                        "partial-generation-test"
+                    )
+                    self.assertEqual(partial["generated_chapters"], [])
+                    self.assertEqual(
+                        partial["chapter_details"][0]["progress_percent"],
+                        50,
+                    )
+
+                    manifest_path.write_text(
+                        json.dumps(
+                            {
+                                "segments": [
+                                    {
+                                        "line_id": "ch01_0000",
+                                        "output_hash": "a",
+                                    },
+                                    {
+                                        "line_id": "ch01_0001",
+                                        "output_hash": "b",
+                                    },
+                                ]
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                    complete = await dashboard.get_pipeline_status(
+                        "partial-generation-test"
+                    )
+                    self.assertEqual(complete["generated_chapters"], [])
+                    self.assertEqual(
+                        complete["chapter_details"][0]["progress_percent"],
+                        50,
+                    )
+
+                    # Only the pipeline's full dependency/hash reconciler may
+                    # promote the durable state to complete.
+                    queue.state["generated_chapters"] = [1]
+                    reconciled = await dashboard.get_pipeline_status(
+                        "partial-generation-test"
+                    )
+                    self.assertEqual(reconciled["generated_chapters"], [1])
+                    self.assertEqual(
+                        reconciled["chapter_details"][0]["progress_percent"],
+                        100,
+                    )
+        finally:
+            active_task.cancel()
+            await asyncio.gather(active_task, return_exceptions=True)
+
+    async def test_quality_endpoint_omits_routine_attempt_payloads(self) -> None:
+        class FakeQueue:
+            @staticmethod
+            def get_quality_report(project_id):
+                base = {
+                    "chapter_number": 1,
+                    "wer": 0.0,
+                    "quality_score": 1.0,
+                    "details": {"selected": True},
+                }
+                return [
+                    {**base, "line_id": "routine", "attempt": 1, "status": "pass"},
+                    {
+                        **base,
+                        "line_id": "retried",
+                        "attempt": 1,
+                        "status": "fail",
+                        "details": {"selected": False},
+                    },
+                    {**base, "line_id": "retried", "attempt": 2, "status": "pass"},
+                    {
+                        **base,
+                        "line_id": "warning",
+                        "attempt": 1,
+                        "status": "accepted_with_warning",
+                    },
+                ]
+
+        with patch.object(dashboard, "job_queue", FakeQueue()):
+            response = await dashboard.get_quality_report("book")
+
+        self.assertEqual(response["total_segments"], 3)
+        self.assertEqual(
+            {item["line_id"] for item in response["final_attempts"]},
+            {"retried", "warning"},
+        )
+        self.assertEqual(len(response["attempts"]), 2)
+        self.assertNotIn(
+            "routine", {item["line_id"] for item in response["attempts"]}
+        )
+
+    async def test_quality_endpoint_archives_results_outside_current_generation(self) -> None:
+        class FakeQueue:
+            @staticmethod
+            def get_job(project_id):
+                return {"generated_chapters": [], "mastered_chapters": []}
+
+            @staticmethod
+            def get_review_items(project_id):
+                return []
+
+            @staticmethod
+            def get_quality_report(project_id):
+                return [{
+                    "line_id": "old-line",
+                    "chapter_number": 1,
+                    "attempt": 1,
+                    "status": "pass",
+                    "wer": 0.0,
+                    "quality_score": 1.0,
+                    "details": {"selected": True},
+                }]
+
+        with patch.object(dashboard, "job_queue", FakeQueue()):
+            response = await dashboard.get_quality_report("book")
+
+        self.assertEqual(response["total_segments"], 0)
+        self.assertEqual(response["stale_records"], 1)
+        self.assertTrue(response["stale"])
+        self.assertEqual(response["final_attempts"], [])
+
+    async def test_quality_endpoint_keeps_the_active_audio_review_blocker(self) -> None:
+        class FakeQueue:
+            @staticmethod
+            def get_job(project_id):
+                return {
+                    "status": "waiting_for_review",
+                    "active_stage": "waiting_for_review",
+                    "generated_chapters": [],
+                    "mastered_chapters": [],
+                    "review_blocking_item_ids": ["current-line"],
+                }
+
+            @staticmethod
+            def get_review_items(project_id):
+                return [{
+                    "item_type": "segment",
+                    "item_id": "current-line",
+                    "disposition": "unreviewed",
+                }]
+
+            @staticmethod
+            def get_quality_report(project_id):
+                return [{
+                    "line_id": "current-line",
+                    "chapter_number": 2,
+                    "attempt": 1,
+                    "status": "flagged",
+                    "wer": 0.1,
+                    "quality_score": 0.7,
+                    "details": {"selected": True, "manual_review_required": True},
+                }]
+
+        with patch.object(dashboard, "job_queue", FakeQueue()):
+            response = await dashboard.get_quality_report("book")
+
+        self.assertEqual(response["total_segments"], 1)
+        self.assertEqual(response["stale_records"], 0)
+        self.assertEqual(response["final_attempts"][0]["line_id"], "current-line")
 
     async def test_stop_outside_hours_can_park_for_scheduled_resume(self) -> None:
         class FakeQueue:

@@ -201,6 +201,9 @@ window.ScriptViewer = (() => {
         const excluded = voiceState.non_speaking_count || 0;
         const assignedProfileCount = voices.filter(voice => (voice.assigned_characters || []).length > 0).length;
         const alternativeCount = Math.max(0, voices.length - assignedProfileCount);
+        const similarPairCount = (
+            voiceState.quality?.cast_pair_diagnostics || []
+        ).filter(item => item.status === 'similar' && !item.warning_suppressed).length;
         if (els.castingSummary) {
             els.castingSummary.innerHTML = `
                 <div>
@@ -210,6 +213,7 @@ window.ScriptViewer = (() => {
                 <div class="casting-exclusion">
                     ${alternativeCount} optional alternative${alternativeCount === 1 ? '' : 's'} available; ${excluded} non-speaking registry entr${excluded === 1 ? 'y is' : 'ies are'} excluded.
                 </div>
+                ${similarPairCount ? `<div class="casting-warning-summary">${similarPairCount} acoustically similar pair${similarPairCount === 1 ? '' : 's'} require preview and acknowledgement before approval.</div>` : ''}
             `;
         }
         renderVoiceReviewBanner(voiceState);
@@ -309,6 +313,12 @@ window.ScriptViewer = (() => {
             const warningHtml = (mainVoice.warnings || []).map(warning => `
                 <div class="voice-profile-warning">${escapeHtml(warning)}</div>
             `).join('');
+            const designNotesHtml = (mainVoice.design_notes || []).length ? `
+                <details class="voice-profile-notes">
+                    <summary>Design safeguards applied (${mainVoice.design_notes.length})</summary>
+                    ${(mainVoice.design_notes || []).map(note => `<p>${escapeHtml(note)}</p>`).join('')}
+                </details>
+            ` : '';
             const assignmentRows = assigned.map(character => `
                 <div class="voice-assignment-row" data-character-id="${escapeHtml(character.character_id)}">
                     <span class="voice-speaker-name">${escapeHtml(character.name)}</span>
@@ -383,6 +393,7 @@ window.ScriptViewer = (() => {
                     <p>${escapeHtml(mainVoice.description || 'No design direction available.')}</p>
                 </details>
                 ${warningHtml}
+                ${designNotesHtml}
                 ${candidatesHtml}
                 <details class="voice-assignments">
                     <summary>Character assignments (${assigned.length})</summary>
@@ -1047,7 +1058,7 @@ window.ScriptViewer = (() => {
             const opt = document.createElement('option');
             opt.value = idx;
             const chNum = ch.chapter_number || (idx + 1);
-            opt.textContent = `Chapter ${chNum}`;
+            opt.textContent = ch.chapter_title || `Chapter ${chNum}`;
             els.chapterSelect.appendChild(opt);
         });
         els.chapterSelect.value = 0;
@@ -1144,7 +1155,7 @@ window.ScriptViewer = (() => {
                         ${allSpeakerOptions}
                     </select>
                     <small>${escapeHtml(String(line.line_id || line.id || ''))}</small>
-                    ${line.speaker_confidence == null ? '' : `<small title="Attribution resolver: ${escapeHtml(humanizeToken(line.attribution_resolver || 'local'))}">${Math.round(Number(line.speaker_confidence) * 100)}% Â· ${escapeHtml(humanizeToken(line.attribution_resolver || 'local'))}</small>`}
+                    ${line.speaker_confidence == null ? '' : `<small title="Attribution resolver: ${escapeHtml(humanizeToken(line.attribution_resolver || 'local'))}">${Math.round(Number(line.speaker_confidence) * 100)}% · ${escapeHtml(humanizeToken(line.attribution_resolver || 'local'))}</small>`}
                     ${isLowConfidence ? `<svg viewBox="0 0 24 24" width="14" height="14" stroke="var(--warning-color, orange)" stroke-width="2" fill="none" style="vertical-align: text-bottom;" title="${escapeHtml(reviewTitle)}"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>` : ''}
                 </div>
                 <div class="line-text">
@@ -1282,7 +1293,8 @@ window.ScriptViewer = (() => {
     }
 
     function renderQuality() {
-        const hasQuality = currentData.quality && Object.keys(currentData.quality).length > 0;
+        const q = currentData.quality || {};
+        const hasQuality = (q.total_segments || 0) > 0 || (q.stale_records || 0) > 0;
         const hasPronunciations = currentData.pronunciations?.candidates?.length > 0;
         const hasJoinReview = currentData.qualityReview?.join_warnings?.length > 0;
         const hasSegmentReview = currentData.qualityReview?.segment_reviews?.length > 0;
@@ -1291,18 +1303,27 @@ window.ScriptViewer = (() => {
             return;
         }
 
-        const q = currentData.quality || {};
         els.qualityOverview.innerHTML = '';
 
-        if (hasQuality) {
+        if ((q.stale_records || 0) > 0) {
+            const notice = document.createElement('div');
+            notice.className = 'quality-stale-notice';
+            notice.innerHTML = `<strong>Previous audio checks are archived</strong><span>${q.stale_records} segment result${q.stale_records === 1 ? '' : 's'} belong to audio outside the current reconciled generation. New results will appear as the selected chapters are generated again.</span>`;
+            els.qualityOverview.appendChild(notice);
+        }
+
+        if (hasQuality && (q.total_segments || 0) > 0) {
             // Segments Total
             addQualityStat('Total Segments', q.total_segments || 0, 'neutral', 'All scripted utterances evaluated in the final run.');
         
         // Pass Rate
         const acceptedSegments = (q.passed_segments || 0) + (q.accepted_with_warning_segments || 0);
-        const passRate = q.total_segments > 0 ? Math.round((acceptedSegments / q.total_segments) * 100) : 0;
-        const passStatus = passRate > 95 ? 'good' : (passRate > 85 ? 'warn' : 'bad');
-        addQualityStat('Accepted Rate', `${passRate}%`, passStatus, 'Segments accepted automatically plus segments accepted with a documented soft warning.');
+        const passRateValue = q.total_segments > 0 ? (acceptedSegments / q.total_segments) * 100 : 0;
+        const passRate = acceptedSegments === q.total_segments && q.total_segments > 0
+            ? '100%'
+            : `${Math.min(99.9, passRateValue).toFixed(1)}%`;
+        const passStatus = passRateValue > 95 ? 'good' : (passRateValue > 85 ? 'warn' : 'bad');
+        addQualityStat('Accepted Rate', passRate, passStatus, 'Segments accepted automatically plus segments accepted with a documented soft warning.');
 
         addQualityStat(
             'Accepted Warnings',
@@ -1346,7 +1367,7 @@ window.ScriptViewer = (() => {
                             <span>Attempt ${item.attempt}</span>
                             <span>WER ${((item.wer || 0) * 100).toFixed(1)}%</span>
                             <span title="Final validator confidence">Confidence ${item.validation_confidence == null ? 'n/a' : `${Math.round(item.validation_confidence * 100)}%`}</span>
-                            ${item.external_validation_provider ? `<span title="${escapeHtml(item.external_validation_reason || '')}">${escapeHtml(humanizeToken(item.external_validation_provider))} Â· ${escapeHtml(humanizeToken(item.external_validation_decision || 'abstain'))}</span>` : ''}
+                            ${item.external_validation_provider ? `<span title="${escapeHtml(item.external_validation_reason || '')}">${escapeHtml(humanizeToken(item.external_validation_provider))} · ${escapeHtml(humanizeToken(item.external_validation_decision || 'abstain'))}</span>` : ''}
                             <span class="quality-reason">${escapeHtml(humanizeToken(item.acceptance_reason))}</span>
                             <details><summary>Reveal transcript and decisions</summary><p>${escapeHtml(item.transcribed_text || 'Transcript unavailable')}</p>${(item.external_validation_history || []).map(step => `<small>${escapeHtml(step.provider || 'local')} · ${escapeHtml(step.decision || 'unknown')} · ${step.confidence == null ? 'n/a' : `${Math.round(step.confidence * 100)}%`} · ${escapeHtml(step.reason || '')}</small>`).join('<br>')}</details>
                             <audio class="quality-attempt-audio" aria-label="Listen to ${escapeHtml(item.line_id)}, final attempt ${item.attempt}" controls preload="metadata" src="${escapeHtml(item.audio_url || '')}"></audio>
@@ -1438,7 +1459,7 @@ window.ScriptViewer = (() => {
                 const row = button.closest('.segment-review-item');
                 const projectId = window.state?.currentProjectId;
                 button.disabled = true;
-                button.textContent = 'Savingâ€¦';
+                button.textContent = 'Saving…';
                 try {
                     const response = await fetch(`api/projects/${encodeURIComponent(projectId)}/quality/review`, {
                         method: 'POST',
@@ -1644,50 +1665,250 @@ window.ScriptViewer = (() => {
 
     function renderPronunciationInventory() {
         const inventory = currentData.pronunciations;
-        if (!inventory?.candidates?.length) return;
-        const unresolved = inventory.candidates.filter(item => item.status === 'review_required');
-        const verified = inventory.candidates.filter(item => item.status === 'verified');
+        if (!inventory) return;
+        const candidates = inventory.candidates || [];
+        const unresolved = candidates.filter(item => item.status === 'review_required');
+        const verified = candidates.filter(item => item.status === 'verified');
         const section = document.createElement('section');
         section.className = 'pronunciation-review';
         section.innerHTML = `
             <div class="pronunciation-heading">
                 <div>
                     <strong>Book pronunciation lexicon</strong>
-                    <p>${unresolved.length} term${unresolved.length === 1 ? '' : 's'} need review. Nothing is inferred or applied automatically.</p>
+                    <p>${unresolved.length} term${unresolved.length === 1 ? '' : 's'} suggested from text · ${verified.length} custom verified mapping${verified.length === 1 ? '' : 's'}</p>
                 </div>
                 <span>${verified.length} verified</span>
             </div>
-            <div class="pronunciation-list">
-                ${unresolved.slice(0, 40).map(item => `
+
+            <div class="pronunciation-add-card">
+                <strong>+ Add Custom Phonetic Replacement</strong>
+                <input type="text" id="lexicon-custom-term" placeholder="Word in book (e.g. homeisle, homeisler)" maxlength="120">
+                <input type="text" id="lexicon-custom-spoken" placeholder="Spoken phonetic form (e.g. home-aisle, home-eye-ler)" maxlength="240">
+                <div style="display:flex; gap:8px; align-items:center;">
+                    <button type="button" class="btn btn-ghost btn-sm" id="btn-preview-lexicon-custom" title="Test audio preview">▶ Test Preview</button>
+                    <button type="button" class="btn btn-primary btn-sm" id="btn-add-lexicon-custom">+ Add / Update Term</button>
+                </div>
+            </div>
+
+            <div class="pronunciation-search-bar">
+                <input type="text" id="lexicon-search-input" placeholder="🔍 Search words, terms, or replacements in lexicon...">
+            </div>
+
+            <div class="pronunciation-list" id="pronunciation-items-container">
+                <!-- rendered items -->
+            </div>
+        `;
+
+        function renderList(query = '') {
+            const container = section.querySelector('#pronunciation-items-container');
+            if (!container) return;
+            const q = query.toLowerCase();
+
+            const filteredVerified = verified.filter(item => 
+                !q || item.term.toLowerCase().includes(q) || (item.spoken_text || '').toLowerCase().includes(q)
+            );
+            const filteredUnresolved = unresolved.filter(item => 
+                !q || item.term.toLowerCase().includes(q)
+            );
+
+            let html = '';
+            if (filteredVerified.length) {
+                html += filteredVerified.map(item => `
+                    <div class="pronunciation-row verified" data-term="${escapeHtml(item.term)}">
+                        <div class="pronunciation-term">
+                            <strong>${escapeHtml(item.term)}</strong>
+                            <small>${item.occurrences || 0} occurrence${item.occurrences === 1 ? '' : 's'} · ${escapeHtml(item.mapping_source || 'project')}</small>
+                        </div>
+                        <span class="pronunciation-arrow">→</span>
+                        <strong style="color:#86efac">${escapeHtml(item.spoken_text)}</strong>
+                        <div style="display:flex; align-items:center; gap:6px; margin-left:auto;">
+                            <button type="button" class="pronunciation-preview" data-term="${escapeHtml(item.term)}" data-spoken="${escapeHtml(item.spoken_text || '')}" title="Test audio preview">▶ Preview</button>
+                            <button type="button" class="pronunciation-delete" data-term="${escapeHtml(item.term)}" title="Remove custom pronunciation">✕ Remove</button>
+                        </div>
+                    </div>
+                `).join('');
+            }
+
+            if (filteredUnresolved.length) {
+                html += filteredUnresolved.slice(0, 100).map(item => `
                     <div class="pronunciation-row" data-term="${escapeHtml(item.term)}">
                         <div class="pronunciation-term">
                             <strong>${escapeHtml(item.term)}</strong>
-                            <small>${item.occurrences} occurrence${item.occurrences === 1 ? '' : 's'} · chapters ${(item.chapters || []).join(', ') || '—'}</small>
+                            <small>${item.occurrences || 0} occurrence${item.occurrences === 1 ? '' : 's'} · chapters ${(item.chapters || []).join(', ') || '—'}</small>
                             <span title="${escapeHtml((item.contexts || []).join(' | '))}">${escapeHtml((item.contexts || [])[0] || '')}</span>
                         </div>
                         <input type="text" maxlength="240" placeholder="Spoken form, e.g. Pah-chee" aria-label="Spoken form for ${escapeHtml(item.term)}">
-                        <button type="button" class="btn btn-secondary pronunciation-save">Verify</button>
-                    </div>
-                `).join('')}
-                ${verified.map(item => `
-                    <div class="pronunciation-row verified">
-                        <div class="pronunciation-term">
-                            <strong>${escapeHtml(item.term)}</strong>
-                            <small>${item.occurrences} occurrence${item.occurrences === 1 ? '' : 's'} · ${escapeHtml(item.mapping_source || 'project')}</small>
+                        <div style="display:flex; align-items:center; gap:6px;">
+                            <button type="button" class="btn btn-ghost btn-sm pronunciation-preview-unresolved" data-term="${escapeHtml(item.term)}" title="Test audio preview">▶ Preview</button>
+                            <button type="button" class="btn btn-secondary pronunciation-save">Verify</button>
                         </div>
-                        <span class="pronunciation-arrow">→</span>
-                        <strong>${escapeHtml(item.spoken_text)}</strong>
                     </div>
-                `).join('')}
-            </div>
-        `;
-        section.querySelectorAll('.pronunciation-save').forEach(button => {
-            button.addEventListener('click', () => {
-                const row = button.closest('.pronunciation-row');
-                approvePronunciation(row?.dataset.term || '', row?.querySelector('input')?.value || '', button);
+                `).join('');
+            }
+
+            if (!filteredVerified.length && !filteredUnresolved.length) {
+                html = '<div class="review-complete-message">No lexicon terms match your search.</div>';
+            }
+
+            container.innerHTML = html;
+
+            container.querySelectorAll('.pronunciation-save').forEach(button => {
+                button.addEventListener('click', () => {
+                    const row = button.closest('.pronunciation-row');
+                    approvePronunciation(row?.dataset.term || '', row?.querySelector('input')?.value || '', button);
+                });
             });
+
+            container.querySelectorAll('.pronunciation-preview').forEach(button => {
+                button.addEventListener('click', () => {
+                    const term = button.dataset.term || '';
+                    const spoken = button.dataset.spoken || '';
+                    previewPronunciation(term, spoken, button);
+                });
+            });
+
+            container.querySelectorAll('.pronunciation-preview-unresolved').forEach(button => {
+                button.addEventListener('click', () => {
+                    const row = button.closest('.pronunciation-row');
+                    const term = button.dataset.term || '';
+                    const spoken = row?.querySelector('input')?.value || term;
+                    previewPronunciation(term, spoken, button);
+                });
+            });
+
+            container.querySelectorAll('.pronunciation-delete').forEach(button => {
+                button.addEventListener('click', () => {
+                    const term = button.dataset.term;
+                    if (confirm(`Remove custom pronunciation for "${term}"?`)) {
+                        deletePronunciation(term, button);
+                    }
+                });
+            });
+        }
+
+        renderList();
+
+        section.querySelector('#lexicon-search-input')?.addEventListener('input', (e) => {
+            renderList(e.target.value.trim());
         });
+
+        section.querySelector('#btn-preview-lexicon-custom')?.addEventListener('click', () => {
+            const termInput = section.querySelector('#lexicon-custom-term');
+            const spokenInput = section.querySelector('#lexicon-custom-spoken');
+            const term = termInput?.value.trim() || '';
+            const spoken = spokenInput?.value.trim() || term;
+            if (!spoken) {
+                showToast('Enter a word or spoken form to preview', 'warning');
+                return;
+            }
+            previewPronunciation(term, spoken, section.querySelector('#btn-preview-lexicon-custom'));
+        });
+
+        section.querySelector('#btn-add-lexicon-custom')?.addEventListener('click', () => {
+            const termInput = section.querySelector('#lexicon-custom-term');
+            const spokenInput = section.querySelector('#lexicon-custom-spoken');
+            const term = termInput?.value.trim();
+            const spoken = spokenInput?.value.trim();
+            if (!term || !spoken) {
+                showToast('Please enter both the word and its phonetic replacement', 'warning');
+                return;
+            }
+            approvePronunciation(term, spoken, section.querySelector('#btn-add-lexicon-custom'));
+        });
+
         els.qualityOverview.appendChild(section);
+    }
+
+    let activePreviewAudio = null;
+
+    async function previewPronunciation(term, spokenText, button) {
+        const projectId = window.state?.currentProjectId;
+        const cleanTerm = (term || '').replace(/^Pronunciation:\s*/i, '').trim();
+        const spoken = (spokenText || cleanTerm || '').replace(/^Pronunciation:\s*/i, '').trim();
+        if (!projectId || !spoken) {
+            showToast('Enter a term or spoken form to preview', 'warning');
+            return;
+        }
+
+        if (activePreviewAudio) {
+            activePreviewAudio.pause();
+            activePreviewAudio = null;
+        }
+
+        const originalHtml = button.innerHTML;
+        button.disabled = true;
+        button.innerHTML = '🔊 <span class="preview-spinner">...</span>';
+
+        try {
+            const response = await fetch(`api/projects/${encodeURIComponent(projectId)}/pronunciations/preview`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({term: cleanTerm, spoken_text: spoken})
+            });
+            const data = await response.json().catch(() => ({}));
+
+            if (response.ok && data.audio_url) {
+                const audio = new Audio(`${data.audio_url}?v=${Date.now()}`);
+                activePreviewAudio = audio;
+                audio.onended = () => {
+                    button.innerHTML = originalHtml;
+                    button.disabled = false;
+                    activePreviewAudio = null;
+                };
+                audio.onerror = () => {
+                    playWebSpeechFallback(spoken, button, originalHtml);
+                };
+                button.innerHTML = '🔊 Playing...';
+                await audio.play();
+            } else {
+                playWebSpeechFallback(spoken, button, originalHtml);
+            }
+        } catch (error) {
+            playWebSpeechFallback(spoken, button, originalHtml);
+        }
+    }
+
+    function playWebSpeechFallback(text, button, originalHtml) {
+        if ('speechSynthesis' in window) {
+            window.speechSynthesis.cancel();
+            const utterance = new SpeechSynthesisUtterance(text);
+            utterance.rate = 0.95;
+            utterance.onend = () => {
+                button.innerHTML = originalHtml;
+                button.disabled = false;
+            };
+            utterance.onerror = () => {
+                button.innerHTML = originalHtml;
+                button.disabled = false;
+            };
+            button.innerHTML = '🔊 Speaking...';
+            window.speechSynthesis.speak(utterance);
+        } else {
+            button.innerHTML = originalHtml;
+            button.disabled = false;
+            showToast('Audio playback not supported in this browser', 'warning');
+        }
+    }
+
+    async function deletePronunciation(term, button) {
+        const projectId = window.state?.currentProjectId;
+        if (!projectId || !term) return;
+        button.disabled = true;
+        try {
+            const response = await fetch(`api/projects/${encodeURIComponent(projectId)}/pronunciations`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({term, spoken_text: ''})
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(data.detail || 'Could not delete pronunciation');
+            currentData.pronunciations = data.inventory;
+            showToast(`Pronunciation for "${term}" removed`, 'info');
+            renderQuality();
+        } catch (error) {
+            showToast(error.message, 'error');
+            button.disabled = false;
+        }
     }
 
     async function approvePronunciation(term, spokenText, button) {
@@ -1707,7 +1928,7 @@ window.ScriptViewer = (() => {
             const data = await response.json().catch(() => ({}));
             if (!response.ok) throw new Error(data.detail || 'Could not save pronunciation');
             currentData.pronunciations = data.inventory;
-            showToast(`Pronunciation saved; ${data.affected_chapters.length} chapter${data.affected_chapters.length === 1 ? '' : 's'} marked for regeneration`, 'success');
+            showToast(`Pronunciation for "${term}" saved! (${data.affected_chapters.length} chapter${data.affected_chapters.length === 1 ? '' : 's'} updated)`, 'success');
             renderQuality();
         } catch (error) {
             showToast(error.message, 'error');
@@ -1795,9 +2016,17 @@ window.ScriptViewer = (() => {
         renderCharacters();
     }
 
+    async function refreshPronunciations(projectId) {
+        if (!projectId) return;
+        await fetchPronunciations(projectId);
+        renderQuality();
+    }
+
     return {
         loadData,
         refreshVoices,
+        refreshPronunciations,
+        previewPronunciation,
         revealLine
     };
 })();

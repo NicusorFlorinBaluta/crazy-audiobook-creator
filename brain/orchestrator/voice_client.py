@@ -110,19 +110,81 @@ class VoiceClient:
     # Voice bootstrapping
     # ------------------------------------------------------------------
 
-    def bootstrap_voices(self, request: BootstrapVoicesRequest) -> BootstrapVoicesResponse:
-        """Generate voice reference clips for all characters."""
+    def bootstrap_voices(
+        self,
+        request: BootstrapVoicesRequest,
+        progress_callback=None,
+    ) -> BootstrapVoicesResponse:
+        """Generate voice references, optionally consuming NDJSON progress."""
         logger.info(
             "Bootstrapping %d voices for project '%s'",
             len(request.characters),
             request.project_id,
         )
-        data = self._post(
-            "/voices/bootstrap",
-            request.model_dump(),
-            timeout=1200,
+        if progress_callback is None:
+            data = self._post(
+                "/voices/bootstrap",
+                request.model_dump(),
+                timeout=1200,
+            )
+            return BootstrapVoicesResponse(**data)
+
+        import json
+
+        url = f"{self.host}/voices/bootstrap/stream"
+        last_error: Exception | None = None
+        for attempt in range(1, self.retries + 1):
+            try:
+                timeout = httpx.Timeout(
+                    connect=10.0,
+                    read=120.0,
+                    write=60.0,
+                    pool=10.0,
+                )
+                with httpx.Client(
+                    timeout=timeout,
+                    headers=self._client.headers,
+                    follow_redirects=True,
+                ) as client:
+                    with client.stream(
+                        "POST",
+                        url,
+                        json=request.model_dump(by_alias=True),
+                    ) as response:
+                        response.raise_for_status()
+                        for line in response.iter_lines():
+                            if not line:
+                                continue
+                            event = json.loads(line)
+                            if event.get("type") == "progress":
+                                progress_callback(event.get("data", {}))
+                            elif event.get("type") == "result":
+                                return BootstrapVoicesResponse(
+                                    **event.get("data", {})
+                                )
+                            elif event.get("type") == "error":
+                                raise RuntimeError(
+                                    "Voice Server bootstrap error: "
+                                    f"{event.get('error')} - "
+                                    f"{event.get('detail')}"
+                                )
+                raise RuntimeError(
+                    "Voice bootstrap stream ended without a result"
+                )
+            except (httpx.TimeoutException, httpx.RequestError) as exc:
+                last_error = exc
+                logger.warning(
+                    "POST /voices/bootstrap/stream failed "
+                    "(attempt %d/%d): %s",
+                    attempt,
+                    self.retries,
+                    exc,
+                )
+                if attempt < self.retries:
+                    time.sleep(self.retry_delay)
+        raise last_error or RuntimeError(
+            "Failed to bootstrap voices after retries"
         )
-        return BootstrapVoicesResponse(**data)
 
     # ------------------------------------------------------------------
     # TTS generation
