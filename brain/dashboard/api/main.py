@@ -54,6 +54,7 @@ from pydantic import BaseModel, Field
 os.environ.setdefault("ROCM_SDK_TARGET_FAMILY", "custom")
 
 from brain.orchestrator.delivery_manager import DeliveryError, DeliveryManager
+from brain.orchestrator.nas_syncer import NASError, NASSyncer
 from brain.orchestrator.pipeline import Pipeline
 from brain.dashboard.api.security import (
     configured_dashboard_token,
@@ -1417,8 +1418,8 @@ def _safe_delete_tree(path: Path) -> bool:
 
 
 @app.delete("/api/projects/{project_id}")
-async def delete_project(project_id: str):
-    """Delete a stopped project's state and local artifacts."""
+async def delete_project(project_id: str, delete_from_nas: bool = False):
+    """Delete a stopped project's state and local artifacts, with optional NAS removal."""
     if not job_queue:
         raise HTTPException(status_code=503, detail="Server not initialized")
     if project_id in running_tasks and not running_tasks[project_id].done():
@@ -1488,10 +1489,94 @@ async def delete_project(project_id: str):
     except Exception as exc:
         logger.warning("Error deleting job %s from database: %s", project_id, exc)
 
+    # Clean up from NAS if requested
+    try:
+        from brain.orchestrator.nas_syncer import NASSyncer
+        nas_syncer = NASSyncer()
+        if nas_syncer.is_configured:
+            nas_syncer.delete_project(project_id, delete_from_nas=delete_from_nas)
+    except Exception as exc:
+        logger.warning("Error during NAS project deletion check for %s: %s", project_id, exc)
+
     running_tasks.pop(project_id, None)
     _project_logs.pop(project_id, None)
     _log_subscribers.pop(project_id, None)
-    return {"status": "deleted", "project_id": project_id}
+    return {"status": "deleted", "project_id": project_id, "deleted_from_nas": delete_from_nas}
+
+
+# ---------------------------------------------------------------------------
+# NAS Storage & Sync endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api/nas/status")
+async def get_nas_status():
+    """Return NAS configuration and connectivity status."""
+    syncer = NASSyncer()
+    return {
+        "configured": syncer.is_configured,
+        "host": syncer.host if syncer.is_configured else None,
+        "shared_folder": syncer.shared_folder,
+        "auto_sync": syncer.auto_sync,
+        "prune_parts_on_full": syncer.prune_parts_on_full,
+    }
+
+
+@app.post("/api/nas/test-connection")
+async def test_nas_connection():
+    """Test SSH/SFTP connection and write access to the NAS."""
+    syncer = NASSyncer()
+    if not syncer.is_configured:
+        raise HTTPException(status_code=400, detail="NAS is not configured in .env or settings.")
+    try:
+        result = syncer.test_connection()
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"NAS connection failed: {e}")
+
+
+@app.post("/api/nas/sync-all")
+async def sync_all_to_nas():
+    """Scan and synchronize all ready books/parts to the NAS."""
+    syncer = NASSyncer()
+    if not syncer.is_configured:
+        raise HTTPException(status_code=400, detail="NAS is not configured in .env or settings.")
+    try:
+        result = syncer.sync_all_projects()
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to sync projects to NAS: {e}")
+
+
+@app.get("/api/notifications/settings")
+async def get_notification_settings():
+    """Return Home Assistant notification engine configuration and status."""
+    from brain.orchestrator.notifier import notifier
+    return {
+        "configured": notifier.is_configured,
+        "base_url": notifier.base_url,
+        "notify_service": notifier.notify_service,
+        "dashboard_url": notifier.dashboard_url,
+    }
+
+
+@app.post("/api/notifications/test")
+async def test_notification():
+    """Send a test notification to Home Assistant to verify mobile delivery."""
+    from brain.orchestrator.notifier import notifier, NotificationPayload, NotificationEventType
+    if not notifier.is_configured:
+        raise HTTPException(status_code=400, detail="Home Assistant notification engine is not configured.")
+    payload = NotificationPayload(
+        event_type=NotificationEventType.TEST,
+        project_id="test",
+        project_title="Test Notification",
+        title="🔔 Crazy Audiobook Creator Test",
+        message="Your Home Assistant notification integration is working! Tap to open the creator dashboard.",
+        importance="high",
+    )
+    result = notifier.send_notification_sync(payload)
+    if result.get("status") == "error":
+        raise HTTPException(status_code=502, detail=f"Failed to send notification: {result.get('error')}")
+    return {"status": "success", "detail": "Notification sent successfully to Home Assistant!", "result": result}
 
 
 # ---------------------------------------------------------------------------
@@ -2333,7 +2418,8 @@ async def get_pipeline_status(project_id: str):
 
         for ch_num in range(1, total_chapters + 1):
             has_script, total_lines, script_title = _has_valid_script(ch_num)
-            title = book_chapter_titles.get(ch_num) or script_title or f"Chapter {ch_num}"
+            raw_title = (book_chapter_titles.get(ch_num) or script_title or "").strip()
+            title = raw_title if raw_title else f"Chapter {ch_num}"
 
             gen_count = segment_counts[ch_num] if total_lines > 0 else 0
             if ch_num in generated_chapters and total_lines > 0:
@@ -4662,8 +4748,12 @@ async def update_pronunciation(project_id: str, request: PronunciationRequest):
         except (OSError, json.JSONDecodeError):
             current_dict = {}
 
-    term = request.term.strip()
-    spoken = request.spoken_text.strip()
+    raw_term = request.term.strip()
+    term = re.sub(r"^(?:pronunciation\s*:\s*)+", "", raw_term, flags=re.IGNORECASE).strip()
+    raw_spoken = request.spoken_text.strip()
+    spoken = re.sub(r"^(?:pronunciation\s*:\s*)+", "", raw_spoken, flags=re.IGNORECASE).strip()
+    if not term:
+        raise HTTPException(status_code=400, detail="Pronunciation term cannot be empty")
     if spoken:
         current_dict[term] = spoken
     else:

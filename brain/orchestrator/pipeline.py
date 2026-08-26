@@ -1191,6 +1191,14 @@ class Pipeline:
                     "error_message": None,
                 },
             )
+            try:
+                from brain.orchestrator.notifier import notifier
+                job_info = self.job_queue.get_job(project_id) or {}
+                p_title = job_info.get("title") or project_id
+                char_count = len(review_pause.item_ids or [])
+                notifier.notify_voice_review_required(project_id, p_title, character_count=char_count)
+            except Exception as notif_exc:
+                logger.debug("Notification error: %s", notif_exc)
             return ProjectStatus(**self.job_queue.get_job(project_id))
         except _GracefulDeliveryPause as _gdp:
             elapsed = time.time() - start_time
@@ -1204,6 +1212,13 @@ class Pipeline:
                 PipelineStage.PAUSED,
                 elapsed_seconds=elapsed,
             )
+            try:
+                from brain.orchestrator.notifier import notifier
+                job_info = self.job_queue.get_job(project_id) or {}
+                p_title = job_info.get("title") or project_id
+                notifier.notify_paused_after_delivery(project_id, p_title, completed_part=str(_gdp))
+            except Exception as notif_exc:
+                logger.debug("Notification error: %s", notif_exc)
             return ProjectStatus(**self.job_queue.get_job(project_id))
         except Exception as e:
             elapsed = time.time() - start_time
@@ -1214,6 +1229,14 @@ class Pipeline:
                 error_message=str(e),
                 elapsed_seconds=elapsed,
             )
+            try:
+                from brain.orchestrator.notifier import notifier
+                job_info = self.job_queue.get_job(project_id) or {}
+                p_title = job_info.get("title") or project_id
+                curr_ch = job_info.get("current_chapter")
+                notifier.notify_generation_error(project_id, p_title, str(e), chapter=curr_ch)
+            except Exception as notif_exc:
+                logger.debug("Notification error: %s", notif_exc)
             raise
         except KeyboardInterrupt:
             elapsed = time.time() - start_time
@@ -2153,6 +2176,22 @@ class Pipeline:
             self._run_generation(project_id, project_dir, batch_chapter_set)
             self._check_stop(project_id)
 
+            # Check review gate for this batch before mastering / publishing
+            release = write_release_report(project_id, project_dir, self.job_queue)
+            batch_blocking_items = [
+                item["item_id"]
+                for item in release["items"]
+                if item["blocking"] and (
+                    item.get("chapter_number") is None
+                    or item.get("chapter_number") in batch_chapter_set
+                )
+            ]
+            if batch_blocking_items:
+                raise _WaitingForReview(
+                    batch_blocking_items,
+                    f"{len(batch_blocking_items)} item(s) in delivery {batch.delivery_id} require review before mastering.",
+                )
+
             # Master this batch
             self._run_mastering(project_id, project_dir, batch_chapter_set)
             self._check_stop(project_id)
@@ -2177,7 +2216,7 @@ class Pipeline:
                     acquire_packaging_lock=False,
                 ) or {}
                 title = book_meta.get("title") or project_id
-                dm.publish_delivery(
+                published_part = dm.publish_delivery(
                     batch=batch,
                     temp_artifact_path=temp_export_path,
                     duration_seconds=float(export_result.get("duration_seconds") or 0.0),
@@ -2187,6 +2226,29 @@ class Pipeline:
                     plan_fingerprint=index.plan_fingerprint,
                     quality=current_quality,
                 )
+                try:
+                    from brain.orchestrator.nas_syncer import NASSyncer
+                    nas_syncer = NASSyncer()
+                    if nas_syncer.is_configured and nas_syncer.auto_sync:
+                        part_file = dm.resolve_artifact(published_part.artifact)
+                        nas_syncer.sync_delivery_part(
+                            project_id=project_id,
+                            project_dir=project_dir,
+                            part_artifact_path=part_file,
+                            part_info=published_part.model_dump(),
+                        )
+                except Exception as nas_exc:
+                    logger.warning("NAS sync for delivery %s failed: %s", batch.delivery_id, nas_exc)
+                try:
+                    from brain.orchestrator.notifier import notifier
+                    notifier.notify_delivery_published(
+                        project_id=project_id,
+                        project_title=title,
+                        part_title=f"Part {batch.ordinal:02d}",
+                        chapters=batch.chapter_numbers,
+                    )
+                except Exception as notif_exc:
+                    logger.debug("Notification error on delivery: %s", notif_exc)
             update_publication_state(batch.delivery_id)
             pause_if_requested(batch.delivery_id)
 
@@ -2567,25 +2629,18 @@ class Pipeline:
                     for result in response.quality_results
                     if result.selected and result.manual_review_required
                 }
-                if active_review_ids:
-                    raise _WaitingForReview(
-                        sorted(active_review_ids),
-                        (
-                            f"{len(active_review_ids)} audio segment(s) require review "
-                            "before mastering."
-                        ),
-                    )
+                fatal_failures = failed_ids - active_review_ids
                 if (
                     response.generated != len(request_lines)
                     or generated_ids != expected_ids
-                    or failed_ids
+                    or fatal_failures
                 ):
                     raise RuntimeError(
                         f"Chapter {chapter_script.chapter_number} generation incomplete: "
                         f"generated={response.generated}/{len(request_lines)}, "
                         f"missing={sorted(expected_ids - generated_ids)}, "
-                        f"failed={sorted(failed_ids)}, "
-                        f"manual_audio_review={sorted(external_review_ids)}, "
+                        f"fatal_failures={sorted(fatal_failures)}, "
+                        f"manual_audio_review={sorted(active_review_ids)}, "
                         f"validation_failures={response.failed_validation}"
                     )
 
@@ -3002,6 +3057,31 @@ class Pipeline:
             },
         )
         self.job_queue.update_job(project_id, {"export_stale": False})
+        if not partial:
+            try:
+                from brain.orchestrator.nas_syncer import NASSyncer
+                nas_syncer = NASSyncer()
+                if nas_syncer.is_configured and nas_syncer.auto_sync:
+                    nas_syncer.sync_full_export(
+                        project_id=project_id,
+                        project_dir=project_dir,
+                        full_m4b_path=local_m4b,
+                        prune_parts=True,
+                    )
+                try:
+                    from brain.orchestrator.notifier import notifier
+                    job_info = self.job_queue.get_job(project_id) or {}
+                    p_title = job_info.get("title") or project_id
+                    notifier.notify_full_book_ready(
+                        project_id=project_id,
+                        project_title=p_title,
+                        total_chapters=len(included_numbers),
+                        total_duration_seconds=self._parse_duration_seconds(response.total_duration),
+                    )
+                except Exception as notif_exc:
+                    logger.debug("Notification error on full book export: %s", notif_exc)
+            except Exception as nas_exc:
+                logger.warning("NAS sync for full export of %s failed: %s", project_id, nas_exc)
         return {
             "output_file": str(local_m4b),
             "chapters": included_numbers,

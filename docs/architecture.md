@@ -308,6 +308,15 @@ When modifying or introducing new pipeline features, developers and AI agents MU
    - Any code that resolves which voice to use for a script line MUST read `voice_cast.json` first (via `assigned_characters`), then fall back to `characters.json`'s `voice_id` field, then fall back to the raw speaker ID. See `_prepare_generation_lines` in `pipeline.py`.
    - `VoiceLibraryManager.get_voice_path` consults `voices.json` to find the actual hashed WAV filename. Do not construct voice file paths by hand as `<voice_id>.wav` — they are content-hashed and registered in the voice library registry.
 
+7. **Dual-Endpoint & 24/7 NAS Streaming Architecture**:
+   - `https://crazyha.mywire.org/audiobook/` $\rightarrow$ Proxies to Creator PC dashboard (`192.168.50.44:8000`) for project creation, script inspection, cast review, and pipeline execution.
+   - `https://crazyha.mywire.org/bookplayer/` $\rightarrow$ Proxies to isolated 24/7 container `crazy-bookplayer-streamer` on Ubuntu server (`192.168.50.180:8005`) streaming directly from `/mnt/nas/media/crazybooks`.
+   - Backed by persistent progress saving at `/mnt/nas/media/crazybooks/{projectId}/progress.json`, allowing continuous 24/7 mobile playback even when the Creator PC is asleep.
+
+8. **Pipeline Notification System**:
+   - Non-blocking, asynchronous alerts delivered via Home Assistant REST API (`notify.crazywiz_notification_group`).
+   - Triggers on speaking cast approval required, pipeline errors, new incremental delivery parts published, full book export ready, and delivery batch pauses.
+
 The 2026-08-21 attribution, sparse scripting, cast-distinctness,
 cross-chapter drift, resilience, and confidence-calibration rationale is recorded
 in [quality-performance-hardening-2026-08-21.md](quality-performance-hardening-2026-08-21.md).

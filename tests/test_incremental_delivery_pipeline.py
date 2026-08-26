@@ -353,6 +353,45 @@ class IncrementalDeliveryPipelineTests(unittest.TestCase):
             chapter_numbers=None,
         )
 
+    def test_incremental_delivery_pauses_at_batch_boundary_when_review_items_exist(self) -> None:
+        from brain.orchestrator.pipeline import _WaitingForReview
+
+        self.job_queue.update_job(
+            self.project_id,
+            {"incremental_delivery": {"enabled": True, "batch_size": 3}},
+        )
+
+        generated_batches: list[set[int]] = []
+        mastered_batches: list[set[int]] = []
+
+        def mock_gen(proj_id, pdir, ch_nums=None):
+            generated_batches.append(ch_nums)
+            # Chapter 1 produces a review item
+            self.job_queue.set_review_item(
+                proj_id, "segment", "ch01_0001", "unreviewed", "WER warning"
+            )
+            self.job_queue.log_quality(
+                proj_id, "ch01_0001", 1, 1, 0.25, 0.6, "flagged",
+                details={"selected": True, "manual_review_reason": "WER warning"},
+            )
+
+        def mock_master(proj_id, pdir, ch_nums=None):
+            mastered_batches.append(ch_nums)
+
+        self.pipeline._run_generation = mock_gen
+        self.pipeline._run_mastering = mock_master
+
+        with self.assertRaises(_WaitingForReview) as raised:
+            self.pipeline._run_incremental_delivery(
+                self.project_id, self.project_dir, PipelineStage.GENERATING
+            )
+
+        # Batch 1 (chapters 1, 2, 3) generated as a whole batch before pausing
+        self.assertEqual(generated_batches, [{1, 2, 3}])
+        # Master was NOT called because review gate blocked at batch boundary
+        self.assertEqual(mastered_batches, [])
+        self.assertIn("ch01_0001", raised.exception.item_ids)
+
 
 class IncrementalDeliveryApiTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
@@ -506,6 +545,46 @@ class IncrementalDeliveryApiTests(unittest.IsolatedAsyncioTestCase):
         state2 = self.job_queue.get_job(self.project_id)
         self.assertFalse(state2["pause_after_delivery_requested"])
 
+    async def test_update_pronunciation_sanitizes_prefix_and_saves(self) -> None:
+        from brain.dashboard.api.main import PronunciationRequest, update_pronunciation
+        dashboard_main.projects_dir = self.project_dir.parent
+
+        scripts_dir = self.project_dir / "script"
+        scripts_dir.mkdir(parents=True, exist_ok=True)
+
+        # Add line containing 'Kholin' in script chapter 1
+        ch1 = ScriptChapter(
+            chapter_number=1,
+            chapter_title="Chapter 1",
+            lines=[
+                dashboard_main.ScriptLine(
+                    line_id="ch01_0001",
+                    speaker="narrator",
+                    text="Highprince Kholin watched from above.",
+                )
+            ],
+        )
+        (scripts_dir / "chapter_001.json").write_text(
+            ch1.model_dump_json(), encoding="utf-8"
+        )
+
+        res = await update_pronunciation(
+            self.project_id,
+            PronunciationRequest(
+                term="Pronunciation: Kholin",
+                spoken_text="Pronunciation: Ko-lin",
+            ),
+        )
+        self.assertEqual(res["status"], "success")
+        self.assertEqual(res["affected_chapters"], [1])
+
+        dict_file = self.project_dir / "pronunciation_dict.json"
+        self.assertTrue(dict_file.exists())
+        saved_dict = json.loads(dict_file.read_text(encoding="utf-8"))
+        self.assertIn("Kholin", saved_dict)
+        self.assertEqual(saved_dict["Kholin"], "Ko-lin")
+
 
 if __name__ == "__main__":
     unittest.main()
+

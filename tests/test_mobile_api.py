@@ -277,3 +277,32 @@ class MobileApiTests(unittest.TestCase):
             import shutil
             if project_dir.exists():
                 shutil.rmtree(project_dir)
+
+    def test_catalog_excludes_orphaned_directories_not_in_job_queue(self):
+        active_id = "test_active_catalog_book"
+        orphan_id = "test_orphaned_catalog_book"
+        active_dir = Path("brain/projects") / active_id
+        orphan_dir = Path("brain/projects") / orphan_id
+        active_dir.mkdir(parents=True, exist_ok=True)
+        orphan_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            (active_dir / "book.json").write_text(json.dumps({"title": "Active Book"}), encoding="utf-8")
+            (orphan_dir / "book.json").write_text(json.dumps({"title": "Orphaned Book"}), encoding="utf-8")
+            (active_dir / f"{active_id}.m4b").write_bytes(b"dummy audio content")
+            (orphan_dir / f"{orphan_id}.m4b").write_bytes(b"dummy orphan content")
+            self.job_queue.create_job(active_id, {"title": "Active Book", "status": "completed"})
+
+            response = self.client.get("/api/mobile/v1/catalog")
+            self.assertEqual(response.status_code, 200)
+            catalog_books = response.json()["books"]
+            catalog_ids = {b["project_id"] for b in catalog_books}
+
+            self.assertIn(active_id, catalog_ids)
+            self.assertNotIn(orphan_id, catalog_ids)
+        finally:
+            import shutil
+            if active_dir.exists():
+                shutil.rmtree(active_dir)
+            if orphan_dir.exists():
+                shutil.rmtree(orphan_dir)
+

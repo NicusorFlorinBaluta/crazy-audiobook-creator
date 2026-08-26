@@ -44,15 +44,15 @@ window.ScriptViewer = (() => {
     els.scriptLowConfidence?.addEventListener('change', () => renderScriptLines(currentScriptChapter));
 
     els.btnRegenerateChapter?.addEventListener('click', async () => {
-        if (!confirm(`Are you sure you want to regenerate Chapter ${currentScriptChapter}? This will delete the current script for this chapter and require a pipeline run to recreate it.`)) return;
+        const actualChapterNumber = currentData.script?.chapters?.[currentScriptChapter]?.chapter_number || (currentScriptChapter + 1);
+        if (!confirm(`Are you sure you want to regenerate Chapter ${actualChapterNumber}? This will delete the current script for this chapter and require a pipeline run to recreate it.`)) return;
 
         try {
             const projectId = window.state?.currentProjectId;
             if (!projectId) return;
-            const actualChapterNumber = currentData.script?.chapters?.[currentScriptChapter]?.chapter_number || (currentScriptChapter + 1);
             const res = await fetch(`api/projects/${encodeURIComponent(projectId)}/chapters/${actualChapterNumber}/regenerate`, { method: 'POST' });
             if (res.ok) {
-                showToast(`Chapter ${currentScriptChapter} queued for regeneration. Start the pipeline to rebuild it.`, 'success');
+                showToast(`Chapter ${actualChapterNumber} queued for regeneration. Start the pipeline to rebuild it.`, 'success');
                 // Remove the chapter data from memory and UI
                 if (currentData.script && currentData.script.chapters) {
                     currentData.script.chapters[currentScriptChapter] = null;
@@ -1058,7 +1058,8 @@ window.ScriptViewer = (() => {
             const opt = document.createElement('option');
             opt.value = idx;
             const chNum = ch.chapter_number || (idx + 1);
-            opt.textContent = ch.chapter_title || `Chapter ${chNum}`;
+            const rawTitle = (ch.chapter_title || '').trim();
+            opt.textContent = rawTitle || `Chapter ${chNum}`;
             els.chapterSelect.appendChild(opt);
         });
         els.chapterSelect.value = 0;
@@ -1451,8 +1452,18 @@ window.ScriptViewer = (() => {
             </article>
         `).join('');
         section.innerHTML = `
-            <div class="join-review-heading"><div><strong>Audio requiring your decision</strong><p>Only segments that exhausted automatic confidence checks appear here.</p></div><span>${unreviewed.length} unreviewed</span></div>
-            <div class="join-review-list">${unreviewed.length ? cards(unreviewed) : '<div class="review-complete-message">All escalated audio has been reviewed.</div>'}${reviewed.length ? `<details class="reviewed-joins"><summary>Show reviewed (${reviewed.length})</summary>${cards(reviewed)}</details>` : ''}</div>
+            <details class="quality-section-details segment-review-details" open id="segment-review-details">
+                <summary class="quality-section-summary" role="button">
+                    <div>
+                        <strong>Audio requiring your decision</strong>
+                        <small>Only segments that exhausted automatic confidence checks appear here.</small>
+                    </div>
+                    <span class="quality-summary-badge ${unreviewed.length === 0 ? 'resolved' : ''}">${unreviewed.length} unreviewed</span>
+                </summary>
+                <div class="quality-section-body">
+                    <div class="join-review-list">${unreviewed.length ? cards(unreviewed) : '<div class="review-complete-message">All escalated audio has been reviewed.</div>'}${reviewed.length ? `<details class="reviewed-joins"><summary>Show reviewed (${reviewed.length})</summary>${cards(reviewed)}</details>` : ''}</div>
+                </div>
+            </details>
         `;
         section.querySelectorAll('.segment-review-save').forEach(button => {
             button.addEventListener('click', async () => {
@@ -1495,6 +1506,16 @@ window.ScriptViewer = (() => {
         const counts = review.review_counts || {};
         const unreviewed = joins.filter(item => (item.disposition || 'unreviewed') === 'unreviewed');
         const reviewed = joins.filter(item => (item.disposition || 'unreviewed') !== 'unreviewed');
+
+        const joinState = {
+            page: 1,
+            pageSize: 15,
+            disposition: 'unreviewed',
+            chapter: 'all',
+            speaker: 'all',
+            severity: 'all'
+        };
+
         const cardsHtml = items => items.map(item => `
             <article class="join-review-item" data-item-id="${escapeHtml(item.item_id)}"
                      data-initial-disposition="${escapeHtml(item.disposition || 'unreviewed')}"
@@ -1526,66 +1547,158 @@ window.ScriptViewer = (() => {
                 <small title="Diagnostic signals that placed this transition in the listening queue">Why flagged: ${escapeHtml((item.reasons || []).map(humanizeJoinReason).join(' · ') || 'Diagnostic threshold')}</small>
             </article>
         `).join('');
+
         section.innerHTML = `
-            <div class="join-review-heading">
-                <div>
-                    <strong>Chapter join review</strong>
-                    <p>${joins.length} diagnostic warning${joins.length === 1 ? '' : 's'}, sorted by measured severity. A warning is not automatically an audible defect.</p>
+            <details class="quality-section-details join-review-details" open id="join-review-details">
+                <summary class="quality-section-summary" role="button">
+                    <div>
+                        <strong>Chapter join review</strong>
+                        <small>${joins.length} diagnostic warning${joins.length === 1 ? '' : 's'}, sorted by measured severity. A warning is not automatically an audible defect.</small>
+                    </div>
+                    <span class="quality-summary-badge ${unreviewed.length === 0 ? 'resolved' : ''}">${counts.unreviewed || 0} unreviewed</span>
+                </summary>
+                <div class="quality-section-body">
+                    <div class="join-review-filter-bar">
+                        <label><span>Disposition</span><select class="input-sm join-filter-disposition">
+                            <option value="all">All</option><option value="unreviewed" selected>Unreviewed</option><option value="acceptable">Acceptable</option><option value="needs_remaster">Needs remaster</option><option value="source_tts_issue">Source / TTS issue</option>
+                        </select></label>
+                        <label><span>Chapter</span><select class="input-sm join-filter-chapter"><option value="all">All chapters</option>${[...new Set(joins.map(item => item.chapter_number))].sort((a, b) => a - b).map(chapter => `<option value="${chapter}">Chapter ${chapter}</option>`).join('')}</select></label>
+                        <label><span>Speaker</span><select class="input-sm join-filter-speaker"><option value="all">All speakers</option>${[...new Set(joins.flatMap(item => [item.previous_line?.speaker, item.current_line?.speaker]).filter(Boolean))].sort().map(speaker => `<option value="${escapeHtml(speaker.toLowerCase())}">${escapeHtml(speakerDisplayName(speaker))}</option>`).join('')}</select></label>
+                        <label><span>Severity</span><select class="input-sm join-filter-severity"><option value="all">All severities</option><option value="0.7">High (0.70+)</option><option value="0.4">Medium+ (0.40+)</option></select></label>
+                        <button type="button" class="btn btn-ghost btn-sm join-bulk-acceptable">Mark page acceptable</button>
+                    </div>
+                    <div class="join-review-list" id="join-review-items-container"></div>
+                    <div class="quality-pagination-toolbar" id="join-pagination-toolbar">
+                        <div class="pagination-info" id="join-pagination-info">Showing 0-0 of 0 warnings</div>
+                        <div class="pagination-controls">
+                            <button class="btn btn-ghost btn-sm" id="btn-join-prev-page" disabled>◀ Prev</button>
+                            <span class="pagination-page-num" id="join-pagination-page-num">Page 1 of 1</span>
+                            <button class="btn btn-ghost btn-sm" id="btn-join-next-page" disabled>Next ▶</button>
+                            <label class="visually-hidden" for="select-join-page-size">Warnings per page</label>
+                            <select id="select-join-page-size" class="input-sm">
+                                <option value="15" selected>15 per page</option>
+                                <option value="30">30 per page</option>
+                                <option value="50">50 per page</option>
+                                <option value="all">Show all</option>
+                            </select>
+                        </div>
+                    </div>
                 </div>
-                <span>${counts.unreviewed || 0} unreviewed</span>
-            </div>
-            <div class="join-review-filter-bar">
-                <label><span>Disposition</span><select class="input-sm join-filter-disposition">
-                    <option value="all">All</option><option value="unreviewed" selected>Unreviewed</option><option value="acceptable">Acceptable</option><option value="needs_remaster">Needs remaster</option><option value="source_tts_issue">Source / TTS issue</option>
-                </select></label>
-                <label><span>Chapter</span><select class="input-sm join-filter-chapter"><option value="all">All chapters</option>${[...new Set(joins.map(item => item.chapter_number))].sort((a, b) => a - b).map(chapter => `<option value="${chapter}">Chapter ${chapter}</option>`).join('')}</select></label>
-                <label><span>Speaker</span><select class="input-sm join-filter-speaker"><option value="all">All speakers</option>${[...new Set(joins.flatMap(item => [item.previous_line?.speaker, item.current_line?.speaker]).filter(Boolean))].sort().map(speaker => `<option value="${escapeHtml(speaker.toLowerCase())}">${escapeHtml(speakerDisplayName(speaker))}</option>`).join('')}</select></label>
-                <label><span>Severity</span><select class="input-sm join-filter-severity"><option value="all">All severities</option><option value="0.7">High (0.70+)</option><option value="0.4">Medium+ (0.40+)</option></select></label>
-                <button type="button" class="btn btn-ghost btn-sm join-bulk-acceptable">Mark visible acceptable</button>
-            </div>
-            <div class="join-review-list">
-                ${unreviewed.length ? cardsHtml(unreviewed) : '<div class="review-complete-message">All join warnings have been reviewed.</div>'}
-                ${reviewed.length ? `<details class="reviewed-joins"><summary>Show reviewed (${reviewed.length})</summary>${cardsHtml(reviewed)}</details>` : ''}
-            </div>
+            </details>
         `;
-        section.querySelectorAll('.join-review-item').forEach(row => {
-            const updateDirtyState = () => {
-                const disposition = row.querySelector('.join-disposition')?.value || 'unreviewed';
-                const note = row.querySelector('.join-note')?.value || '';
-                const dirty = disposition !== row.dataset.initialDisposition || note !== row.dataset.initialNote;
-                const button = row.querySelector('.join-review-save');
-                button.disabled = !dirty;
-                button.textContent = dirty ? 'Save review' : 'Saved';
-            };
-            row.querySelector('.join-disposition')?.addEventListener('change', updateDirtyState);
-            row.querySelector('.join-note')?.addEventListener('input', updateDirtyState);
-        });
-        const applyJoinFilters = () => {
-            const disposition = section.querySelector('.join-filter-disposition').value;
-            const chapter = section.querySelector('.join-filter-chapter').value;
-            const speaker = section.querySelector('.join-filter-speaker').value;
-            const severity = section.querySelector('.join-filter-severity').value;
-            let visibleCount = 0;
-            section.querySelectorAll('.join-review-item').forEach(row => {
-                row.hidden = !(
-                    (disposition === 'all' || row.dataset.disposition === disposition)
-                    && (chapter === 'all' || row.dataset.chapter === chapter)
-                    && (speaker === 'all' || row.dataset.speakers.split(' ').includes(speaker))
-                    && (severity === 'all' || Number(row.dataset.severity) >= Number(severity))
-                );
-                if (!row.hidden) visibleCount += 1;
+
+        function renderJoinPage() {
+            const container = section.querySelector('#join-review-items-container');
+            if (!container) return;
+
+            const filtered = joins.filter(item => {
+                const dispMatch = joinState.disposition === 'all' || (item.disposition || 'unreviewed') === joinState.disposition;
+                const chMatch = joinState.chapter === 'all' || String(item.chapter_number) === String(joinState.chapter);
+                const spkMatch = joinState.speaker === 'all' || [item.previous_line?.speaker, item.current_line?.speaker].filter(Boolean).some(s => s.toLowerCase() === joinState.speaker);
+                const sevMatch = joinState.severity === 'all' || Number(item.severity || 0) >= Number(joinState.severity);
+                return dispMatch && chMatch && spkMatch && sevMatch;
             });
-            section.querySelector('.join-bulk-acceptable').disabled = visibleCount === 0;
-            const reviewedDetails = section.querySelector('.reviewed-joins');
-            if (reviewedDetails && disposition !== 'unreviewed') reviewedDetails.open = true;
-        };
-        section.querySelectorAll('.join-review-filter-bar select').forEach(select => {
-            select.addEventListener('change', applyJoinFilters);
+
+            const pageSize = joinState.pageSize === 'all' ? filtered.length : Number(joinState.pageSize);
+            const totalPages = Math.max(1, Math.ceil(filtered.length / (pageSize || 1)));
+            if (joinState.page > totalPages) joinState.page = totalPages;
+            if (joinState.page < 1) joinState.page = 1;
+
+            const startIndex = (joinState.page - 1) * pageSize;
+            const pageItems = joinState.pageSize === 'all' ? filtered : filtered.slice(startIndex, startIndex + pageSize);
+
+            if (pageItems.length) {
+                container.innerHTML = cardsHtml(pageItems);
+            } else {
+                container.innerHTML = '<div class="review-complete-message">No join warnings match the selected filters.</div>';
+            }
+
+            const startDisplay = filtered.length ? startIndex + 1 : 0;
+            const endDisplay = Math.min(startIndex + pageItems.length, filtered.length);
+            const infoEl = section.querySelector('#join-pagination-info');
+            if (infoEl) infoEl.textContent = `Showing ${startDisplay}-${endDisplay} of ${filtered.length} warning${filtered.length === 1 ? '' : 's'}`;
+
+            const pageNumEl = section.querySelector('#join-pagination-page-num');
+            if (pageNumEl) pageNumEl.textContent = `Page ${joinState.page} of ${totalPages}`;
+
+            const prevBtn = section.querySelector('#btn-join-prev-page');
+            if (prevBtn) prevBtn.disabled = joinState.page <= 1;
+
+            const nextBtn = section.querySelector('#btn-join-next-page');
+            if (nextBtn) nextBtn.disabled = joinState.page >= totalPages;
+
+            const bulkBtn = section.querySelector('.join-bulk-acceptable');
+            if (bulkBtn) bulkBtn.disabled = pageItems.length === 0;
+
+            container.querySelectorAll('.join-review-item').forEach(row => {
+                const updateDirtyState = () => {
+                    const disposition = row.querySelector('.join-disposition')?.value || 'unreviewed';
+                    const note = row.querySelector('.join-note')?.value || '';
+                    const dirty = disposition !== row.dataset.initialDisposition || note !== row.dataset.initialNote;
+                    const button = row.querySelector('.join-review-save');
+                    if (button) {
+                        button.disabled = !dirty;
+                        button.textContent = dirty ? 'Save review' : 'Saved';
+                    }
+                };
+                row.querySelector('.join-disposition')?.addEventListener('change', updateDirtyState);
+                row.querySelector('.join-note')?.addEventListener('input', updateDirtyState);
+            });
+
+            container.querySelectorAll('.join-review-save').forEach(button => {
+                button.addEventListener('click', async () => {
+                    const row = button.closest('.join-review-item');
+                    await saveReviewDisposition(
+                        row?.dataset.itemId || '',
+                        row?.querySelector('.join-disposition')?.value || 'unreviewed',
+                        row?.querySelector('.join-note')?.value || '',
+                        button
+                    );
+                });
+            });
+        }
+
+        section.querySelector('.join-filter-disposition')?.addEventListener('change', e => {
+            joinState.disposition = e.target.value;
+            joinState.page = 1;
+            renderJoinPage();
         });
+        section.querySelector('.join-filter-chapter')?.addEventListener('change', e => {
+            joinState.chapter = e.target.value;
+            joinState.page = 1;
+            renderJoinPage();
+        });
+        section.querySelector('.join-filter-speaker')?.addEventListener('change', e => {
+            joinState.speaker = e.target.value;
+            joinState.page = 1;
+            renderJoinPage();
+        });
+        section.querySelector('.join-filter-severity')?.addEventListener('change', e => {
+            joinState.severity = e.target.value;
+            joinState.page = 1;
+            renderJoinPage();
+        });
+
+        section.querySelector('#btn-join-prev-page')?.addEventListener('click', () => {
+            if (joinState.page > 1) {
+                joinState.page -= 1;
+                renderJoinPage();
+            }
+        });
+        section.querySelector('#btn-join-next-page')?.addEventListener('click', () => {
+            joinState.page += 1;
+            renderJoinPage();
+        });
+        section.querySelector('#select-join-page-size')?.addEventListener('change', e => {
+            joinState.pageSize = e.target.value;
+            joinState.page = 1;
+            renderJoinPage();
+        });
+
         section.querySelector('.join-bulk-acceptable')?.addEventListener('click', async event => {
-            const visibleRows = [...section.querySelectorAll('.join-review-item:not([hidden])')];
+            const visibleRows = [...section.querySelectorAll('.join-review-item')];
             if (!visibleRows.length) {
-                showToast('No visible join warnings to update', 'info');
+                showToast('No visible join warnings on this page to update', 'info');
                 return;
             }
             if (!confirm(`Mark ${visibleRows.length} visible join warning${visibleRows.length === 1 ? '' : 's'} as acceptable?`)) return;
@@ -1617,18 +1730,8 @@ window.ScriptViewer = (() => {
                 button.textContent = 'Try bulk update again';
             }
         });
-        applyJoinFilters();
-        section.querySelectorAll('.join-review-save').forEach(button => {
-            button.addEventListener('click', async () => {
-                const row = button.closest('.join-review-item');
-                await saveReviewDisposition(
-                    row?.dataset.itemId || '',
-                    row?.querySelector('.join-disposition')?.value || 'unreviewed',
-                    row?.querySelector('.join-note')?.value || '',
-                    button
-                );
-            });
-        });
+
+        renderJoinPage();
         els.qualityOverview.appendChild(section);
     }
 
@@ -1651,13 +1754,12 @@ window.ScriptViewer = (() => {
                     })
                 }
             );
-            const data = await response.json().catch(() => ({}));
-            if (!response.ok) throw new Error(data.detail || 'Could not save review');
-            showToast('Join review saved', 'success');
+            if (!response.ok) throw new Error(await response.text());
+            showToast('Join review updated', 'success');
             await fetchQualityReview(projectId);
             renderQuality();
         } catch (error) {
-            showToast(error.message, 'error');
+            showToast(`Could not update join review: ${error.message}`, 'error');
             button.disabled = false;
             button.textContent = 'Try again';
         }
@@ -1671,86 +1773,146 @@ window.ScriptViewer = (() => {
         const verified = candidates.filter(item => item.status === 'verified');
         const section = document.createElement('section');
         section.className = 'pronunciation-review';
+
+        const lexState = {
+            page: 1,
+            pageSize: 15,
+            filter: 'all',
+            search: ''
+        };
+
         section.innerHTML = `
-            <div class="pronunciation-heading">
-                <div>
-                    <strong>Book pronunciation lexicon</strong>
-                    <p>${unresolved.length} term${unresolved.length === 1 ? '' : 's'} suggested from text · ${verified.length} custom verified mapping${verified.length === 1 ? '' : 's'}</p>
+            <details class="quality-section-details pronunciation-details" open id="pronunciation-details">
+                <summary class="quality-section-summary" role="button">
+                    <div>
+                        <strong>Book pronunciation lexicon</strong>
+                        <small>${unresolved.length} term${unresolved.length === 1 ? '' : 's'} suggested from text · ${verified.length} custom verified mapping${verified.length === 1 ? '' : 's'}</small>
+                    </div>
+                    <span class="quality-summary-badge resolved">${verified.length} verified</span>
+                </summary>
+                <div class="quality-section-body">
+                    <div class="pronunciation-add-card">
+                        <strong>+ Add Custom Phonetic Replacement</strong>
+                        <input type="text" id="lexicon-custom-term" placeholder="Word in book (e.g. homeisle, homeisler)" maxlength="120">
+                        <input type="text" id="lexicon-custom-spoken" placeholder="Spoken phonetic form (e.g. home-aisle, home-eye-ler)" maxlength="240">
+                        <div style="display:flex; gap:8px; align-items:center;">
+                            <button type="button" class="btn btn-ghost btn-sm" id="btn-preview-lexicon-custom" title="Test audio preview">▶ Test Preview</button>
+                            <button type="button" class="btn btn-primary btn-sm" id="btn-add-lexicon-custom">+ Add / Update Term</button>
+                        </div>
+                    </div>
+
+                    <div class="pronunciation-toolbar">
+                        <div class="pronunciation-search-bar" style="flex: 1;">
+                            <input type="text" id="lexicon-search-input" placeholder="🔍 Search words, terms, or replacements in lexicon...">
+                        </div>
+                        <div class="pronunciation-filter-tabs">
+                            <button type="button" class="btn btn-ghost btn-sm lex-tab active" data-filter="all">All (${candidates.length})</button>
+                            <button type="button" class="btn btn-ghost btn-sm lex-tab" data-filter="verified">Verified (${verified.length})</button>
+                            <button type="button" class="btn btn-ghost btn-sm lex-tab" data-filter="unresolved">Suggestions (${unresolved.length})</button>
+                        </div>
+                    </div>
+
+                    <div class="pronunciation-list" id="pronunciation-items-container"></div>
+
+                    <div class="quality-pagination-toolbar" id="lexicon-pagination-toolbar">
+                        <div class="pagination-info" id="lexicon-pagination-info">Showing 0-0 of 0 terms</div>
+                        <div class="pagination-controls">
+                            <button class="btn btn-ghost btn-sm" id="btn-lexicon-prev-page" disabled>◀ Prev</button>
+                            <span class="pagination-page-num" id="lexicon-pagination-page-num">Page 1 of 1</span>
+                            <button class="btn btn-ghost btn-sm" id="btn-lexicon-next-page" disabled>Next ▶</button>
+                            <label class="visually-hidden" for="select-lexicon-page-size">Terms per page</label>
+                            <select id="select-lexicon-page-size" class="input-sm">
+                                <option value="15" selected>15 per page</option>
+                                <option value="30">30 per page</option>
+                                <option value="50">50 per page</option>
+                                <option value="all">Show all</option>
+                            </select>
+                        </div>
+                    </div>
                 </div>
-                <span>${verified.length} verified</span>
-            </div>
-
-            <div class="pronunciation-add-card">
-                <strong>+ Add Custom Phonetic Replacement</strong>
-                <input type="text" id="lexicon-custom-term" placeholder="Word in book (e.g. homeisle, homeisler)" maxlength="120">
-                <input type="text" id="lexicon-custom-spoken" placeholder="Spoken phonetic form (e.g. home-aisle, home-eye-ler)" maxlength="240">
-                <div style="display:flex; gap:8px; align-items:center;">
-                    <button type="button" class="btn btn-ghost btn-sm" id="btn-preview-lexicon-custom" title="Test audio preview">▶ Test Preview</button>
-                    <button type="button" class="btn btn-primary btn-sm" id="btn-add-lexicon-custom">+ Add / Update Term</button>
-                </div>
-            </div>
-
-            <div class="pronunciation-search-bar">
-                <input type="text" id="lexicon-search-input" placeholder="🔍 Search words, terms, or replacements in lexicon...">
-            </div>
-
-            <div class="pronunciation-list" id="pronunciation-items-container">
-                <!-- rendered items -->
-            </div>
+            </details>
         `;
 
-        function renderList(query = '') {
+        function renderList() {
             const container = section.querySelector('#pronunciation-items-container');
             if (!container) return;
-            const q = query.toLowerCase();
+            const q = lexState.search.toLowerCase();
 
-            const filteredVerified = verified.filter(item => 
-                !q || item.term.toLowerCase().includes(q) || (item.spoken_text || '').toLowerCase().includes(q)
-            );
-            const filteredUnresolved = unresolved.filter(item => 
-                !q || item.term.toLowerCase().includes(q)
-            );
+            let pool = candidates;
+            if (lexState.filter === 'verified') pool = verified;
+            else if (lexState.filter === 'unresolved') pool = unresolved;
+
+            const filtered = pool.filter(item => {
+                if (!q) return true;
+                return (
+                    item.term.toLowerCase().includes(q) ||
+                    (item.spoken_text || '').toLowerCase().includes(q) ||
+                    (item.contexts || []).some(c => c.toLowerCase().includes(q))
+                );
+            });
+
+            const pageSize = lexState.pageSize === 'all' ? filtered.length : Number(lexState.pageSize);
+            const totalPages = Math.max(1, Math.ceil(filtered.length / (pageSize || 1)));
+            if (lexState.page > totalPages) lexState.page = totalPages;
+            if (lexState.page < 1) lexState.page = 1;
+
+            const startIndex = (lexState.page - 1) * pageSize;
+            const pageItems = lexState.pageSize === 'all' ? filtered : filtered.slice(startIndex, startIndex + pageSize);
 
             let html = '';
-            if (filteredVerified.length) {
-                html += filteredVerified.map(item => `
-                    <div class="pronunciation-row verified" data-term="${escapeHtml(item.term)}">
-                        <div class="pronunciation-term">
-                            <strong>${escapeHtml(item.term)}</strong>
-                            <small>${item.occurrences || 0} occurrence${item.occurrences === 1 ? '' : 's'} · ${escapeHtml(item.mapping_source || 'project')}</small>
-                        </div>
-                        <span class="pronunciation-arrow">→</span>
-                        <strong style="color:#86efac">${escapeHtml(item.spoken_text)}</strong>
-                        <div style="display:flex; align-items:center; gap:6px; margin-left:auto;">
-                            <button type="button" class="pronunciation-preview" data-term="${escapeHtml(item.term)}" data-spoken="${escapeHtml(item.spoken_text || '')}" title="Test audio preview">▶ Preview</button>
-                            <button type="button" class="pronunciation-delete" data-term="${escapeHtml(item.term)}" title="Remove custom pronunciation">✕ Remove</button>
-                        </div>
-                    </div>
-                `).join('');
-            }
-
-            if (filteredUnresolved.length) {
-                html += filteredUnresolved.slice(0, 100).map(item => `
-                    <div class="pronunciation-row" data-term="${escapeHtml(item.term)}">
-                        <div class="pronunciation-term">
-                            <strong>${escapeHtml(item.term)}</strong>
-                            <small>${item.occurrences || 0} occurrence${item.occurrences === 1 ? '' : 's'} · chapters ${(item.chapters || []).join(', ') || '—'}</small>
-                            <span title="${escapeHtml((item.contexts || []).join(' | '))}">${escapeHtml((item.contexts || [])[0] || '')}</span>
-                        </div>
-                        <input type="text" maxlength="240" placeholder="Spoken form, e.g. Pah-chee" aria-label="Spoken form for ${escapeHtml(item.term)}">
-                        <div style="display:flex; align-items:center; gap:6px;">
-                            <button type="button" class="btn btn-ghost btn-sm pronunciation-preview-unresolved" data-term="${escapeHtml(item.term)}" title="Test audio preview">▶ Preview</button>
-                            <button type="button" class="btn btn-secondary pronunciation-save">Verify</button>
-                        </div>
-                    </div>
-                `).join('');
-            }
-
-            if (!filteredVerified.length && !filteredUnresolved.length) {
-                html = '<div class="review-complete-message">No lexicon terms match your search.</div>';
+            if (pageItems.length) {
+                html = pageItems.map(item => {
+                    if (item.status === 'verified') {
+                        return `
+                            <div class="pronunciation-row verified" data-term="${escapeHtml(item.term)}">
+                                <div class="pronunciation-term">
+                                    <strong>${escapeHtml(item.term)}</strong>
+                                    <small>${item.occurrences || 0} occurrence${item.occurrences === 1 ? '' : 's'} · ${escapeHtml(item.mapping_source || 'project')}</small>
+                                </div>
+                                <span class="pronunciation-arrow">→</span>
+                                <strong style="color:#86efac">${escapeHtml(item.spoken_text)}</strong>
+                                <div style="display:flex; align-items:center; gap:6px; margin-left:auto;">
+                                    <button type="button" class="pronunciation-preview" data-term="${escapeHtml(item.term)}" data-spoken="${escapeHtml(item.spoken_text || '')}" title="Test audio preview">▶ Preview</button>
+                                    <button type="button" class="pronunciation-delete" data-term="${escapeHtml(item.term)}" title="Remove custom pronunciation">✕ Remove</button>
+                                </div>
+                            </div>
+                        `;
+                    } else {
+                        return `
+                            <div class="pronunciation-row" data-term="${escapeHtml(item.term)}">
+                                <div class="pronunciation-term">
+                                    <strong>${escapeHtml(item.term)}</strong>
+                                    <small>${item.occurrences || 0} occurrence${item.occurrences === 1 ? '' : 's'} · chapters ${(item.chapters || []).join(', ') || '—'}</small>
+                                    <span title="${escapeHtml((item.contexts || []).join(' | '))}">${escapeHtml((item.contexts || [])[0] || '')}</span>
+                                </div>
+                                <input type="text" maxlength="240" placeholder="Spoken form, e.g. Pah-chee" aria-label="Spoken form for ${escapeHtml(item.term)}">
+                                <div style="display:flex; align-items:center; gap:6px;">
+                                    <button type="button" class="btn btn-ghost btn-sm pronunciation-preview-unresolved" data-term="${escapeHtml(item.term)}" title="Test audio preview">▶ Preview</button>
+                                    <button type="button" class="btn btn-secondary pronunciation-save">Verify</button>
+                                </div>
+                            </div>
+                        `;
+                    }
+                }).join('');
+            } else {
+                html = '<div class="review-complete-message">No lexicon terms match your search or filter.</div>';
             }
 
             container.innerHTML = html;
+
+            const startDisplay = filtered.length ? startIndex + 1 : 0;
+            const endDisplay = Math.min(startIndex + pageItems.length, filtered.length);
+            const infoEl = section.querySelector('#lexicon-pagination-info');
+            if (infoEl) infoEl.textContent = `Showing ${startDisplay}-${endDisplay} of ${filtered.length} term${filtered.length === 1 ? '' : 's'}`;
+
+            const pageNumEl = section.querySelector('#lexicon-pagination-page-num');
+            if (pageNumEl) pageNumEl.textContent = `Page ${lexState.page} of ${totalPages}`;
+
+            const prevBtn = section.querySelector('#btn-lexicon-prev-page');
+            if (prevBtn) prevBtn.disabled = lexState.page <= 1;
+
+            const nextBtn = section.querySelector('#btn-lexicon-next-page');
+            if (nextBtn) nextBtn.disabled = lexState.page >= totalPages;
 
             container.querySelectorAll('.pronunciation-save').forEach(button => {
                 button.addEventListener('click', () => {
@@ -1789,7 +1951,35 @@ window.ScriptViewer = (() => {
         renderList();
 
         section.querySelector('#lexicon-search-input')?.addEventListener('input', (e) => {
-            renderList(e.target.value.trim());
+            lexState.search = e.target.value.trim();
+            lexState.page = 1;
+            renderList();
+        });
+
+        section.querySelectorAll('.lex-tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                section.querySelectorAll('.lex-tab').forEach(t => t.classList.remove('active'));
+                tab.classList.add('active');
+                lexState.filter = tab.dataset.filter || 'all';
+                lexState.page = 1;
+                renderList();
+            });
+        });
+
+        section.querySelector('#btn-lexicon-prev-page')?.addEventListener('click', () => {
+            if (lexState.page > 1) {
+                lexState.page -= 1;
+                renderList();
+            }
+        });
+        section.querySelector('#btn-lexicon-next-page')?.addEventListener('click', () => {
+            lexState.page += 1;
+            renderList();
+        });
+        section.querySelector('#select-lexicon-page-size')?.addEventListener('change', e => {
+            lexState.pageSize = e.target.value;
+            lexState.page = 1;
+            renderList();
         });
 
         section.querySelector('#btn-preview-lexicon-custom')?.addEventListener('click', () => {

@@ -156,16 +156,18 @@ async def get_catalog(
         if not project_dir.is_dir() or project_dir.name.startswith((".", "_")):
             continue
         project_id = project_dir.name
+        if active_job_ids and project_id not in active_job_ids:
+            continue
 
         try:
             job_state = job_queue.get_job(project_id)
         except KeyError:
             job_state = {}
 
-        # If project is not in job_queue and has no book.json, it is deleted/stale
-        book_json_path = project_dir / "book.json"
-        if not job_state and not book_json_path.is_file():
+        if not job_state:
             continue
+
+        book_json_path = project_dir / "book.json"
 
         metadata: dict[str, Any] = {}
         total_chapters = int(job_state.get("total_chapters") or 0)
@@ -384,13 +386,13 @@ async def get_book_detail(project_id: str, request: Request) -> dict[str, Any]:
             cumulative_offset += dur
 
         raw_title = (chapter_titles.get(c_num) or "").strip()
-        formatted_title = f"Chapter {c_num}"
+        formatted_title = raw_title if raw_title else f"Chapter {c_num}"
 
         chapters_list.append({
             "number": c_num,
             "title": formatted_title,
-            "raw_title": raw_title or f"Chapter {c_num}",
-            "source_heading": raw_title,
+            "raw_title": formatted_title,
+            "source_heading": formatted_title,
             "status": ch_status,
             "duration_seconds": dur,
             "start_ms": start_ms,
