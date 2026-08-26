@@ -237,7 +237,7 @@ class VoiceClient:
                             elif data.get("type") == "error":
                                 raise RuntimeError(f"Voice Server generation error: {data.get('error')} - {data.get('detail')}")
                 raise RuntimeError("Stream ended without returning a result.")
-            except (httpx.TimeoutException, httpx.RequestError) as e:
+            except (httpx.TimeoutException, httpx.RequestError, httpx.HTTPStatusError) as e:
                 last_error = e
                 logger.warning(
                     "POST /generate/chapter stream failed (attempt %d/%d): %s",

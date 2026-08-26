@@ -1196,7 +1196,13 @@ class Pipeline:
                 job_info = self.job_queue.get_job(project_id) or {}
                 p_title = job_info.get("title") or project_id
                 char_count = len(review_pause.item_ids or [])
-                notifier.notify_voice_review_required(project_id, p_title, character_count=char_count)
+                notifier.notify_review_required(
+                    project_id=project_id,
+                    project_title=p_title,
+                    reason=review_pause.reason,
+                    item_count=char_count,
+                    item_ids=review_pause.item_ids or [],
+                )
             except Exception as notif_exc:
                 logger.debug("Notification error: %s", notif_exc)
             return ProjectStatus(**self.job_queue.get_job(project_id))
@@ -3314,8 +3320,8 @@ class Pipeline:
         # book-local glossary for places, peoples, creatures, and other proper
         # names without asking the reader to curate the source book.
         script_path = project_dir / "book_script.json"
-        if script_path.exists():
-            script_payload = json.loads(script_path.read_text(encoding="utf-8"))
+        script_dir = project_dir / "script"
+        if script_path.exists() or script_dir.is_dir():
             candidate_counts: dict[str, int] = {}
             mid_sentence_candidates: set[str] = set()
 
@@ -3342,7 +3348,21 @@ class Pipeline:
                     for value in node:
                         collect_text(value)
 
-            collect_text(script_payload.get("chapters", []))
+            if script_path.exists():
+                try:
+                    script_payload = json.loads(script_path.read_text(encoding="utf-8"))
+                    collect_text(script_payload.get("chapters", []))
+                except Exception:
+                    pass
+
+            if script_dir.is_dir():
+                for ch_file in script_dir.glob("chapter_*.json"):
+                    try:
+                        ch_payload = json.loads(ch_file.read_text(encoding="utf-8"))
+                        collect_text(ch_payload.get("lines", []))
+                    except Exception:
+                        pass
+
             sentence_words = {
                 "After", "Again", "Because", "Before", "Could", "Every",
                 "Finally", "First", "From", "Here", "However", "Instead",

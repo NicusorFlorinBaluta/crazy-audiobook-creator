@@ -503,6 +503,7 @@ class NASSyncer:
 
         # Check delivery parts mapping from deliveries/index.json if present
         delivery_chapter_map: dict[int, str] = {}
+        delivery_info_map: dict[str, dict[str, Any]] = {}
         deliveries_index = project_dir / "deliveries" / "index.json"
         if deliveries_index.is_file():
             try:
@@ -510,10 +511,38 @@ class NASSyncer:
                 for deliv in d_data.get("deliveries", []):
                     if deliv.get("status") == "published" and deliv.get("artifact"):
                         art = deliv["artifact"]
+                        url = f"{project_id}/parts/{quote(art)}"
+                        delivery_info_map[art] = deliv
+                        delivery_info_map[url] = deliv
                         for c_num in deliv.get("chapter_numbers", []):
-                            delivery_chapter_map[c_num] = f"{project_id}/parts/{quote(art)}"
+                            delivery_chapter_map[c_num] = url
             except Exception:
                 pass
+
+        # Helper to compute duration of a chapter
+        def get_chapter_duration(ch_num: int) -> float:
+            m_file = project_dir / "manifests" / f"chapter_{ch_num:03d}.master.json"
+            if m_file.is_file():
+                try:
+                    m_d = json.loads(m_file.read_text(encoding="utf-8"))
+                    d = m_d.get("mastering_quality", {}).get("duration_seconds") or m_d.get("duration_seconds")
+                    if d:
+                        return float(d)
+                except Exception:
+                    pass
+            # Try workspace wav
+            for cand in [
+                project_dir.parent.parent / "workspace" / project_id / "chapters" / f"chapter_{ch_num:03d}.wav",
+                project_dir / "chapters" / f"chapter_{ch_num:03d}.wav",
+            ]:
+                if cand.is_file():
+                    try:
+                        import soundfile as sf
+                        info = sf.info(str(cand))
+                        return float(info.duration)
+                    except Exception:
+                        pass
+            return 0.0
 
         # Check delivery parts directory on NAS
         parts_remote_dir = posixpath.join(proj_remote_dir, "parts")
@@ -530,13 +559,39 @@ class NASSyncer:
                         ch_nums = list(range(int(m_ch.group(1)), int(m_ch.group(2)) + 1))
                         for c in ch_nums:
                             delivery_chapter_map[c] = download_url
+
+                    # Build accurate chapter details with start_ms and duration
+                    part_ch_details: list[dict[str, Any]] = []
+                    part_cum_offset = 0.0
+                    for c_num in ch_nums:
+                        c_dur = get_chapter_duration(c_num)
+                        ch_entry = book_chapters[c_num - 1] if 0 <= c_num - 1 < len(book_chapters) else {}
+                        c_title = str(ch_entry.get("source_heading") or ch_entry.get("title") or f"Chapter {c_num}").strip()
+                        c_start = int(part_cum_offset * 1000)
+                        c_end = int((part_cum_offset + c_dur) * 1000)
+                        part_cum_offset += c_dur
+                        part_ch_details.append({
+                            "number": c_num,
+                            "title": c_title,
+                            "start_ms": c_start,
+                            "end_ms": c_end,
+                            "duration_seconds": c_dur,
+                            "stream_url": download_url,
+                            "status": "mastered",
+                        })
+
+                    deliv_info = delivery_info_map.get(item) or delivery_info_map.get(download_url) or {}
+                    part_total_dur = float(deliv_info.get("duration_seconds") or part_cum_offset)
+
                     parts_list.append({
                         "delivery_id": f"part-{ord_val:03d}",
                         "title": f"Part {ord_val:02d}",
+                        "filename": item,
                         "chapters": ch_nums,
+                        "chapter_details": part_ch_details,
+                        "duration_seconds": part_total_dur,
                         "status": "published",
                         "download_url": download_url,
-                        "filename": item,
                     })
         except (IOError, OSError):
             pass

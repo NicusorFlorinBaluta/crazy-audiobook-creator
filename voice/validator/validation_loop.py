@@ -1076,18 +1076,33 @@ class ValidationLoop:
             + analysis["duration_score"] * QUALITY_WEIGHT_DURATION
         )
         estimated_word_errors = reported_wer * max(word_count, 1)
-        # For one- and two-word clips, one wrong word means the utterance is
-        # materially wrong. Longer clips follow the configured WER threshold;
-        # the former 6-15 word special case silently rejected lines that were
-        # already below that configured threshold.
-        length_sensitive_wer_failure = semantic_text_mismatch or ((
-            (word_count <= 2 and estimated_word_errors > 0.05)
-            or (word_count > 2 and wer > effective_wer_threshold)
-        ) and not (
-            spelling_variant_match
-            or glossary_phonetic_match
-            or orthographic_segmentation_match
-        ))
+        
+        # On short lines (<= 3 words), allow clean acoustic takes with verified glossary match or high text similarity without substitution
+        short_line_phonetic_acceptable = (
+            word_count <= 3
+            and not analysis["clipping_detected"]
+            and not analysis["has_long_silence"]
+            and analysis["duration_ok"]
+            and (
+                spelling_variant_match
+                or glossary_phonetic_match
+                or orthographic_segmentation_match
+                or (wer <= effective_wer_threshold and text_similarity >= 0.85)
+            )
+        )
+
+        length_sensitive_wer_failure = semantic_text_mismatch or (
+            not short_line_phonetic_acceptable
+            and (
+                (word_count <= 2 and estimated_word_errors > 0.05)
+                or (word_count > 2 and wer > effective_wer_threshold)
+            )
+            and not (
+                spelling_variant_match
+                or glossary_phonetic_match
+                or orthographic_segmentation_match
+            )
+        )
 
         hard_audio_failure = (
             analysis["clipping_detected"]
@@ -1209,7 +1224,7 @@ class ValidationLoop:
             word
             for term in validation_terms
             for word in self.whisper._normalize_text(term).split()
-            if len(word) >= 4
+            if len(word) >= 3
         }
         if not glossary_words:
             return 1.0
@@ -1228,10 +1243,14 @@ class ValidationLoop:
                 observed = hypothesis_words[column - 1]
                 equivalent = expected == observed
                 if not equivalent and expected in glossary_words:
+                    sim_ratio = SequenceMatcher(None, expected, observed).ratio()
                     equivalent = (
-                        len(observed) >= 4
-                        and SequenceMatcher(None, expected, observed).ratio()
-                        >= 0.60
+                        len(observed) >= 3
+                        and (
+                            sim_ratio >= 0.45
+                            or expected.startswith(observed[:3])
+                            or observed.startswith(expected[:3])
+                        )
                     )
                 substitution_cost = 0.0 if equivalent else 1.0
                 distance[row][column] = min(

@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 class NotificationEventType(str, Enum):
     VOICE_REVIEW_REQUIRED = "voice_review_required"
+    REVIEW_REQUIRED = "review_required"
     PRONUNCIATION_ATTENTION = "pronunciation_attention"
     GENERATION_ERROR = "generation_error"
     DELIVERY_PUBLISHED = "delivery_published"
@@ -99,11 +100,14 @@ class HANotifier:
             "data": {
                 "url": click_url,
                 "clickAction": click_url,
-                "tag": f"crazy-audiobook-{payload.project_id}",
+                "tag": f"crazy-{payload.event_type.value}-{payload.project_id}-{int(time.time())}",
                 "group": "crazy-audiobook-creator",
-                "importance": payload.importance,
+                "importance": "high" if payload.importance == "high" else "default",
+                "priority": "high",
+                "ttl": 0,
                 "channel": "Audiobook Notifications",
-                "notification_icon": "mdi:book-music",
+                "notification_icon": "mdi:book-open-page-variant",
+                "visibility": "public",
             }
         }
 
@@ -138,6 +142,27 @@ class HANotifier:
         thread.start()
 
     # --- Convenience Helper Methods ---
+
+    def notify_review_required(
+        self,
+        project_id: str,
+        project_title: str,
+        reason: str | None = None,
+        item_count: int = 0,
+        item_ids: list[str] | None = None,
+    ) -> None:
+        reason_msg = reason or (f"{item_count} item(s) require review before proceeding." if item_count > 0 else "Action required.")
+        title = f"🔍 Review Required: {project_title}" if item_count > 0 else f"🎭 Action Required: {project_title}"
+        payload = NotificationPayload(
+            event_type=NotificationEventType.REVIEW_REQUIRED,
+            project_id=project_id,
+            project_title=project_title,
+            title=title,
+            message=f"{reason_msg} Tap to open the creator dashboard.",
+            details={"item_count": item_count, "item_ids": item_ids or [], "reason": reason_msg},
+            importance="high",
+        )
+        self.notify_async(payload)
 
     def notify_voice_review_required(self, project_id: str, project_title: str, character_count: int = 0) -> None:
         payload = NotificationPayload(

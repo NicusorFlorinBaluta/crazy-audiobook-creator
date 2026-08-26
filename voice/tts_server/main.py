@@ -634,13 +634,22 @@ def generate_chapter(request: GenerateChapterRequest, fast_req: Request):
     _safe_workspace_project(request.project_id)
     _enforce_workspace_quota()
     cancellation = threading.Event()
-    with run_state_lock:
-        if request.project_id in active_project_runs:
-            raise HTTPException(
-                status_code=409,
-                detail="A chapter request is already active for this project",
-            )
-        active_project_runs[request.project_id] = cancellation
+    acquired = False
+    for _ in range(25):
+        with run_state_lock:
+            if request.project_id not in active_project_runs:
+                active_project_runs[request.project_id] = cancellation
+                acquired = True
+                break
+        time.sleep(0.2)
+
+    if not acquired:
+        with run_state_lock:
+            # If still locked after 5 seconds, check if old run was cancelled or signal cancellation and take over
+            old_cancellation = active_project_runs.get(request.project_id)
+            if old_cancellation is not None:
+                old_cancellation.set()
+            active_project_runs[request.project_id] = cancellation
 
     import queue
     import json

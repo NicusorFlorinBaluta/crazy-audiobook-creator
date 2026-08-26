@@ -213,6 +213,11 @@ def collect_review_gate(project_id: str, project_dir: Path, job_queue: Any) -> R
         details = quality.get("details", {})
         disposition = review.get("disposition", "unreviewed")
         script_line = script_lines_by_id.get(item_id, {})
+        # Only segments that failed hard deterministic audio gates or were flagged are blocking.
+        # Soft warnings and accepted audio with advisory notes are non-blocking.
+        is_hard_failure = not bool(details.get("passed_hard_gates", True)) or quality.get("status") in {"fail", "flagged"}
+        blocking = is_hard_failure and (disposition not in RESOLVED_SEGMENT_DISPOSITIONS)
+
         items.append(ReviewItem(
             category="audio",
             item_id=item_id,
@@ -220,7 +225,7 @@ def collect_review_gate(project_id: str, project_dir: Path, job_queue: Any) -> R
             reason=str(details.get("manual_review_reason") or review.get("note") or "Automatic validators abstained."),
             confidence=_float_or_none(details.get("validation_confidence")),
             disposition=disposition,
-            blocking=disposition not in RESOLVED_SEGMENT_DISPOSITIONS,
+            blocking=blocking,
             chapter_number=_int_or_none(quality.get("chapter_number")) or script_line.get("chapter_number"),
             details={
                 "provider": details.get("external_validation_provider", ""),
