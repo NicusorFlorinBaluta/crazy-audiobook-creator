@@ -9,6 +9,7 @@ from brain.orchestrator.pipeline import Pipeline
 from brain.validators.gemini_validation import GeminiValidationService
 from brain.validators.gemini_validation import (
     ExtractionBatch,
+    GeminiApiClient,
     _extract_json,
     _gemini_response_schema,
 )
@@ -482,6 +483,75 @@ class GeminiAudioValidationTests(unittest.TestCase):
 
             self.assertEqual(regenerate, {"line"})
             self.assertEqual(manual, {"line"})
+
+
+class GeminiApiClientPacingTests(unittest.TestCase):
+    def test_client_respects_request_interval(self) -> None:
+        from unittest.mock import MagicMock, patch
+
+        with tempfile.TemporaryDirectory() as directory:
+            client = GeminiApiClient(
+                {
+                    "enabled": True,
+                    "request_interval_seconds": 0.05,
+                    "max_attempts": 2,
+                },
+                Path(directory),
+            )
+            client.api_key = "test_key"
+
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = {
+                "candidates": [{"content": {"parts": [{"text": '{"decision": "accept"}'}]}}]
+            }
+
+            with patch("httpx.post", return_value=mock_resp) as mock_post, \
+                 patch("time.sleep") as mock_sleep:
+                client._last_request_time = 100.0
+                with patch("time.monotonic", side_effect=[100.01, 100.05, 100.1, 100.1]):
+                    res = client.generate_json(
+                        model="gemini-3.5-flash-lite",
+                        prompt="test prompt",
+                        schema={"type": "object"},
+                    )
+                    self.assertEqual(res, {"decision": "accept"})
+                    mock_sleep.assert_called_once()
+                    self.assertAlmostEqual(mock_sleep.call_args[0][0], 0.04, places=2)
+
+    def test_client_honors_retry_after_on_429(self) -> None:
+        from unittest.mock import MagicMock, patch
+
+        with tempfile.TemporaryDirectory() as directory:
+            client = GeminiApiClient(
+                {
+                    "enabled": True,
+                    "request_interval_seconds": 0.0,
+                    "max_attempts": 3,
+                },
+                Path(directory),
+            )
+            client.api_key = "test_key"
+
+            resp_429 = MagicMock()
+            resp_429.status_code = 429
+            resp_429.headers = {"Retry-After": "5"}
+
+            resp_200 = MagicMock()
+            resp_200.status_code = 200
+            resp_200.json.return_value = {
+                "candidates": [{"content": {"parts": [{"text": '{"ok": true}'}]}}]
+            }
+
+            with patch("httpx.post", side_effect=[resp_429, resp_200]), \
+                 patch("time.sleep") as mock_sleep:
+                res = client.generate_json(
+                    model="gemini-3.5-flash-lite",
+                    prompt="test prompt",
+                    schema={"type": "object"},
+                )
+                self.assertEqual(res, {"ok": True})
+                mock_sleep.assert_called_once_with(5.0)
 
 
 if __name__ == "__main__":

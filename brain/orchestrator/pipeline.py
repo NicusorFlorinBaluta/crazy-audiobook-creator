@@ -1566,13 +1566,16 @@ class Pipeline:
                 except Exception:
                     pass
             completed = len(self.job_queue.get_job(project_id).get("scripted_chapters", []))
+            ch_idx = chapter_num - 1
+            ch_obj = book.chapters[ch_idx] if 0 <= ch_idx < len(book.chapters) else None
+            ch_title = getattr(ch_obj, "title", None) or f"chapter {chapter_num}"
             self.job_queue.update_progress(
                 project_id,
                 self._progress_estimator.snapshot(
                     f"{project_id}:scripting",
                     stage=PipelineStage.SCRIPTING.value,
                     phase="chapter_start",
-                    message=f"Preparing script chapter {chapter_num} of {len(book.chapters)}",
+                    message=f"Preparing script for {ch_title} ({chapter_num} of {len(book.chapters)})",
                     completed_units=completed,
                     total_units=len(book.chapters),
                     chapter=chapter_num,
@@ -1597,6 +1600,9 @@ class Pipeline:
             completed = completed_chapters + max(0, chunk_num - 1) / max(
                 chunk_total, 1
             )
+            ch_idx = current_script_chapter - 1
+            ch_obj = book.chapters[ch_idx] if 0 <= ch_idx < len(book.chapters) else None
+            ch_title = getattr(ch_obj, "title", None) or f"chapter {current_script_chapter}"
             self.job_queue.update_progress(
                 project_id,
                 self._progress_estimator.snapshot(
@@ -1604,7 +1610,7 @@ class Pipeline:
                     stage=PipelineStage.SCRIPTING.value,
                     phase="fragment_annotation",
                     message=(
-                        f"Scripting chapter {current_script_chapter}: "
+                        f"Scripting {ch_title}: "
                         f"fragment batch {chunk_num} of {chunk_total}"
                     ),
                     completed_units=completed,
@@ -2419,6 +2425,7 @@ class Pipeline:
                         if chapter_script.chapter_number in selected_numbers
                         else None
                     )
+                    ch_title = getattr(chapter_script, "title", None) or f"chapter {chapter_script.chapter_number}"
                     self.job_queue.update_progress(
                         project_id,
                         self._progress_estimator.snapshot(
@@ -2426,8 +2433,7 @@ class Pipeline:
                             stage=stage_value,
                             phase=phase,
                             message=(
-                                f"{phase.title()} chapter "
-                                f"{chapter_script.chapter_number}: "
+                                f"{phase.title()} {ch_title}: "
                                 f"utterance {completed} of {total}"
                             ),
                             completed_units=completed,
@@ -2763,6 +2769,7 @@ class Pipeline:
                 if chapter_script.chapter_number in selected_numbers
                 else None
             )
+            ch_title = getattr(chapter_script, "title", None) or f"chapter {chapter_script.chapter_number}"
             self.job_queue.update_progress(
                 project_id,
                 self._progress_estimator.snapshot(
@@ -2770,8 +2777,8 @@ class Pipeline:
                     stage=PipelineStage.MASTERING.value,
                     phase="chapter_mastering",
                     message=(
-                        f"Mastering chapter {chapter_script.chapter_number} "
-                        f"of {len(selected_numbers)}"
+                        f"Mastering {ch_title} "
+                        f"({chapter_position} of {len(selected_numbers)})"
                     ),
                     completed_units=len(mastered_chapters),
                     total_units=len(selected_numbers),

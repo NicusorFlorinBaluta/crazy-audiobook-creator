@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -297,6 +298,9 @@ class GeminiApiClient:
         self.config = config
         self.api_key = os.getenv(str(config.get("api_key_env", "GEMINI_API_KEY")), "").strip()
         self.timeout = float(config.get("timeout_seconds", 120))
+        self.request_interval = max(0.0, float(config.get("request_interval_seconds", 2.0)))
+        self._last_request_time: float = 0.0
+        self._request_lock = threading.Lock()
         limits = {
             str(key): int(value)
             for key, value in dict(config.get("daily_request_budgets", {})).items()
@@ -353,6 +357,13 @@ class GeminiApiClient:
             max_attempts = max(1, int(self.config.get("max_attempts", 4)))
             for attempt in range(max_attempts):
                 self.budget.reserve(model)
+                if self.request_interval > 0:
+                    with self._request_lock:
+                        now = time.monotonic()
+                        elapsed = now - self._last_request_time
+                        if elapsed < self.request_interval:
+                            time.sleep(self.request_interval - elapsed)
+                        self._last_request_time = time.monotonic()
                 response = httpx.post(
                     url,
                     headers={"x-goog-api-key": self.api_key},
@@ -363,7 +374,14 @@ class GeminiApiClient:
                     break
                 if attempt + 1 >= max_attempts:
                     break
-                time.sleep(min(8.0, 2.0 ** attempt))
+                retry_after = 0.0
+                if response.status_code == 429:
+                    raw_retry = response.headers.get("Retry-After", "")
+                    try:
+                        retry_after = float(raw_retry)
+                    except (ValueError, TypeError):
+                        retry_after = 0.0
+                time.sleep(max(retry_after, min(16.0, 2.0 ** (attempt + 1))))
             assert response is not None
             response.raise_for_status()
             body = response.json()

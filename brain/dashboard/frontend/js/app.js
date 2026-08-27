@@ -1701,7 +1701,7 @@ function renderChapterList(project) {
             statusBackground = 'rgba(168, 85, 247, 0.15)';
             statusColor = '#c084fc';
             percent = 100;
-            download = `<a class="chapter-download" data-server-download href="api/projects/${encodeURIComponent(project.project_id)}/download/chapter/${chapter}" target="_blank" rel="noopener" aria-label="Download chapter ${chapter} mastered WAV" title="Download mastered chapter WAV">↓</a>`;
+            download = `<a class="chapter-download" data-server-download href="api/projects/${encodeURIComponent(project.project_id)}/download/chapter/${chapter}" target="_blank" rel="noopener" aria-label="Download ${escapeHtml(title)} mastered WAV" title="Download mastered chapter WAV">↓</a>`;
         } else if (generated.has(chapter)) {
             statusKey = 'generated';
             statusText = 'Generated';
@@ -1757,7 +1757,6 @@ function renderChapterList(project) {
                 aria-label="Include ${escapeHtml(title)} in the next audio batch"
                 title="${selectionLocked ? 'The active batch is locked while the pipeline runs' : 'Include this chapter in the next audio batch'}">
             <div class="chapter-title-wrap">
-                <span class="chapter-number">${chapter}</span>
                 <span class="chapter-title" title="${escapeHtml(title)}">${escapeHtml(title)}</span>
                 ${isInActiveBatch ? '<span class="chapter-run-badge">In this run</span>' : ''}
             </div>
@@ -1887,6 +1886,23 @@ function updateSelectionSummary(project = null) {
         : `${selected} of ${total} selected${locked ? ' · active batch' : ''}`;
 }
 
+function formatChapterActivityMessage(message, detailMap) {
+    if (!message) return '';
+    const m = message.match(/^(synthesis|validation|scripting|mastering|generating)\s+chapter\s+(\d+):\s*(.*)$/i);
+    if (m) {
+        const phaseName = m[1].charAt(0).toUpperCase() + m[1].slice(1).toLowerCase();
+        const chNum = parseInt(m[2], 10);
+        const bookTitle = (detailMap && detailMap.get(chNum) && detailMap.get(chNum).title) || `Chapter ${chNum}`;
+        return `${phaseName} — ${bookTitle}: ${m[3]}`;
+    }
+    if (!detailMap) return message;
+    return message.replace(/\bchapter\s+(\d+)\b/gi, (match, chStr) => {
+        const chNum = parseInt(chStr, 10);
+        const detail = detailMap.get(chNum);
+        return (detail && detail.title) ? detail.title : match;
+    });
+}
+
 function renderWorkStatus(project) {
     const terminalStatuses = new Set([
         'paused', 'pausing', 'paused_scheduled', 'deploy_paused', 'waiting_for_review', 'error',
@@ -1906,7 +1922,8 @@ function renderWorkStatus(project) {
     const totalSelected = selected.length;
     const masteredInBatch = selected.filter(ch => mastered.has(ch)).length;
     const generatedInBatch = selected.filter(ch => generated.has(ch)).length;
-    const currentChapter = project.current_gen_chapter || project.current_script_chapter;
+    const progress = project.progress || null;
+    const currentChapter = progress?.chapter || project.current_gen_chapter || project.current_script_chapter;
     const currentDetail = detailMap.get(currentChapter) || {};
     const status = String(project.status || 'created').toLowerCase();
     const stage = terminalStatuses.has(status)
@@ -1917,13 +1934,13 @@ function renderWorkStatus(project) {
         ? (currentChapterDetail.title || `Chapter ${currentChapter}`)
         : '';
     const workProgress = project.work_progress || {};
-    const progress = project.progress || null;
     const totalBookChapters = project.total_chapters || 0;
     const isSelectiveBatch = selected.length > 0 && selected.length < totalBookChapters;
     let batchSummary = 'Full book';
     if (isSelectiveBatch) {
         if (selected.length <= 4) {
-            batchSummary = `Chapters ${selected.join(', ')} (${selected.length} selected)`;
+            const batchTitles = selected.map(ch => detailMap.get(ch)?.title || `Chapter ${ch}`);
+            batchSummary = `${batchTitles.join(', ')} (${selected.length} selected)`;
         } else {
             batchSummary = `${selected.length} selected chapters`;
         }
@@ -2045,7 +2062,11 @@ function renderWorkStatus(project) {
     }
 
     if (progress && project.running) {
-        activity = progress.message || activity;
+        if (progress.message) {
+            activity = formatChapterActivityMessage(progress.message, detailMap);
+        } else {
+            activity = activity;
+        }
         if (Number.isFinite(progress.percent)) {
             overall = Math.round(progress.percent);
             overallLabel = `${(progress.phase || progress.stage || 'Current').replaceAll('_', ' ')}`;
@@ -2350,10 +2371,11 @@ function deriveWorkProgress(lines, totalChapters, chapterTitleMap = new Map()) {
         if (match) {
             const current = Number(match[1]);
             const total = Number(match[2]) || totalChapters;
+            const realTitle = chapterTitleMap.get(current) || `Chapter ${current}`;
             progress.phase = 'chapter_scripting';
             progress.stagePercent = 20 + Math.round(80 * current / Math.max(total, 1));
-            progress.current = `Scripting · Chapter ${current} of ${total} complete`;
-            progress.detail = `${current} of ${total} chapter scripts complete.`;
+            progress.current = `Scripting · ${realTitle} complete`;
+            progress.detail = `${realTitle} script complete (${current} of ${total} chapters).`;
             progress.position = `${current} / ${total}`;
             progress.chapterLabel = 'Scripting chapter';
             progress.tokens = null;

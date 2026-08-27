@@ -133,6 +133,7 @@ external_validation:
     triage_model: gemini-3.5-flash-lite
     adjudication_model: gemini-3.5-flash
     timeout_seconds: 120
+    request_interval_seconds: 2.0
     max_attempts: 4
     # Leave headroom below the account limits shown in AI Studio.
     daily_request_budgets:

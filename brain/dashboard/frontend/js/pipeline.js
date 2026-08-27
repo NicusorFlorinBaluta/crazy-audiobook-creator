@@ -27,6 +27,7 @@ window.PipelineManager = (() => {
 
     let pipelineDisclosureProject = null;
     let pipelineDisclosureInitialized = false;
+    let chapterDetailsMap = new Map();
 
     function init() {
         renderTracker();
@@ -89,6 +90,10 @@ window.PipelineManager = (() => {
                 ) {
                     el.classList.add('active');
                     
+                    if (data && Array.isArray(data.chapter_details)) {
+                        chapterDetailsMap = new Map(data.chapter_details.map(d => [d.number, d.title]));
+                    }
+
                     // Compute percentage based on real metrics from the pipeline state!
                     if (data && percentEl) {
                         let pct = null;
@@ -178,11 +183,30 @@ window.PipelineManager = (() => {
                 : ` ~${remainingSec} sec remaining`;
         }
 
+        let displayMessage = data.message || 'Processing...';
+        if (data.message) {
+            const map = chapterDetailsMap.size > 0
+                ? chapterDetailsMap
+                : new Map((window.state?.currentProject?.chapter_details || []).map(d => [d.number, d.title]));
+            const m = data.message.match(/^(synthesis|validation|scripting|mastering|generating)\s+chapter\s+(\d+):\s*(.*)$/i);
+            if (m) {
+                const phaseName = m[1].charAt(0).toUpperCase() + m[1].slice(1).toLowerCase();
+                const chNum = parseInt(m[2], 10);
+                const bookTitle = map.get(chNum) || `Chapter ${chNum}`;
+                displayMessage = `${phaseName} — ${bookTitle}: ${m[3]}`;
+            } else {
+                displayMessage = displayMessage.replace(/\bchapter\s+(\d+)\b/gi, (match, chStr) => {
+                    const chNum = parseInt(chStr, 10);
+                    return map.get(chNum) || match;
+                });
+            }
+        }
+
         els.live.classList.add('active');
         els.live.innerHTML = `
             <div class="live-dot"></div>
             <div class="live-progress">
-                <div>${escapeHtml(data.message || 'Processing...')} <span class="eta" style="opacity:0.7;font-size:0.9em">${etaStr}</span></div>
+                <div>${escapeHtml(displayMessage)} <span class="eta" style="opacity:0.7;font-size:0.9em">${etaStr}</span></div>
                 <div class="progress-bar">
                     <div class="progress-fill" style="width: ${percent}%"></div>
                 </div>

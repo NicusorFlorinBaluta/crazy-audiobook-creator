@@ -173,3 +173,19 @@ def test_manual_resume_requests_a_one_run_schedule_override() -> None:
     assert "result.schedule_overridden" in app
     assert "result.will_resume_on_schedule" in app
     assert "outside configured working hours for this run only" in pipeline
+
+
+def test_current_activity_formats_progress_message_with_book_chapter_titles() -> None:
+    app = _read("js/app.js")
+    pipeline = _read("js/pipeline.js")
+
+    # app.js defines and uses formatChapterActivityMessage
+    assert "function formatChapterActivityMessage(" in app
+    assert "activity = formatChapterActivityMessage(progress.message, detailMap);" in app
+    # app.js chapter rows display real chapter title cleanly
+    assert '<span class="chapter-title" title="${escapeHtml(title)}">${escapeHtml(title)}</span>' in app
+
+    # pipeline.js formats live progress messages using book chapter names
+    assert "chapterDetailsMap = new Map(data.chapter_details.map(d => [d.number, d.title]));" in pipeline
+    assert "${phaseName} — ${bookTitle}: ${m[3]}" in pipeline
+

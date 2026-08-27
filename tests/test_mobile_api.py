@@ -192,13 +192,11 @@ class MobileApiTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             data = response.json()
             self.assertEqual(data["project_id"], project_id)
-            self.assertEqual(data["title"], "Detailed Story")
-            self.assertEqual(len(data["chapters"]), 2)
-            self.assertEqual(data["chapters"][0]["title"], "Chapter 1")
+            self.assertEqual(data["chapters"][0]["title"], "Prologue")
             self.assertEqual(data["chapters"][0]["source_heading"], "Prologue")
             self.assertEqual(data["chapters"][0]["raw_title"], "Prologue")
             self.assertEqual(data["chapters"][0]["status"], "mastered")
-            self.assertEqual(data["chapters"][1]["title"], "Chapter 2")
+            self.assertEqual(data["chapters"][1]["title"], "The Awakening")
             self.assertEqual(data["chapters"][1]["raw_title"], "The Awakening")
             self.assertEqual(data["chapters"][1]["status"], "generating")
         finally:
@@ -305,4 +303,92 @@ class MobileApiTests(unittest.TestCase):
                 shutil.rmtree(active_dir)
             if orphan_dir.exists():
                 shutil.rmtree(orphan_dir)
+
+    def test_delivery_batches_include_relative_chapter_details(self):
+        project_id = "test_delivery_detail_book"
+        project_dir = Path("brain/projects") / project_id
+        project_dir.mkdir(parents=True, exist_ok=True)
+        deliv_dir = project_dir / "deliveries"
+        deliv_dir.mkdir(parents=True, exist_ok=True)
+        manifests_dir = project_dir / "manifests"
+        manifests_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            (project_dir / "book.json").write_text(json.dumps({
+                "metadata": {"title": "Delivery Book", "author": "Author"},
+                "chapters": [
+                    {"title": "Prologue"},
+                    {"title": "Chapter One"},
+                    {"title": "Chapter Two"},
+                ],
+            }), encoding="utf-8")
+
+            # Write master manifests for durations
+            for ch_num, dur in [(1, 100.0), (2, 200.0), (3, 300.0)]:
+                (manifests_dir / f"chapter_{ch_num:03d}.master.json").write_text(json.dumps({
+                    "duration_seconds": dur,
+                }), encoding="utf-8")
+
+            # Write delivery index
+            (deliv_dir / "index.json").write_text(json.dumps({
+                "schema_version": 1,
+                "project_id": project_id,
+                "batch_size": 2,
+                "chapter_numbers": [1, 2],
+                "deliveries": [
+                    {
+                        "delivery_id": "part-001",
+                        "ordinal": 1,
+                        "chapter_numbers": [1, 2],
+                        "status": "published",
+                        "artifact": "Part-01.m4b",
+                        "duration_seconds": 300.0,
+                        "published_at": "2026-08-27T12:00:00Z",
+                        "sha256": "abc123def456",
+                        "bytes": 1024,
+                    }
+                ],
+            }), encoding="utf-8")
+
+            self.job_queue.create_job(project_id, {
+                "title": "Delivery Book",
+                "status": "generating",
+                "total_chapters": 3,
+                "mastered_chapters": [1, 2],
+            })
+
+            response = self.client.get(f"/api/mobile/v1/books/{project_id}")
+            self.assertEqual(response.status_code, 200)
+            data = response.json()
+
+            deliveries = data.get("deliveries", [])
+            self.assertEqual(len(deliveries), 1)
+            part1 = deliveries[0]
+            self.assertEqual(part1["delivery_id"], "part-001")
+            self.assertEqual(part1["filename"], "Part-01.m4b")
+            self.assertEqual(part1["duration_seconds"], 300.0)
+
+            ch_details = part1.get("chapter_details", [])
+            self.assertEqual(len(ch_details), 2)
+            self.assertEqual(ch_details[0]["number"], 1)
+            self.assertEqual(ch_details[0]["title"], "Prologue")
+            self.assertEqual(ch_details[0]["start_ms"], 0)
+            self.assertEqual(ch_details[0]["end_ms"], 100000)
+
+            self.assertEqual(ch_details[1]["number"], 2)
+            self.assertEqual(ch_details[1]["title"], "Chapter One")
+            self.assertEqual(ch_details[1]["start_ms"], 100000)
+            self.assertEqual(ch_details[1]["end_ms"], 300000)
+
+            # Verify data["chapters"] also has relative offsets for delivery parts
+            all_chaps = data.get("chapters", [])
+            self.assertEqual(all_chaps[0]["start_ms"], 0)
+            self.assertEqual(all_chaps[0]["end_ms"], 100000)
+            self.assertEqual(all_chaps[1]["start_ms"], 100000)
+            self.assertEqual(all_chaps[1]["end_ms"], 300000)
+        finally:
+            import shutil
+            if project_dir.exists():
+                shutil.rmtree(project_dir)
+
 

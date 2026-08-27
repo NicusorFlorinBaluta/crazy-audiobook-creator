@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from brain.orchestrator.delivery_manager import DeliveryManager
@@ -23,6 +24,21 @@ from brain.orchestrator.job_queue import JobQueue
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/mobile/v1", tags=["mobile"])
+
+
+@router.get("/app")
+async def download_voice_apk():
+    """Download the latest compiled Voice client APK."""
+    apk_path = Path("Voice-CrazyAudiobook-debug.apk").resolve()
+    if not apk_path.is_file():
+        apk_path = Path("E:/Projects/Voice/app/build/outputs/apk/free/debug/app-free-debug.apk").resolve()
+    if not apk_path.is_file():
+        raise HTTPException(status_code=404, detail="APK not found")
+    return FileResponse(
+        path=apk_path,
+        media_type="application/vnd.android.package-archive",
+        filename="Voice-CrazyAudiobook-debug.apk",
+    )
 
 
 class ProgressSyncRequest(BaseModel):
@@ -371,19 +387,72 @@ async def get_book_detail(project_id: str, request: Request) -> dict[str, Any]:
             except Exception:
                 pass
 
+    # Deliveries
+    deliveries = []
+    chapter_delivery_offsets: dict[int, tuple[int, int]] = {}
+    try:
+        dm = DeliveryManager(project_dir)
+        for d in dm.load_index().deliveries:
+            if getattr(d, "status", "") == "published":
+                d_id = getattr(d, "delivery_id", "") or getattr(d, "id", "")
+                d_ord = getattr(d, "ordinal", 1)
+                d_chaps = getattr(d, "chapter_numbers", []) or getattr(d, "chapters", [])
+                min_c = min(d_chaps) if d_chaps else 1
+                max_c = max(d_chaps) if d_chaps else 1
+                d_dur = float(getattr(d, "duration_seconds", 0.0) or 0.0)
+                d_artifact = str(getattr(d, "artifact", "") or "")
+
+                part_ch_details: list[dict[str, Any]] = []
+                part_cum_offset = 0.0
+                for c_num in d_chaps:
+                    c_dur = _chapter_duration(project_dir, workspace_dir, c_num) or 0.0
+                    c_title = chapter_titles.get(c_num) or f"Chapter {c_num}"
+                    c_start = int(part_cum_offset * 1000)
+                    c_end = int((part_cum_offset + c_dur) * 1000)
+                    part_cum_offset += c_dur
+                    chapter_delivery_offsets[c_num] = (c_start, c_end)
+                    part_ch_details.append({
+                        "number": c_num,
+                        "title": c_title,
+                        "raw_title": c_title,
+                        "source_heading": c_title,
+                        "start_ms": c_start,
+                        "end_ms": c_end,
+                        "duration_seconds": c_dur,
+                        "status": "mastered" if c_num in mastered_set else "pending",
+                        "stream_url": f"api/projects/{project_id}/stream/chapter/{c_num}?format=aac",
+                        "download_url": f"api/projects/{project_id}/download/chapter/{c_num}",
+                    })
+
+                if not d_dur and part_cum_offset > 0:
+                    d_dur = part_cum_offset
+
+                deliveries.append({
+                    "delivery_id": str(d_id),
+                    "title": f"Part {d_ord}: Chapters {min_c}-{max_c}",
+                    "chapters": d_chaps,
+                    "status": "published",
+                    "download_url": f"api/projects/{project_id}/deliveries/{d_id}/download",
+                    "filename": d_artifact,
+                    "duration_seconds": d_dur,
+                    "chapter_details": part_ch_details,
+                })
+    except Exception as e:
+        logger.warning("Could not load deliveries for %s: %s", project_id, e)
+
     chapters_list = []
     max_chapter = max(total_chapters, max(mastered_set, default=0), max(generated_set, default=0))
-    cumulative_offset = 0.0
     for c_num in range(1, max_chapter + 1):
         is_mastered = c_num in mastered_set
         is_generated = c_num in generated_set
         ch_status = "mastered" if is_mastered else ("generating" if is_generated else "pending")
         dur = _chapter_duration(project_dir, workspace_dir, c_num) if is_mastered else None
 
-        start_ms = int(cumulative_offset * 1000)
-        end_ms = int((cumulative_offset + (dur or 0.0)) * 1000)
-        if dur:
-            cumulative_offset += dur
+        if c_num in chapter_delivery_offsets:
+            start_ms, end_ms = chapter_delivery_offsets[c_num]
+        else:
+            start_ms = 0
+            end_ms = int((dur or 0.0) * 1000)
 
         raw_title = (chapter_titles.get(c_num) or "").strip()
         formatted_title = raw_title if raw_title else f"Chapter {c_num}"
@@ -400,27 +469,6 @@ async def get_book_detail(project_id: str, request: Request) -> dict[str, Any]:
             "stream_url": f"api/projects/{project_id}/stream/chapter/{c_num}?format=aac" if is_mastered else None,
             "download_url": f"api/projects/{project_id}/download/chapter/{c_num}" if is_mastered else None,
         })
-
-    # Deliveries
-    deliveries = []
-    try:
-        dm = DeliveryManager(project_dir)
-        for d in dm.load_index().deliveries:
-            if getattr(d, "status", "") == "published":
-                d_id = getattr(d, "delivery_id", "") or getattr(d, "id", "")
-                d_ord = getattr(d, "ordinal", 1)
-                d_chaps = getattr(d, "chapter_numbers", []) or getattr(d, "chapters", [])
-                min_c = min(d_chaps) if d_chaps else 1
-                max_c = max(d_chaps) if d_chaps else 1
-                deliveries.append({
-                    "delivery_id": str(d_id),
-                    "title": f"Part {d_ord}: Chapters {min_c}-{max_c}",
-                    "chapters": d_chaps,
-                    "status": "published",
-                    "download_url": f"api/projects/{project_id}/deliveries/{d_id}/download",
-                })
-    except Exception as e:
-        logger.warning("Could not load deliveries for %s: %s", project_id, e)
 
     is_live = (len(mastered_set) > 0 and len(mastered_set) < total_chapters) or bool(job_state.get("running"))
 

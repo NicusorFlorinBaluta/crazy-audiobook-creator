@@ -532,14 +532,24 @@ class NASSyncer:
                     pass
             # Try workspace wav
             for cand in [
+                Path("workspace") / project_id / "chapters" / f"chapter_{ch_num:03d}.wav",
                 project_dir.parent.parent / "workspace" / project_id / "chapters" / f"chapter_{ch_num:03d}.wav",
                 project_dir / "chapters" / f"chapter_{ch_num:03d}.wav",
             ]:
                 if cand.is_file():
                     try:
+                        import wave
+                        with wave.open(str(cand), "rb") as handle:
+                            frames = handle.getnframes()
+                            rate = handle.getframerate()
+                            if rate > 0:
+                                return round(frames / float(rate), 2)
+                    except Exception:
+                        pass
+                    try:
                         import soundfile as sf
                         info = sf.info(str(cand))
-                        return float(info.duration)
+                        return round(float(info.duration), 2)
                     except Exception:
                         pass
             return 0.0
@@ -547,9 +557,19 @@ class NASSyncer:
         # Check delivery parts directory on NAS
         parts_remote_dir = posixpath.join(proj_remote_dir, "parts")
         parts_list: list[dict[str, Any]] = []
+        chapter_delivery_offsets: dict[int, tuple[int, int]] = {}
         try:
             for item in sorted(sftp.listdir(parts_remote_dir)):
                 if item.lower().endswith(".m4b"):
+                    # Ignore and prune superseded part revisions if delivery_info_map has active artifacts
+                    if delivery_info_map and item not in delivery_info_map:
+                        try:
+                            sftp.remove(posixpath.join(parts_remote_dir, item))
+                            logger.info("Pruned superseded part artifact on NAS: %s", item)
+                        except Exception:
+                            pass
+                        continue
+
                     m_part = re.search(r"Part\s+(\d+)", item, re.IGNORECASE)
                     ord_val = int(m_part.group(1)) if m_part else 1
                     download_url = f"{project_id}/parts/{quote(item)}"
@@ -570,6 +590,7 @@ class NASSyncer:
                         c_start = int(part_cum_offset * 1000)
                         c_end = int((part_cum_offset + c_dur) * 1000)
                         part_cum_offset += c_dur
+                        chapter_delivery_offsets[c_num] = (c_start, c_end)
                         part_ch_details.append({
                             "number": c_num,
                             "title": c_title,
@@ -603,17 +624,12 @@ class NASSyncer:
 
         # Try to load master durations from local project if present
         for idx, ch in enumerate(book_chapters, 1):
-            dur = None
-            master_manifest = project_dir / "manifests" / f"chapter_{idx:03d}.master.json"
-            if master_manifest.is_file():
-                try:
-                    m_data = json.loads(master_manifest.read_text(encoding="utf-8"))
-                    dur = m_data.get("mastering_quality", {}).get("duration_seconds") or m_data.get("duration_seconds")
-                except Exception:
-                    pass
-
-            start_ms = int(cumulative_offset * 1000)
-            end_ms = int((cumulative_offset + (dur or 60.0)) * 1000)
+            dur = get_chapter_duration(idx)
+            if idx in chapter_delivery_offsets:
+                start_ms, end_ms = chapter_delivery_offsets[idx]
+            else:
+                start_ms = int(cumulative_offset * 1000)
+                end_ms = int((cumulative_offset + (dur or 60.0)) * 1000)
             if dur:
                 cumulative_offset += dur
 
