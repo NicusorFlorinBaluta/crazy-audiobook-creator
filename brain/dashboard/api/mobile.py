@@ -539,3 +539,319 @@ async def get_progress(project_id: str, req: Request) -> dict[str, Any]:
         "has_progress": True,
         **progress,
     }
+
+
+def _resolve_chapter_timeline(
+    project_dir: Path, workspace_dir: Path, chapter_num: int
+) -> dict[str, tuple[int, int]]:
+    """Return a mapping of line_id -> (start_ms, end_ms) for a mastered or segmented chapter."""
+    timeline_path = project_dir / "manifests" / f"chapter_{chapter_num:03d}.timeline.json"
+    if timeline_path.is_file():
+        try:
+            t_data = json.loads(timeline_path.read_text(encoding="utf-8"))
+            if isinstance(t_data, list):
+                return {
+                    str(item["line_id"]): (int(item["start_ms"]), int(item["end_ms"]))
+                    for item in t_data
+                    if "line_id" in item and "start_ms" in item and "end_ms" in item
+                }
+        except Exception:
+            pass
+
+    # Compute timeline dynamically from segments manifest
+    seg_manifest_path = project_dir / "manifests" / f"chapter_{chapter_num:03d}.segments.json"
+    if not seg_manifest_path.is_file():
+        return {}
+
+    try:
+        seg_data = json.loads(seg_manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+    segments = seg_data.get("segments", [])
+    if not segments:
+        return {}
+
+    # Measure segment audio lengths
+    wav_segments_dir = workspace_dir / "segments"
+    if not wav_segments_dir.is_dir():
+        wav_segments_dir = project_dir / "segments"
+
+    durations: list[int] = []
+    for s in segments:
+        lid = s.get("line_id", "")
+        wav_candidate = wav_segments_dir / f"{lid}.wav"
+        dur_ms = 0
+        if wav_candidate.is_file():
+            try:
+                with wave.open(str(wav_candidate), "rb") as w:
+                    frames = w.getnframes()
+                    rate = w.getframerate()
+                    if rate > 0:
+                        dur_ms = int(round((frames / float(rate)) * 1000))
+            except Exception:
+                size = wav_candidate.stat().st_size
+                if size > 44:
+                    dur_ms = int(round(((size - 44) / 48000.0) * 1000))
+        durations.append(dur_ms)
+
+    start_silence_ms = 1000
+    current_time_ms = start_silence_ms
+    prev_pause_after = 0
+    prev_utterance_group = None
+    raw_lines: list[tuple[str, int, int]] = []
+
+    for i, s in enumerate(segments):
+        lid = str(s.get("line_id", i))
+        pause_before = int(s.get("pause_before_ms") or 0)
+        ug_id = s.get("utterance_group_id")
+        same_ug = ug_id is not None and ug_id == prev_utterance_group
+
+        gap_before = 0 if i == 0 or same_ug else max(prev_pause_after, pause_before)
+        start_ms = current_time_ms + gap_before
+        dur_ms = durations[i]
+        end_ms = start_ms + dur_ms
+
+        raw_lines.append((lid, start_ms, end_ms))
+        current_time_ms = end_ms
+        prev_pause_after = int(s.get("pause_after_ms") or 500)
+        prev_utterance_group = ug_id
+
+    ch_wav = workspace_dir / "chapters" / f"chapter_{chapter_num:03d}.wav"
+    if not ch_wav.is_file():
+        ch_wav = project_dir / "chapters" / f"chapter_{chapter_num:03d}.wav"
+
+    timeline_dict: dict[str, tuple[int, int]] = {}
+    cached_list: list[dict[str, Any]] = []
+
+    if raw_lines and ch_wav.is_file():
+        actual_wav_ms = 0
+        try:
+            with wave.open(str(ch_wav), "rb") as w:
+                actual_wav_ms = int(round((w.getnframes() / float(w.getframerate())) * 1000))
+        except Exception:
+            pass
+
+        raw_end = raw_lines[-1][2]
+        expected_body_end = max(actual_wav_ms - 2000, start_silence_ms + 1000) if actual_wav_ms > 4000 else raw_end
+        diff = (actual_wav_ms - 2000) - raw_end if actual_wav_ms > 0 else 0
+
+        if diff > 2500:
+            announcement_lead_ms = diff
+            body_start_ms = start_silence_ms + announcement_lead_ms
+            scale = (actual_wav_ms - 2000 - body_start_ms) / float(max(1, raw_end - start_silence_ms))
+            for lid, s_ms, e_ms in raw_lines:
+                scaled_start = body_start_ms + int(round((s_ms - start_silence_ms) * scale))
+                scaled_end = body_start_ms + int(round((e_ms - start_silence_ms) * scale))
+                timeline_dict[lid] = (scaled_start, scaled_end)
+                cached_list.append({"line_id": lid, "start_ms": scaled_start, "end_ms": scaled_end})
+        elif actual_wav_ms > 4000 and raw_end > start_silence_ms:
+            scale = (expected_body_end - start_silence_ms) / float(raw_end - start_silence_ms)
+            for lid, s_ms, e_ms in raw_lines:
+                scaled_start = start_silence_ms + int(round((s_ms - start_silence_ms) * scale))
+                scaled_end = start_silence_ms + int(round((e_ms - start_silence_ms) * scale))
+                timeline_dict[lid] = (scaled_start, scaled_end)
+                cached_list.append({"line_id": lid, "start_ms": scaled_start, "end_ms": scaled_end})
+        else:
+            for lid, s_ms, e_ms in raw_lines:
+                timeline_dict[lid] = (s_ms, e_ms)
+                cached_list.append({"line_id": lid, "start_ms": s_ms, "end_ms": e_ms})
+    else:
+        for lid, s_ms, e_ms in raw_lines:
+            timeline_dict[lid] = (s_ms, e_ms)
+            cached_list.append({"line_id": lid, "start_ms": s_ms, "end_ms": e_ms})
+
+    # Cache timeline to disk for future microsecond retrieval
+    try:
+        timeline_path.parent.mkdir(parents=True, exist_ok=True)
+        timeline_path.write_text(json.dumps(cached_list, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+    return timeline_dict
+
+
+@router.get("/books/{project_id}/chapters/{chapter_number}/lyrics")
+async def get_chapter_lyrics(
+    project_id: str, chapter_number: int, request: Request
+) -> dict[str, Any]:
+    """Return synchronized karaoke/script lines with timestamps for a chapter."""
+    project_dir = _project_dir(project_id)
+    workspace_dir = _workspace_project_dir(project_id)
+
+    script_file = project_dir / "script" / f"chapter_{chapter_number:03d}.json"
+    if not script_file.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail=f"Script not available for chapter {chapter_number}",
+        )
+
+    try:
+        script_data = json.loads(script_file.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500, detail="Failed to parse chapter script"
+        ) from exc
+
+    timeline = _resolve_chapter_timeline(project_dir, workspace_dir, chapter_number)
+
+    lines_out: list[dict[str, Any]] = []
+    chapter_title = (
+        script_data.get("chapter_title")
+        or script_data.get("title")
+        or f"Chapter {chapter_number}"
+    )
+
+    for line in script_data.get("lines", []):
+        lid = str(line.get("line_id", ""))
+        timing = timeline.get(lid, (0, 0))
+        lines_out.append({
+            "line_id": lid,
+            "speaker": line.get("speaker") or "Narrator",
+            "speaker_id": line.get("voice_id") or line.get("speaker") or "narrator",
+            "text": line.get("spoken_text") or line.get("text") or "",
+            "emotion": line.get("emotion"),
+            "start_ms": timing[0],
+            "end_ms": timing[1],
+            "source_start": line.get("source_start"),
+            "source_end": line.get("source_end"),
+        })
+
+    return {
+        "project_id": project_id,
+        "chapter_number": chapter_number,
+        "chapter_title": chapter_title,
+        "lines": lines_out,
+    }
+
+
+@router.get("/books/{project_id}/chapters/{chapter_number}/reader")
+async def get_chapter_reader(
+    project_id: str, chapter_number: int, request: Request
+) -> dict[str, Any]:
+    """Return formatted chapter text partitioned into paragraphs with timing metadata."""
+    project_dir = _project_dir(project_id)
+    workspace_dir = _workspace_project_dir(project_id)
+
+    # 1. Load book.json for chapter text
+    book_file = project_dir / "book.json"
+    chapter_text = ""
+    chapter_title = f"Chapter {chapter_number}"
+    source_heading = f"Chapter {chapter_number}"
+
+    if book_file.is_file():
+        try:
+            bdata = json.loads(book_file.read_text(encoding="utf-8"))
+            chapters = bdata.get("chapters", [])
+            if 1 <= chapter_number <= len(chapters):
+                ch = chapters[chapter_number - 1]
+                chapter_text = ch.get("text", "")
+                chapter_title = ch.get("title") or ch.get("source_heading") or chapter_title
+                source_heading = ch.get("source_heading") or chapter_title
+        except Exception:
+            pass
+
+    # 2. Load script & timeline for timing alignment
+    script_file = project_dir / "script" / f"chapter_{chapter_number:03d}.json"
+    script_lines = []
+    if script_file.is_file():
+        try:
+            sdata = json.loads(script_file.read_text(encoding="utf-8"))
+            script_lines = sdata.get("lines", [])
+            if not chapter_text:
+                # Fallback: assemble text from script lines if book.json text was missing
+                chapter_text = "\n\n".join(l.get("text", "") for l in script_lines if l.get("text"))
+        except Exception:
+            pass
+
+    timeline = _resolve_chapter_timeline(project_dir, workspace_dir, chapter_number)
+
+    # Attach timing to script lines
+    for line in script_lines:
+        lid = str(line.get("line_id", ""))
+        timing = timeline.get(lid, (0, 0))
+        line["_start_ms"] = timing[0]
+        line["_end_ms"] = timing[1]
+
+    # 3. Partition chapter text into paragraphs
+    raw_paragraphs = [p.strip() for p in re.split(r"\n\s*\n", chapter_text) if p.strip()]
+
+    paragraphs_out: list[dict[str, Any]] = []
+    char_search_offset = 0
+
+    for idx, p_text in enumerate(raw_paragraphs):
+        # Locate character range of this paragraph in chapter_text
+        found_pos = chapter_text.find(p_text, char_search_offset)
+        if found_pos >= 0:
+            p_start_char = found_pos
+            p_end_char = found_pos + len(p_text)
+            char_search_offset = p_end_char
+        else:
+            p_start_char = 0
+            p_end_char = len(p_text)
+
+        # Match script lines overlapping this paragraph
+        overlapping_lines = [
+            l for l in script_lines
+            if (
+                l.get("source_start") is not None
+                and l.get("source_end") is not None
+                and l.get("source_start") < p_end_char
+                and l.get("source_end") > p_start_char
+                and l.get("_end_ms", 0) > 0
+            )
+        ]
+
+        if overlapping_lines:
+            p_start_ms = min(l["_start_ms"] for l in overlapping_lines)
+            p_end_ms = max(l["_end_ms"] for l in overlapping_lines)
+        else:
+            p_start_ms = 0
+            p_end_ms = 0
+
+        paragraphs_out.append({
+            "index": idx,
+            "text": p_text,
+            "start_ms": p_start_ms,
+            "end_ms": p_end_ms,
+        })
+
+    # Fill in timing holes monotonically if any intro/transition paragraphs missed direct attribution
+    last_valid_ms = 0
+    for p in paragraphs_out:
+        if p["start_ms"] == 0 and p["end_ms"] == 0:
+            p["start_ms"] = last_valid_ms
+            p["end_ms"] = last_valid_ms + 2000
+        else:
+            last_valid_ms = p["end_ms"]
+
+    return {
+        "project_id": project_id,
+        "chapter_number": chapter_number,
+        "title": chapter_title,
+        "source_heading": source_heading,
+        "total_paragraphs": len(paragraphs_out),
+        "paragraphs": paragraphs_out,
+    }
+
+
+@router.get("/books/{project_id}/epub")
+async def download_book_epub(project_id: str, request: Request):
+    """Download the original EPUB source file for offline reading."""
+    project_dir = _project_dir(project_id)
+    epub_path = project_dir / "source.epub"
+    if not epub_path.is_file():
+        # Check workspace or root
+        candidate = Path("workspace") / project_id / "source.epub"
+        if candidate.is_file():
+            epub_path = candidate
+
+    if not epub_path.is_file():
+        raise HTTPException(status_code=404, detail="EPUB source file not found for this book")
+
+    return FileResponse(
+        path=str(epub_path),
+        media_type="application/epub+zip",
+        filename=f"{project_id}.epub",
+    )
+

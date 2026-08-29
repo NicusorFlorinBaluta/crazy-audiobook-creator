@@ -391,4 +391,161 @@ class MobileApiTests(unittest.TestCase):
             if project_dir.exists():
                 shutil.rmtree(project_dir)
 
+    def test_chapter_lyrics_endpoint(self):
+        project_id = "test_lyrics_book"
+        project_dir = Path("brain/projects") / project_id
+        project_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            # Create script
+            script_dir = project_dir / "script"
+            script_dir.mkdir(parents=True, exist_ok=True)
+            script_data = {
+                "chapter_number": 1,
+                "chapter_title": "Prologue: The Awakening",
+                "lines": [
+                    {
+                        "line_id": "ch01_0000",
+                        "speaker": "Narrator",
+                        "text": "The wind howled across the crags.",
+                        "emotion": "ominous",
+                        "source_start": 0,
+                        "source_end": 33,
+                    },
+                    {
+                        "line_id": "ch01_0001",
+                        "speaker": "Kaladin",
+                        "text": "We need to keep moving!",
+                        "emotion": "urgent",
+                        "source_start": 35,
+                        "source_end": 58,
+                    },
+                ],
+            }
+            (script_dir / "chapter_001.json").write_text(json.dumps(script_data), encoding="utf-8")
+
+            # Create timeline
+            manifest_dir = project_dir / "manifests"
+            manifest_dir.mkdir(parents=True, exist_ok=True)
+            timeline_data = [
+                {"line_id": "ch01_0000", "start_ms": 1000, "end_ms": 4500},
+                {"line_id": "ch01_0001", "start_ms": 5000, "end_ms": 7800},
+            ]
+            (manifest_dir / "chapter_001.timeline.json").write_text(json.dumps(timeline_data), encoding="utf-8")
+
+            response = self.client.get(f"/api/mobile/v1/books/{project_id}/chapters/1/lyrics")
+            self.assertEqual(response.status_code, 200)
+            data = response.json()
+            self.assertEqual(data["project_id"], project_id)
+            self.assertEqual(data["chapter_number"], 1)
+            self.assertEqual(data["chapter_title"], "Prologue: The Awakening")
+            lines = data["lines"]
+            self.assertEqual(len(lines), 2)
+            self.assertEqual(lines[0]["line_id"], "ch01_0000")
+            self.assertEqual(lines[0]["speaker"], "Narrator")
+            self.assertEqual(lines[0]["emotion"], "ominous")
+            self.assertEqual(lines[0]["start_ms"], 1000)
+            self.assertEqual(lines[0]["end_ms"], 4500)
+
+            self.assertEqual(lines[1]["line_id"], "ch01_0001")
+            self.assertEqual(lines[1]["speaker"], "Kaladin")
+            self.assertEqual(lines[1]["start_ms"], 5000)
+            self.assertEqual(lines[1]["end_ms"], 7800)
+        finally:
+            import shutil
+            if project_dir.exists():
+                shutil.rmtree(project_dir)
+
+    def test_chapter_reader_endpoint(self):
+        project_id = "test_reader_book"
+        project_dir = Path("brain/projects") / project_id
+        project_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            # Create book.json with chapter text
+            ch_text = "The wind howled across the crags.\n\nWe need to keep moving! The storm is coming."
+            book_data = {
+                "chapters": [
+                    {
+                        "number": 1,
+                        "title": "Prologue",
+                        "source_heading": "Prologue: Dawn",
+                        "text": ch_text,
+                    }
+                ]
+            }
+            (project_dir / "book.json").write_text(json.dumps(book_data), encoding="utf-8")
+
+            # Create script
+            script_dir = project_dir / "script"
+            script_dir.mkdir(parents=True, exist_ok=True)
+            script_data = {
+                "chapter_number": 1,
+                "lines": [
+                    {
+                        "line_id": "ch01_0000",
+                        "speaker": "Narrator",
+                        "text": "The wind howled across the crags.",
+                        "source_start": 0,
+                        "source_end": 33,
+                    },
+                    {
+                        "line_id": "ch01_0001",
+                        "speaker": "Kaladin",
+                        "text": "We need to keep moving! The storm is coming.",
+                        "source_start": 35,
+                        "source_end": 79,
+                    },
+                ],
+            }
+            (script_dir / "chapter_001.json").write_text(json.dumps(script_data), encoding="utf-8")
+
+            # Create timeline
+            manifest_dir = project_dir / "manifests"
+            manifest_dir.mkdir(parents=True, exist_ok=True)
+            timeline_data = [
+                {"line_id": "ch01_0000", "start_ms": 1000, "end_ms": 4500},
+                {"line_id": "ch01_0001", "start_ms": 5000, "end_ms": 9000},
+            ]
+            (manifest_dir / "chapter_001.timeline.json").write_text(json.dumps(timeline_data), encoding="utf-8")
+
+            response = self.client.get(f"/api/mobile/v1/books/{project_id}/chapters/1/reader")
+            self.assertEqual(response.status_code, 200)
+            data = response.json()
+            self.assertEqual(data["project_id"], project_id)
+            self.assertEqual(data["chapter_number"], 1)
+            self.assertEqual(data["title"], "Prologue")
+            self.assertEqual(data["source_heading"], "Prologue: Dawn")
+            paragraphs = data["paragraphs"]
+            self.assertEqual(len(paragraphs), 2)
+            self.assertEqual(paragraphs[0]["index"], 0)
+            self.assertEqual(paragraphs[0]["text"], "The wind howled across the crags.")
+            self.assertEqual(paragraphs[0]["start_ms"], 1000)
+            self.assertEqual(paragraphs[0]["end_ms"], 4500)
+
+            self.assertEqual(paragraphs[1]["index"], 1)
+            self.assertEqual(paragraphs[1]["text"], "We need to keep moving! The storm is coming.")
+            self.assertEqual(paragraphs[1]["start_ms"], 5000)
+            self.assertEqual(paragraphs[1]["end_ms"], 9000)
+        finally:
+            import shutil
+            if project_dir.exists():
+                shutil.rmtree(project_dir)
+
+    def test_book_epub_download(self):
+        project_id = "test_epub_book"
+        project_dir = Path("brain/projects") / project_id
+        project_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            epub_file = project_dir / "source.epub"
+            epub_file.write_bytes(b"PK\x03\x04fake_epub_content")
+
+            response = self.client.get(f"/api/mobile/v1/books/{project_id}/epub")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.content, b"PK\x03\x04fake_epub_content")
+            self.assertIn("application/epub+zip", response.headers["content-type"])
+        finally:
+            import shutil
+            if project_dir.exists():
+                shutil.rmtree(project_dir)
+
+
 
