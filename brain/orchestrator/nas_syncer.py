@@ -561,8 +561,12 @@ class NASSyncer:
         try:
             for item in sorted(sftp.listdir(parts_remote_dir)):
                 if item.lower().endswith(".m4b"):
-                    # Ignore and prune superseded part revisions if delivery_info_map has active artifacts
-                    if delivery_info_map and item not in delivery_info_map:
+                    # Only prune if this exact item was explicitly marked as superseded
+                    superseded_set = set()
+                    for deliv in delivery_info_map.values():
+                        if isinstance(deliv, dict):
+                            superseded_set.update(deliv.get("superseded_artifacts", []))
+                    if item in superseded_set:
                         try:
                             sftp.remove(posixpath.join(parts_remote_dir, item))
                             logger.info("Pruned superseded part artifact on NAS: %s", item)

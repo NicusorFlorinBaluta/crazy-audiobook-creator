@@ -283,10 +283,11 @@ class VoiceClient:
     def export_m4b(self, request: ExportM4BRequest) -> ExportM4BResponse:
         """Export all chapters as a single M4B audiobook."""
         logger.info("Exporting M4B for project '%s'", request.project_id)
+        timeout = max(3600, len(request.chapters) * 120)
         data = self._post(
             "/export/m4b",
             request.model_dump(),
-            timeout=600,
+            timeout=timeout,
         )
         return ExportM4BResponse(**data)
 

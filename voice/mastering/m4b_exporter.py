@@ -334,7 +334,7 @@ class M4BExporter:
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=600,  # 10 minute timeout
+                timeout=7200,  # 2 hour timeout
             )
 
             if result.returncode != 0:
@@ -344,7 +344,7 @@ class M4BExporter:
             logger.info("FFmpeg completed successfully")
 
         except subprocess.TimeoutExpired:
-            raise RuntimeError("FFmpeg timed out after 10 minutes")
+            raise RuntimeError("FFmpeg export timed out")
         except FileNotFoundError:
             raise RuntimeError(
                 "FFmpeg not found. Install FFmpeg and add it to PATH"
