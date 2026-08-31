@@ -549,12 +549,15 @@ def _resolve_chapter_timeline(
     if timeline_path.is_file():
         try:
             t_data = json.loads(timeline_path.read_text(encoding="utf-8"))
-            if isinstance(t_data, list):
-                return {
-                    str(item["line_id"]): (int(item["start_ms"]), int(item["end_ms"]))
-                    for item in t_data
-                    if "line_id" in item and "start_ms" in item and "end_ms" in item
-                }
+            if isinstance(t_data, list) and len(t_data) > 0:
+                first_start = int(t_data[0].get("start_ms", 0))
+                # Validate that timeline is chapter-relative (first line starts within first 15s)
+                if 0 <= first_start < 15000:
+                    return {
+                        str(item["line_id"]): (int(item["start_ms"]), int(item["end_ms"]))
+                        for item in t_data
+                        if "line_id" in item and "start_ms" in item and "end_ms" in item
+                    }
         except Exception:
             pass
 
@@ -636,7 +639,8 @@ def _resolve_chapter_timeline(
         expected_body_end = max(actual_wav_ms - 2000, start_silence_ms + 1000) if actual_wav_ms > 4000 else raw_end
         diff = (actual_wav_ms - 2000) - raw_end if actual_wav_ms > 0 else 0
 
-        if diff > 2500:
+        # Check if chapter announcement audio was prepended (typically 2000-4500ms lead)
+        if diff > 1500:
             announcement_lead_ms = diff
             body_start_ms = start_silence_ms + announcement_lead_ms
             scale = (actual_wav_ms - 2000 - body_start_ms) / float(max(1, raw_end - start_silence_ms))

@@ -2846,6 +2846,9 @@ class Pipeline:
                         },
                     },
                 )
+                if getattr(response, "timeline", None):
+                    timeline_file = project_dir / "manifests" / f"chapter_{chapter_script.chapter_number:03d}.timeline.json"
+                    atomic_write_json(timeline_file, response.timeline)
                 mastered_chapters = sorted(
                     set(mastered_chapters) | {chapter_script.chapter_number}
                 )

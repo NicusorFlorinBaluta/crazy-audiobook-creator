@@ -624,6 +624,7 @@ class MasterChapterResponse(BaseModel):
     file_size_mb: float = 0.0
     join_warnings: int = 0
     join_diagnostics: list[dict[str, Any]] = Field(default_factory=list)
+    timeline: list[dict[str, Any]] = Field(default_factory=list)
 
 
 # ===================================================================

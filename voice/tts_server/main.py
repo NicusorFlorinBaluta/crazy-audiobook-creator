@@ -831,6 +831,7 @@ def master_chapter(request: MasterChapterRequest) -> MasterChapterResponse:
         file_size_mb=output_path.stat().st_size / (1024 * 1024),
         join_warnings=int(assembled.get("join_warnings", 0)),
         join_diagnostics=assembled.get("join_diagnostics", []),
+        timeline=assembled.get("timeline", []),
     )
 
 
