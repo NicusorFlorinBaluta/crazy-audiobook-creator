@@ -1778,8 +1778,11 @@ window.ScriptViewer = (() => {
             page: 1,
             pageSize: 15,
             filter: 'all',
-            search: ''
+            search: '',
+            inSentence: true
         };
+
+        const unresolvedWithRecs = unresolved.filter(item => item.recommendation_default);
 
         section.innerHTML = `
             <details class="quality-section-details pronunciation-details" open id="pronunciation-details">
@@ -1794,9 +1797,9 @@ window.ScriptViewer = (() => {
                     <div class="pronunciation-add-card">
                         <strong>+ Add Custom Phonetic Replacement</strong>
                         <input type="text" id="lexicon-custom-term" placeholder="Word in book (e.g. homeisle, homeisler)" maxlength="120">
-                        <input type="text" id="lexicon-custom-spoken" placeholder="Spoken phonetic form (e.g. home-aisle, home-eye-ler)" maxlength="240">
+                        <input type="text" id="lexicon-custom-spoken" placeholder="Spoken form with spaces (e.g. Home aisle, Home eye ler)" maxlength="240">
                         <div style="display:flex; gap:8px; align-items:center;">
-                            <button type="button" class="btn btn-ghost btn-sm" id="btn-preview-lexicon-custom" title="Test audio preview">▶ Test Preview</button>
+                            <button type="button" class="btn btn-ghost btn-sm" id="btn-preview-lexicon-custom" title="Test native TTS audio preview">▶ Test Preview</button>
                             <button type="button" class="btn btn-primary btn-sm" id="btn-add-lexicon-custom">+ Add / Update Term</button>
                         </div>
                     </div>
@@ -1810,6 +1813,18 @@ window.ScriptViewer = (() => {
                             <button type="button" class="btn btn-ghost btn-sm lex-tab" data-filter="verified">Verified (${verified.length})</button>
                             <button type="button" class="btn btn-ghost btn-sm lex-tab" data-filter="unresolved">Suggestions (${unresolved.length})</button>
                         </div>
+                    </div>
+
+                    <div class="pronunciation-subtoolbar">
+                        <label class="pronunciation-preview-toggle" title="Preview words in natural sentence context ('The word is ...') for accurate flow">
+                            <input type="checkbox" id="lexicon-carrier-toggle" ${lexState.inSentence ? 'checked' : ''}>
+                            <span>Sentence context preview</span>
+                        </label>
+                        ${unresolvedWithRecs.length > 0 ? `
+                            <button type="button" class="btn btn-sm btn-batch-accept" id="btn-lexicon-batch-accept" title="Accept all default recommendations for unverified terms">
+                                ✨ Accept All Defaults (${unresolvedWithRecs.length})
+                            </button>
+                        ` : ''}
                     </div>
 
                     <div class="pronunciation-list" id="pronunciation-items-container"></div>
@@ -1847,6 +1862,8 @@ window.ScriptViewer = (() => {
                 return (
                     item.term.toLowerCase().includes(q) ||
                     (item.spoken_text || '').toLowerCase().includes(q) ||
+                    (item.recommendation_default || '').toLowerCase().includes(q) ||
+                    (item.recommendation_alternate || '').toLowerCase().includes(q) ||
                     (item.contexts || []).some(c => c.toLowerCase().includes(q))
                 );
             });
@@ -1872,22 +1889,39 @@ window.ScriptViewer = (() => {
                                 <span class="pronunciation-arrow">→</span>
                                 <strong style="color:#86efac">${escapeHtml(item.spoken_text)}</strong>
                                 <div style="display:flex; align-items:center; gap:6px; margin-left:auto;">
-                                    <button type="button" class="pronunciation-preview" data-term="${escapeHtml(item.term)}" data-spoken="${escapeHtml(item.spoken_text || '')}" title="Test audio preview">▶ Preview</button>
+                                    <button type="button" class="pronunciation-preview" data-term="${escapeHtml(item.term)}" data-spoken="${escapeHtml(item.spoken_text || '')}" title="Test native TTS audio preview">▶ Preview</button>
                                     <button type="button" class="pronunciation-delete" data-term="${escapeHtml(item.term)}" title="Remove custom pronunciation">✕ Remove</button>
                                 </div>
                             </div>
                         `;
                     } else {
+                        const defaultRec = item.recommendation_default || '';
+                        const altRec = item.recommendation_alternate || '';
+                        const contextSentence = (item.contexts && item.contexts[0]) || '';
                         return `
-                            <div class="pronunciation-row" data-term="${escapeHtml(item.term)}">
+                            <div class="pronunciation-row" data-term="${escapeHtml(item.term)}" data-context="${escapeHtml(contextSentence)}">
                                 <div class="pronunciation-term">
                                     <strong>${escapeHtml(item.term)}</strong>
                                     <small>${item.occurrences || 0} occurrence${item.occurrences === 1 ? '' : 's'} · chapters ${(item.chapters || []).join(', ') || '—'}</small>
-                                    <span title="${escapeHtml((item.contexts || []).join(' | '))}">${escapeHtml((item.contexts || [])[0] || '')}</span>
+                                    <span title="${escapeHtml((item.contexts || []).join(' | '))}">${escapeHtml(contextSentence)}</span>
+                                    ${(defaultRec || altRec) ? `
+                                        <div class="pronunciation-recommendations">
+                                            ${defaultRec ? `
+                                                <button type="button" class="btn-rec-chip btn-rec-default active" data-rec="${escapeHtml(defaultRec)}" title="Click to use default recommendation">
+                                                    ✨ Default: <strong>${escapeHtml(defaultRec)}</strong>
+                                                </button>
+                                            ` : ''}
+                                            ${altRec ? `
+                                                <button type="button" class="btn-rec-chip btn-rec-alt" data-rec="${escapeHtml(altRec)}" title="Click to use alternate recommendation">
+                                                    🔄 Alt: <strong>${escapeHtml(altRec)}</strong>
+                                                </button>
+                                            ` : ''}
+                                        </div>
+                                    ` : ''}
                                 </div>
-                                <input type="text" maxlength="240" placeholder="Spoken form, e.g. Pah-chee" aria-label="Spoken form for ${escapeHtml(item.term)}">
+                                <input type="text" maxlength="240" value="${escapeHtml(defaultRec)}" placeholder="Spoken form, e.g. Pah chee" aria-label="Spoken form for ${escapeHtml(item.term)}">
                                 <div style="display:flex; align-items:center; gap:6px;">
-                                    <button type="button" class="btn btn-ghost btn-sm pronunciation-preview-unresolved" data-term="${escapeHtml(item.term)}" title="Test audio preview">▶ Preview</button>
+                                    <button type="button" class="btn btn-ghost btn-sm pronunciation-preview-unresolved" data-term="${escapeHtml(item.term)}" title="Test native TTS audio preview">▶ Preview</button>
                                     <button type="button" class="btn btn-secondary pronunciation-save">Verify</button>
                                 </div>
                             </div>
@@ -1914,6 +1948,29 @@ window.ScriptViewer = (() => {
             const nextBtn = section.querySelector('#btn-lexicon-next-page');
             if (nextBtn) nextBtn.disabled = lexState.page >= totalPages;
 
+            container.querySelectorAll('.btn-rec-chip').forEach(chip => {
+                chip.addEventListener('click', () => {
+                    const row = chip.closest('.pronunciation-row');
+                    const input = row?.querySelector('input');
+                    const rec = chip.dataset.rec;
+                    if (input && rec) {
+                        input.value = rec;
+                        row.querySelectorAll('.btn-rec-chip').forEach(c => c.classList.remove('active'));
+                        chip.classList.add('active');
+                    }
+                });
+            });
+
+            container.querySelectorAll('.pronunciation-row input').forEach(input => {
+                input.addEventListener('input', () => {
+                    const row = input.closest('.pronunciation-row');
+                    const val = input.value.trim().toLowerCase();
+                    row?.querySelectorAll('.btn-rec-chip').forEach(chip => {
+                        chip.classList.toggle('active', chip.dataset.rec?.toLowerCase() === val);
+                    });
+                });
+            });
+
             container.querySelectorAll('.pronunciation-save').forEach(button => {
                 button.addEventListener('click', () => {
                     const row = button.closest('.pronunciation-row');
@@ -1925,7 +1982,7 @@ window.ScriptViewer = (() => {
                 button.addEventListener('click', () => {
                     const term = button.dataset.term || '';
                     const spoken = button.dataset.spoken || '';
-                    previewPronunciation(term, spoken, button);
+                    previewPronunciation(term, spoken, button, lexState.inSentence, null);
                 });
             });
 
@@ -1934,7 +1991,8 @@ window.ScriptViewer = (() => {
                     const row = button.closest('.pronunciation-row');
                     const term = button.dataset.term || '';
                     const spoken = row?.querySelector('input')?.value || term;
-                    previewPronunciation(term, spoken, button);
+                    const context = row?.dataset.context || '';
+                    previewPronunciation(term, spoken, button, lexState.inSentence, context);
                 });
             });
 
@@ -1949,6 +2007,24 @@ window.ScriptViewer = (() => {
         }
 
         renderList();
+
+        section.querySelector('#lexicon-carrier-toggle')?.addEventListener('change', (e) => {
+            lexState.inSentence = e.target.checked;
+        });
+
+        section.querySelector('#btn-lexicon-batch-accept')?.addEventListener('click', async () => {
+            const batch = {};
+            unresolved.forEach(item => {
+                if (item.recommendation_default) {
+                    batch[item.term] = item.recommendation_default;
+                }
+            });
+            const count = Object.keys(batch).length;
+            if (!count) return;
+            if (confirm(`Accept default recommendations for all ${count} unverified terms?`)) {
+                await batchApprovePronunciations(batch, section.querySelector('#btn-lexicon-batch-accept'));
+            }
+        });
 
         section.querySelector('#lexicon-search-input')?.addEventListener('input', (e) => {
             lexState.search = e.target.value.trim();
@@ -1991,7 +2067,7 @@ window.ScriptViewer = (() => {
                 showToast('Enter a word or spoken form to preview', 'warning');
                 return;
             }
-            previewPronunciation(term, spoken, section.querySelector('#btn-preview-lexicon-custom'));
+            previewPronunciation(term, spoken, section.querySelector('#btn-preview-lexicon-custom'), lexState.inSentence, null);
         });
 
         section.querySelector('#btn-add-lexicon-custom')?.addEventListener('click', () => {
@@ -2011,7 +2087,7 @@ window.ScriptViewer = (() => {
 
     let activePreviewAudio = null;
 
-    async function previewPronunciation(term, spokenText, button) {
+    async function previewPronunciation(term, spokenText, button, inSentence = true, contextSentence = null) {
         const projectId = window.state?.currentProjectId;
         const cleanTerm = (term || '').replace(/^Pronunciation:\s*/i, '').trim();
         const spoken = (spokenText || cleanTerm || '').replace(/^Pronunciation:\s*/i, '').trim();
@@ -2033,7 +2109,12 @@ window.ScriptViewer = (() => {
             const response = await fetch(`api/projects/${encodeURIComponent(projectId)}/pronunciations/preview`, {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({term: cleanTerm, spoken_text: spoken})
+                body: JSON.stringify({
+                    term: cleanTerm,
+                    spoken_text: spoken,
+                    in_sentence: inSentence,
+                    context_sentence: contextSentence
+                })
             });
             const data = await response.json().catch(() => ({}));
 
@@ -2123,6 +2204,27 @@ window.ScriptViewer = (() => {
         } catch (error) {
             showToast(error.message, 'error');
             button.disabled = false;
+        }
+    }
+
+    async function batchApprovePronunciations(entries, button) {
+        const projectId = window.state?.currentProjectId;
+        if (!projectId || !Object.keys(entries).length) return;
+        if (button) button.disabled = true;
+        try {
+            const response = await fetch(`api/projects/${encodeURIComponent(projectId)}/pronunciations/batch`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({entries})
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(data.detail || 'Could not save batch pronunciations');
+            currentData.pronunciations = data.inventory;
+            showToast(`Approved ${Object.keys(entries).length} pronunciations! (${data.affected_chapters.length} chapter${data.affected_chapters.length === 1 ? '' : 's'} updated)`, 'success');
+            renderQuality();
+        } catch (error) {
+            showToast(error.message, 'error');
+            if (button) button.disabled = false;
         }
     }
 
@@ -2217,6 +2319,7 @@ window.ScriptViewer = (() => {
         refreshVoices,
         refreshPronunciations,
         previewPronunciation,
-        revealLine
+        revealLine,
+        jumpToScriptLine
     };
 })();

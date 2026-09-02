@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -52,6 +53,82 @@ class ReviewGate:
             "counts": counts,
             "release_ready": not self.blocking_items,
         }
+
+
+from shared.cache import cache_service
+
+
+def _cap_decision_trail(
+    trail: list[Any] | None,
+    max_entries: int = 10,
+    max_str_len: int = 500,
+) -> list[dict[str, Any]]:
+    """Cap decision trail to the last N entries and truncate verbose strings."""
+    if not trail or not isinstance(trail, list):
+        return []
+    sliced = trail[-max_entries:]
+    result: list[dict[str, Any]] = []
+    for entry in sliced:
+        if isinstance(entry, dict):
+            cleaned: dict[str, Any] = {}
+            for k, v in entry.items():
+                if isinstance(v, str) and len(v) > max_str_len:
+                    cleaned[k] = v[:max_str_len] + "..."
+                else:
+                    cleaned[k] = v
+            result.append(cleaned)
+        elif isinstance(entry, str):
+            result.append({"reason": entry[:max_str_len]})
+    return result
+
+
+def _get_script_review_data(project_dir: Path) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
+    script_dir = project_dir / "script"
+    if not script_dir.is_dir():
+        return {}, []
+
+    try:
+        file_mtimes = {
+            p.name: p.stat().st_mtime
+            for p in script_dir.glob("chapter_*.json")
+            if re.fullmatch(r"chapter_\d{3,}\.json", p.name)
+        }
+    except OSError:
+        file_mtimes = {}
+
+    cache_key = f"script_review:{project_dir.resolve()}"
+    cached = cache_service.get(cache_key)
+    if cached and isinstance(cached, dict) and cached.get("file_mtimes") == file_mtimes:
+        return cached.get("lines", {}), cached.get("attributions", [])
+
+    script_lines_by_id: dict[str, dict[str, Any]] = {}
+    attribution_lines: list[dict[str, Any]] = []
+
+    for chapter_path in sorted(script_dir.glob("chapter_*.json")):
+        if not re.fullmatch(r"chapter_\d{3,}\.json", chapter_path.name):
+            continue
+        try:
+            chapter = json.loads(chapter_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            continue
+        chapter_number = _int_or_none(chapter.get("chapter_number"))
+        for line in chapter.get("lines", []):
+            line_id = str(line.get("line_id") or line.get("id") or "unknown")
+            line_data = {**line, "chapter_number": chapter_number}
+            script_lines_by_id[line_id] = line_data
+            if line.get("attribution_review_required"):
+                attribution_lines.append(line_data)
+
+    cache_service.set(
+        cache_key,
+        {
+            "file_mtimes": file_mtimes,
+            "lines": script_lines_by_id,
+            "attributions": attribution_lines,
+        },
+        ttl_seconds=1800,
+    )
+    return script_lines_by_id, attribution_lines
 
 
 def collect_review_gate(project_id: str, project_dir: Path, job_queue: Any) -> ReviewGate:
@@ -164,35 +241,27 @@ def collect_review_gate(project_id: str, project_dir: Path, job_queue: Any) -> R
                 blocking=False,
             ))
 
-    script_lines_by_id: dict[str, dict[str, Any]] = {}
-    for chapter_path in sorted((project_dir / "script").glob("chapter_*.json")):
-        try:
-            chapter = json.loads(chapter_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, TypeError):
-            continue
-        chapter_number = _int_or_none(chapter.get("chapter_number"))
-        for line in chapter.get("lines", []):
-            line_id = str(line.get("line_id") or line.get("id") or "unknown")
-            script_lines_by_id[line_id] = {**line, "chapter_number": chapter_number}
-            if not line.get("attribution_review_required"):
-                continue
-            review = persisted.get(("attribution", line_id), {})
-            disposition = str(review.get("disposition", "unreviewed"))
-            items.append(ReviewItem(
-                category="attribution",
-                item_id=line_id,
-                title=f"Speaker attribution {line_id}",
-                reason=str(line.get("attribution_review_reason") or line.get("speaker_evidence") or "Speaker could not be resolved safely."),
-                confidence=_float_or_none(line.get("speaker_confidence")),
-                disposition=disposition,
-                blocking=disposition not in RESOLVED_ATTRIBUTION_DISPOSITIONS,
-                chapter_number=chapter_number,
-                details={
-                    "speaker": line.get("speaker"),
-                    "source_excerpt": line.get("text"),
-                    "decision_trail": line.get("attribution_confidence_history", []),
-                },
-            ))
+    script_lines_by_id, attribution_lines = _get_script_review_data(project_dir)
+    for line in attribution_lines:
+        line_id = str(line.get("line_id") or line.get("id") or "unknown")
+        chapter_number = line.get("chapter_number")
+        review = persisted.get(("attribution", line_id), {})
+        disposition = str(review.get("disposition", "unreviewed"))
+        items.append(ReviewItem(
+            category="attribution",
+            item_id=line_id,
+            title=f"Speaker attribution {line_id}",
+            reason=str(line.get("attribution_review_reason") or line.get("speaker_evidence") or "Speaker could not be resolved safely."),
+            confidence=_float_or_none(line.get("speaker_confidence")),
+            disposition=disposition,
+            blocking=disposition not in RESOLVED_ATTRIBUTION_DISPOSITIONS,
+            chapter_number=chapter_number,
+            details={
+                "speaker": line.get("speaker"),
+                "source_excerpt": line.get("text"),
+                "decision_trail": _cap_decision_trail(line.get("attribution_confidence_history")),
+            },
+        ))
 
     quality_by_line: dict[str, dict[str, Any]] = {}
     for row in job_queue.get_quality_report(project_id):
@@ -305,7 +374,7 @@ def collect_review_gate(project_id: str, project_dir: Path, job_queue: Any) -> R
                         "audit_kind": issue.get("kind", "unknown"),
                         "speaker": issue.get("speaker") or matched_line.get("speaker"),
                         "source_excerpt": issue.get("source_excerpt") or matched_line.get("text"),
-                        "decision_trail": matched_line.get("attribution_confidence_history", []),
+                        "decision_trail": _cap_decision_trail(matched_line.get("attribution_confidence_history")),
                     },
                 ))
                 existing_attribution_ids.add(item_id)
@@ -313,7 +382,11 @@ def collect_review_gate(project_id: str, project_dir: Path, job_queue: Any) -> R
             pass
 
     try:
-        inventory = build_pronunciation_inventory(project_dir)
+        inv_path = project_dir / "pronunciation_inventory.json"
+        if inv_path.is_file():
+            inventory = json.loads(inv_path.read_text(encoding="utf-8"))
+        else:
+            inventory = build_pronunciation_inventory(project_dir)
         for candidate in inventory.get("candidates", []):
             if candidate.get("status") != "review_required":
                 continue

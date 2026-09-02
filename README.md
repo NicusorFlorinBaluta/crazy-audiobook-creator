@@ -53,7 +53,7 @@ The checked-in defaults assume the Python environment at `E:\PyTorch env\my_venv
 .\scripts\setup-voice-server.ps1 -VenvPath "E:\PyTorch env\my_venv"
 
 # Pull the model once; the pipeline starts its isolated Ollama service on demand
-ollama pull qwen2.5:32b
+ollama pull qwen3.8:27b
 & "E:\PyTorch env\my_venv\Scripts\python.exe" -m uvicorn brain.dashboard.api.main:app --host 127.0.0.1 --port 8000
 ```
 

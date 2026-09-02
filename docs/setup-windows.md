@@ -56,7 +56,7 @@ The application expects the GPU PyTorch build to expose the device through PyTor
 Install/start Ollama and pull the model named by `brain/config.yaml`:
 
 ```powershell
-ollama pull qwen2.5:32b
+ollama pull qwen3.8:27b
 ollama list
 ```
 
@@ -77,7 +77,7 @@ At minimum verify:
 # brain/config.yaml
 ollama:
   host: "http://127.0.0.1:11435"
-  model: "qwen2.5:32b"
+  model: "qwen3.8:27b"
   auto_start: true
   models_dir: "E:\\.ollama\\models"
   vulkan_visible_devices: "0"

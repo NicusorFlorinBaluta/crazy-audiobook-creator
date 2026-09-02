@@ -2541,6 +2541,37 @@ class PartialGenerationTests(unittest.TestCase):
             "calm and deliberate",
         )
 
+    def test_detect_new_characters_generic_speaker_autoprovisioned(self) -> None:
+        registry = CharacterRegistry(
+            characters={
+                "narrator": Character(
+                    id="narrator",
+                    name="Narrator",
+                    gender=Gender.FEMALE,
+                    age_range="adult",
+                    voice_description="Narrator voice",
+                    speaking_style="clear",
+                )
+            }
+        )
+        script = ScriptChapter(
+            chapter_number=1,
+            chapter_title="Chapter 1",
+            lines=[
+                ScriptLine(line_id="1", speaker="character_female", text="Help me!"),
+                ScriptLine(line_id="2", speaker="unnamed_man", text="Stay back!"),
+            ],
+        )
+        generator = ScriptGenerator(ollama=None)
+        generator._detect_new_characters(script, registry)
+        
+        self.assertEqual(script.lines[0].speaker, "minor_female")
+        self.assertEqual(script.lines[1].speaker, "minor_male")
+        self.assertIn("minor_female", registry.characters)
+        self.assertIn("minor_male", registry.characters)
+        self.assertEqual(registry.characters["minor_female"].gender, Gender.FEMALE)
+        self.assertEqual(registry.characters["minor_male"].gender, Gender.MALE)
+
 
 if __name__ == "__main__":
     unittest.main()

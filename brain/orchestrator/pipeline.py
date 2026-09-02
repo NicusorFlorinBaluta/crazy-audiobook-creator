@@ -1445,6 +1445,19 @@ class Pipeline:
             except Exception:
                 reuse_characters = False
 
+        if hasattr(self.job_queue, "emit_progress"):
+            self.job_queue.emit_progress(
+                project_id,
+                ProgressEvent(
+                    stage="scripting",
+                    phase="character_discovery" if not reuse_characters else "fragment_annotation",
+                    message="Pass 1: Discovering characters and voice profiles..." if not reuse_characters else "Preparing chapter scripting...",
+                    chapter=1,
+                    chapter_total=len(book.chapters),
+                    percent=0.0,
+                ),
+            )
+
         joint_discovery = self._joint_script_analysis_enabled()
         joint_checkpoint_path = project_dir / "characters.joint.checkpoint.json"
         discovery_checkpoint_chapters: set[int] = set()
@@ -1501,6 +1514,22 @@ class Pipeline:
                 registry = CharacterRegistry.model_validate_json(chars_path.read_text(encoding="utf-8"))
             else:
                 chars_ckpt_path = project_dir / "characters.checkpoint.json"
+                def _analyzer_progress(percent: float, message: str, ch_num: int, unit_idx: int, total_units: int) -> None:
+                    if hasattr(self.job_queue, "emit_progress"):
+                        self.job_queue.emit_progress(
+                            project_id,
+                            ProgressEvent(
+                                stage="scripting",
+                                phase="character_discovery",
+                                message=message,
+                                chapter=ch_num,
+                                chapter_total=len(book.chapters),
+                                percent=percent,
+                                line_position=unit_idx,
+                                line_total=total_units,
+                            ),
+                        )
+
                 registry = self.character_analyzer.analyze(
                     book,
                     check_callback=_analyzer_check,
@@ -1510,6 +1539,7 @@ class Pipeline:
                         project_dir / "character_reference_audit.json"
                     ),
                     project_dir=project_dir,
+                    progress_callback=_analyzer_progress,
                 )
                 pass1_elapsed = time.time() - t0
 
@@ -1711,6 +1741,51 @@ class Pipeline:
                 len(deterministic_before["repaired"]),
             )
 
+        # --- Tiered dialogue attribution repair (Tier 1 Local Qwen) ---
+        ext_cfg = self.config.get("external_validation", {})
+        tiered_cfg = ext_cfg.get("tiered_attribution", {})
+        if tiered_cfg.get("enabled", True):
+            try:
+                from brain.director.attribution_detector import detect_suspicious_turns
+                from brain.validators.tiered_adjudicator import TieredAttributionAdjudicator
+
+                min_conf = float(tiered_cfg.get("min_detection_confidence", 0.70))
+                max_short = int(tiered_cfg.get("max_short_response_chars", 80))
+                local_auto_accept = float(tiered_cfg.get("local_auto_accept_confidence", 0.95))
+                ollama_temp = float(tiered_cfg.get("ollama_temperature", 0.1))
+                is_dry_run = bool(tiered_cfg.get("dry_run", False))
+
+                suspicious = detect_suspicious_turns(
+                    chapter_scripts,
+                    min_confidence=min_conf,
+                    max_short_response_chars=max_short,
+                )
+                if suspicious:
+                    logger.info(
+                        "[TieredAttribution] Detected %d suspicious dialogue turn(s) across %d chapter(s)",
+                        len(suspicious),
+                        len(chapter_scripts),
+                    )
+                    adjudicator = TieredAttributionAdjudicator(
+                        ollama=self.ollama,
+                        external_validator=self.external_validator,
+                        registry=registry,
+                        local_auto_accept=local_auto_accept,
+                        ollama_temperature=ollama_temp,
+                    )
+                    tier1_report = adjudicator.adjudicate(
+                        suspicious,
+                        project_dir=project_dir,
+                        chapters=chapter_scripts,
+                        dry_run=is_dry_run,
+                    )
+                    logger.info(
+                        "[TieredAttribution] Tier 1 adjudication finished: %s",
+                        tier1_report.summary,
+                    )
+            except Exception as exc:
+                logger.warning("[TieredAttribution] Tiered adjudication encountered error: %s", exc)
+
         post_repair_audit = audit_book_attribution(
             book,
             registry,
@@ -1785,6 +1860,7 @@ class Pipeline:
             character_registry=registry,
             chapters=chapter_scripts,
         )
+        atomic_write_text(chars_path, registry.model_dump_json(indent=2))
         atomic_write_text(
             project_dir / "book_script.json",
             book_script.model_dump_json(indent=2),

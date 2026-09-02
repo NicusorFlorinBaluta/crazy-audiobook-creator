@@ -20,7 +20,10 @@ from pathlib import Path
 from typing import Any, Iterator
 from urllib.parse import quote
 
-import paramiko
+try:
+    import paramiko
+except ImportError:
+    paramiko = None
 from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)

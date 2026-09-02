@@ -157,6 +157,96 @@ _UNSAFE_SPEAKER_ALIASES = {
     "boy", "girl", "person", "someone", "speaker", "narrator",
 }
 
+_GENERIC_SPEAKER_ALIASES = {
+    "character_female": "minor_female",
+    "female_speaker": "minor_female",
+    "unnamed_female": "minor_female",
+    "unnamed_woman": "minor_female",
+    "woman": "minor_female",
+    "character_male": "minor_male",
+    "male_speaker": "minor_male",
+    "unnamed_male": "minor_male",
+    "unnamed_man": "minor_male",
+    "man": "minor_male",
+    "unnamed_girl": "child_female",
+    "girl": "child_female",
+    "unnamed_boy": "child_male",
+    "boy": "child_male",
+}
+
+_GENERIC_SPEAKER_DEFINITIONS: dict[str, dict[str, Any]] = {
+    "minor_male": {
+        "name": "Unnamed Man",
+        "gender": Gender.MALE,
+        "age_range": "adult",
+        "personality_traits": ["unnamed", "generic"],
+        "voice_description": (
+            "male speaker, adult age. medium pitch, moderate volume, "
+            "natural speed. clear texture, high clarity, natural fluency. "
+            "neutral emotion, conversational tone, grounded personality."
+        ),
+        "speaking_style": "Natural dialogue matching the source context",
+        "test_sentence": "I know what I saw, and I can explain it if you listen.",
+    },
+    "minor_female": {
+        "name": "Unnamed Woman",
+        "gender": Gender.FEMALE,
+        "age_range": "adult",
+        "personality_traits": ["unnamed", "generic"],
+        "voice_description": (
+            "female speaker, adult age. medium pitch, moderate volume, "
+            "natural speed. clear texture, high clarity, natural fluency. "
+            "neutral emotion, conversational tone, grounded personality."
+        ),
+        "speaking_style": "Natural dialogue matching the source context",
+        "test_sentence": "I know what I saw, and I can explain it if you listen.",
+    },
+    "child_male": {
+        "name": "Unnamed Boy",
+        "gender": Gender.MALE,
+        "age_range": "child",
+        "personality_traits": ["unnamed", "generic"],
+        "voice_description": (
+            "male child speaker, child age. medium-high pitch, moderate volume, "
+            "natural speed. clear texture, high clarity, natural fluency. "
+            "curious emotion, direct tone, youthful personality."
+        ),
+        "speaking_style": "Natural dialogue matching the source context",
+        "test_sentence": "I know what I saw, and I can explain it if you listen.",
+    },
+    "child_female": {
+        "name": "Unnamed Girl",
+        "gender": Gender.FEMALE,
+        "age_range": "child",
+        "personality_traits": ["unnamed", "generic"],
+        "voice_description": (
+            "female child speaker, child age. high pitch, moderate volume, "
+            "natural speed. clear texture, high clarity, natural fluency. "
+            "curious emotion, direct tone, youthful personality."
+        ),
+        "speaking_style": "Natural dialogue matching the source context",
+        "test_sentence": "I know what I saw, and I can explain it if you listen.",
+    },
+    "crowd": {
+        "name": "Crowd",
+        "gender": Gender.OTHER,
+        "age_range": "adult",
+        "personality_traits": ["crowd", "collective", "generic"],
+        "voice_description": "multiple voices speaking in unison, crowd chants, group murmurs.",
+        "speaking_style": "Choral or crowd dialogue",
+        "test_sentence": "We stand together!",
+    },
+    "collective": {
+        "name": "Collective",
+        "gender": Gender.OTHER,
+        "age_range": "adult",
+        "personality_traits": ["collective", "generic"],
+        "voice_description": "collective or choral speech.",
+        "speaking_style": "Choral or collective dialogue",
+        "test_sentence": "We stand together!",
+    },
+}
+
 _PROMPT_DIR = Path(__file__).parent / "prompts"
 
 _SYSTEM_PROMPT = """You are a STRICT AUDIOBOOK SCRIPT METADATA ANNOTATOR. Your ONLY job is to assign the correct speaker, emotion, and reading speed to an array of pre-extracted text fragments.
@@ -2719,29 +2809,53 @@ class ScriptGenerator:
         script: ScriptChapter,
         registry: CharacterRegistry,
     ) -> None:
-        """Resolve exact aliases and reject invented Pass 2 speakers."""
+        """Resolve exact aliases, generic archetypes, and reject invented Pass 2 speakers."""
         known_ids = set(registry.characters.keys())
         for line in script.lines:
-            spk = line.speaker.lower().replace(" ", "_").strip("_")
+            spk = ScriptGenerator._normalize_speaker_id(line.speaker)
             if not spk or spk == "narrator":
                 continue
             
-            # Check canonical speaker resolution (aliases, display names, name variants)
+            # 1. Check canonical speaker resolution (exact ID, aliases, display names, name variants)
             canonical = spk
             if spk not in known_ids:
                 for cid, char in registry.characters.items():
                     aliases = getattr(char, "aliases", [])
-                    alias_norms = [a.lower().replace(" ", "_") for a in aliases]
-                    char_name_norm = char.name.lower().replace(" ", "_")
+                    alias_norms = [ScriptGenerator._normalize_speaker_id(a) for a in aliases]
+                    char_name_norm = ScriptGenerator._normalize_speaker_id(char.name)
                     if spk in alias_norms or spk == char_name_norm:
                         canonical = cid
                         break
-            
-            if canonical != spk:
-                line.speaker = canonical
-                continue
 
-            if spk not in known_ids:
+            # 2. If still unresolved in registry, check generic speaker aliases
+            if canonical not in known_ids:
+                canonical = _GENERIC_SPEAKER_ALIASES.get(canonical, canonical)
+
+            # 3. Auto-provision standard universal generic archetypes if used
+            if canonical not in known_ids and canonical in _GENERIC_SPEAKER_DEFINITIONS:
+                spec = _GENERIC_SPEAKER_DEFINITIONS[canonical]
+                registry.characters[canonical] = Character(
+                    id=canonical,
+                    name=spec["name"],
+                    gender=spec["gender"],
+                    age_range=spec["age_range"],
+                    personality_traits=spec["personality_traits"],
+                    voice_description=spec["voice_description"],
+                    speaking_style=spec["speaking_style"],
+                    dialogue_count=1,
+                    test_sentence=spec["test_sentence"],
+                )
+                known_ids.add(canonical)
+                logger.info(
+                    "[ScriptGenerator] Auto-provisioned generic speaker archetype '%s' for Chapter %d",
+                    canonical,
+                    script.chapter_number,
+                )
+            
+            if canonical != line.speaker:
+                line.speaker = canonical
+
+            if canonical not in known_ids:
                 raise ValueError(
                     f"Chapter {script.chapter_number} contains unknown speaker "
                     f"'{spk}'; Pass 2 may not create cast members"

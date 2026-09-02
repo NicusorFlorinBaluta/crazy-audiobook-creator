@@ -75,9 +75,9 @@ _SYSTEM_PROMPT = """You are an expert audiobook director and strict data extract
 - Do NOT mark a named character as `other` if surrounding narrative text uses `he` or `she`.
 - Use `other` ONLY for true non-gendered collective entities, swarms, or when zero gender indicators exist in the entire text.
 
-### Character ID Guidelines
+### Character ID & Narrator Guidelines
 - CRITICAL: Use the character's actual name as the character_id in snake_case.
-  For example: "starling", "sixth_of_dusk", "mother_frond".
+  For example: "starling", "sixth_of_dusk", "mother_frond", "breezy".
 - Do NOT use generic IDs like "character_1", "character_2", "char_a".
 - For unnamed speakers, use a descriptive ID: "child_female", "old_merchant",
   "guard_captain".
@@ -86,6 +86,7 @@ _SYSTEM_PROMPT = """You are an expert audiobook director and strict data extract
 - Never merge identities merely because one name contains another. Family
   members, ranks, shared surnames, and similarly titled characters remain
   distinct unless the supplied text explicitly establishes identity.
+- NARRATOR VS IN-WORLD CHARACTERS: The "narrator" entry is strictly the audiobook reader role for unquoted narrative prose. NEVER add in-world character names or aliases to "narrator". If the book is written in the first person or includes POV journal entries/reflections (e.g. Breezy, Katniss, Percy), the protagonist MUST have their own distinct character card (e.g. "breezy") for their spoken dialogue turns.
 
 ### Voice Description Guidelines
 
@@ -121,7 +122,7 @@ CRITICAL REMINDER: You MUST output ONLY valid JSON matching the Output Schema be
       "gender": "male|female",
       "age_range": "string",
       "personality_traits": ["trait1", "trait2"],
-      "aliases": ["explicit nickname or title"],
+      "aliases": [],
       "voice_description": "detailed voice description for TTS",
       "speaking_style": "how the narrator typically speaks",
       "test_sentence": "An INVENTED 15 to 25 word sentence showcasing the narrator's pacing and tone. DO NOT use fantasy names, places, or complex jargon."
@@ -131,6 +132,7 @@ CRITICAL REMINDER: You MUST output ONLY valid JSON matching the Output Schema be
       "gender": "male|female|other",
       "age_range": "string",
       "personality_traits": ["trait1", "trait2"],
+      "aliases": ["nickname or alternative name"],
       "voice_description": "detailed voice description for TTS",
       "speaking_style": "how this character typically speaks",
       "test_sentence": "An INVENTED 15 to 25 word line of dialogue showcasing their personality. DO NOT use fantasy names, places, or complex jargon.",
@@ -174,6 +176,7 @@ class CharacterAnalyzer:
         checkpoint_fingerprint: str = "",
         reference_audit_path: Path | str | None = None,
         project_dir: Path | str | None = None,
+        progress_callback: Callable[[float, str, int, int, int], None] | None = None,
     ) -> CharacterRegistry:
         """Analyze a book and produce a character registry, using multi-pass for long books."""
         total_chars = sum(len(ch.text) for ch in book.chapters)
@@ -209,9 +212,10 @@ class CharacterAnalyzer:
                     "[CharacterAnalyzer] Using %d reference section(s) to seed character analysis",
                     len(guide_parts),
                 )
-
         if total_chars <= self.single_pass_threshold:
             # Single pass for standard books (fits within Qwen 32k context)
+            if progress_callback:
+                progress_callback(0.0, "Pass 1 Character Discovery: analyzing full book...", 1, 1, 1)
             book_text = self._prepare_book_text(book)
             system_prompt = _SYSTEM_PROMPT.format(genre=self.genre)
             prompt = _USER_PROMPT.format(book_text=book_text)
@@ -307,6 +311,13 @@ class CharacterAnalyzer:
                         part_index,
                         ch.title,
                     )
+                    if progress_callback:
+                        pct = round((idx / len(analysis_units)) * 100.0, 1)
+                        msg = f"Pass 1 Character Discovery: unit {idx + 1} of {len(analysis_units)} (Ch {ch.number}: {ch.title})"
+                        try:
+                            progress_callback(pct, msg, ch.number, idx + 1, len(analysis_units))
+                        except Exception:
+                            pass
                     raw_ch = self.ollama.generate_json(
                         ch_prompt,
                         temperature=self.temperature,

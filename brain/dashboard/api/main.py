@@ -86,8 +86,10 @@ from shared.pronunciation import (
     build_pronunciation_inventory,
     apply_pronunciations,
     load_pronunciation_dictionary,
+    normalize_phonetic_text,
 )
-from shared.models import GenerateLineRequest, ScriptLine
+from shared.models import GenerateLineRequest, ScriptLine, ScriptChapter
+from shared.artifacts import atomic_write_text, atomic_write_json
 from voice.tts_server.voice_library import VoiceLibraryManager
 from brain.dashboard.api.mobile import router as mobile_router
 
@@ -285,10 +287,17 @@ class PronunciationRequest(BaseModel):
     spoken_text: str = Field(default="", max_length=240)
 
 
+class PronunciationBatchRequest(BaseModel):
+    entries: dict[str, str] = Field(default_factory=dict)
+
+
 class PronunciationPreviewRequest(BaseModel):
     term: str = Field(default="", max_length=120)
     spoken_text: str = Field(default="", max_length=240)
     voice_id: str | None = Field(default=None, max_length=120)
+    in_sentence: bool = True
+    context_sentence: str | None = Field(default=None, max_length=500)
+
 
 
 
@@ -368,11 +377,32 @@ def _load_character_registry(project_id: str) -> tuple[Path, dict[str, Any]]:
     return chars_path, registry
 
 
+from shared.cache import cache_service
+
+
 def _script_chapters(project_id: str) -> list[Any]:
     from shared.models import ScriptChapter
 
+    script_dir = _project_dir(project_id) / "script"
+    if not script_dir.is_dir():
+        return []
+
+    try:
+        file_mtimes = {
+            p.name: p.stat().st_mtime
+            for p in script_dir.glob("chapter_*.json")
+            if re.fullmatch(r"chapter_\d{3,}\.json", p.name)
+        }
+    except OSError:
+        file_mtimes = {}
+
+    cache_key = f"script_chapters:{project_id}"
+    cached = cache_service.get(cache_key)
+    if cached and isinstance(cached, dict) and cached.get("file_mtimes") == file_mtimes:
+        return cached.get("chapters", [])
+
     chapters = []
-    for path in sorted((_project_dir(project_id) / "script").glob("chapter_*.json")):
+    for path in sorted(script_dir.glob("chapter_*.json")):
         if not re.fullmatch(r"chapter_\d{3,}\.json", path.name):
             continue
         try:
@@ -383,22 +413,102 @@ def _script_chapters(project_id: str) -> list[Any]:
             )
         except Exception:
             logger.warning("Ignoring invalid script while building cast: %s", path)
+
+    cache_service.set(
+        cache_key,
+        {"file_mtimes": file_mtimes, "chapters": chapters},
+        ttl_seconds=1800,
+    )
     return chapters
 
 
 def _script_line_index(project_id: str) -> dict[str, dict[str, Any]]:
     """Return source-safe display metadata for generated line IDs."""
+    script_dir = _project_dir(project_id) / "script"
+    if not script_dir.is_dir():
+        return {}
+
+    try:
+        file_mtimes = {
+            p.name: p.stat().st_mtime
+            for p in script_dir.glob("chapter_*.json")
+            if re.fullmatch(r"chapter_\d{3,}\.json", p.name)
+        }
+    except OSError:
+        file_mtimes = {}
+
+    cache_key = f"script_line_index:{project_id}"
+    cached = cache_service.get(cache_key)
+    if cached and isinstance(cached, dict) and cached.get("file_mtimes") == file_mtimes:
+        return cached.get("index", {})
+
     result: dict[str, dict[str, Any]] = {}
-    for chapter in _script_chapters(project_id):
-        for position, line in enumerate(chapter.lines, 1):
-            result[line.line_id] = {
-                "chapter_number": chapter.chapter_number,
-                "chapter_title": chapter.chapter_title,
-                "position": position,
-                "speaker": line.speaker,
-                "voice_id": line.voice_id or line.speaker,
-                "text": line.text,
-            }
+    for path in sorted(script_dir.glob("chapter_*.json")):
+        if not re.fullmatch(r"chapter_\d{3,}\.json", path.name):
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            ch_num = data.get("chapter_number")
+            ch_title = data.get("chapter_title")
+            for position, line in enumerate(data.get("lines", []), 1):
+                lid = line.get("line_id") or line.get("id")
+                if lid:
+                    result[lid] = {
+                        "chapter_number": ch_num,
+                        "chapter_title": ch_title,
+                        "position": position,
+                        "speaker": line.get("speaker"),
+                        "voice_id": line.get("voice_id") or line.get("speaker"),
+                        "text": line.get("text", ""),
+                    }
+        except Exception:
+            pass
+
+    cache_service.set(
+        cache_key,
+        {"file_mtimes": file_mtimes, "index": result},
+        ttl_seconds=1800,
+    )
+    return result
+
+
+def _get_script_summary(project_id: str) -> dict[int, tuple[bool, int, str]]:
+    """Return fast cached chapter valid/count/title mapping by per-file mtimes."""
+    script_dir = _project_dir(project_id) / "script"
+    if not script_dir.is_dir():
+        return {}
+    try:
+        file_mtimes = {
+            p.name: p.stat().st_mtime
+            for p in script_dir.glob("chapter_*.json")
+            if re.fullmatch(r"chapter_\d{3,}\.json", p.name)
+        }
+    except OSError:
+        file_mtimes = {}
+
+    cache_key = f"script_summary:{project_id}"
+    cached = cache_service.get(cache_key)
+    if cached and isinstance(cached, dict) and cached.get("file_mtimes") == file_mtimes:
+        return cached.get("summary", {})
+
+    result: dict[int, tuple[bool, int, str]] = {}
+    for path in sorted(script_dir.glob("chapter_*.json")):
+        if not re.fullmatch(r"chapter_\d{3,}\.json", path.name):
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            ch_num = data.get("chapter_number")
+            if ch_num is not None:
+                lines = data.get("lines", [])
+                result[int(ch_num)] = (len(lines) > 0, len(lines), str(data.get("chapter_title") or ""))
+        except Exception:
+            pass
+
+    cache_service.set(
+        cache_key,
+        {"file_mtimes": file_mtimes, "summary": result},
+        ttl_seconds=1800,
+    )
     return result
 
 
@@ -1028,13 +1138,20 @@ async def lifespan(app: FastAPI):
     auto_resume = config.get("dashboard", {}).get("auto_resume_in_flight", True)
     jobs_to_resume: list[str] = []
 
-    # A process restart cannot preserve worker threads. Convert stale running
-    # state into a resumable state; scheduled jobs remain eligible for the
-    # automatic scheduler below.
     for stale_job in job_queue.list_jobs():
         if not stale_job.get("running"):
             continue
         stale_status = stale_job.get("status")
+        if stale_status == PipelineStage.WAITING_FOR_REVIEW.value:
+            # Jobs waiting for review should remain in waiting_for_review and not auto-run
+            job_queue.update_job(
+                stale_job["project_id"],
+                {
+                    "running": False,
+                    "pause_reason": None,
+                },
+            )
+            continue
         if auto_resume and not was_graceful_shutdown:
             jobs_to_resume.append(stale_job["project_id"])
         replacement = (
@@ -1056,6 +1173,18 @@ async def lifespan(app: FastAPI):
         for pid in jobs_to_resume:
             logger.info("Auto-resuming in-flight project after unexpected restart: %s", pid)
             asyncio.create_task(start_pipeline(pid))
+
+    def _warmup_caches():
+        for job in job_queue.list_jobs():
+            pid = job.get("project_id")
+            if pid:
+                try:
+                    _get_script_summary(pid)
+                    collect_review_gate(pid, _project_dir(pid), job_queue)
+                except Exception:
+                    pass
+
+    asyncio.create_task(asyncio.to_thread(_warmup_caches))
 
     # Periodic background task to push live project updates via WebSocket
     async def ws_broadcast_loop():
@@ -1254,12 +1383,15 @@ async def serve_dashboard():
 
 
 @app.get("/health", include_in_schema=False)
+@app.get("/api/health", include_in_schema=False)
 async def dashboard_health():
     """Return minimal readiness information for HA and the reverse proxy."""
     return {
         "status": "ok",
         "ready": pipeline is not None and job_queue is not None,
         "pipeline_running": any(not task.done() for task in running_tasks.values()),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "version": FRONTEND_BUILD,
     }
 
 
@@ -1274,13 +1406,21 @@ async def list_projects():
     if not job_queue:
         raise HTTPException(status_code=503, detail="Server not initialized")
     projects = job_queue.list_jobs()
-    for project in projects:
-        gate = collect_review_gate(
-            project["project_id"], _project_dir(project["project_id"]), job_queue
-        ).to_dict()
-        project["attention_count"] = gate["total_count"]
-        project["blocking_review_count"] = gate["blocking_count"]
-    return projects
+
+    def _enrich():
+        for project in projects:
+            try:
+                gate = collect_review_gate(
+                    project["project_id"], _project_dir(project["project_id"]), job_queue
+                ).to_dict()
+                project["attention_count"] = gate["total_count"]
+                project["blocking_review_count"] = gate["blocking_count"]
+            except Exception:
+                project["attention_count"] = 0
+                project["blocking_review_count"] = 0
+        return projects
+
+    return await asyncio.to_thread(_enrich)
 
 
 @app.post("/api/projects")
@@ -1679,8 +1819,21 @@ async def start_pipeline(
             "pause_reason": None,
             "reset_target_stage": None,
             "schedule_override_active": override_schedule,
+            "review_blocking_item_ids": [],
         },
     )
+    if hasattr(job_queue, "emit_progress"):
+        job_queue.emit_progress(
+            project_id,
+            ProgressEvent(
+                stage=resume_stage.value,
+                phase="starting",
+                message=f"Starting {resume_stage.value}...",
+                chapter=0,
+                chapter_total=0,
+                percent=0.0,
+            ),
+        )
 
     # Clear old logs for this project on a fresh start
     _project_logs[project_id] = collections.deque(maxlen=500)
@@ -1913,11 +2066,43 @@ async def reset_pipeline_stage(project_id: str, request: Request):
             except OSError as e:
                 raise RuntimeError(f"Could not remove {p} during reset: {e}") from e
 
-        if stage == PipelineStage.EXTRACTING:
-            try:
-                await asyncio.to_thread(pipeline.reextract_project, project_id)
-            except FileNotFoundError as exc:
-                raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if stage in {PipelineStage.EXTRACTING, PipelineStage.SCRIPTING}:
+            job_queue.clear_review_items(project_id)
+            update["review_blocking_item_ids"] = []
+            for p in [
+                project_dir / "characters.json",
+                project_dir / "characters.checkpoint.json",
+                project_dir / "characters.meta.json",
+                project_dir / "voice_cast.json",
+                project_dir / ".fingerprints.json",
+                project_dir / "book_script.json",
+                project_dir / "attribution_audit.json",
+                project_dir / "character_augmentation_audit.json",
+                project_dir / "character_reference_audit.json",
+                project_dir / "extraction_audit.json",
+            ]:
+                _safe_unlink(p)
+            for d in [
+                project_dir / "script",
+                project_dir / "segments",
+                project_dir / "mastered",
+                project_dir / "external_validation",
+                workspace_dir / "segments",
+                workspace_dir / "mastered",
+            ]:
+                if d.exists() and d.is_dir():
+                    shutil.rmtree(d)
+            cache_service.delete(
+                f"script_chapters:{project_id}",
+                f"script_line_index:{project_id}",
+                f"script_summary:{project_id}",
+                f"script_review:{project_dir.resolve()}",
+            )
+            if stage == PipelineStage.EXTRACTING:
+                try:
+                    await asyncio.to_thread(pipeline.reextract_project, project_id)
+                except FileNotFoundError as exc:
+                    raise HTTPException(status_code=409, detail=str(exc)) from exc
             update.update({
                 "script_completed": False,
                 "bootstrapping_completed": False,
@@ -1929,31 +2114,9 @@ async def reset_pipeline_stage(project_id: str, request: Request):
                 "mastered_chapters": [],
                 "force_character_analysis": True,
             })
-            for p in [project_dir / "characters.json", project_dir / "characters.checkpoint.json", project_dir / "characters.meta.json", project_dir / "voice_cast.json", project_dir / ".fingerprints.json", project_dir / "book_script.json"]:
-                _safe_unlink(p)
-            for d in [project_dir / "script", project_dir / "segments", project_dir / "mastered", workspace_dir / "segments", workspace_dir / "mastered"]:
-                if d.exists() and d.is_dir():
-                    shutil.rmtree(d)
-                    
-        elif stage == PipelineStage.SCRIPTING:
-            update.update({
-                "script_completed": False,
-                "bootstrapping_completed": False,
-                "voice_review_approved": False,
-                "voice_review_status": "pending",
-                "voice_review_approved_at": None,
-                "scripted_chapters": [],
-                "generated_chapters": [],
-                "mastered_chapters": [],
-                "force_character_analysis": True,
-            })
-            for p in [project_dir / "characters.json", project_dir / "characters.checkpoint.json", project_dir / "characters.meta.json", project_dir / "voice_cast.json", project_dir / ".fingerprints.json", project_dir / "book_script.json"]:
-                _safe_unlink(p)
-            for d in [project_dir / "script", project_dir / "segments", project_dir / "mastered", workspace_dir / "segments", workspace_dir / "mastered"]:
-                if d.exists() and d.is_dir():
-                    shutil.rmtree(d)
                     
         elif stage == PipelineStage.BOOTSTRAPPING:
+            job_queue.clear_review_items(project_id, item_type="segment")
             update.update({
                 "bootstrapping_completed": False,
                 "voice_review_approved": False,
@@ -1970,6 +2133,7 @@ async def reset_pipeline_stage(project_id: str, request: Request):
                     shutil.rmtree(d)
                     
         elif stage == PipelineStage.VOICE_REVIEW:
+            job_queue.clear_review_items(project_id, item_type="segment")
             update.update({
                 "status": "paused",
                 "active_stage": "voice_review",
@@ -1986,6 +2150,7 @@ async def reset_pipeline_stage(project_id: str, request: Request):
                     shutil.rmtree(d)
                     
         elif stage == PipelineStage.GENERATING:
+            job_queue.clear_review_items(project_id, item_type="segment")
             update.update({
                 "generated_chapters": [],
                 "mastered_chapters": [],
@@ -1995,11 +2160,13 @@ async def reset_pipeline_stage(project_id: str, request: Request):
                     shutil.rmtree(d)
 
         elif stage == PipelineStage.VALIDATING:
+            job_queue.clear_review_items(project_id, item_type="segment")
             update.update({
                 "generated_chapters": [],
                 "mastered_chapters": [],
                 "validation_revision": uuid.uuid4().hex,
             })
+            _safe_unlink(project_dir / "long_form_audio_quality.json")
             manifests_dir = project_dir / "manifests"
             if manifests_dir.is_dir():
                 for manifest in manifests_dir.glob("chapter_*.segments.json"):
@@ -2046,7 +2213,41 @@ async def reset_pipeline_stage(project_id: str, request: Request):
             )
         if stage != PipelineStage.EXPORTING:
             update["export_stale"] = True
+        update["progress"] = {
+            "schema_version": 1,
+            "stage": stage.value,
+            "phase": "idle",
+            "message": f"Reset to {stage.value}",
+            "chapter": 0,
+            "chapter_position": 0,
+            "chapter_total": 0,
+            "line_id": "",
+            "line_position": 0,
+            "line_total": 0,
+            "attempt": 1,
+            "cache_hit": None,
+            "completed_units": 0.0,
+            "total_units": 0.0,
+            "percent": 0.0,
+            "elapsed_seconds": 0.0,
+            "eta_seconds": None,
+            "eta_confidence": None,
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
         job_queue.update_job(project_id, update)
+        if hasattr(job_queue, "emit_progress"):
+            job_queue.emit_progress(
+                project_id,
+                ProgressEvent(
+                    stage=stage.value,
+                    phase="idle",
+                    message=f"Reset to {stage.value}",
+                    chapter=0,
+                    chapter_total=0,
+                    percent=0.0,
+                ),
+            )
         packaging_guard.__exit__(None, None, None)
         packaging_guard = None
         return {"status": "success", "project_id": project_id, "stage": stage.value}
@@ -2375,16 +2576,10 @@ async def get_pipeline_status(project_id: str):
                     if c not in voice_revision_pending:
                         mastered_chapters.add(c)
 
+        script_summary = _get_script_summary(project_id)
+
         def _has_valid_script(c_num: int) -> tuple[bool, int, str]:
-            ch_f = script_dir / f"chapter_{c_num:03d}.json"
-            if not ch_f.is_file():
-                return False, 0, ""
-            try:
-                sdata = json.loads(ch_f.read_text(encoding="utf-8"))
-                lines = sdata.get("lines", [])
-                return len(lines) > 0, len(lines), str(sdata.get("chapter_title") or "")
-            except Exception:
-                return False, 0, ""
+            return script_summary.get(c_num, (False, 0, ""))
 
         generated_chapters = set(state.get("generated_chapters", [])) - voice_revision_pending
         for c_num, count in segment_counts.items():
@@ -4755,7 +4950,7 @@ async def update_pronunciation(project_id: str, request: PronunciationRequest):
     if not term:
         raise HTTPException(status_code=400, detail="Pronunciation term cannot be empty")
     if spoken:
-        current_dict[term] = spoken
+        current_dict[term] = normalize_phonetic_text(spoken)
     else:
         current_dict.pop(term, None)
 
@@ -4792,9 +4987,70 @@ async def update_pronunciation(project_id: str, request: PronunciationRequest):
     }
 
 
+@app.post("/api/projects/{project_id}/pronunciations/batch")
+async def batch_update_pronunciations(project_id: str, request: PronunciationBatchRequest):
+    """Save multiple custom pronunciation mappings in a single batch."""
+    _require_job(project_id)
+    project_dir = _project_dir(project_id)
+    dict_path = project_dir / "pronunciation_dict.json"
+
+    current_dict: dict[str, str] = {}
+    if dict_path.is_file():
+        try:
+            current_dict = json.loads(dict_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            current_dict = {}
+
+    affected_terms: set[str] = set()
+    for raw_term, raw_spoken in request.entries.items():
+        term = re.sub(r"^(?:pronunciation\s*:\s*)+", "", raw_term.strip(), flags=re.IGNORECASE).strip()
+        spoken = re.sub(r"^(?:pronunciation\s*:\s*)+", "", raw_spoken.strip(), flags=re.IGNORECASE).strip()
+        if not term:
+            continue
+        if spoken:
+            current_dict[term] = normalize_phonetic_text(spoken)
+            affected_terms.add(term)
+        else:
+            current_dict.pop(term, None)
+
+    atomic_write_json(dict_path, current_dict)
+
+    affected_chapters: set[int] = set()
+    if affected_terms:
+        term_pattern = re.compile(
+            rf"(?<!\w)(?:{'|'.join(re.escape(t) for t in affected_terms)})(?!\w)",
+            re.IGNORECASE,
+        )
+        for chapter_path in sorted((project_dir / "script").glob("chapter_*.json")):
+            if chapter_path.name.endswith(".meta.json"):
+                continue
+            try:
+                chapter = json.loads(chapter_path.read_text(encoding="utf-8"))
+                ch_num = int(chapter.get("chapter_number") or 0)
+                for line in chapter.get("lines", []):
+                    txt = line.get("text", "")
+                    if term_pattern.search(txt):
+                        affected_chapters.add(ch_num)
+                        break
+            except Exception:
+                pass
+
+        if affected_chapters:
+            DeliveryManager(project_dir).mark_stale_for_chapters(
+                affected_chapters,
+                f"Batch pronunciation updated for {len(affected_terms)} terms",
+            )
+
+    return {
+        "status": "success",
+        "inventory": build_pronunciation_inventory(project_dir),
+        "affected_chapters": sorted(affected_chapters),
+    }
+
+
 @app.post("/api/projects/{project_id}/pronunciations/preview")
 async def preview_pronunciation(project_id: str, request: PronunciationPreviewRequest):
-    """Generate a high-quality TTS audio preview for a pronunciation candidate."""
+    """Generate a high-quality native Qwen3-TTS audio preview for a pronunciation candidate."""
     _require_job(project_id)
     project_dir = _project_dir(project_id)
     workspace_dir = _workspace_project_dir(project_id)
@@ -4803,7 +5059,33 @@ async def preview_pronunciation(project_id: str, request: PronunciationPreviewRe
     if not spoken:
         raise HTTPException(status_code=400, detail="Text to preview cannot be empty")
 
-    preview_hash = hashlib.sha256(spoken.encode("utf-8")).hexdigest()[:16]
+    clean_spoken = normalize_phonetic_text(spoken)
+    if request.in_sentence:
+        if request.context_sentence and request.term.strip():
+            text_to_speak = apply_pronunciations(
+                request.context_sentence, {request.term.strip(): clean_spoken}
+            )
+        else:
+            text_to_speak = f"The word is {clean_spoken}."
+    else:
+        text_to_speak = clean_spoken
+
+    voice_id = request.voice_id
+    if not voice_id:
+        cast_path = project_dir / "voice_cast.json"
+        if cast_path.is_file():
+            try:
+                cast_data = json.loads(cast_path.read_text(encoding="utf-8"))
+                voices = cast_data.get("voices", {})
+                voice_id = next(
+                    (vid for vid in voices if "narrator" in vid.lower()),
+                    next(iter(voices.keys()), None),
+                )
+            except Exception:
+                voice_id = None
+    voice_id = voice_id or "narrator"
+
+    preview_hash = hashlib.sha256(f"{voice_id}_{text_to_speak}".encode("utf-8")).hexdigest()[:16]
     previews_dir = workspace_dir / "previews"
     previews_dir.mkdir(parents=True, exist_ok=True)
     audio_path = previews_dir / f"pron_{preview_hash}.wav"
@@ -4813,34 +5095,27 @@ async def preview_pronunciation(project_id: str, request: PronunciationPreviewRe
         return {
             "status": "success",
             "audio_url": f"api/projects/{project_id}/pronunciations/preview/{preview_hash}/audio",
-            "spoken_text": spoken,
+            "spoken_text": clean_spoken,
+            "text_spoken": text_to_speak,
             "has_tts": True,
             "cached": True,
         }
 
-    # If pipeline is initialized and has a voice_client, try generating via TTS server
+    # Ensure TTS voice server is running and generate via native Qwen3-TTS
     has_tts = False
-    if pipeline and getattr(pipeline, "voice_client", None):
+    if pipeline:
         try:
-            # Fast check if voice server is responding
-            await asyncio.to_thread(
-                pipeline.voice_client.health_check_once, 0.8
-            )
-            voice_id = request.voice_id
-            if not voice_id:
-                # Pick the narrator voice or the first available voice
-                cast_path = project_dir / "voice_cast.json"
-                if cast_path.is_file():
-                    try:
-                        cast_data = json.loads(cast_path.read_text(encoding="utf-8"))
-                        voices = cast_data.get("voices", {})
-                        voice_id = next(
-                            (vid for vid in voices if "narrator" in vid.lower()),
-                            next(iter(voices.keys()), None),
-                        )
-                    except Exception:
-                        voice_id = None
-            voice_id = voice_id or "narrator"
+            # Check if voice server responds; start if needed
+            is_healthy = False
+            if getattr(pipeline, "voice_client", None):
+                try:
+                    await asyncio.to_thread(pipeline.voice_client.health_check_once, 0.8)
+                    is_healthy = True
+                except Exception:
+                    is_healthy = False
+
+            if not is_healthy:
+                await asyncio.to_thread(pipeline._start_voice_server)
 
             line_req = GenerateLineRequest(
                 project_id=project_id,
@@ -4848,7 +5123,7 @@ async def preview_pronunciation(project_id: str, request: PronunciationPreviewRe
                     line_id=f"preview_pron_{preview_hash}",
                     speaker=voice_id,
                     voice_id=voice_id,
-                    text=spoken,
+                    text=text_to_speak,
                 ),
             )
             await asyncio.to_thread(pipeline.voice_client.generate_line, line_req)
@@ -4857,22 +5132,23 @@ async def preview_pronunciation(project_id: str, request: PronunciationPreviewRe
                 shutil.copyfile(seg_path, audio_path)
                 has_tts = True
         except Exception as exc:
-            logger.info("TTS voice server preview not available: %s", exc)
+            logger.warning("TTS native preview generation failed: %s", exc)
             has_tts = False
 
     if has_tts and audio_path.is_file():
         return {
             "status": "success",
             "audio_url": f"api/projects/{project_id}/pronunciations/preview/{preview_hash}/audio",
-            "spoken_text": spoken,
+            "spoken_text": clean_spoken,
+            "text_spoken": text_to_speak,
             "has_tts": True,
         }
 
-    # Return fallback status for frontend Web Speech audio
     return {
         "status": "fallback_webspeech",
         "audio_url": None,
-        "spoken_text": spoken,
+        "spoken_text": clean_spoken,
+        "text_spoken": text_to_speak,
         "has_tts": False,
         "message": "TTS server offline. Playing preview via Web Speech.",
     }
@@ -4900,10 +5176,9 @@ async def get_pronunciation_preview_audio(project_id: str, preview_id: str):
 async def get_attention_reviews(project_id: str):
     """Return the unified, privacy-conscious Attention Required inbox."""
     _require_job(project_id)
-    result = collect_review_gate(
-        project_id, _project_dir(project_id), job_queue
-    ).to_dict()
-    release_path = _project_dir(project_id) / "pre_master_release.json"
+    pdir = _project_dir(project_id)
+    result = await asyncio.to_thread(lambda: collect_review_gate(project_id, pdir, job_queue).to_dict())
+    release_path = pdir / "pre_master_release.json"
     if release_path.is_file():
         try:
             result["pre_master_release"] = json.loads(
@@ -5142,6 +5417,133 @@ async def get_external_validation_status(project_id: str):
         ),
         "calibration": job_queue.external_validation_calibration(project_id),
     }
+
+
+_retry_locks: dict[str, asyncio.Lock] = {}
+
+
+@app.post("/api/projects/{project_id}/external-validation/retry")
+async def retry_external_validation(
+    project_id: str,
+    reset_circuit: bool = False,
+):
+    """Retry external validation with Gemini for unresolved attribution items."""
+    _require_job(project_id)
+    if not pipeline:
+        raise HTTPException(status_code=503, detail="Server not initialized")
+
+    project_dir = _project_dir(project_id)
+    if not project_dir.is_dir():
+        raise HTTPException(status_code=404, detail=f"Project not found: {project_id}")
+
+    lock = _retry_locks.setdefault(project_id, asyncio.Lock())
+    if lock.locked():
+        raise HTTPException(
+            status_code=409,
+            detail="A validation retry is already in progress for this project",
+        )
+
+    async with lock:
+        # Load character registry
+        chars_path = project_dir / "characters.json"
+        character_context = {}
+        character_ids: set[str] = set()
+        if chars_path.is_file():
+            try:
+                chars_data = json.loads(chars_path.read_text(encoding="utf-8"))
+                char_map = chars_data.get("characters", {})
+                character_ids = set(char_map.keys())
+                character_context = {
+                    cid: {
+                        "id": cid,
+                        "name": c.get("name", cid),
+                        "aliases": c.get("aliases", []),
+                        "gender": c.get("gender", "neutral"),
+                        "age_range": c.get("age_range", "adult"),
+                    }
+                    for cid, c in char_map.items()
+                }
+            except Exception as exc:
+                logger.warning("Could not read characters for retry: %s", exc)
+
+        # Load chapter scripts
+        scripts_dir = project_dir / "script"
+        if not scripts_dir.is_dir():
+            raise HTTPException(status_code=404, detail="No chapter scripts found")
+
+        chapter_scripts: list[ScriptChapter] = []
+        for path in sorted(scripts_dir.glob("chapter_*.json")):
+            if path.name.endswith(".meta.json"):
+                continue
+            try:
+                chapter_scripts.append(
+                    ScriptChapter.model_validate_json(path.read_text(encoding="utf-8"))
+                )
+            except Exception as exc:
+                logger.warning("Could not read script %s for validation retry: %s", path.name, exc)
+
+        if not chapter_scripts:
+            raise HTTPException(status_code=404, detail="No valid chapter scripts found to retry")
+
+        # If requested, reset circuit breaker health
+        if reset_circuit:
+            health_path = project_dir / ".external_validation_health.json"
+            global_health_path = Path("brain/projects/.external_validation_health.json")
+            for hp in (health_path, global_health_path):
+                try:
+                    hp.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+        # Run resolve_attributions in a background thread to keep event loop responsive
+        escalation = await asyncio.to_thread(
+            pipeline.external_validator.resolve_attributions,
+            project_dir=project_dir,
+            chapters=chapter_scripts,
+            character_ids=character_ids,
+            character_context=character_context,
+        )
+
+        # Persist modified chapter scripts
+        book_script_chapters = []
+        total_lines = 0
+        unresolved_count = 0
+        for script in chapter_scripts:
+            script_path = scripts_dir / f"chapter_{script.chapter_number:03d}.json"
+            atomic_write_text(script_path, script.model_dump_json(indent=2))
+            book_script_chapters.append(script.model_dump(mode="json"))
+            total_lines += len(script.lines)
+            unresolved_count += sum(1 for line in script.lines if line.attribution_review_required)
+
+        # Update book_script.json (merge to preserve top-level metadata)
+        book_script_path = project_dir / "book_script.json"
+        existing_book_script: dict[str, Any] = {}
+        if book_script_path.is_file():
+            try:
+                existing_book_script = json.loads(book_script_path.read_text(encoding="utf-8"))
+            except Exception:
+                existing_book_script = {}
+        existing_book_script["chapters"] = book_script_chapters
+        existing_book_script["total_lines"] = total_lines
+        atomic_write_json(book_script_path, existing_book_script)
+
+        # Invalidate project caches
+        cache_service.delete(
+            f"script_chapters:{project_id}",
+            f"script_line_index:{project_id}",
+            f"script_summary:{project_id}",
+            f"script_review:{project_dir.resolve()}",
+            f"pronunciation_inv:{project_dir.resolve()}",
+        )
+
+        return {
+            "status": "success",
+            "attempted": escalation.get("attempted", 0),
+            "resolved": escalation.get("resolved", 0),
+            "manual_review": escalation.get("manual_review", unresolved_count),
+            "unresolved_remaining": unresolved_count,
+            "provider_health": pipeline.external_validator.health_snapshot(),
+        }
 
 
 @app.post("/api/system/restart")

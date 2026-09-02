@@ -582,7 +582,7 @@ class IncrementalDeliveryApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(dict_file.exists())
         saved_dict = json.loads(dict_file.read_text(encoding="utf-8"))
         self.assertIn("Kholin", saved_dict)
-        self.assertEqual(saved_dict["Kholin"], "Ko-lin")
+        self.assertEqual(saved_dict["Kholin"], "Ko lin")
 
 
 if __name__ == "__main__":

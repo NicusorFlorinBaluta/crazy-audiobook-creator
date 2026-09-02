@@ -43,7 +43,7 @@ class PronunciationAndHotSwapTests(unittest.IsolatedAsyncioTestCase):
     """Test suite covering pronunciation replacements, preview API, line-level caching, and hot-swap."""
 
     def test_pronunciation_replacement_rules(self) -> None:
-        """Verify word-boundary aware case-insensitive pronunciation replacement."""
+        """Verify word-boundary aware case-insensitive pronunciation replacement with fluid syllable spacing."""
         p_dict = {
             "homeisle": "home-aisle",
             "homeisler": "home-aisler",
@@ -52,20 +52,20 @@ class PronunciationAndHotSwapTests(unittest.IsolatedAsyncioTestCase):
             "kokerlii": "Koh-ker-lee",
         }
 
-        # Exact match
+        # Exact match (hyphens normalized to spaces for fluid TTS)
         self.assertEqual(
             apply_pronunciations("The homeisle was quiet.", p_dict),
-            "The home-aisle was quiet.",
+            "The home aisle was quiet.",
         )
         # Plural and agent noun matches
         self.assertEqual(
             apply_pronunciations("Two Homeislers met on the homeisles.", p_dict),
-            "Two home-aislers met on the home-aisles.",
+            "Two home aislers met on the home aisles.",
         )
         # Capitalized proper noun
         self.assertEqual(
             apply_pronunciations("Kokerlii flew overhead.", p_dict),
-            "Koh-ker-lee flew overhead.",
+            "Koh ker lee flew overhead.",
         )
         # Substring inside another word must NOT be erroneously replaced
         self.assertEqual(
@@ -73,8 +73,24 @@ class PronunciationAndHotSwapTests(unittest.IsolatedAsyncioTestCase):
             "The word unhomeisled is untouched.",
         )
 
+    def test_generate_phonetic_recommendations(self) -> None:
+        """Verify generation of 1 default and 1 alternate recommendation."""
+        from shared.pronunciation import generate_phonetic_recommendations
+
+        homeisle_rec = generate_phonetic_recommendations("Homeisle")
+        self.assertEqual(homeisle_rec["default"], "Home aisle")
+        self.assertTrue(bool(homeisle_rec["alternate"]))
+
+        kokerlii_rec = generate_phonetic_recommendations("Kokerlii")
+        self.assertEqual(kokerlii_rec["default"], "Coker lee")
+        self.assertEqual(kokerlii_rec["alternate"], "Koh ker lee")
+
+        pache_rec = generate_phonetic_recommendations("Pache")
+        self.assertEqual(pache_rec["default"], "Pah chee")
+        self.assertEqual(pache_rec["alternate"], "Paych")
+
     def test_pronunciation_inventory_indexing(self) -> None:
-        """Verify scanning book script chapters for pronunciation candidates."""
+        """Verify scanning book script chapters for pronunciation candidates with recommendations."""
         with tempfile.TemporaryDirectory() as directory:
             project_dir = Path(directory)
             book_script = {
@@ -86,7 +102,8 @@ class PronunciationAndHotSwapTests(unittest.IsolatedAsyncioTestCase):
                         "chapter_title": "One",
                         "lines": [
                             {"line_id": "ch01_0001", "speaker": "narrator", "text": "The homeisler sailed away."},
-                            {"line_id": "ch01_0002", "speaker": "dusk", "text": "Farewell, homeisle."},
+                            {"line_id": "ch01_0002", "speaker": "dusk", "text": "Farewell, Homeisle."},
+                            {"line_id": "ch01_0003", "speaker": "narrator", "text": "And Homeisle faded from sight."},
                         ]
                     }
                 ]
@@ -103,8 +120,14 @@ class PronunciationAndHotSwapTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(terms["homeisler"]["status"], "verified")
             self.assertEqual(terms["homeisler"]["spoken_text"], "home-aisler")
 
+            # Check recommendation on unresolved term
+            self.assertIn("Homeisle", terms)
+            self.assertEqual(terms["Homeisle"]["status"], "review_required")
+            self.assertEqual(terms["Homeisle"]["recommendation_default"], "Home aisle")
+            self.assertTrue(bool(terms["Homeisle"]["recommendation_alternate"]))
+
     async def test_preview_endpoint_with_tts_generation(self) -> None:
-        """Verify preview endpoint synthesizes or returns preview audio URL."""
+        """Verify preview endpoint synthesizes native TTS audio with carrier sentence and isolated modes."""
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             project_dir = root / "project"
@@ -124,7 +147,6 @@ class PronunciationAndHotSwapTests(unittest.IsolatedAsyncioTestCase):
                     return MagicMock(status="ok")
 
                 def generate_line(self, req: GenerateLineRequest) -> GenerateLineResponse:
-                    # Write dummy segment wav
                     out_path = workspace_dir / "segments" / f"{req.line.line_id}.wav"
                     _make_dummy_wav(out_path, duration_s=0.3)
                     return GenerateLineResponse(
@@ -147,11 +169,14 @@ class PronunciationAndHotSwapTests(unittest.IsolatedAsyncioTestCase):
                 req = dashboard.PronunciationPreviewRequest(
                     term="homeisle",
                     spoken_text="home-aisle",
+                    in_sentence=True,
                 )
                 res = await dashboard.preview_pronunciation("test", req)
 
                 self.assertEqual(res["status"], "success")
                 self.assertTrue(res["has_tts"])
+                self.assertEqual(res["spoken_text"], "home aisle")
+                self.assertEqual(res["text_spoken"], "The word is home aisle.")
                 self.assertIn("api/projects/test/pronunciations/preview/", res["audio_url"])
 
                 # Now test fetching the preview audio
@@ -183,7 +208,49 @@ class PronunciationAndHotSwapTests(unittest.IsolatedAsyncioTestCase):
 
                 self.assertEqual(res["status"], "fallback_webspeech")
                 self.assertFalse(res["has_tts"])
-                self.assertEqual(res["spoken_text"], "home-aisle")
+                self.assertEqual(res["spoken_text"], "home aisle")
+
+    async def test_batch_pronunciation_update(self) -> None:
+        """Verify batch approval of multiple pronunciation recommendations in a single atomic request."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project_dir = root / "project"
+            workspace_dir = root / "workspace"
+            project_dir.mkdir(parents=True)
+            workspace_dir.mkdir(parents=True)
+
+            book_script = {
+                "metadata": {"title": "Test Book"},
+                "character_registry": {"characters": {}},
+                "chapters": [
+                    {
+                        "chapter_number": 1,
+                        "lines": [
+                            {"line_id": "ch01_0001", "speaker": "narrator", "text": "Kokerlii and homeisle."},
+                        ]
+                    }
+                ]
+            }
+            (project_dir / "book_script.json").write_text(json.dumps(book_script), encoding="utf-8")
+
+            with (
+                patch.object(dashboard, "job_queue", MagicMock()),
+                patch.object(dashboard, "_require_job", return_value={"project_id": "test"}),
+                patch.object(dashboard, "_project_dir", return_value=project_dir),
+                patch.object(dashboard, "_workspace_project_dir", return_value=workspace_dir),
+            ):
+                req = dashboard.PronunciationBatchRequest(
+                    entries={
+                        "homeisle": "Home aisle",
+                        "kokerlii": "Coker lee",
+                    }
+                )
+                res = await dashboard.batch_update_pronunciations("test", req)
+                self.assertEqual(res["status"], "success")
+
+                dict_data = json.loads((project_dir / "pronunciation_dict.json").read_text(encoding="utf-8"))
+                self.assertEqual(dict_data.get("homeisle"), "Home aisle")
+                self.assertEqual(dict_data.get("kokerlii"), "Coker lee")
 
     def test_line_caching_and_hot_swap_regeneration(self) -> None:
         """Verify changing pronunciation text invalidates only affected segment hashes, allowing instant hot swap."""
@@ -253,10 +320,11 @@ class PronunciationAndHotSwapTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(needs_gen_1, "Line 1 should be a cache hit initially")
             self.assertFalse(needs_gen_2, "Line 2 should be a cache hit initially")
 
-            # 2. Update pronunciation for homeisle -> home-aisle
+            # 2. Update pronunciation for homeisle -> home-aisle (normalized to home aisle)
             line1_spoken = apply_pronunciations(line1_orig, {"homeisle": "home-aisle"})
-            self.assertEqual(line1_spoken, "The home-aisle was peaceful.")
+            self.assertEqual(line1_spoken, "The home aisle was peaceful.")
             ctx_line1_v2 = {"synthesis_text": line1_spoken, "model": "qwen3"}
+
 
             # Line 1 context has changed: MUST require regeneration
             needs_gen_1_updated = store.line_needs_synthesis(

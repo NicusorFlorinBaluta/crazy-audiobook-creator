@@ -291,6 +291,16 @@ function setupEventListeners() {
         pill.classList.add('active');
         attentionState.activePill = pill.dataset.filter || 'all';
         attentionState.page = 1;
+        
+        const statusSelect = document.getElementById('attention-status');
+        if (statusSelect) {
+            if (attentionState.activePill === 'blocking') {
+                if (statusSelect.value === 'optional') statusSelect.value = 'blocking';
+            } else if (attentionState.activePill === 'pronunciation' || attentionState.activePill === 'character') {
+                if (statusSelect.value === 'blocking') statusSelect.value = 'all';
+            }
+        }
+        
         try { localStorage.setItem('crazy_audiobook_attention_pill', attentionState.activePill); } catch (_) {}
         renderAttentionInbox();
     });
@@ -303,6 +313,22 @@ function setupEventListeners() {
         renderAttentionInbox();
     });
     document.getElementById('btn-resume-after-review')?.addEventListener('click', startPipeline);
+    document.getElementById('btn-retry-gemini-now')?.addEventListener('click', () => {
+        if (state.currentProjectId) {
+            retryGeminiExternalValidation(state.currentProjectId, true);
+        }
+    });
+    document.getElementById('btn-dismiss-gemini-retry')?.addEventListener('click', () => {
+        const banner = document.getElementById('gemini-retry-banner');
+        if (banner) {
+            banner.classList.add('hidden');
+            banner.dataset.dismissed = 'true';
+        }
+        if (geminiRetryTimer) {
+            clearInterval(geminiRetryTimer);
+            geminiRetryTimer = null;
+        }
+    });
 
     // Feature Expansion Handlers
     const btnFetchMeta = document.getElementById('btn-fetch-metadata');
@@ -1013,6 +1039,162 @@ function confidenceBand(value) {
 
 attentionState.expandedCandidates = attentionState.expandedCandidates || new Set();
 
+let geminiRetryTimer = null;
+let geminiCooldownSeconds = 0;
+let geminiAutoRetryCount = 0;
+
+async function checkAndRenderGeminiRetryBanner(projectId, items = []) {
+    const banner = document.getElementById('gemini-retry-banner');
+    if (!banner) return;
+    
+    // Check if there are unresolved attribution items
+    const unresolvedAttributions = items.filter(i => i.category === 'attribution' && i.blocking);
+    if (!unresolvedAttributions.length) {
+        banner.classList.add('hidden');
+        if (geminiRetryTimer) { clearInterval(geminiRetryTimer); geminiRetryTimer = null; }
+        return;
+    }
+
+    try {
+        const res = await fetch(`api/projects/${encodeURIComponent(projectId)}/external-validation/status`);
+        if (!res.ok) return;
+        const status = await res.json();
+        const health = status.provider_health || {};
+        
+        let maxCooldown = 0;
+        let rateLimited = false;
+        let dailyBudgetExhausted = false;
+
+        for (const [provider, pData] of Object.entries(health)) {
+            const cd = Number(pData.cooldown_remaining_seconds || 0);
+            if (cd > maxCooldown) maxCooldown = cd;
+            const err = String(pData.last_error || '').toLowerCase();
+            if (err.includes('safety budget') || err.includes('50/50')) {
+                dailyBudgetExhausted = true;
+            }
+            if (err.includes('429') || err.includes('quota') || err.includes('rate limit') || err.includes('cooling down') || pData.circuit_open) {
+                rateLimited = true;
+            }
+        }
+
+        const autoCheck = document.getElementById('gemini-auto-retry-check');
+        const desc = document.getElementById('gemini-retry-description');
+        const timerEl = document.getElementById('gemini-cooldown-timer');
+        const retryBtn = document.getElementById('btn-retry-gemini-now');
+
+        if (retryBtn && !retryBtn.dataset.busy) {
+            retryBtn.disabled = false;
+            retryBtn.innerHTML = '⚡ Retry with Gemini Now';
+        }
+
+        if (dailyBudgetExhausted) {
+            banner.classList.remove('hidden');
+            if (autoCheck) autoCheck.checked = false;
+            if (desc) {
+                desc.textContent = `Gemini daily API budget reached (50/50). Automatic retries are paused. You can retry now (falls back to Gemini Web) or review the remaining ${unresolvedAttributions.length} dialogue turns manually below.`;
+            }
+            if (timerEl) timerEl.textContent = 'Paused';
+            if (geminiRetryTimer) { clearInterval(geminiRetryTimer); geminiRetryTimer = null; }
+            return;
+        }
+
+        if (geminiAutoRetryCount >= 3) {
+            banner.classList.remove('hidden');
+            if (autoCheck) autoCheck.checked = false;
+            if (desc) {
+                desc.textContent = `Auto-retry paused after 3 rate-limited attempts (${unresolvedAttributions.length} turns remaining). Click 'Retry with Gemini Now' anytime or review manually below.`;
+            }
+            if (timerEl) timerEl.textContent = 'Paused';
+            if (geminiRetryTimer) { clearInterval(geminiRetryTimer); geminiRetryTimer = null; }
+            return;
+        }
+
+        if (rateLimited || (unresolvedAttributions.length > 0 && maxCooldown > 0)) {
+            banner.classList.remove('hidden');
+            if (desc) {
+                desc.textContent = `Gemini reached its rate limit on ${unresolvedAttributions.length} dialogue turns. You can wait for quota reset (${maxCooldown || 30}s), retry now, or review items manually.`;
+            }
+            geminiCooldownSeconds = maxCooldown > 0 ? maxCooldown : 30;
+            startGeminiCooldownCountdown(projectId);
+        } else if (unresolvedAttributions.length > 0 && !banner.dataset.dismissed) {
+            banner.classList.remove('hidden');
+            if (desc) {
+                desc.textContent = `${unresolvedAttributions.length} dialogue turns require resolution. You can run Gemini triage/adjudication now or review manually below.`;
+            }
+            if (timerEl) timerEl.textContent = 'Ready';
+        } else {
+            banner.classList.add('hidden');
+        }
+    } catch (err) {
+        console.warn('Could not check external validation health', err);
+    }
+}
+
+function startGeminiCooldownCountdown(projectId) {
+    if (geminiRetryTimer) { clearInterval(geminiRetryTimer); }
+    
+    function updateDisplay() {
+        const timerEl = document.getElementById('gemini-cooldown-timer');
+        if (!timerEl) return;
+        const mins = Math.floor(geminiCooldownSeconds / 60);
+        const secs = geminiCooldownSeconds % 60;
+        timerEl.textContent = `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+    }
+
+    updateDisplay();
+    geminiRetryTimer = setInterval(async () => {
+        geminiCooldownSeconds--;
+        updateDisplay();
+        if (geminiCooldownSeconds <= 0) {
+            clearInterval(geminiRetryTimer);
+            geminiRetryTimer = null;
+            const autoCheck = document.getElementById('gemini-auto-retry-check');
+            if (autoCheck && autoCheck.checked) {
+                geminiAutoRetryCount++;
+                await retryGeminiExternalValidation(projectId, true);
+            }
+        }
+    }, 1000);
+}
+
+async function retryGeminiExternalValidation(projectId, resetCircuit = true) {
+    const retryBtn = document.getElementById('btn-retry-gemini-now');
+    if (retryBtn) {
+        retryBtn.dataset.busy = 'true';
+        retryBtn.disabled = true;
+        retryBtn.innerHTML = '⏳ Retrying Gemini...';
+    }
+
+    try {
+        const res = await fetch(`api/projects/${encodeURIComponent(projectId)}/external-validation/retry?reset_circuit=${resetCircuit}`, {
+            method: 'POST',
+        });
+        const result = await res.json();
+        if (res.ok && result.status === 'success') {
+            const resolved = result.resolved || 0;
+            const remaining = result.manual_review || 0;
+            if (resolved > 0) {
+                showToast(`Gemini resolved ${resolved} dialogue turn${resolved === 1 ? '' : 's'}! (${remaining} remaining)`, 'success');
+                geminiAutoRetryCount = 0;
+            } else {
+                showToast(`Gemini retry finished. ${remaining} items remaining for review.`, 'info');
+            }
+            await fetchAndRenderAttention(projectId, state.currentProject, true);
+        } else {
+            showToast(`Retry attempt: ${result.detail || 'Quota still cooling down'}`, 'warning');
+        }
+    } catch (err) {
+        console.error('Error retrying external validation', err);
+        showToast('External validation retry failed', 'error');
+    } finally {
+        if (retryBtn) {
+            delete retryBtn.dataset.busy;
+            retryBtn.disabled = false;
+            retryBtn.innerHTML = '⚡ Retry with Gemini Now';
+        }
+    }
+}
+
 async function fetchAndRenderAttention(projectId, project = state.currentProject, force = false) {
     try {
         const response = await fetch(`api/projects/${encodeURIComponent(projectId)}/reviews`);
@@ -1028,6 +1210,15 @@ async function fetchAndRenderAttention(projectId, project = state.currentProject
             document.getElementById('attention-status').value =
                 attentionState.data.blocking_count ? 'blocking' : 'all';
             attentionState.expandedCandidates = new Set();
+        }
+        if (!attentionState.characters || newProject) {
+            fetch(`api/projects/${encodeURIComponent(projectId)}/characters`)
+                .then(r => r.ok ? r.json() : {})
+                .then(c => {
+                    attentionState.characters = c.characters || c || {};
+                    renderAttentionInbox(project);
+                })
+                .catch(() => {});
         }
         state.lastAttentionRefresh = Date.now();
         if (dataChanged || force) {
@@ -1050,6 +1241,7 @@ function renderAttentionInbox(project = state.currentProject) {
     panel.classList.remove('hidden');
     const isWaitingForReview = project?.status === 'waiting_for_review';
     const items = data.items || [];
+    checkAndRenderGeminiRetryBanner(project?.project_id || attentionState.projectId, items);
     const blockingItems = items.filter(item => Boolean(item.blocking));
     const pronunciationItems = items.filter(item => item.category === 'pronunciation');
     const characterItems = items.filter(item => item.category === 'character');
@@ -1141,7 +1333,7 @@ function renderAttentionInbox(project = state.currentProject) {
         if (query) {
             const matchTitle = (item.title || '').toLowerCase().includes(query);
             const matchReason = (item.reason || '').toLowerCase().includes(query);
-            const matchText = (item.details?.text || '').toLowerCase().includes(query);
+            const matchText = (item.details?.text || item.details?.source_excerpt || '').toLowerCase().includes(query);
             const matchSpeaker = (item.details?.speaker || '').toLowerCase().includes(query);
             const matchTerm = (item.details?.term || '').toLowerCase().includes(query);
             if (!matchTitle && !matchReason && !matchText && !matchSpeaker && !matchTerm) return false;
@@ -1153,6 +1345,8 @@ function renderAttentionInbox(project = state.currentProject) {
     const pages = Math.max(1, Math.ceil(filtered.length / attentionState.pageSize));
     attentionState.page = Math.min(attentionState.page, pages);
     const rows = filtered.slice((attentionState.page - 1) * attentionState.pageSize, attentionState.page * attentionState.pageSize);
+
+    const charactersMap = attentionState.characters || {};
 
     document.getElementById('attention-list').innerHTML = rows.length ? rows.map(item => {
         const band = confidenceBand(item.confidence);
@@ -1173,9 +1367,24 @@ function renderAttentionInbox(project = state.currentProject) {
         }
 
         const isPronunciation = item.category === 'pronunciation';
+        const isAttribution = item.category === 'attribution';
         const termName = (item.details?.term || (item.title || '')).replace(/^Pronunciation:\s*/i, '').trim();
+        const quoteText = item.details?.text || item.details?.source_excerpt || '';
+        const currentSpeaker = item.details?.speaker || 'narrator';
 
-        return `<article class="attention-item ${item.blocking ? 'blocking' : ''}" data-line-id="${escapeHtml(item.item_id)}" data-term="${escapeHtml(termName)}">
+        let charOptions = '';
+        if (isAttribution) {
+            charOptions = Object.entries(charactersMap).map(([cid, cinfo]) => {
+                const cname = cinfo.name || cid;
+                const isSelected = cid === currentSpeaker ? 'selected' : '';
+                return `<option value="${escapeHtml(cid)}" ${isSelected}>${escapeHtml(cname)} (${escapeHtml(cid)})</option>`;
+            }).join('');
+            if (!charOptions) {
+                charOptions = `<option value="${escapeHtml(currentSpeaker)}" selected>${escapeHtml(currentSpeaker)}</option><option value="narrator">Narrator</option>`;
+            }
+        }
+
+        return `<article class="attention-item ${item.blocking ? 'blocking' : ''}" data-line-id="${escapeHtml(item.item_id)}" data-chapter="${item.chapter_number || ''}" data-term="${escapeHtml(termName)}">
             <div class="attention-item-head">
                 <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
                     <strong>${escapeHtml(item.title)}</strong>
@@ -1183,10 +1392,10 @@ function renderAttentionInbox(project = state.currentProject) {
                 </div>
                 <span class="confidence-band confidence-${band.key}">${escapeHtml(band.label)}</span>
             </div>
-            ${item.details?.text ? `
+            ${quoteText ? `
                 <div class="attention-line-quote">
-                    <strong>${escapeHtml(item.details?.speaker ? (item.details.speaker.charAt(0).toUpperCase() + item.details.speaker.slice(1)) : 'Speaker')}:</strong>
-                    <span>“${escapeHtml(item.details.text)}”</span>
+                    <strong>${escapeHtml(currentSpeaker ? (currentSpeaker.charAt(0).toUpperCase() + currentSpeaker.slice(1)) : 'Speaker')}:</strong>
+                    <span>“${escapeHtml(quoteText)}”</span>
                 </div>
             ` : ''}
             <p>${escapeHtml(item.reason || '')}</p>
@@ -1205,7 +1414,18 @@ function renderAttentionInbox(project = state.currentProject) {
                     <button class="btn btn-danger btn-sm regen-audio-review" data-line-id="${escapeHtml(item.item_id)}">↻ Regenerate</button>
                     ${!isCandidatesExpanded ? `<button class="btn btn-ghost btn-sm load-candidates">Compare attempts</button>` : ''}
                 ` : ''}
-                ${item.category === 'attribution' ? `<button class="btn btn-ghost btn-sm reveal-context">Reveal in script editor</button>` : ''}
+                ${isAttribution ? `
+                    <div class="attention-attribution-controls" style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; width:100%; margin-top:4px;">
+                        <button type="button" class="btn btn-success btn-sm accept-attribution-review" data-line-id="${escapeHtml(item.item_id)}" data-chapter="${item.chapter_number || ''}" data-speaker="${escapeHtml(currentSpeaker)}">✓ Approve "${escapeHtml(currentSpeaker)}"</button>
+                        <div style="display:inline-flex; align-items:center; gap:6px;">
+                            <select class="form-select form-select-sm attribution-speaker-select" style="max-width:220px; padding:4px 8px; font-size:12px; background:var(--bg-input, #1e293b); color:var(--text-main, #f8fafc); border:1px solid var(--border-subtle, #334155); border-radius:4px;">
+                                ${charOptions}
+                            </select>
+                            <button type="button" class="btn btn-secondary btn-sm save-attribution-review" data-line-id="${escapeHtml(item.item_id)}" data-chapter="${item.chapter_number || ''}">Change Speaker</button>
+                        </div>
+                        <button type="button" class="btn btn-ghost btn-sm reveal-context" data-line-id="${escapeHtml(item.item_id)}" data-chapter="${item.chapter_number || ''}">🔍 Jump to Script</button>
+                    </div>
+                ` : ''}
             </div>
             <div class="candidate-comparison ${isCandidatesExpanded ? '' : 'hidden'}"></div>
             ${trail.length ? `<details class="decision-trail"><summary>Decision trail (${trail.length})</summary>${trail.map(step => `<div><strong>${escapeHtml(step.provider || step.resolver || 'validator')}</strong> · ${escapeHtml(step.decision || 'unknown')} · ${step.confidence == null ? 'n/a' : `${Math.round(step.confidence * 100)}%`}<br><small>${escapeHtml(step.reason || '')}</small></div>`).join('')}</details>` : ''}
@@ -1234,6 +1454,69 @@ function renderAttentionInbox(project = state.currentProject) {
         }
     });
 
+    panel.querySelectorAll('.accept-attribution-review').forEach(button => button.addEventListener('click', async () => {
+        const lineId = button.dataset.lineId;
+        const chapter = parseInt(button.dataset.chapter, 10);
+        const speaker = button.dataset.speaker;
+        button.disabled = true;
+        button.textContent = 'Approving…';
+        try {
+            const response = await fetch(`api/projects/${encodeURIComponent(attentionState.projectId)}/script/chapter/${chapter}/line/${encodeURIComponent(lineId)}`, {
+                method: 'PATCH',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ speaker: speaker })
+            });
+            if (!response.ok) throw new Error(await response.text());
+            const saved = await response.json();
+            showToast(saved.auto_resuming ? 'Speaker approved. Pipeline is resuming automatically.' : 'Speaker approved.', 'success');
+            await fetchAndRenderAttention(attentionState.projectId, state.currentProject, true);
+            if (state.currentProjectId) fetchProjectDetails(state.currentProjectId);
+        } catch (error) {
+            showToast(`Could not approve: ${error.message}`, 'error');
+            button.disabled = false;
+            button.textContent = `✓ Approve "${speaker}"`;
+        }
+    }));
+
+    panel.querySelectorAll('.save-attribution-review').forEach(button => button.addEventListener('click', async () => {
+        const row = button.closest('.attention-item');
+        const lineId = button.dataset.lineId;
+        const chapter = parseInt(button.dataset.chapter, 10);
+        const select = row.querySelector('.attribution-speaker-select');
+        const speaker = select ? select.value : '';
+        if (!speaker) return;
+        button.disabled = true;
+        button.textContent = 'Saving…';
+        try {
+            const response = await fetch(`api/projects/${encodeURIComponent(attentionState.projectId)}/script/chapter/${chapter}/line/${encodeURIComponent(lineId)}`, {
+                method: 'PATCH',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ speaker: speaker })
+            });
+            if (!response.ok) throw new Error(await response.text());
+            const saved = await response.json();
+            showToast(saved.auto_resuming ? `Speaker changed to "${speaker}". Pipeline is resuming automatically.` : `Speaker changed to "${speaker}".`, 'success');
+            await fetchAndRenderAttention(attentionState.projectId, state.currentProject, true);
+            if (state.currentProjectId) fetchProjectDetails(state.currentProjectId);
+        } catch (error) {
+            showToast(`Could not update speaker: ${error.message}`, 'error');
+            button.disabled = false;
+            button.textContent = 'Change Speaker';
+        }
+    }));
+
+    panel.querySelectorAll('.reveal-context').forEach(button => button.addEventListener('click', () => {
+        const lineId = button.dataset.lineId;
+        const chapter = parseInt(button.dataset.chapter, 10);
+        if (window.ScriptViewer && typeof window.ScriptViewer.revealLine === 'function') {
+            window.ScriptViewer.revealLine(lineId);
+        } else if (chapter && lineId && window.ScriptViewer && typeof window.ScriptViewer.jumpToScriptLine === 'function') {
+            window.ScriptViewer.jumpToScriptLine(chapter, lineId);
+        } else if (typeof window.activateDetailTab === 'function') {
+            window.activateDetailTab('tab-script', true);
+        }
+    }));
+
     panel.querySelectorAll('.accept-audio-review').forEach(button => button.addEventListener('click', async () => {
         const row = button.closest('.attention-item');
         const lineId = row.dataset.lineId;
@@ -1261,6 +1544,7 @@ function renderAttentionInbox(project = state.currentProject) {
             button.textContent = '✓ Approve audio';
         }
     }));
+
     panel.querySelectorAll('.regen-audio-review').forEach(button => button.addEventListener('click', async () => {
         const row = button.closest('.attention-item');
         const lineId = row.dataset.lineId;
@@ -1288,6 +1572,7 @@ function renderAttentionInbox(project = state.currentProject) {
             button.textContent = '↻ Regenerate';
         }
     }));
+
     panel.querySelectorAll('.load-candidates').forEach(button => button.addEventListener('click', async () => {
         const row = button.closest('.attention-item');
         const lineId = row.dataset.lineId;

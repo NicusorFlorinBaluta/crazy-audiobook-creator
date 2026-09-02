@@ -120,6 +120,16 @@ external_validation:
   manual_review_confidence: 0.75
   attribution_batch_size: 20
   max_audio_regenerations: 1
+  # Tiered local-first dialogue attribution auto-fix
+  tiered_attribution:
+    enabled: true
+    local_auto_accept_confidence: 0.85
+    min_detection_confidence: 0.70
+    max_short_response_chars: 80
+    ollama_temperature: 0.1
+    dry_run: false
+
+
   character_augmentation:
     enabled: true
     triage_model: gemini-3.5-flash-lite
@@ -171,7 +181,5 @@ schedule:
     - Wednesday
     - Thursday
     - Friday
-    - Saturday
-    - Sunday
     start: 09:00
     end: '19:00'

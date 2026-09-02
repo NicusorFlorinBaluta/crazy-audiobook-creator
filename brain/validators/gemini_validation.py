@@ -103,6 +103,16 @@ class ExternalValidationError(RuntimeError):
     """Raised when an external validator cannot produce a trustworthy result."""
 
 
+_VALIDATION_RECOVERABLE_ERRORS = (
+    ExternalValidationError,
+    ValueError,
+    OSError,
+    httpx.HTTPError,
+    TimeoutError,
+    json.JSONDecodeError,
+)
+
+
 class _ProviderHealth:
     """Persisted failure counter and cooldown circuit for slow external providers."""
 
@@ -631,6 +641,17 @@ class GeminiValidationService:
             logger.warning("Could not append external validation event", exc_info=True)
 
     @staticmethod
+    def _clean_review_reason(stage: str, decision: Any) -> str:
+        """Format a crisp, human-readable review reason without bloating the review UI."""
+        reason_text = str(getattr(decision, "reason", "") or "").strip()
+        first_sentence = reason_text.split(". ")[0].rstrip(".")
+        if len(first_sentence) > 200:
+            first_sentence = first_sentence[:197] + "..."
+        conf = getattr(decision, "confidence", None)
+        conf_str = f" ({conf:.0%})" if conf is not None else ""
+        return f"{stage}: {first_sentence}{conf_str}"
+
+    @staticmethod
     def _attribution_schema() -> dict[str, Any]:
         return AttributionBatch.model_json_schema()
 
@@ -718,8 +739,9 @@ class GeminiValidationService:
                     ),
                 )
                 batch = CharacterAugmentationBatch.model_validate(raw)
-            except (ExternalValidationError, ValueError) as exc:
-                trace.append({"stage": stage, "model": model, "error": str(exc)})
+            except _VALIDATION_RECOVERABLE_ERRORS as exc:
+                err_summary = str(exc).split("\n")[0][:300]
+                trace.append({"stage": stage, "model": model, "error": err_summary})
                 continue
 
             for decision in batch.decisions:
@@ -842,17 +864,18 @@ class GeminiValidationService:
                     ),
                 )
                 batch = ExtractionBatch.model_validate(raw)
-            except (ExternalValidationError, ValueError) as exc:
+            except _VALIDATION_RECOVERABLE_ERRORS as exc:
+                err_summary = str(exc).split("\n")[0][:300]
                 for item_id in sorted(remaining):
                     self._event(project_dir, "extraction", item_id, stage, model,
-                                "unavailable", None, str(exc))
+                                "unavailable", None, err_summary)
                     trace.append({
                         "item_id": item_id,
                         "provider": stage,
                         "model": model,
                         "decision": "unavailable",
                         "confidence": None,
-                        "reason": str(exc),
+                        "reason": err_summary,
                     })
                 continue
             for decision in batch.decisions:
@@ -1056,23 +1079,24 @@ class GeminiValidationService:
                         stage,
                         lambda: self._run_attribution_stage(stage, model, stage_prompt, project_dir),
                     )
-                except (ExternalValidationError, ValueError) as exc:
-                    logger.warning("Attribution escalation %s unavailable: %s", stage, exc)
+                except _VALIDATION_RECOVERABLE_ERRORS as exc:
+                    err_summary = str(exc).split("\n")[0][:300]
+                    logger.warning("Attribution escalation %s unavailable: %s", stage, err_summary)
                     trace.append({
                         "stage": stage,
                         "model": model,
                         "item_ids": [case["item_id"] for case in batch],
-                        "error": str(exc),
+                        "error": err_summary,
                     })
                     for case in batch:
                         self._event(project_dir, "attribution", case["item_id"], stage,
-                                    model, "unavailable", None, str(exc))
+                                    model, "unavailable", None, err_summary)
                         by_id[case["item_id"]].attribution_confidence_history.append({
                             "resolver": stage,
                             "model": model,
                             "decision": "unavailable",
                             "confidence": None,
-                            "reason": str(exc),
+                            "reason": err_summary,
                         })
                     continue
                 for decision in result.decisions:
@@ -1127,10 +1151,11 @@ class GeminiValidationService:
                             "validation_error"
                         ] = identity_conflict
                         trace[-1]["validation_error"] = identity_conflict
+
                     if valid and decision.confidence >= self.auto_accept:
                         line.speaker = str(decision.speaker_id)
                         line.speaker_confidence = decision.confidence
-                        line.speaker_evidence = decision.evidence or decision.reason
+                        line.speaker_evidence = str(decision.evidence or decision.reason or "")[:2000]
                         line.attribution_resolver = stage
                         line.attribution_review_required = False
                         line.attribution_review_reason = ""
@@ -1142,18 +1167,15 @@ class GeminiValidationService:
                                 float(line.speaker_confidence or 0.0),
                                 max(0.0, self.manual_threshold - 0.01),
                             )
-                            line.attribution_review_reason = identity_conflict
+                            line.attribution_review_reason = str(identity_conflict).split(". ")[0].rstrip(".")
                         else:
                             line.speaker_confidence = decision.confidence
-                            line.attribution_review_reason = (
-                                f"{stage} {decision.decision} at "
-                                f"{decision.confidence:.0%}: {decision.reason}"
-                            )
+                            line.attribution_review_reason = self._clean_review_reason(stage, decision)
         for line_id in remaining:
             line = by_id[line_id]
             line.attribution_review_required = True
             if not line.attribution_review_reason:
-                line.attribution_review_reason = "External validators were unavailable or abstained"
+                line.attribution_review_reason = "Unresolved speaker: confirmation required before voice synthesis"
         atomic_write_json(project_dir / "external_validation" / "attribution.json", trace)
         return {"attempted": len(unresolved), "resolved": len(unresolved) - len(remaining), "manual_review": len(remaining)}
 
@@ -1228,17 +1250,18 @@ class GeminiValidationService:
                     ),
                 )
                 decision = AudioDecision.model_validate(raw)
-            except (ExternalValidationError, ValueError) as exc:
-                errors.append(f"{stage}: {exc}")
+            except _VALIDATION_RECOVERABLE_ERRORS as exc:
+                err_summary = str(exc).split("\n")[0][:300]
+                errors.append(f"{stage}: {err_summary}")
                 result.external_validation_history.append({
                     "provider": stage,
                     "model": model,
                     "decision": "unavailable",
                     "confidence": None,
-                    "reason": str(exc),
+                    "reason": err_summary,
                 })
                 self._event(project_dir, "segment", result.line_id, stage, model,
-                            "unavailable", None, str(exc))
+                            "unavailable", None, err_summary)
                 continue
             if decision.item_id != result.line_id:
                 errors.append(

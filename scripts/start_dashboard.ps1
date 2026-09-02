@@ -2,8 +2,8 @@
 param(
     [string]$PythonExecutable = "",
     [switch]$NoSupervise,
-    [int]$CheckIntervalSeconds = 10,
-    [int]$MaxFailedChecks = 3
+    [int]$CheckIntervalSeconds = 15,
+    [int]$MaxFailedChecks = 5
 )
 
 $ErrorActionPreference = "Stop"
@@ -150,7 +150,7 @@ while ($true) {
 
         # Health probe
         try {
-            $response = Invoke-WebRequest -Uri "http://127.0.0.1:8000/health" -UseBasicParsing -TimeoutSec 4 -ErrorAction Stop
+            $response = Invoke-WebRequest -Uri "http://127.0.0.1:8000/health" -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
             if ($response.StatusCode -eq 200) {
                 $failCount = 0
             } else {

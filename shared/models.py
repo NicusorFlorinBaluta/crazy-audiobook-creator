@@ -175,7 +175,7 @@ class ScriptLine(BaseModel):
     )
     speaker_evidence: str = Field(
         default="",
-        max_length=500,
+        max_length=4000,
         description="Short source-context reason for the selected speaker",
     )
     attribution_review_required: bool = Field(
@@ -184,7 +184,7 @@ class ScriptLine(BaseModel):
     )
     attribution_review_reason: str = Field(
         default="",
-        max_length=500,
+        max_length=4000,
         description="Why this speaker attribution still needs review",
     )
     attribution_resolver: str = Field(

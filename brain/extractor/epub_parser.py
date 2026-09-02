@@ -519,6 +519,22 @@ class EpubParser:
                     result.setdefault(href, set()).update(tokens)
         return result
 
+    @staticmethod
+    def _normalize_chapter_title(toc_title: str, heading_title: str) -> str:
+        """Combine or normalize TOC titles and heading titles into clean human-readable names."""
+        clean_toc = str(toc_title or "").strip()
+        clean_heading = str(heading_title or "").strip()
+        if not clean_toc:
+            return clean_heading
+        # If TOC has "Chapter 1: Title", convert to "1: Title"
+        normalized = re.sub(r"(?i)^chapter\s+(\d+\s*[:\-])", r"\1", clean_toc)
+        # If TOC is "Chapter 1. Title", convert to "1: Title"
+        normalized = re.sub(r"(?i)^chapter\s+(\d+)\.\s*", r"\1: ", normalized)
+        # If heading is just digits "1" or short, prefer richer TOC title
+        if clean_heading.isdigit() or len(clean_heading) <= 3:
+            return normalized
+        return normalized or clean_heading
+
     def _extract_chapters(self, book: epub.EpubBook) -> tuple[list[dict], dict[str, str]]:
         """Extract chapters and reference materials from EPUB documents.
 
@@ -640,6 +656,10 @@ class EpubParser:
                         chapters = [{"title": "", "text": text}]
                         raw_chapters.extend(chapters)
             else:
+                if len(chapters) == 1 and toc_labels.get(href_key):
+                    chapters[0]["title"] = self._normalize_chapter_title(
+                        toc_labels[href_key], chapters[0].get("title", "")
+                    )
                 raw_chapters.extend(chapters)
                 classification["extracted_word_count"] = sum(
                     len(str(chapter.get("text") or "").split())
