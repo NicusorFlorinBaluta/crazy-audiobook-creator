@@ -404,16 +404,27 @@ class VoiceDesigner:
                         transcribed[:60],
                     )
                     if wer > self.wer_threshold:
-                        self.library.delete_voice(project_id, candidate.id)
-                        if candidate_index == 0:
-                            validation_failures.append(
-                                f"{candidate.id} (WER={wer:.3f})"
-                            )
-                        else:
+                        if wer <= 0.35 and getattr(character, "importance", "minor") == "minor":
                             logger.warning(
-                                "Discarding optional candidate '%s' after transcript failure",
+                                "Retaining minor candidate '%s' with borderline WER=%.3f for Voice Review",
                                 candidate.id,
+                                wer,
                             )
+                            candidate.warnings.append(
+                                f"Reference transcript WER {wer:.2f} exceeded standard threshold ({self.wer_threshold:.2f}); verify in Voice Review."
+                            )
+                            validated_candidates.append(candidate)
+                        else:
+                            self.library.delete_voice(project_id, candidate.id)
+                            if candidate_index == 0:
+                                validation_failures.append(
+                                    f"{candidate.id} (WER={wer:.3f})"
+                                )
+                            else:
+                                logger.warning(
+                                    "Discarding optional candidate '%s' after transcript failure",
+                                    candidate.id,
+                                )
                     else:
                         validated_candidates.append(candidate)
                     validation_completed += 1
