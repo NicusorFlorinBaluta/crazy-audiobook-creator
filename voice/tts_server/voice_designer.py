@@ -374,7 +374,6 @@ class VoiceDesigner:
 
         # Validate only after VoiceDesign has released VRAM.
         if self.validator:
-            validation_failures: list[str] = []
             validation_total = sum(
                 len(result.candidates)
                 for result in voices_generated.values()
@@ -404,29 +403,16 @@ class VoiceDesigner:
                         transcribed[:60],
                     )
                     if wer > self.wer_threshold:
-                        if wer <= 0.35 and getattr(character, "importance", "minor") == "minor":
-                            logger.warning(
-                                "Retaining minor candidate '%s' with borderline WER=%.3f for Voice Review",
-                                candidate.id,
-                                wer,
-                            )
-                            candidate.warnings.append(
-                                f"Reference transcript WER {wer:.2f} exceeded standard threshold ({self.wer_threshold:.2f}); verify in Voice Review."
-                            )
-                            validated_candidates.append(candidate)
-                        else:
-                            self.library.delete_voice(project_id, candidate.id)
-                            if candidate_index == 0:
-                                validation_failures.append(
-                                    f"{candidate.id} (WER={wer:.3f})"
-                                )
-                            else:
-                                logger.warning(
-                                    "Discarding optional candidate '%s' after transcript failure",
-                                    candidate.id,
-                                )
-                    else:
-                        validated_candidates.append(candidate)
+                        logger.warning(
+                            "Reference candidate '%s' has elevated transcript WER=%.3f (threshold=%.2f); retaining for Voice Review",
+                            candidate.id,
+                            wer,
+                            self.wer_threshold,
+                        )
+                        candidate.warnings.append(
+                            f"Reference transcript WER {wer:.2f} exceeded threshold ({self.wer_threshold:.2f}); manual audition and approval required in Voice Review."
+                        )
+                    validated_candidates.append(candidate)
                     validation_completed += 1
                     emit(
                         "validating_transcripts",
@@ -442,11 +428,6 @@ class VoiceDesigner:
             # Do not make chapter-scale TTS/Whisper co-residency an implicit
             # requirement. Release Whisper before loading the speaker encoder.
             self.validator.unload()
-            if validation_failures:
-                raise RuntimeError(
-                    "Voice references failed transcript check: "
-                    + ", ".join(validation_failures)
-                )
 
         embeddings: dict[str, Any] = {}
         acoustic_total = sum(
