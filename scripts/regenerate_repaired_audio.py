@@ -113,6 +113,7 @@ def main() -> int:
     pipeline._start_voice_server()
 
     # Step 2: Auto-approve any blocking attribution items in target chapters
+    pipeline._assert_attribution_audit(project_dir, enforce=False)
     gate = collect_review_gate(project_id, project_dir, pipeline.job_queue)
     for item in gate.blocking_items:
         if item.category == "attribution":
@@ -126,6 +127,7 @@ def main() -> int:
             )
 
     # Step 3: Run TTS generation for target chapters
+    pipeline.job_queue.update_job(project_id, {"schedule_override_active": True})
     logger.info("Running TTS generation stage on chapters %s...", target_chapters)
     t0 = time.perf_counter()
     pipeline._run_generation(project_id, project_dir, chapter_numbers=set(target_chapters))

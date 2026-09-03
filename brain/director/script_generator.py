@@ -46,6 +46,16 @@ _PRONOUN_STOPWORDS = {
     "male", "female", "man", "woman", "boy", "girl", "person", "someone", "speaker",
 }
 
+_GENERIC_ROLE_DESCRIPTORS = {
+    "stranger", "alien", "soldier", "guard", "captain", "officer",
+    "attendant", "voice", "figure", "traveler", "shadow", "visitor",
+    "servant", "priest", "doctor", "elder", "crewman", "fellow",
+    "individual", "human", "entity", "presence", "inhabitant", "citizen",
+    "driver", "pilot", "merchant", "trader", "bystander", "passerby",
+    "guest", "host", "friend", "enemy", "leader", "chief", "master",
+    "worker", "assistant", "aide", "deputy", "agent", "scout",
+}
+
 
 @dataclass(frozen=True)
 class SourceFragment:
@@ -3099,7 +3109,9 @@ class ScriptGenerator:
             name_parts = [
                 p.lower()
                 for p in (char.name or "").split()
-                if len(p) >= 2 and p.lower() not in _PRONOUN_STOPWORDS
+                if len(p) >= 2
+                and p.lower() not in _PRONOUN_STOPWORDS
+                and p.lower() not in _GENERIC_ROLE_DESCRIPTORS
             ]
             if any(re.search(rf"\b{re.escape(part)}\b", ch_lower) for part in name_parts):
                 active.add(char_id)
@@ -3107,13 +3119,20 @@ class ScriptGenerator:
             id_parts = [
                 p.lower()
                 for p in char_id.split("_")
-                if len(p) >= 2 and p not in _PRONOUN_STOPWORDS
+                if len(p) >= 2
+                and p not in _PRONOUN_STOPWORDS
+                and p not in _GENERIC_ROLE_DESCRIPTORS
             ]
             if any(re.search(rf"\b{re.escape(part)}\b", ch_lower) for part in id_parts):
                 active.add(char_id)
                 continue
             for alias in char.aliases:
                 alias_clean = alias.strip().lower()
+                # Single generic role descriptors must not activate a character across chapters
+                if len(alias_clean.split()) == 1 and (
+                    alias_clean in _PRONOUN_STOPWORDS or alias_clean in _GENERIC_ROLE_DESCRIPTORS
+                ):
+                    continue
                 if len(alias_clean) >= 2 and alias_clean not in _PRONOUN_STOPWORDS:
                     if re.search(rf"\b{re.escape(alias_clean)}\b", ch_lower):
                         active.add(char_id)

@@ -578,6 +578,53 @@ class ScriptFidelityTests(unittest.TestCase):
         )._adjudicate_name_candidates(characters, book)
         self.assertEqual(set(consolidated), {"king", "red_king"})
 
+    def test_distinctive_token_overlap_candidate_adjudication(self) -> None:
+        evidence = "The Drominadian smiled. 'What a wonderful decision, Sixth!'"
+        book = ExtractedBook(
+            metadata=BookMetadata(title="Book", author="Author", total_chapters=1),
+            chapters=[
+                ExtractedChapter(
+                    number=1,
+                    title="One",
+                    text=evidence,
+                    word_count=len(evidence.split()),
+                )
+            ],
+        )
+        characters = {
+            "dusk": {
+                "name": "Sixth of the Dusk",
+                "aliases": ["Sixth", "Dusk"],
+                "dialogue_count": 393,
+            },
+            "drominadian": {
+                "name": "Drominadian",
+                "aliases": ["Sixth"],
+                "dialogue_count": 16,
+            },
+        }
+
+        class FakeDrominadianOllama:
+            model = "fake"
+
+            def generate_json(self, *args, **kwargs):
+                return {
+                    "decisions": [
+                        {
+                            "left_id": "drominadian",
+                            "right_id": "dusk",
+                            "same_character": True,
+                            "evidence": "The Drominadian smiled. 'What a wonderful decision, Sixth!'",
+                        }
+                    ]
+                }
+
+        analyzer = CharacterAnalyzer(FakeDrominadianOllama())
+        consolidated = analyzer._adjudicate_name_candidates(characters, book)
+        self.assertEqual(set(consolidated), {"dusk"})
+        self.assertEqual(consolidated["dusk"]["dialogue_count"], 409)
+        self.assertIn("Drominadian", consolidated["dusk"]["aliases"])
+
     def test_pronoun_does_not_select_arbitrary_speaker(self) -> None:
         fragments = [
             SourceFragment(text='"Hello."', start=0, end=8),

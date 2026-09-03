@@ -77,6 +77,23 @@ Several OS-level and pipeline edge cases were resolved to ensure seamless execut
 - **Issue**: Browser-based external audio QA hung on Playwright `wait_for_function` (180s timeout) and raised `playwright._impl._errors.TimeoutError`, which was unhandled in `_VALIDATION_RECOVERABLE_ERRORS`.
 - **Fix**: Added `Exception` to `_VALIDATION_RECOVERABLE_ERRORS` in `brain/validators/gemini_validation.py` so browser timeouts never crash the pipeline, and added an early exit in `_apply_external_audio_validation` when `external_validator.enabled` is False to keep batch audio regeneration fast and purely local with Whisper ASR.
 
+### F. Generic Role Descriptor Scoping & Alias Guardrail
+- **Issue**: Single bare common nouns (`"stranger"`, `"alien"`, `"guard"`, `"soldier"`, `"officer"`) extracted during Pass 1 were registered as standalone global character aliases and pulled unrelated characters into scenes across the book (e.g., Singer representative `armored_alien` from Chapter 8 had alias `"Stranger"`, which pulled him into Chapter 42 where Sixth of the Dusk was called `"the stranger with two birds"`).
+- **Fix**:
+  - Defined `_GENERIC_ROLE_DESCRIPTORS` in [`character_analyzer.py`](file:///e:/Projects/crazy-audiobook-creator/brain/director/character_analyzer.py), [`script_generator.py`](file:///e:/Projects/crazy-audiobook-creator/brain/director/script_generator.py), and [`tiered_adjudicator.py`](file:///e:/Projects/crazy-audiobook-creator/brain/validators/tiered_adjudicator.py).
+  - Merged generic role descriptors into `_UNSAFE_CHARACTER_ALIASES` so bare generic nouns are rejected as standalone global aliases.
+  - Updated `_get_chapter_scoped_speakers` so single generic words in `id_parts`, `name_parts`, and single-word `aliases` never activate characters in unrelated chapters.
+
+### G. Distinctive Token Adjudication & Prominence Canonical Selection
+- **Issue**: Across POV shifts in literature (e.g., Chapter 42 switching to Starling's perspective), characters are introduced under cultural demonyms or temporary epithets (*"the Drominadian"*). While direct dialogue in the scene addressed him as *"Sixth"*, the pipeline failed to correlate him with *Sixth of the Dusk* because:
+  1. `_adjudicate_name_candidates` only paired entities if one ID was a strict suffix of the other (`pwent` $\subset$ `thibbledorf_pwent`).
+  2. Legacy consolidation selected canonical targets purely by string length, which would cause an 11-character minor epithet (`drominadian`) to absurdly absorb a 4-character major protagonist (`dusk`).
+- **Fix**:
+  - **Distinctive Token Overlap Candidate Pairing**: Updated `_adjudicate_name_candidates` to extract `_distinctive_tokens` (excluding stopwords and `_GENERIC_ROLE_DESCRIPTORS`). When two characters share a distinctive proper name token (e.g. `"Sixth"`), they are proposed as candidates for evidence-based LLM adjudication.
+  - **Verbatim Text Verification**: The adjudicator retrieves source passages where both terms appear (e.g. Chapter 42: *"the Drominadian said... What a wonderful decision, Sixth!"*) and validates verbatim evidence before merging.
+  - **Dialogue-Weighted Prominence Selection**: In both consolidation and adjudication, the canonical target is determined by `dialogue_count + mention_count`. The major protagonist (`dusk`, 393 lines) absorbs the temporary epithet (`drominadian`, 16 lines), preserving the protagonist's voice profile while recording the epithet as an alias.
+  - **Audio Continuity**: Reassigned all 16 lines in Chapter 42 to `dusk`, re-synthesized them with Sixth of the Dusk's official voice (`dusk_cand3`), and re-mastered Chapter 42 to `-19.0 LUFS`.
+
 ---
 
 ## 4. Production Deliverables & Verification

@@ -22,6 +22,7 @@ from typing import Any
 from brain.director.attribution_detector import SuspiciousTurn
 from brain.director.ollama_client import OllamaClient
 from brain.director.script_generator import ScriptGenerator
+from brain.director.script_generator import _GENERIC_ROLE_DESCRIPTORS
 from brain.validators.gemini_validation import GeminiValidationService
 from shared.constants import Gender
 from shared.models import CharacterRegistry, ScriptChapter, ScriptLine
@@ -145,11 +146,17 @@ def _resolve_speaker_alias(raw_speaker: str, registry: CharacterRegistry) -> tup
             continue
         for alias in (c.aliases or []):
             a_clean = str(alias).strip().casefold()
+            if len(a_clean.split()) == 1 and a_clean in _GENERIC_ROLE_DESCRIPTORS:
+                continue
             if clean == a_clean or clean == a_clean.replace(" ", "_"):
                 matches.add(cid)
                 break
-        if len(clean) >= 4:
-            cid_parts = [p.casefold() for p in cid.split("_") if len(p) >= 4]
+        if len(clean) >= 4 and clean not in _GENERIC_ROLE_DESCRIPTORS:
+            cid_parts = [
+                p.casefold()
+                for p in cid.split("_")
+                if len(p) >= 4 and p.casefold() not in _GENERIC_ROLE_DESCRIPTORS
+            ]
             if clean in cid_parts:
                 matches.add(cid)
 

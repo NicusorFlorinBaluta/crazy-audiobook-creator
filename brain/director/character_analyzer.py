@@ -30,12 +30,22 @@ logger = logging.getLogger(__name__)
 # post-processing changes the contents or meaning of a character registry.
 CHARACTER_ANALYSIS_REVISION = 4
 
+_GENERIC_ROLE_DESCRIPTORS = {
+    "stranger", "alien", "soldier", "guard", "captain", "officer",
+    "attendant", "voice", "figure", "traveler", "shadow", "visitor",
+    "servant", "priest", "doctor", "elder", "crewman", "fellow",
+    "man", "woman", "boy", "girl", "child", "person", "someone", "speaker",
+    "individual", "human", "entity", "presence", "inhabitant", "citizen",
+    "driver", "pilot", "merchant", "trader", "bystander", "passerby",
+    "guest", "host", "friend", "enemy", "leader", "chief", "master",
+    "worker", "assistant", "aide", "deputy", "agent", "scout",
+}
+
 _UNSAFE_CHARACTER_ALIASES = {
     "a", "an", "and", "the", "of", "narrator", "she", "he", "it",
     "they", "him", "her", "his", "hers", "them", "male", "female",
-    "character", "unidentified", "man", "woman", "boy", "girl",
-    "person", "someone", "speaker",
-}
+    "character", "unidentified",
+} | _GENERIC_ROLE_DESCRIPTORS
 
 # Load prompt template
 _PROMPT_DIR = Path(__file__).parent / "prompts"
@@ -1103,9 +1113,15 @@ class CharacterAnalyzer:
                 target_id = variant_id = None
                 target_info = variant_info = None
                 if explicitly_linked:
-                    # Prefer the more descriptive canonical ID. Input order is
-                    # only a deterministic tie breaker.
-                    if (len(cid1.split("_")), len(cid1)) >= (
+                    count1 = cinfo1.get("dialogue_count", 0) + cinfo1.get("mention_count", 0)
+                    count2 = cinfo2.get("dialogue_count", 0) + cinfo2.get("mention_count", 0)
+                    if count1 > count2:
+                        target_id, variant_id = cid1, cid2
+                        target_info, variant_info = cinfo1, cinfo2
+                    elif count2 > count1:
+                        target_id, variant_id = cid2, cid1
+                        target_info, variant_info = cinfo2, cinfo1
+                    elif (len(cid1.split("_")), len(cid1)) >= (
                         len(cid2.split("_")), len(cid2)
                     ):
                         target_id, variant_id = cid1, cid2
@@ -1151,23 +1167,59 @@ class CharacterAnalyzer:
         with the short name. This tolerates imperfect citation formatting without
         turning name containment alone into merge evidence.
         """
+        def _distinctive_tokens(cid: str, data: dict[str, Any]) -> set[str]:
+            tokens: set[str] = set()
+            name_words = re.split(r"[\s_]+", str(data.get("name", cid)))
+            for w in name_words:
+                w_clean = w.lower().strip("'\".,;:-")
+                if (
+                    len(w_clean) >= 3
+                    and w_clean not in _UNSAFE_CHARACTER_ALIASES
+                    and w_clean not in _GENERIC_ROLE_DESCRIPTORS
+                ):
+                    tokens.add(w_clean)
+            for a in data.get("aliases", []):
+                for w in re.split(r"[\s_]+", str(a)):
+                    w_clean = w.lower().strip("'\".,;:-")
+                    if (
+                        len(w_clean) >= 3
+                        and w_clean not in _UNSAFE_CHARACTER_ALIASES
+                        and w_clean not in _GENERIC_ROLE_DESCRIPTORS
+                    ):
+                        tokens.add(w_clean)
+            return tokens
+
         ids = sorted(characters)
         candidate_pairs: list[tuple[str, str]] = []
+        tokens_by_id = {cid: _distinctive_tokens(cid, characters[cid]) for cid in ids}
+
         for index, left in enumerate(ids):
             if left == "narrator":
                 continue
             left_parts = left.split("_")
+            left_tokens = tokens_by_id[left]
             for right in ids[index + 1:]:
                 if right == "narrator":
                     continue
                 right_parts = right.split("_")
-                if (
-                    len(left_parts) < len(right_parts)
-                    and right_parts[-len(left_parts):] == left_parts
-                ) or (
-                    len(right_parts) < len(left_parts)
-                    and left_parts[-len(right_parts):] == right_parts
-                ):
+                right_tokens = tokens_by_id[right]
+
+                # Criterion 1: Suffix ID match (e.g. pwent <-> thibbledorf_pwent)
+                suffix_match = (
+                    (
+                        len(left_parts) < len(right_parts)
+                        and right_parts[-len(left_parts):] == left_parts
+                    )
+                    or (
+                        len(right_parts) < len(left_parts)
+                        and left_parts[-len(right_parts):] == right_parts
+                    )
+                )
+
+                # Criterion 2: Distinctive non-generic token overlap (e.g. "Sixth" in Sixth of Dusk <-> "Sixth" in Drominadian)
+                shared_tokens = left_tokens & right_tokens
+
+                if suffix_match or shared_tokens:
                     candidate_pairs.append((left, right))
         if not candidate_pairs:
             return characters
@@ -1182,6 +1234,22 @@ class CharacterAnalyzer:
                 left.replace("_", " "),
                 right.replace("_", " "),
             }
+            for a in characters[left].get("aliases", []):
+                a_clean = str(a).strip()
+                if (
+                    len(a_clean) >= 3
+                    and a_clean.lower() not in _UNSAFE_CHARACTER_ALIASES
+                    and a_clean.lower() not in _GENERIC_ROLE_DESCRIPTORS
+                ):
+                    terms.add(a_clean)
+            for a in characters[right].get("aliases", []):
+                a_clean = str(a).strip()
+                if (
+                    len(a_clean) >= 3
+                    and a_clean.lower() not in _UNSAFE_CHARACTER_ALIASES
+                    and a_clean.lower() not in _GENERIC_ROLE_DESCRIPTORS
+                ):
+                    terms.add(a_clean)
             snippets: list[str] = []
             for term in sorted(terms, key=len, reverse=True):
                 if len(term) < 3:
@@ -1275,13 +1343,20 @@ class CharacterAnalyzer:
                     derived_evidence,
                 )
             left, right = pair
-            target, variant = max(
-                (left, right),
-                key=lambda value: (len(value.split("_")), len(value)),
-            ), min(
-                (left, right),
-                key=lambda value: (len(value.split("_")), len(value)),
-            )
+            count_left = characters[left].get("dialogue_count", 0) + characters[left].get("mention_count", 0)
+            count_right = characters[right].get("dialogue_count", 0) + characters[right].get("mention_count", 0)
+            if count_left > count_right:
+                target, variant = left, right
+            elif count_right > count_left:
+                target, variant = right, left
+            else:
+                target, variant = max(
+                    (left, right),
+                    key=lambda value: (len(value.split("_")), len(value)),
+                ), min(
+                    (left, right),
+                    key=lambda value: (len(value.split("_")), len(value)),
+                )
             aliases = list(characters[target].get("aliases", []))
             aliases.extend(
                 [variant, str(characters[variant].get("name", variant))]

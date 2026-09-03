@@ -15,6 +15,7 @@ from brain.validators.tiered_adjudicator import (
 )
 from shared.constants import Gender
 from shared.models import Character, CharacterRegistry, ScriptChapter, ScriptLine
+from brain.director.script_generator import ScriptGenerator
 
 
 @pytest.fixture
@@ -300,4 +301,83 @@ def test_reciprocal_turn_guardrail_reverts_same_speaker_qa_pair(sample_registry)
     assert "Guardrail 4" in results[0].reason
     assert results[1].resolver_tier == "gemini_api"
     assert "Guardrail 4" in results[1].reason
+
+
+def test_generic_descriptor_alias_filtering():
+    """Verify bare generic nouns like 'stranger' or 'alien' are not resolved as character aliases."""
+    registry = CharacterRegistry(
+        characters={
+            "armored_alien": Character(
+                id="armored_alien",
+                name="Armored Alien",
+                gender=Gender.MALE,
+                age_range="adult",
+                voice_description="Metallic alien voice",
+                aliases=["Armored Alien", "The Other Alien", "Stranger", "Alien"],
+            ),
+            "dusk": Character(
+                id="dusk",
+                name="Sixth of the Dusk",
+                gender=Gender.MALE,
+                age_range="adult",
+                voice_description="Gravelly voice",
+                aliases=["Sixth of the Dusk", "Sixth", "Dusk"],
+            ),
+        }
+    )
+
+    # Multi-word alias should resolve
+    resolved, detail = _resolve_speaker_alias("Armored Alien", registry)
+    assert resolved == "armored_alien"
+    assert detail in ("exact_id", "alias_resolved")
+
+    # Full name should resolve
+    resolved, detail = _resolve_speaker_alias("The Other Alien", registry)
+    assert resolved == "armored_alien"
+
+    # Bare generic noun 'stranger' or 'alien' must NOT resolve to armored_alien
+    resolved, detail = _resolve_speaker_alias("stranger", registry)
+    assert resolved is None
+    assert "unresolved_speaker" in detail or "ambiguous" in detail
+
+    resolved, detail = _resolve_speaker_alias("alien", registry)
+    assert resolved is None
+    assert "unresolved_speaker" in detail or "ambiguous" in detail
+
+
+def test_chapter_scoping_ignores_bare_generic_descriptors():
+    """Verify chapter scoping does not activate a character solely because of bare generic nouns."""
+    registry = CharacterRegistry(
+        characters={
+            "armored_alien": Character(
+                id="armored_alien",
+                name="Armored Alien",
+                gender=Gender.MALE,
+                age_range="adult",
+                voice_description="Metallic alien voice",
+                aliases=["Armored Alien", "The Other Alien", "Stranger", "Alien"],
+            ),
+            "dusk": Character(
+                id="dusk",
+                name="Sixth of the Dusk",
+                gender=Gender.MALE,
+                age_range="adult",
+                voice_description="Gravelly voice",
+                aliases=["Sixth", "Dusk"],
+            ),
+        }
+    )
+
+    # Text contains 'stranger' and 'alien', but neither mentions 'Armored Alien' nor 'The Other Alien'
+    text = "The stranger walked down the hall and wondered about the strange alien devices."
+    scoped = ScriptGenerator._get_chapter_scoped_speakers(text, registry)
+
+    assert "armored_alien" not in scoped
+
+    # Text that actually mentions 'Armored Alien' must activate armored_alien
+    text_specific = "The Armored Alien raised his weapon and spoke to the council."
+    scoped_specific = ScriptGenerator._get_chapter_scoped_speakers(text_specific, registry)
+
+    assert "armored_alien" in scoped_specific
+
 
