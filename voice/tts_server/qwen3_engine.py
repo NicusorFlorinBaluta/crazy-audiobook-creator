@@ -665,7 +665,12 @@ class Qwen3TTSEngine:
         temporary = Path(temporary_name)
         try:
             sf.write(str(temporary), audio, self.sample_rate)
-            os.replace(temporary, output_path)
+            try:
+                os.replace(temporary, output_path)
+            except OSError:
+                import shutil
+                with open(output_path, "wb") as dst, open(temporary, "rb") as src:
+                    shutil.copyfileobj(src, dst)
         finally:
             temporary.unlink(missing_ok=True)
 

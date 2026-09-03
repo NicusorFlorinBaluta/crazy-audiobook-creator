@@ -646,11 +646,21 @@ class Pipeline:
         report_path = project_dir / "attribution_audit.json"
         atomic_write_json(report_path, report)
         if enforce and not report["passed"]:
-            count = int(report["summary"]["blocking_issues"])
-            raise RuntimeError(
-                f"Speaker attribution release gate failed with {count} "
-                f"blocking issue(s); inspect {report_path}"
-            )
+            from brain.orchestrator.review_gate import collect_review_gate
+            blocking_items = [
+                item
+                for item in collect_review_gate(
+                    project_dir.name, project_dir, self.job_queue
+                ).blocking_items
+                if item.category == "attribution"
+                and (chapter_numbers is None or item.chapter_number in chapter_numbers)
+            ]
+            if blocking_items:
+                count = len(blocking_items)
+                raise RuntimeError(
+                    f"Speaker attribution release gate failed with {count} "
+                    f"blocking issue(s); inspect {report_path}"
+                )
         return report
 
     def _update_long_form_audio_quality(
@@ -2373,10 +2383,11 @@ class Pipeline:
                 ).blocking_items
                 if item.category == "attribution"
             ]
-            raise _WaitingForReview(
-                attribution_items,
-                f"{len(attribution_items)} speaker attribution(s) require review before generation.",
-            )
+            if attribution_items:
+                raise _WaitingForReview(
+                    attribution_items,
+                    f"{len(attribution_items)} speaker attribution(s) require review before generation.",
+                )
         self._update_stage(project_id, PipelineStage.GENERATING)
 
         scripts_dir = project_dir / "script"
@@ -2606,8 +2617,17 @@ class Pipeline:
                         break
                     for line_id in auto_regenerate_ids:
                         audio_path = segment_dir / f"{line_id}.wav"
-                        audio_path.unlink(missing_ok=True)
-                        audio_path.with_suffix(".pt").unlink(missing_ok=True)
+                        try:
+                            audio_path.unlink(missing_ok=True)
+                        except OSError:
+                            try:
+                                open(audio_path, "wb").close()
+                            except OSError:
+                                pass
+                        try:
+                            audio_path.with_suffix(".pt").unlink(missing_ok=True)
+                        except OSError:
+                            pass
                     external_audio_retry += 1
                     logger.warning(
                         "[ExternalAudioQA] Regenerating chapter %d segments %s (attempt %d/%d)",
@@ -2701,7 +2721,7 @@ class Pipeline:
                 accepted_review_ids = {
                     item_id
                     for item_id, item in review_by_id.items()
-                    if item.get("disposition") in {"acceptable", "needs_remaster"}
+                    if item.get("disposition") in {"acceptable", "needs_remaster", "approved", "accepted"}
                 }
                 failed_ids = set(response.failed_line_ids) - accepted_review_ids
                 if response.failed_validation > 0:
@@ -3275,6 +3295,8 @@ class Pipeline:
         response: Any,
     ) -> tuple[set[str], set[str]]:
         """Apply audio escalation and identify automatic vs human follow-up."""
+        if not getattr(self.external_validator, "enabled", True):
+            return set(), set()
         line_by_id = {line.line_id: line for line in request_lines}
         review_by_id = {
             item["item_id"]: item

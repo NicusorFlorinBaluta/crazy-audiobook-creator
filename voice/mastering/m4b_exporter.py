@@ -100,7 +100,12 @@ class M4BExporter:
                 or temporary_output.stat().st_size == 0
             ):
                 raise RuntimeError("FFmpeg produced no M4B output")
-            os.replace(temporary_output, output_file)
+            try:
+                os.replace(temporary_output, output_file)
+            except OSError:
+                import shutil
+                with open(output_file, "wb") as dst, open(temporary_output, "rb") as src:
+                    shutil.copyfileobj(src, dst)
         finally:
             temporary_output.unlink(missing_ok=True)
 

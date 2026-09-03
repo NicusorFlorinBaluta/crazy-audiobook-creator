@@ -44,6 +44,8 @@ def main():
     parser = argparse.ArgumentParser(description="Repair dialogue attributions across audiobook project.")
     parser.add_argument("--project", required=True, help="Project directory name inside brain/projects")
     parser.add_argument("--chapter", type=int, default=None, help="Target a specific chapter number (e.g. 39)")
+    parser.add_argument("--start-chapter", type=int, default=None, help="Start chapter number (inclusive, e.g. 40)")
+    parser.add_argument("--end-chapter", type=int, default=None, help="End chapter number (inclusive, e.g. 63)")
     parser.add_argument("--dry-run", action="store_true", help="Preview proposed attribution fixes without modifying scripts")
     parser.add_argument("--apply", action="store_true", help="Write changes to disk")
     parser.add_argument("--escalate-gemini", action="store_true", help="Escalate unresolved Tier 1 lines to Gemini API")
@@ -92,12 +94,17 @@ def main():
             ch = ScriptChapter.model_validate_json(sf.read_text(encoding="utf-8"))
             if args.chapter is not None and ch.chapter_number != args.chapter:
                 continue
+            if args.start_chapter is not None and ch.chapter_number < args.start_chapter:
+                continue
+            if args.end_chapter is not None and ch.chapter_number > args.end_chapter:
+                continue
             chapter_scripts.append(ch)
             file_map[ch.chapter_number] = sf
         except Exception as exc:
             logger.warning("Failed to parse %s: %s", sf.name, exc)
 
     logger.info("Loaded %d chapter script(s) for audit/repair", len(chapter_scripts))
+
 
     # Detect suspicious turns
     suspicious = detect_suspicious_turns(chapter_scripts)
@@ -129,7 +136,6 @@ def main():
         max_output_tokens=350,
     )
 
-
     external_validator = GeminiValidationService(
         dict(config.get("external_validation", {})),
         project_path.parent,
@@ -142,53 +148,96 @@ def main():
         local_auto_accept=args.local_conf,
     )
 
-    print(f"\nRunning Tier 1 adjudication (dry_run={dry_run}, local_threshold={args.local_conf})...")
-    report = adjudicator.adjudicate(
-        suspicious,
-        project_dir=project_path,
-        chapters=chapter_scripts,
-        dry_run=dry_run,
-    )
+    print(f"\nProcessing {len(chapter_scripts)} chapter(s) (dry_run={dry_run}, local_threshold={args.local_conf}, escalate_gemini={args.escalate_gemini})...\n")
 
+    all_results = []
+    total_suspicious = 0
+    total_local_resolved = 0
+    total_escalated = 0
+    total_repairs = 0
+
+    for ch in chapter_scripts:
+        ch_num = ch.chapter_number
+        sf = file_map.get(ch_num)
+        ch_suspicious = detect_suspicious_turns([ch])
+
+        if not ch_suspicious:
+            logger.info("Chapter %d: Clean (0 suspicious turns)", ch_num)
+            continue
+
+        print("\n" + "=" * 60)
+        print(f"CHAPTER {ch_num}: Found {len(ch_suspicious)} suspicious turn(s)")
+        print("=" * 60)
+
+        ch_report = adjudicator.adjudicate(
+            ch_suspicious,
+            project_dir=project_path,
+            chapters=[ch],
+            dry_run=dry_run,
+        )
+
+        all_results.extend(ch_report.results)
+        total_suspicious += ch_report.summary["total_suspicious"]
+        total_local_resolved += ch_report.summary["local_resolved"]
+        total_escalated += ch_report.summary["escalated_to_tier2"]
+
+        # Print fixes for this chapter
+        ch_repairs = [
+            r for r in ch_report.results
+            if r.resolver_tier == "local_qwen" and r.resolved_speaker and r.resolved_speaker != r.original_speaker
+        ]
+        total_repairs += len(ch_repairs)
+        if ch_repairs:
+            print(f"  Repairs in Chapter {ch_num} ({len(ch_repairs)}):")
+            for r in ch_repairs:
+                status_icon = "APPLIED" if not dry_run else "PREVIEW"
+                print(f"    [{status_icon}] {r.line_id}: '{r.original_speaker}' -> '{r.resolved_speaker}' (conf={r.confidence:.2f}) | {r.text[:45]!r}")
+        else:
+            print(f"  No speaker changes in Chapter {ch_num} (all existing attributions verified)")
+
+        # Optional Tier 2 escalation for lines Qwen couldn't resolve
+        unresolved_in_ch = [line for line in ch.lines if getattr(line, "attribution_review_required", False)]
+        if args.escalate_gemini and unresolved_in_ch:
+            print(f"  Escalating {len(unresolved_in_ch)} turn(s) in Chapter {ch_num} to Gemini API...")
+            try:
+                esc_res = external_validator.resolve_attributions(
+                    project_dir=project_path,
+                    chapters=[ch],
+                    character_ids=set(registry.characters),
+                    character_context={
+                        cid: c.model_dump(include={"id", "name", "aliases", "gender", "age_range"}, mode="json")
+                        for cid, c in registry.characters.items()
+                    },
+                )
+                print(f"  Gemini escalation result: {esc_res}")
+            except Exception as exc:
+                logger.warning("Gemini escalation failed for Chapter %d: %s", ch_num, exc)
+
+        # Save this chapter immediately to disk if applied
+        if not dry_run and sf:
+            atomic_write_text(sf, ch.model_dump_json(indent=2))
+            logger.info("Saved Chapter %d atomically to %s", ch_num, sf.name)
+
+    # Final summary across all processed chapters
     print("\n" + "=" * 70)
-    print("ADJUDICATION RESULTS:")
-    print(f"  Total suspicious turns: {report.summary['total_suspicious']}")
-    print(f"  Local Qwen resolved:    {report.summary['local_resolved']}")
-    print(f"  Escalated to Tier 2:    {report.summary['escalated_to_tier2']}")
-    print(f"  Dry run mode:           {report.summary['dry_run']}")
+    print("ALL PROCESSED CHAPTERS SUMMARY:")
+    print(f"  Total suspicious turns: {total_suspicious}")
+    print(f"  Local Qwen resolved:    {total_local_resolved}")
+    print(f"  Escalated to Tier 2:    {total_escalated}")
+    print(f"  Total speaker repairs:  {total_repairs}")
+    print(f"  Dry run mode:           {dry_run}")
     print("=" * 70)
 
-    # Print diffs
-    print("\nPROPOSED / APPLIED FIXES:")
-    for res in report.results:
-        if res.resolver_tier == "local_qwen" and res.resolved_speaker:
-            status_icon = "APPLIED" if not dry_run else "PREVIEW"
-            print(
-                f"[{status_icon}] Ch{res.chapter_number} {res.line_id}: "
-                f"'{res.original_speaker}' -> '{res.resolved_speaker}' "
-                f"(conf={res.confidence:.2f}) | text={res.text[:50]!r}"
-            )
-            print(f"         Reason: {res.reason}")
-        else:
-            print(
-                f"[ESCALATE] Ch{res.chapter_number} {res.line_id} (current: {res.original_speaker}): "
-                f"Escalated (conf={res.confidence:.2f}) - {res.reason[:80]}"
-            )
-
-    # Save to disk if applied
+    # Update metadata and book script if applied
     if not dry_run:
-        print("\nWriting updated chapter scripts to disk...")
-        for ch in chapter_scripts:
-            sf = file_map.get(ch.chapter_number)
-            if sf:
-                atomic_write_text(sf, ch.model_dump_json(indent=2))
+        from brain.director.script_generator import ScriptGenerator
+        ScriptGenerator.sync_dialogue_counts(chapter_scripts, registry)
         atomic_write_text(chars_path, registry.model_dump_json(indent=2))
+        logger.info("Updated characters.json with synced dialogue counts.")
 
-        # Also update book_script.json if present
         book_script_path = project_path / "book_script.json"
         if book_script_path.exists():
             try:
-                # Update chapters in book_script.json
                 bs_data = json.loads(book_script_path.read_text(encoding="utf-8"))
                 script_by_num = {c.chapter_number: c.model_dump(mode="json") for c in chapter_scripts}
                 if "chapters" in bs_data:
@@ -197,31 +246,24 @@ def main():
                         if c_num in script_by_num:
                             bs_data["chapters"][idx] = script_by_num[c_num]
                 atomic_write_json(book_script_path, bs_data)
-                print("Updated book_script.json")
+                logger.info("Updated book_script.json")
             except Exception as exc:
                 logger.warning("Could not update book_script.json: %s", exc)
 
-        print(f"Successfully saved {len(chapter_scripts)} updated chapter scripts!")
+        # Write final report
+        report_path = project_path / "external_validation" / "tiered_attribution_report.json"
+        atomic_write_json(report_path, {
+            "summary": {
+                "total_suspicious": total_suspicious,
+                "local_resolved": total_local_resolved,
+                "escalated_to_tier2": total_escalated,
+                "total_repairs": total_repairs,
+                "dry_run": False,
+            },
+            "results": [r.to_dict() for r in all_results],
+        })
+        print(f"\nFinal attribution report written to {report_path}")
 
-        # Optional Tier 2 escalation
-        if args.escalate_gemini:
-            print("\nRunning Tier 2 escalation via GeminiValidationService...")
-            escalation_result = external_validator.resolve_attributions(
-                project_dir=project_path,
-                chapters=chapter_scripts,
-                character_ids=set(registry.characters),
-                character_context={
-                    cid: c.model_dump(include={"id", "name", "aliases", "gender", "age_range"}, mode="json")
-                    for cid, c in registry.characters.items()
-                },
-            )
-            print(f"Gemini escalation complete: {escalation_result}")
-            # Re-save scripts with Gemini fixes
-            for ch in chapter_scripts:
-                sf = file_map.get(ch.chapter_number)
-                if sf:
-                    atomic_write_text(sf, ch.model_dump_json(indent=2))
-            print("Saved post-escalation scripts to disk.")
 
 
 if __name__ == "__main__":

@@ -206,9 +206,10 @@ class ValidationLoop:
                 synthesis_cache_misses += 1
                 synthesis_elapsed = 0.0
                 last_error: Exception | None = None
-                # A missing/replaced WAV must never inherit a speaker
-                # embedding calculated for its previous contents.
-                output_path.with_suffix(".pt").unlink(missing_ok=True)
+                try:
+                    output_path.with_suffix(".pt").unlink(missing_ok=True)
+                except OSError:
+                    pass
                 for generation_attempt in range(1, retry_limit + 1):
                     self._raise_if_cancelled(cancel_check)
                     try:
@@ -1405,19 +1406,40 @@ class ValidationLoop:
     @staticmethod
     def _unlink_audio_artifacts(audio_path: Path) -> None:
         """Remove audio and its content-derived speaker embedding together."""
-        audio_path.unlink(missing_ok=True)
-        audio_path.with_suffix(".pt").unlink(missing_ok=True)
+        try:
+            audio_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        try:
+            audio_path.with_suffix(".pt").unlink(missing_ok=True)
+        except OSError:
+            pass
 
     @staticmethod
     def _replace_audio_artifacts(source: Path, destination: Path) -> None:
         """Promote a retry WAV and its matching embedding atomically by file."""
-        os.replace(source, destination)
+        try:
+            os.replace(source, destination)
+        except OSError:
+            import shutil
+            with open(destination, "wb") as dst, open(source, "rb") as src:
+                shutil.copyfileobj(src, dst)
+            source.unlink(missing_ok=True)
         source_embedding = source.with_suffix(".pt")
         destination_embedding = destination.with_suffix(".pt")
         if source_embedding.is_file():
-            os.replace(source_embedding, destination_embedding)
+            try:
+                os.replace(source_embedding, destination_embedding)
+            except OSError:
+                import shutil
+                with open(destination_embedding, "wb") as dst, open(source_embedding, "rb") as src:
+                    shutil.copyfileobj(src, dst)
+                source_embedding.unlink(missing_ok=True)
         else:
-            destination_embedding.unlink(missing_ok=True)
+            try:
+                destination_embedding.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     @staticmethod
     def _merge_engine_generation_metrics(

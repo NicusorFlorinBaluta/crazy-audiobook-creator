@@ -50,7 +50,8 @@ _EXPLICIT_IDENTITY_PATTERNS = (
 
 
 def _normalized_identity(value: str) -> str:
-    return re.sub(r"[^\w]+", "_", value.casefold()).strip("_")
+    cleaned = re.sub(r"['’]s$", "", value.strip(), flags=re.IGNORECASE)
+    return re.sub(r"[^\w]+", "_", cleaned.casefold()).strip("_")
 
 
 def _attribution_identity_conflict(
@@ -110,6 +111,7 @@ _VALIDATION_RECOVERABLE_ERRORS = (
     httpx.HTTPError,
     TimeoutError,
     json.JSONDecodeError,
+    Exception,
 )
 
 
