@@ -1705,6 +1705,33 @@ class Pipeline:
             registry_progress_callback=(on_registry_progress if joint_discovery else None),
         )
 
+        # Record the scripting measurement now, not at the end of the stage.
+        #
+        # This used to be appended after attribution, escalation, the chapter
+        # saves and the pronunciation inventory, so any interruption in that
+        # tail threw the whole thing away -- including `calls`, which holds the
+        # prompt_eval_count figures the prefix-cache analysis needs. On
+        # 2026-09-04 a 395-second Pass 2 was lost exactly that way, and the
+        # cached resume afterwards wrote `calls: []` in its place.
+        scripted_seconds = time.time() - t0
+        cached_pass = not self.script_generator.call_metrics
+        self._append_performance_metric(
+            project_dir,
+            {
+                "event": "script_generation",
+                "director_mode": "joint" if joint_discovery else "two_pass",
+                "pass1_seconds": round(pass1_elapsed, 6),
+                "pass2_seconds": round(max(0.0, scripted_seconds - pass1_elapsed), 6),
+                "total_seconds": round(scripted_seconds, 6),
+                "chapters": len(chapter_scripts),
+                "segments": sum(script.total_lines for script in chapter_scripts),
+                # A resume that reused every cached chapter made no LLM calls.
+                # Say so, so a reader does not read it as a measurement of one.
+                "cached_pass": cached_pass,
+                "calls": list(self.script_generator.call_metrics),
+            },
+        )
+
         if joint_discovery:
             reconcile_started = time.time()
             registry, speaker_remap = self.character_analyzer.finalize_joint_registry(
@@ -1900,19 +1927,9 @@ class Pipeline:
                 "current_script_chapter": None,
             },
         )
-        self._append_performance_metric(
-            project_dir,
-            {
-                "event": "script_generation",
-                "director_mode": "joint" if joint_discovery else "two_pass",
-                "pass1_seconds": round(pass1_elapsed, 6),
-                "pass2_seconds": round(max(0.0, total_elapsed - pass1_elapsed), 6),
-                "total_seconds": round(total_elapsed, 6),
-                "chapters": len(chapter_scripts),
-                "segments": total_lines,
-                "calls": list(self.script_generator.call_metrics),
-            },
-        )
+        # The script_generation metric is emitted right after the passes, so a
+        # failure in this tail cannot take it with it. `total_elapsed` still
+        # times the whole stage for the stage-level accounting below.
 
     def _run_voice_bootstrap(self, project_id: str, project_dir: Path) -> None:
         """Run Stage ③: Generate voice reference clips."""
