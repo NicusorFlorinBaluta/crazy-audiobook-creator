@@ -80,11 +80,24 @@ held at `Limited`:
 | `S4U` | yes | `BUILTIN\Administrators` |
 | `Interactive` | no | the user |
 
-`install_dashboard_task.ps1` now registers the dashboard with
-`-LogonType Password`, which yields the same filtered token as `Interactive`
-while still running with nobody logged on — the one property S4U was chosen
-for. It prompts for the credential at install time and stores nothing itself;
-Windows keeps it in the Task Scheduler vault.
+`install_dashboard_task.ps1` now chooses between the two logon types that
+produce a standard token, and never offers S4U:
+
+| Account type | Logon type | Trade-off |
+| --- | --- | --- |
+| Local | `Password` | Runs headless. Prompts once; Windows stores the credential, the script does not. |
+| Microsoft | `Interactive` | No credential at all, but the task will not start unless someone is logged on. |
+
+A Microsoft account cannot perform the batch logon that `Password` requires
+under its local `MACHINE\user` name: `Register-ScheduledTask` returns
+`0x8007052E` (`ERROR_LOGON_FAILURE`) however correct the password is, and a
+Windows Hello PIN is not a password and can never be used there. Measured on
+this workstation, where `Get-LocalUser` reports
+`PrincipalSource = MicrosoftAccount`.
+
+Override with `-LogonType Password` or `-LogonType Interactive`. If losing
+headless start matters, the alternative is a dedicated local standard account,
+which can use `Password` and is not in Administrators to begin with.
 
 **An existing task keeps its old principal.** Registering over it does not
 change the logon type, so a machine set up before this must unregister and
