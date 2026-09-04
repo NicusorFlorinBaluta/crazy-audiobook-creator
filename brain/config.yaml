@@ -168,6 +168,11 @@ metadata:
 # API credentials stay in .env. Browser automation uses an isolated persistent
 # Chrome profile and one saved conversation per project/purpose.
 external_validation:
+  # Model tags below were checked against the live provider catalogue on
+  # 2026-09-04: `gemini-3.5-flash` and `gemini-3.5-flash-lite` both resolve.
+  # Config validation enforces structure, not tag existence, so a renamed or
+  # retired model degrades this pass at runtime rather than at startup --
+  # re-check with the provider's models list after any provider announcement.
   enabled: true
   auto_accept_confidence: 0.90
   manual_review_confidence: 0.75
