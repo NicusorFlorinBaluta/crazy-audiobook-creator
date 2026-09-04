@@ -16,6 +16,7 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
+import yaml
 from fastapi import HTTPException
 
 from shared import paths as shared_paths
@@ -88,3 +89,19 @@ def pronunciation_llm():
     call to Ollama does not have.
     """
     return getattr(pipeline, "ollama", None) if pipeline else None
+
+
+def load_config(config_path: str = "brain/config.yaml") -> dict[str, Any]:
+    """Load a YAML config, resolving a relative path from the repository root.
+
+    The default was working-directory relative, so a dashboard started from
+    anywhere but the repository root silently loaded an empty config -- every
+    setting falling back to its in-code default with no error.
+    """
+    path = Path(config_path)
+    if not path.is_absolute():
+        path = shared_paths.REPO_ROOT / path
+    if path.exists():
+        with open(path, encoding="utf-8") as handle:
+            return yaml.safe_load(handle) or {}
+    return {}

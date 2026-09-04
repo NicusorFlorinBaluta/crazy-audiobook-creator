@@ -43,9 +43,16 @@ EXTRACTED_ROUTES = [
     ("PATCH", "/api/projects/pinned/characters/c1/profile"),
     ("POST", "/api/projects/pinned/voices/v1/regenerate"),
     ("POST", "/api/projects/pinned/voices/v1/upload"),
-    # still in main.py -- approve_voice_cast calls start_pipeline, so moving it
-    # would make the router import main. Pinned here so that stays deliberate.
+    # routers/external_validation.py
+    ("GET", "/api/projects/pinned/external-validation/events"),
+    ("GET", "/api/projects/pinned/external-validation/status"),
+    ("POST", "/api/projects/pinned/external-validation/retry"),
+    # still in main.py, and deliberately so: both reach `start_pipeline`
+    # (directly, or through `_schedule_resume_after_reviews`), which would make
+    # the router import main. Pinned here so that stays a decision.
     ("POST", "/api/projects/pinned/voice-review/approve"),
+    ("GET", "/api/projects/pinned/quality"),
+    ("GET", "/api/projects/pinned/quality/review"),
 ]
 
 
