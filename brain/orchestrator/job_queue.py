@@ -287,6 +287,23 @@ class JobQueue:
             "updated_at": now,
         }
 
+    #: Longest `reason` an event may store. A provider's explanation is a
+    #: sentence or two; anything past this is a stack trace or a retry log.
+    #: Playwright failures from the web tier reached 109 MB *each* and were
+    #: written once per affected line, which is how pipeline_state.db reached
+    #: 2.4 GB with 7,742 events in it.
+    MAX_EVENT_REASON_CHARS = 4000
+
+    #: Same argument for the serialized `details` blob.
+    MAX_EVENT_DETAILS_CHARS = 16000
+
+    @staticmethod
+    def _bounded(text: str, limit: int) -> str:
+        """Trim to `limit`, saying so, so a truncated value is never mistaken."""
+        if len(text) <= limit:
+            return text
+        return f"{text[:limit]}... [truncated {len(text) - limit:,} chars]"
+
     def log_external_validation(
         self,
         project_id: str,
@@ -302,6 +319,8 @@ class JobQueue:
     ) -> int:
         """Append one immutable machine-decision event."""
         now = datetime.now(UTC).isoformat()
+        reason = self._bounded(str(reason), self.MAX_EVENT_REASON_CHARS)
+        details_json = self._bounded(json.dumps(details or {}), self.MAX_EVENT_DETAILS_CHARS)
         with self._connect() as conn:
             cursor = conn.execute(
                 """INSERT INTO external_validation_events
@@ -317,7 +336,7 @@ class JobQueue:
                     confidence,
                     reason,
                     latency_ms,
-                    json.dumps(details or {}),
+                    details_json,
                     now,
                 ),
             )
