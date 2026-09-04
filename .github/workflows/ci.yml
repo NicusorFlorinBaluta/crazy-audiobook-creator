@@ -62,7 +62,7 @@ jobs:
       - name: Python compilation
         # Includes the repository root: a stray non-UTF-8 file there used to be
         # invisible to every check.
-        run: python -m compileall -q brain voice shared scripts tools .
+        run: python -m compileall -q brain voice shared scripts tools legacy .
       - name: JavaScript syntax
         shell: pwsh
         run: |

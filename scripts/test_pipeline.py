@@ -4,6 +4,9 @@ from pathlib import Path
 
 import requests
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from shared import paths as shared_paths  # noqa: E402
+
 API_URL = "http://localhost:8000/api/projects"
 
 # Upload can take a while for a large EPUB; status polls should fail fast so a
@@ -12,7 +15,9 @@ UPLOAD_TIMEOUT_SECONDS = 120
 REQUEST_TIMEOUT_SECONDS = 30
 
 def run_test():
-    epub_path = Path("sample_book.epub")
+    # Resolved from the repository root, not the working directory, so this
+    # script works from anywhere rather than only from the repo root.
+    epub_path = shared_paths.REPO_ROOT / "tests" / "fixtures" / "sample_book.epub"
     if not epub_path.exists():
         print(f"Error: {epub_path} not found.")
         sys.exit(1)

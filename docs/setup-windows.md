@@ -43,7 +43,7 @@ versions observed in the successful 2026-08-09 AMD run. PyTorch remains a
 separate machine-specific ROCm installation. Use `-DryRun` to run only the
 read-only preflight and dependency-consistency checks.
 
-The setup script removes a stale `parler-tts` installation, installs the supported Qwen/Whisper requirements, runs `pip check`, and checks for FFmpeg. `parler_server.py` is legacy-only; if it must be evaluated, use `voice/requirements-legacy-parler.txt` in a separate environment because its Transformers requirement conflicts with Qwen.
+The setup script removes a stale `parler-tts` installation, installs the supported Qwen/Whisper requirements, runs `pip check`, and checks for FFmpeg. `legacy/parler_server.py` is legacy-only; if it must be evaluated, use `voice/requirements-legacy-parler.txt` in a separate environment because its Transformers requirement conflicts with Qwen. See [../legacy/README.md](../legacy/README.md).
 
 Verify core imports:
 

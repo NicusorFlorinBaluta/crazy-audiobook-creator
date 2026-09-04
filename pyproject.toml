@@ -125,3 +125,8 @@ ignore = [
 
 [tool.ruff.lint.isort]
 known-first-party = ["brain", "voice", "shared"]
+
+[tool.pytest.ini_options]
+# Folded in from pytest.ini so the repository has one static-analysis and test
+# configuration file rather than two.
+testpaths = ["tests"]
