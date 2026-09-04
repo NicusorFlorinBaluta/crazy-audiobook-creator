@@ -102,6 +102,19 @@ def validate_brain_config(config: dict[str, Any]) -> dict[str, Any]:
         _number(errors, external, "manual_review_confidence", minimum=0, maximum=1)
         _number(errors, external, "attribution_batch_size", minimum=1, maximum=100)
         _number(errors, external, "max_audio_regenerations", minimum=0, maximum=5)
+        cast = external.get("cast_adjudication", {})
+        if not isinstance(cast, dict):
+            errors.append("external_validation.cast_adjudication must be an object")
+        else:
+            for field in ("enabled", "require_approval"):
+                if field in cast and not isinstance(cast[field], bool):
+                    errors.append(f"external_validation.cast_adjudication.{field} must be boolean")
+            # A merge gives two characters one voice for a whole book. Refuse a
+            # bar low enough to make that a coin flip.
+            _number(errors, cast, "min_confidence", minimum=0.5, maximum=1)
+            for field in ("roster_model", "adjudication_model"):
+                if field in cast and not str(cast[field]).strip():
+                    errors.append(f"external_validation.cast_adjudication.{field} cannot be empty")
         circuit = external.get("circuit_breaker", {})
         if not isinstance(circuit, dict):
             errors.append("external_validation.circuit_breaker must be an object")

@@ -16,6 +16,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from brain.director import cast_identity
 from brain.director.ollama_client import OllamaClient
 from shared.constants import Gender
 from shared.models import (
@@ -475,6 +476,14 @@ class CharacterAnalyzer:
                     pass
 
         registry = self._ensure_explicit_unnamed_speakers(registry, book)
+        # Duplicates are folded BEFORE augmentation and voice assignment: there
+        # is no point enriching, or casting a voice for, an entry that is about
+        # to be absorbed into another.
+        registry = self._adjudicate_cast_identity(
+            registry,
+            book,
+            Path(project_dir) if project_dir else None,
+        )
         registry = self._augment_characters_with_gemini(
             registry,
             book,
@@ -526,6 +535,180 @@ class CharacterAnalyzer:
                 "evidence_snippets": contexts[:4],
             }
         return dossier
+
+    def _adjudicate_cast_identity(
+        self,
+        registry: CharacterRegistry,
+        book: ExtractedBook,
+        project_dir: Path | None = None,
+    ) -> CharacterRegistry:
+        """Fold duplicate registry entries found by whole-cast adjudication.
+
+        `_adjudicate_name_candidates` above only ever *sees* pairs that share a
+        distinctive token or an id suffix. Measured on a real 57-character
+        cast, that is 24 of 1,540 pairs -- 1.6%. A character recorded once as
+        "Zaknafein" and again as "the weapons master" shares nothing lexical,
+        so no candidate is proposed and the duplicate reaches casting as a
+        second voice with its own reference clip.
+
+        This pass closes that gap by handing the whole roster to the external
+        adjudicator. Everything it returns is then filtered through
+        `cast_identity.merge_veto`, which is local, deterministic, and cannot
+        be overridden by the model -- most importantly the conjunction veto,
+        which refuses any pair the source ever names side by side.
+
+        Merges are applied automatically when they clear the confidence bar and
+        every veto. `cast_adjudication.require_approval` turns that into a
+        review gate instead, at the cost of putting source excerpts in front of
+        the operator.
+        """
+        external = self.external_validator
+        if external is None or project_dir is None:
+            return registry
+        if not getattr(external, "cast_adjudication_enabled", False):
+            return registry
+
+        characters = registry.characters
+        if len(characters) < 2:
+            return registry
+
+        source_text = "\n".join(chapter.text for chapter in book.chapters)
+        roster = {
+            cid: {
+                "name": char.name or cid,
+                "aliases": list(char.aliases or []),
+                "gender": char.gender.value if hasattr(char.gender, "value") else str(char.gender),
+                "age_range": char.age_range,
+                "dialogue_count": int(getattr(char, "dialogue_count", 0) or 0),
+            }
+            for cid, char in characters.items()
+            if cid != "narrator"
+        }
+
+        def evidence_for(left_id: str, right_id: str) -> list[str]:
+            return self._pair_evidence_snippets(left_id, right_id, characters, source_text)
+
+        try:
+            result = external.adjudicate_cast(
+                project_dir=project_dir,
+                roster=roster,
+                evidence_for=evidence_for,
+            )
+        except Exception as exc:
+            logger.warning("[CharacterAnalyzer] Cast identity adjudication failed: %s", exc)
+            return registry
+
+        require_approval = bool(
+            (self.config.get("external_validation", {}).get("cast_adjudication", {}) or {}).get(
+                "require_approval", False
+            )
+        )
+
+        applied: list[dict[str, Any]] = []
+        refused: list[dict[str, Any]] = []
+        for proposal in result.get("merges", []):
+            left, right = proposal["left_id"], proposal["right_id"]
+            primary, duplicate = cast_identity.choose_primary(left, right, characters)
+            veto = cast_identity.merge_veto(primary, duplicate, characters, source_text)
+            if veto:
+                logger.info("[CharacterAnalyzer] Refused merge %s <- %s: %s", primary, duplicate, veto)
+                refused.append({**proposal, "veto": veto})
+                continue
+            if require_approval:
+                refused.append({**proposal, "veto": "held for operator approval"})
+                continue
+            applied.append(cast_identity.apply_merge(primary, duplicate, characters))
+
+        if applied or refused or result.get("review"):
+            self._write_cast_identity_audit(project_dir, result, applied, refused, require_approval)
+        if applied:
+            logger.info(
+                "[CharacterAnalyzer] Cast identity: merged %d duplicate character(s)",
+                len(applied),
+            )
+        return registry
+
+    @staticmethod
+    def _pair_evidence_snippets(
+        left_id: str,
+        right_id: str,
+        characters: dict[str, Any],
+        source_text: str,
+        limit: int = 6,
+    ) -> list[str]:
+        """Passages where both entries are named, for grounding a merge claim.
+
+        Passages mentioning *both* are what settles identity: an apposition
+        ("Jarlaxle, whom she called Uncle Jax") states it outright. Falls back
+        to a couple of single-name passages so the adjudicator can still answer
+        "distinct" rather than being forced to abstain for want of context.
+        """
+
+        def terms_for(cid: str) -> list[str]:
+            char = characters.get(cid)
+            name = getattr(char, "name", None) or cid
+            aliases = list(getattr(char, "aliases", []) or [])
+            out = []
+            for raw in [str(name), cid.replace("_", " "), *[str(a) for a in aliases]]:
+                term = raw.strip()
+                if len(term) >= 3 and term.lower() not in _UNSAFE_CHARACTER_ALIASES and term not in out:
+                    out.append(term)
+            return out
+
+        left_terms, right_terms = terms_for(left_id), terms_for(right_id)
+        if not left_terms or not right_terms:
+            return []
+
+        left_pattern = re.compile(r"\b(?:" + "|".join(re.escape(t) for t in left_terms) + r")\b", re.IGNORECASE)
+        right_pattern = re.compile(r"\b(?:" + "|".join(re.escape(t) for t in right_terms) + r")\b", re.IGNORECASE)
+
+        both: list[str] = []
+        singles: list[str] = []
+        for match in left_pattern.finditer(source_text):
+            start = max(0, match.start() - 260)
+            end = min(len(source_text), match.end() + 260)
+            snippet = source_text[start:end].replace("\n", " ").strip()
+            if not snippet:
+                continue
+            if right_pattern.search(snippet):
+                if snippet not in both:
+                    both.append(snippet)
+                if len(both) >= limit:
+                    return both
+            elif len(singles) < 2 and snippet not in singles:
+                singles.append(snippet)
+        return (both + singles)[:limit]
+
+    @staticmethod
+    def _write_cast_identity_audit(
+        project_dir: Path,
+        result: dict[str, Any],
+        applied: list[dict[str, Any]],
+        refused: list[dict[str, Any]],
+        require_approval: bool,
+    ) -> None:
+        """Record every decision, including the refusals and why.
+
+        Written to the project directory rather than surfaced in the review
+        inbox: the evidence is verbatim book text, and an operator who has not
+        read the book should be able to opt out of seeing it.
+        """
+        from shared.artifacts import atomic_write_json
+
+        try:
+            atomic_write_json(
+                project_dir / "cast_identity_audit.json",
+                {
+                    "schema_version": 1,
+                    "require_approval": require_approval,
+                    "applied": applied,
+                    "refused": refused,
+                    "held_for_review": result.get("review", []),
+                    "trace": result.get("trace", []),
+                },
+            )
+        except Exception:
+            logger.warning("Could not write the cast identity audit", exc_info=True)
 
     def _augment_characters_with_gemini(
         self,

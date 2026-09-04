@@ -218,6 +218,34 @@ class CharacterAugmentationBatch(BaseModel):
     decisions: list[CharacterAugmentationDecision]
 
 
+class CastDuplicateProposal(BaseModel):
+    """One roster-level claim that two registry entries are the same person."""
+
+    left_id: str
+    right_id: str
+    confidence: float = Field(ge=0.0, le=1.0)
+    reason: str = Field(max_length=600)
+
+
+class CastRosterBatch(BaseModel):
+    proposals: list[CastDuplicateProposal] = Field(default_factory=list, max_length=60)
+
+
+class CastMergeDecision(BaseModel):
+    """The grounded verdict on one proposed duplicate pair."""
+
+    left_id: str
+    right_id: str
+    decision: Literal["merge", "distinct", "abstain"]
+    confidence: float = Field(ge=0.0, le=1.0)
+    reason: str = Field(max_length=1000)
+    evidence: list[str] = Field(default_factory=list, max_length=6)
+
+
+class CastMergeBatch(BaseModel):
+    decisions: list[CastMergeDecision] = Field(default_factory=list)
+
+
 def _extract_json(text: str) -> dict[str, Any]:
     candidate = text.strip()
     fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", candidate, re.DOTALL)
@@ -577,6 +605,13 @@ class GeminiValidationService:
         self.character_augmentation_enabled = bool(character_cfg.get("enabled", False))
         self.character_triage_model = str(character_cfg.get("triage_model", self.triage_model))
         self.character_adjudication_model = str(character_cfg.get("adjudication_model", self.adjudication_model))
+        cast_cfg = dict(config.get("cast_adjudication", {}))
+        self.cast_adjudication_enabled = bool(cast_cfg.get("enabled", False))
+        self.cast_roster_model = str(cast_cfg.get("roster_model", self.triage_model))
+        self.cast_merge_model = str(cast_cfg.get("adjudication_model", self.adjudication_model))
+        # A merge collapses two characters into one voice for a whole book, so
+        # it is held to a higher bar than an attribute enrichment.
+        self.cast_merge_confidence = float(cast_cfg.get("min_confidence", 0.95))
         circuit = dict(config.get("circuit_breaker", {}))
         self.health = _ProviderHealth(
             projects_dir / ".external_validation_health.json",
@@ -679,6 +714,243 @@ class GeminiValidationService:
         for evidence in decision.evidence:
             normalized = re.sub(r"\s+", " ", evidence).strip()
             if len(normalized) >= 12 and normalized.casefold() in normalized_source:
+                return True
+        return False
+
+    def adjudicate_cast(
+        self,
+        *,
+        project_dir: Path,
+        roster: dict[str, dict[str, Any]],
+        evidence_for: Any,
+    ) -> dict[str, Any]:
+        """Find registry entries that are the same character under two names.
+
+        Two stages, deliberately separated.
+
+        1. **Roster.** The whole cast goes in one prompt as names, aliases,
+           gender and dialogue counts -- no book text at all. A model reading
+           the roster can spot "Jarlaxle" and "Uncle Jax" without any passage,
+           and keeping the source out of this call makes it cheap.
+        2. **Grounding.** Only the pairs stage 1 proposed get a second call,
+           with evidence snippets, and must return a verbatim citation. A
+           proposal that cannot be grounded is dropped, never merged.
+
+        `evidence_for(left_id, right_id)` supplies the snippets for a pair; it
+        is injected so this module stays free of extraction concerns.
+
+        Returns `{"merges": [...], "review": [...], "trace": [...]}`. Applying
+        anything is the caller's job -- this only decides, and the caller still
+        applies its own local vetoes on top.
+        """
+        if not self.enabled or not self.cast_adjudication_enabled or len(roster) < 2:
+            return {"merges": [], "review": [], "trace": []}
+
+        trace: list[dict[str, Any]] = []
+        proposals = self._propose_cast_duplicates(project_dir, roster, trace)
+        if not proposals:
+            return {"merges": [], "review": [], "trace": trace}
+
+        merges: list[dict[str, Any]] = []
+        review: list[dict[str, Any]] = []
+        for proposal in proposals:
+            if proposal.left_id not in roster or proposal.right_id not in roster:
+                trace.append(
+                    {
+                        "pair": [proposal.left_id, proposal.right_id],
+                        "outcome": "rejected",
+                        "reason": "proposal names an id that is not in the cast",
+                    }
+                )
+                continue
+
+            snippets = list(evidence_for(proposal.left_id, proposal.right_id) or [])
+            decision = self._ground_cast_merge(project_dir, proposal, roster, snippets, trace)
+            if decision is None:
+                continue
+
+            grounded = self._cast_evidence_is_grounded(decision, snippets)
+            record = {
+                "left_id": decision.left_id,
+                "right_id": decision.right_id,
+                "confidence": decision.confidence,
+                "reason": decision.reason,
+                "evidence": list(decision.evidence),
+                "grounded": grounded,
+            }
+            if decision.decision != "merge":
+                trace.append({**record, "outcome": decision.decision})
+                continue
+            if not grounded:
+                # The most important rejection: a merge claim with no verbatim
+                # support is a hallucination with a whole-book blast radius.
+                trace.append({**record, "outcome": "rejected", "reason": "evidence is not verbatim"})
+                continue
+            if decision.confidence < self.cast_merge_confidence:
+                trace.append({**record, "outcome": "review", "reason": "below the merge confidence bar"})
+                review.append(record)
+                continue
+            trace.append({**record, "outcome": "merge"})
+            merges.append(record)
+
+        return {"merges": merges, "review": review, "trace": trace}
+
+    def _propose_cast_duplicates(
+        self,
+        project_dir: Path,
+        roster: dict[str, dict[str, Any]],
+        trace: list[dict[str, Any]],
+    ) -> list[CastDuplicateProposal]:
+        """Stage one: which roster entries look like the same person?"""
+        prompt = (
+            "You are auditing an audiobook character registry for DUPLICATES: "
+            "entries that are the same person recorded twice under different "
+            "names, titles or appellatives (for example a proper name and 'the "
+            "weapons master', or a full name and a nickname).\n\n"
+            "Rules:\n"
+            "- Propose a pair ONLY when you believe they are one person.\n"
+            "- Family members, twins, and characters who merely share a title "
+            "or species are DIFFERENT people. Do not propose them.\n"
+            "- Never propose the narrator.\n"
+            "- Return an empty list if nothing is duplicated. That is the "
+            "expected answer for most casts.\n\n"
+            "Return JSON matching this schema: "
+            + json.dumps(CastRosterBatch.model_json_schema(), ensure_ascii=False)
+            + "\nCAST:\n"
+            + json.dumps(roster, ensure_ascii=False, indent=2)
+        )
+        stage = "gemini_api_triage"
+        try:
+            raw, latency_ms = self._call_stage(
+                stage,
+                lambda: self.api.generate_json(
+                    model=self.cast_roster_model,
+                    prompt=prompt,
+                    schema=CastRosterBatch.model_json_schema(),
+                ),
+            )
+            batch = CastRosterBatch.model_validate(raw)
+        except _VALIDATION_RECOVERABLE_ERRORS as exc:
+            summary = str(exc).split("\n")[0][:300]
+            logger.warning("Cast duplicate proposal unavailable: %s", summary)
+            trace.append({"outcome": "unavailable", "stage": stage, "reason": summary})
+            return []
+
+        self._event(
+            project_dir,
+            "cast",
+            "roster",
+            "gemini_api",
+            self.cast_roster_model,
+            "proposed",
+            None,
+            f"{len(batch.proposals)} duplicate pair(s) proposed from {len(roster)} entries",
+            latency_ms,
+        )
+        return batch.proposals
+
+    def _ground_cast_merge(
+        self,
+        project_dir: Path,
+        proposal: CastDuplicateProposal,
+        roster: dict[str, dict[str, Any]],
+        snippets: list[str],
+        trace: list[dict[str, Any]],
+    ) -> CastMergeDecision | None:
+        """Stage two: make the model cite the source, or abstain."""
+        if not snippets:
+            trace.append(
+                {
+                    "pair": [proposal.left_id, proposal.right_id],
+                    "outcome": "rejected",
+                    "reason": "no source evidence available for the pair",
+                }
+            )
+            return None
+
+        pair_context = {
+            proposal.left_id: roster.get(proposal.left_id, {}),
+            proposal.right_id: roster.get(proposal.right_id, {}),
+        }
+        prompt = (
+            "Decide whether these two audiobook registry entries are the SAME "
+            "person, using ONLY the supplied excerpts.\n\n"
+            "Answer 'merge' only if an excerpt shows one is another name, "
+            "title or appellative for the other. Answer 'distinct' if they are "
+            "different people. Answer 'abstain' if the excerpts do not settle "
+            "it -- abstaining is always safer than guessing, because a wrong "
+            "merge gives two characters one voice for the whole book.\n\n"
+            "Every entry in `evidence` MUST be copied verbatim from the "
+            "excerpts below.\n\n"
+            "Return JSON matching this schema: "
+            + json.dumps(CastMergeBatch.model_json_schema(), ensure_ascii=False)
+            + "\nENTRIES:\n"
+            + json.dumps(pair_context, ensure_ascii=False, indent=2)
+            + "\nEXCERPTS:\n"
+            + json.dumps(snippets, ensure_ascii=False, indent=2)
+        )
+        stage = "gemini_api_adjudication"
+        try:
+            raw, latency_ms = self._call_stage(
+                stage,
+                lambda: self.api.generate_json(
+                    model=self.cast_merge_model,
+                    prompt=prompt,
+                    schema=CastMergeBatch.model_json_schema(),
+                ),
+            )
+            batch = CastMergeBatch.model_validate(raw)
+        except _VALIDATION_RECOVERABLE_ERRORS as exc:
+            summary = str(exc).split("\n")[0][:300]
+            logger.warning(
+                "Cast merge adjudication unavailable for %s/%s: %s",
+                proposal.left_id,
+                proposal.right_id,
+                summary,
+            )
+            trace.append(
+                {
+                    "pair": [proposal.left_id, proposal.right_id],
+                    "outcome": "unavailable",
+                    "reason": summary,
+                }
+            )
+            return None
+
+        for decision in batch.decisions:
+            if {decision.left_id, decision.right_id} == {proposal.left_id, proposal.right_id}:
+                self._event(
+                    project_dir,
+                    "cast",
+                    f"{proposal.left_id}|{proposal.right_id}",
+                    "gemini_api",
+                    self.cast_merge_model,
+                    decision.decision,
+                    decision.confidence,
+                    self._clean_review_reason("cast", decision),
+                    latency_ms,
+                )
+                return decision
+        trace.append(
+            {
+                "pair": [proposal.left_id, proposal.right_id],
+                "outcome": "rejected",
+                "reason": "adjudicator returned no decision for the pair",
+            }
+        )
+        return None
+
+    @staticmethod
+    def _cast_evidence_is_grounded(decision: CastMergeDecision, snippets: list[str]) -> bool:
+        """Every citation must be a literal substring of what we supplied.
+
+        Same contract as `_character_evidence_is_grounded`, and for the same
+        reason: a fluent rationale is not evidence.
+        """
+        source = re.sub(r"\s+", " ", " ".join(snippets)).casefold()
+        for evidence in decision.evidence:
+            normalized = re.sub(r"\s+", " ", str(evidence)).strip()
+            if len(normalized) >= 12 and normalized.casefold() in source:
                 return True
         return False
 

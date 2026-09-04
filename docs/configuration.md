@@ -239,6 +239,25 @@ login, changes its page selectors, or presents an anti-automation challenge,
 the fallback fails closed into dashboard review; it does not attempt to bypass
 the challenge.
 
+#### `external_validation.cast_adjudication`
+
+Whole-cast duplicate detection, run once after book-wide character analysis.
+
+| Key | Meaning |
+|---|---|
+| `enabled` | Run the pass at all |
+| `roster_model` | Stage one: reads the cast roster (names only, no book text) and proposes duplicate pairs |
+| `adjudication_model` | Stage two: decides a proposed pair against verbatim excerpts |
+| `min_confidence` | Bar a merge must clear, default `0.95`. Higher than an attribute enrichment because a merge gives two characters one voice for a whole book |
+| `require_approval` | `false` (default) applies qualifying merges and records everything in `cast_identity_audit.json`. `true` holds them for approval instead -- safer, but the evidence is verbatim source text, so approving means reading spoilers |
+
+Every proposal is filtered through local deterministic vetoes the model cannot
+override: the narrator is never merged, explicit genders must not disagree, ids
+differing only by a positional or numeric marker are refused, the citation must
+be verbatim, and the *conjunction veto* refuses any pair the source ever names
+side by side. See
+[decisions/2026-09-04-whole-cast-duplicate-detection.md](decisions/2026-09-04-whole-cast-duplicate-detection.md).
+
 ### `pipeline`
 
 State is stored in `pipeline_state.db`. GPU work is chapter-batched and serialized independently of `batch_mode`. Valid line, generated-chapter, and mastered-chapter artifacts are reused through fingerprints and manifests.

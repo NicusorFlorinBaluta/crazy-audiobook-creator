@@ -105,6 +105,21 @@ exact display names may be consolidated directly. Name suffixes only create an
 identity-adjudication candidate: the model must return verbatim source evidence
 before two registry entries are merged.
 
+Local identity consolidation only ever *considers* pairs that share a
+distinctive name token or an id suffix -- measured at 24 of 1,540 pairs (1.6%)
+on a real 57-character cast. A whole-cast adjudication pass closes that gap: the
+roster (names, aliases, gender, dialogue counts -- no book text) goes to the
+external adjudicator, which proposes duplicates; every proposal is then filtered
+through local deterministic vetoes it cannot override, and must cite verbatim
+source evidence before a merge is applied. The load-bearing veto is
+*conjunction*: if the source ever names the two side by side ("Ilnezhara and
+Tazmikella") they are two people. Proximity was tried and rejected -- aliases
+co-occur more than distinct characters. Merges apply automatically by default
+and are recorded in `cast_identity_audit.json`;
+`external_validation.cast_adjudication.require_approval` turns that into a gate,
+at the cost of putting verbatim excerpts in front of the operator. See
+[decisions/2026-09-04-whole-cast-duplicate-detection.md](decisions/2026-09-04-whole-cast-duplicate-detection.md).
+
 Following local identity consolidation, the analyzer builds a bounded evidence
 dossier. Configured Gemini API triage, adjudication, and optional browser
 fallback may propose profile enrichment. Only high-confidence proposals with

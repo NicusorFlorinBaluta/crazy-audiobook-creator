@@ -192,6 +192,31 @@ external_validation:
     enabled: true
     triage_model: gemini-3.5-flash-lite
     adjudication_model: gemini-3.5-flash
+  # Whole-cast duplicate detection, run once after book-wide character
+  # analysis. The local identity adjudicator only ever *looks at* pairs that
+  # share a distinctive name token -- measured at 24 of 1,540 pairs (1.6%) on a
+  # 57-character cast -- so a character recorded once by proper name and again
+  # by appellative ("Zaknafein" / "the weapons master") is never even
+  # considered, and reaches casting as a second voice.
+  #
+  # Every proposal is filtered through local, deterministic vetoes that the
+  # model cannot override: the narrator is never merged, explicit genders must
+  # not disagree, the citation must be verbatim, and the conjunction veto
+  # refuses any pair the source ever names side by side ("Ilnezhara and
+  # Tazmikella"). That last one is what keeps twins and siblings apart.
+  cast_adjudication:
+    enabled: true
+    roster_model: gemini-3.5-flash-lite
+    adjudication_model: gemini-3.5-flash
+    # A merge gives two characters one voice for a whole book, so the bar is
+    # higher than for an attribute enrichment.
+    min_confidence: 0.95
+    # false: apply merges that clear the bar and every veto, and record them in
+    #   cast_identity_audit.json. Nothing reaches the review inbox, so no book
+    #   text is put in front of you.
+    # true: hold every merge for approval instead. Safer, but the evidence is
+    #   verbatim source text, so approving means reading spoilers.
+    require_approval: false
   circuit_breaker:
     failure_threshold: 3
     cooldown_seconds: 60
