@@ -202,3 +202,44 @@ class GenerationCancelled(BaseException):
     catch site. The Voice service already had its own ``GenerationCancelled``;
     this is the shared definition both sides can use.
     """
+
+
+# ---------------------------------------------------------------------------
+# GPU allocator configuration
+# ---------------------------------------------------------------------------
+
+# Applied to every process that loads a Torch model on this workstation.
+#
+# Evidence: `voice_crash.log` records three crashes of the form
+#
+#     HIP out of memory. Tried to allocate 3.39 GiB. GPU 0 has a total
+#     capacity of 23.98 GiB of which 23.33 GiB is free.
+#
+# raised inside `transformers.modeling_utils.caching_allocator_warmup`. Failing
+# a 3.4 GiB allocation with 23 GiB free is not exhaustion -- it is HIP caching
+# allocator fragmentation, and the error text names this setting as the remedy.
+#
+# `expandable_segments` lets a segment grow in place instead of requiring one
+# contiguous block per size class. That is exactly the pattern the Voice
+# service stresses: it loads, unloads and reloads Qwen3-TTS, the VoiceDesign
+# helper and Whisper within a single process at every stage boundary, so the
+# allocator's arena is repeatedly carved up and released.
+#
+# Set with `setdefault` at every site, never assignment: an operator debugging
+# an allocator problem must be able to override it from the environment.
+TORCH_ALLOC_CONF = "expandable_segments:True"
+
+# ROCm builds read the HIP name; upstream Torch reads the CUDA name and ROCm
+# honours it too. Setting both keeps the value effective across a Torch upgrade
+# that changes which one wins.
+TORCH_ALLOC_ENV_VARS = ("PYTORCH_CUDA_ALLOC_CONF", "PYTORCH_HIP_ALLOC_CONF")
+
+
+def apply_torch_alloc_conf(env: dict[str, str]) -> dict[str, str]:
+    """Set the allocator configuration on ``env`` in place and return it.
+
+    Existing values are preserved so an operator override always wins.
+    """
+    for name in TORCH_ALLOC_ENV_VARS:
+        env.setdefault(name, TORCH_ALLOC_CONF)
+    return env
