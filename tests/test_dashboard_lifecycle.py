@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import logging
 import os
 import tempfile
 import unittest
@@ -1181,6 +1182,65 @@ class DashboardLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["status"], "success")
         self.assertIn("narrator_male", fake_pipeline.voice_client.request.characters)
+
+
+class ProjectLogVisibilityTests(unittest.TestCase):
+    """What a book's log is allowed to hide from the person reading it.
+
+    `brain.dashboard.api.main` was suppressed outright. That is right for
+    request chatter and wrong for the events that interrupt the run: on
+    2026-09-04 a pipeline paused three times, the attribution saying why was
+    logged by exactly that module, and the project log dropped every line. The
+    effect was visible and the cause was not.
+    """
+
+    def _record(self, name: str, level: int) -> logging.LogRecord:
+        return logging.LogRecord(
+            name=name,
+            level=level,
+            pathname=__file__,
+            lineno=1,
+            msg="probe",
+            args=(),
+            exc_info=None,
+        )
+
+    def _emitted(self, name: str, level: int) -> bool:
+        from brain.dashboard.api import main as dashboard
+
+        handler = dashboard.ProjectLogHandler("probe-project")
+        written: list[str] = []
+        handler.format = lambda record: "line"  # type: ignore[method-assign]
+        with patch.object(dashboard, "_project_logs", {}) as buffers:
+            handler.emit(self._record(name, level))
+            for lines in buffers.values():
+                written.extend(lines)
+        return bool(written)
+
+    def test_dashboard_warnings_reach_the_project_log(self) -> None:
+        self.assertTrue(
+            self._emitted("brain.dashboard.api.main", logging.WARNING),
+            "a warning about this run must not be filtered out of its log",
+        )
+        self.assertTrue(self._emitted("brain.dashboard.api.main", logging.ERROR))
+
+    def test_dashboard_chatter_still_stays_out(self) -> None:
+        self.assertFalse(self._emitted("brain.dashboard.api.main", logging.INFO))
+        self.assertFalse(self._emitted("brain.dashboard.api.main", logging.DEBUG))
+
+    def test_uvicorn_is_dropped_at_every_level(self) -> None:
+        for level in (logging.DEBUG, logging.INFO, logging.WARNING, logging.ERROR):
+            self.assertFalse(self._emitted("uvicorn.access", level))
+            self.assertFalse(self._emitted("uvicorn.error", level))
+
+    def test_pipeline_logs_are_untouched(self) -> None:
+        self.assertTrue(self._emitted("brain.orchestrator.pipeline", logging.INFO))
+
+    def test_the_dashboard_keeps_a_log_of_its_own(self) -> None:
+        """Console-only logging is lost entirely under Task Scheduler."""
+        source = Path("brain/dashboard/api/main.py").read_text(encoding="utf-8")
+        self.assertIn("RotatingFileHandler", source)
+        self.assertIn('"dashboard.log"', source)
 
 
 if __name__ == "__main__":

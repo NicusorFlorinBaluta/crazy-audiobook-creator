@@ -639,5 +639,122 @@ class GeminiApiClientPacingTests(unittest.TestCase):
                 mock_sleep.assert_called_once_with(5.0)
 
 
+class GeminiResponseSchemaTests(unittest.TestCase):
+    """What `generateContent` will and will not accept in a responseSchema.
+
+    Measured against gemini-3.5-flash and -flash-lite on 2026-09-04: any
+    schema carrying `maxItems` is rejected with a bare `400 INVALID_ARGUMENT`,
+    as an integer or as a string, even though the key appears in the published
+    subset. Found by bisecting a failing schema one key at a time after a cast
+    adjudication call 400ed in a live run.
+
+    The damage was not limited to the new cast passes. `CharacterAugmentationBatch`
+    carries `maxItems` too and predates them, so its API tier had been failing
+    and silently escalating for as long as it has existed.
+    """
+
+    def _keys(self, node, found=None):
+        found = set() if found is None else found
+        if isinstance(node, dict):
+            for key, value in node.items():
+                found.add(key)
+                self._keys(value, found)
+        elif isinstance(node, list):
+            for value in node:
+                self._keys(value, found)
+        return found
+
+    def test_no_shipped_schema_reaches_the_api_with_maxitems(self) -> None:
+        from brain.validators import gemini_validation as module
+
+        offenders = []
+        for name in dir(module):
+            model = getattr(module, name)
+            if not isinstance(model, type) or not hasattr(model, "model_json_schema"):
+                continue
+            if not name.endswith(("Batch", "Decision")):
+                continue
+            converted = module._gemini_response_schema(model.model_json_schema())
+            present = self._keys(converted) & {"maxItems", "minItems"}
+            # A property literally named maxItems would be a false positive;
+            # none exists, and this keeps the failure message honest.
+            if present:
+                offenders.append(f"{name}: {sorted(present)}")
+        self.assertEqual(offenders, [], f"these would be rejected with 400: {offenders}")
+
+    def test_the_converter_strips_the_bounds_but_keeps_the_shape(self) -> None:
+        from brain.validators.gemini_validation import _gemini_response_schema
+
+        converted = _gemini_response_schema(
+            {
+                "type": "object",
+                "properties": {
+                    "items": {
+                        "type": "array",
+                        "maxItems": 60,
+                        "minItems": 1,
+                        "items": {"$ref": "#/$defs/Thing"},
+                    }
+                },
+                "required": ["items"],
+                "$defs": {
+                    "Thing": {
+                        "type": "object",
+                        "title": "Thing",
+                        "properties": {"name": {"type": "string", "maxLength": 600}},
+                    }
+                },
+            }
+        )
+        self.assertNotIn("maxItems", converted["properties"]["items"])
+        self.assertNotIn("minItems", converted["properties"]["items"])
+        # The reference is still inlined and the rest survives: maxLength is
+        # accepted by the API, and dropping constraints wholesale would be a
+        # different and worse change.
+        thing = converted["properties"]["items"]["items"]
+        self.assertEqual(thing["properties"]["name"]["maxLength"], 600)
+        self.assertNotIn("title", thing)
+        self.assertEqual(converted["required"], ["items"])
+
+    def test_the_bounds_are_still_enforced_where_it_counts(self) -> None:
+        """Stripping the hint must not stop the model from being validated.
+
+        The API never guaranteed the bound anyway. Pydantic does, on the way
+        back in, which is the only place it was ever load-bearing.
+        """
+        from pydantic import ValidationError
+
+        from brain.validators.gemini_validation import CastRosterBatch
+
+        too_many = {"proposals": [{"left_id": "a", "right_id": "b", "confidence": 0.9, "reason": "x"}] * 61}
+        with self.assertRaises(ValidationError):
+            CastRosterBatch.model_validate(too_many)
+
+
+class EscalationFailureReportingTests(unittest.TestCase):
+    """A failure has to say enough to act on."""
+
+    def test_the_summary_keeps_the_response_body(self) -> None:
+        from brain.validators.gemini_validation import _failure_summary
+
+        exc = Exception(
+            "Client error '400 Bad Request' for url 'https://x'\n"
+            "For more information check: https://mdn\n"
+            '; response={ "error": { "status": "INVALID_ARGUMENT" } }'
+        )
+        summary = _failure_summary(exc)
+        self.assertIn("INVALID_ARGUMENT", summary, "the body is the part worth keeping")
+        self.assertNotIn("\n", summary, "must stay one log line")
+
+    def test_a_rejected_request_is_not_reported_as_an_outage(self) -> None:
+        from brain.validators.gemini_validation import _is_malformed_request
+
+        self.assertTrue(_is_malformed_request("400 Bad Request INVALID_ARGUMENT"))
+        self.assertTrue(_is_malformed_request("404 Not Found"))
+        # A rate limit is exactly when escalating is correct, so it is not a bug.
+        self.assertFalse(_is_malformed_request("429 Too Many Requests"))
+        self.assertFalse(_is_malformed_request("503 Service Unavailable"))
+
+
 if __name__ == "__main__":
     unittest.main()

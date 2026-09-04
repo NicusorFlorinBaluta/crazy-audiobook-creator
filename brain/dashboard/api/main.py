@@ -23,6 +23,7 @@ import hashlib
 import io
 import json
 import logging
+import logging.handlers
 import os
 import re
 import shutil
@@ -568,10 +569,18 @@ class ProjectLogHandler(logging.Handler):
     and fans out to any live SSE subscribers."""
 
     # Suppress these noisy loggers from the project log stream
+    # Dropped outright: these say nothing about the book being produced.
     _SUPPRESS = {
-        "brain.dashboard.api.main",
         "uvicorn.access",
         "uvicorn.error",
+    }
+
+    # Dropped only below WARNING. The dashboard's routine chatter does not
+    # belong in a book's log, but its warnings are about things happening to
+    # that book -- a GPU release interrupting the run, a shutdown, a restart.
+    # Filtering those out is how three unexplained pauses stayed unexplained.
+    _SUPPRESS_BELOW_WARNING = {
+        "brain.dashboard.api.main",
     }
 
     def __init__(self, project_id: str):
@@ -588,6 +597,8 @@ class ProjectLogHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         # Skip dashboard / uvicorn noise
         if record.name in self._SUPPRESS:
+            return
+        if record.name in self._SUPPRESS_BELOW_WARNING and record.levelno < logging.WARNING:
             return
         try:
             line = self.format(record)
@@ -3732,9 +3743,31 @@ def main():
     # Re-check here so an explicit `--host` override cannot widen exposure.
     _assert_safe_bind({**dashboard_cfg, "host": host})
 
+    # Console plus a rotating file. Under Task Scheduler the console goes
+    # nowhere, so until now anything the dashboard logged outside a project's
+    # own handler was simply lost -- which is why three interrupted runs on
+    # 2026-09-04 could not be traced to whatever asked for them.
+    log_path = shared_paths.PROJECTS_DIR / "dashboard.log"
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        handlers.append(
+            logging.handlers.RotatingFileHandler(
+                log_path,
+                maxBytes=8 * 1024 * 1024,
+                backupCount=3,
+                encoding="utf-8",
+            )
+        )
+    except OSError as exc:
+        # Console-only is a working dashboard; refusing to start over a log
+        # file would not be.
+        print(f"Could not open {log_path} for logging; console only: {exc}")
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
+        handlers=handlers,
     )
 
     logger.info("Starting Brain Dashboard on %s:%d", host, port)

@@ -279,6 +279,51 @@ def _extract_json(text: str) -> dict[str, Any]:
     return value
 
 
+def _failure_summary(exc: BaseException) -> str:
+    """One readable line that keeps the part which says what went wrong.
+
+    Every escalation site used ``_failure_summary(exc)``. httpx writes
+    a multi-line message -- status and URL on the first line, a documentation
+    link on the second -- and ``GeminiApiClient`` appends the response body
+    after all of it as ``; response=...``. Taking the first line therefore
+    threw away the only part that identifies the problem.
+
+    That cost real time on 2026-09-04: a ``400 INVALID_ARGUMENT`` caused by a
+    responseSchema the API would not accept was logged as plain "unavailable",
+    indistinguishable from the 503 above it, and had to be reproduced by hand
+    to find out which key was at fault.
+    """
+    return re.sub(r"\s+", " ", str(exc)).strip()[:600]
+
+
+def _is_malformed_request(summary: str) -> bool:
+    """Whether a failure means "this can never work" rather than "not right now".
+
+    A 4xx that is not a rate limit fails identically on every retry and every
+    model, so it deserves ERROR and a trace outcome of its own. Recording it as
+    "unavailable" next to genuine 503s is exactly what let a broken
+    responseSchema sit unnoticed behind a working fallback.
+    """
+    if "429" in summary:
+        return False
+    return any(code in summary for code in ("400", "403", "404", "422")) or "INVALID_ARGUMENT" in summary
+
+
+# Keys `generateContent` will not accept in a responseSchema.
+#
+# The first four are Pydantic bookkeeping. `maxItems`/`minItems` are the
+# interesting ones: the API rejects the whole request with a bare
+# `400 INVALID_ARGUMENT` when either is present, as an integer *or* a string,
+# even though both appear in the published schema subset. Measured against
+# gemini-3.5-flash and -flash-lite on 2026-09-04 by bisecting a failing
+# schema one key at a time; removing `maxItems` alone was sufficient.
+#
+# Nothing is lost by dropping them. They were never a guarantee -- the model
+# is free to ignore any bound -- and the real enforcement is the Pydantic
+# model that parses the response, which still applies every constraint.
+_GEMINI_SCHEMA_REJECTS = frozenset({"$defs", "title", "default", "additionalProperties", "maxItems", "minItems"})
+
+
 def _gemini_response_schema(schema: dict[str, Any]) -> dict[str, Any]:
     """Inline Pydantic references and remove metadata outside Gemini's subset."""
     definitions = dict(schema.get("$defs", {}))
@@ -295,11 +340,7 @@ def _gemini_response_schema(schema: dict[str, Any]) -> dict[str, Any]:
             if not isinstance(target, dict):
                 raise ValueError(f"Unresolved response-schema reference: {reference}")
             return convert(target)
-        return {
-            key: convert(item)
-            for key, item in value.items()
-            if key not in {"$defs", "title", "default", "additionalProperties"}
-        }
+        return {key: convert(item) for key, item in value.items() if key not in _GEMINI_SCHEMA_REJECTS}
 
     converted = convert(schema)
     if not isinstance(converted, dict):
@@ -839,9 +880,27 @@ class GeminiValidationService:
                 )
                 return raw, stage, latency_ms
             except _VALIDATION_RECOVERABLE_ERRORS as exc:
-                summary = str(exc).split("\n")[0][:300]
-                logger.warning("%s unavailable (%s): %s", web_purpose, stage, summary)
-                trace.append({"outcome": "unavailable", "stage": stage, "reason": summary})
+                summary = _failure_summary(exc)
+                # Escalation still happens either way -- the web tier does not
+                # use a responseSchema, so it can succeed where the API tier
+                # cannot -- but a rejected request is our bug and should not
+                # read like someone else's outage.
+                malformed = _is_malformed_request(summary)
+                logger.log(
+                    logging.ERROR if malformed else logging.WARNING,
+                    "%s %s (%s): %s",
+                    web_purpose,
+                    "sent a request the API rejected" if malformed else "unavailable",
+                    stage,
+                    summary,
+                )
+                trace.append(
+                    {
+                        "outcome": "malformed_request" if malformed else "unavailable",
+                        "stage": stage,
+                        "reason": summary,
+                    }
+                )
         return None, "", 0
 
     def adjudicate_unlinked_speakers(
@@ -1183,7 +1242,7 @@ class GeminiValidationService:
                 )
                 batch = CharacterAugmentationBatch.model_validate(raw)
             except _VALIDATION_RECOVERABLE_ERRORS as exc:
-                err_summary = str(exc).split("\n")[0][:300]
+                err_summary = _failure_summary(exc)
                 trace.append({"stage": stage, "model": model, "error": err_summary})
                 continue
 
@@ -1308,7 +1367,7 @@ class GeminiValidationService:
                 )
                 batch = ExtractionBatch.model_validate(raw)
             except _VALIDATION_RECOVERABLE_ERRORS as exc:
-                err_summary = str(exc).split("\n")[0][:300]
+                err_summary = _failure_summary(exc)
                 for item_id in sorted(remaining):
                     self._event(project_dir, "extraction", item_id, stage, model, "unavailable", None, err_summary)
                     trace.append(
@@ -1562,7 +1621,7 @@ class GeminiValidationService:
                         ),
                     )
                 except _VALIDATION_RECOVERABLE_ERRORS as exc:
-                    err_summary = str(exc).split("\n")[0][:300]
+                    err_summary = _failure_summary(exc)
                     logger.warning("Attribution escalation %s unavailable: %s", stage, err_summary)
                     trace.append(
                         {
@@ -1756,7 +1815,7 @@ class GeminiValidationService:
                 )
                 decision = AudioDecision.model_validate(raw)
             except _VALIDATION_RECOVERABLE_ERRORS as exc:
-                err_summary = str(exc).split("\n")[0][:300]
+                err_summary = _failure_summary(exc)
                 errors.append(f"{stage}: {err_summary}")
                 result.external_validation_history.append(
                     {
