@@ -585,6 +585,23 @@ class CharacterAnalyzer:
             if cid != "narrator"
         }
 
+        require_approval = bool(
+            (self.config.get("external_validation", {}).get("cast_adjudication", {}) or {}).get(
+                "require_approval", False
+            )
+        )
+
+        applied_aliases = self._recover_unlinked_speakers(
+            external, project_dir, characters, roster, source_text, require_approval
+        )
+        if applied_aliases:
+            # A recovered alias changes what the roster answers to, so refresh
+            # it before duplicate detection reads it.
+            for record in applied_aliases:
+                entry = roster.get(record["character_id"])
+                if entry is not None and record["alias"] not in entry["aliases"]:
+                    entry["aliases"].append(record["alias"])
+
         def evidence_for(left_id: str, right_id: str) -> list[str]:
             return self._pair_evidence_snippets(left_id, right_id, characters, source_text)
 
@@ -597,12 +614,6 @@ class CharacterAnalyzer:
         except Exception as exc:
             logger.warning("[CharacterAnalyzer] Cast identity adjudication failed: %s", exc)
             return registry
-
-        require_approval = bool(
-            (self.config.get("external_validation", {}).get("cast_adjudication", {}) or {}).get(
-                "require_approval", False
-            )
-        )
 
         applied: list[dict[str, Any]] = []
         refused: list[dict[str, Any]] = []
@@ -627,6 +638,81 @@ class CharacterAnalyzer:
                 len(applied),
             )
         return registry
+
+    def _recover_unlinked_speakers(
+        self,
+        external: Any,
+        project_dir: Path,
+        characters: dict[str, Any],
+        roster: dict[str, dict[str, Any]],
+        source_text: str,
+        require_approval: bool,
+    ) -> list[dict[str, Any]]:
+        """Attach aliases for names that speak but match no registry entry.
+
+        The measured case: "Zak" appears 38 times in a real book and speaks
+        repeatedly, while the registry holds Zaknafein with aliases
+        ["the weapons master", "Zaknafein"]. Nothing links them, so every
+        "Zak said" is unresolvable at attribution time.
+
+        Only the `alias` verdict is acted on. `new_character` and
+        `not_a_person` are recorded and left alone: adding or removing a
+        character is a bigger change than annotating one, and there is no
+        measured case for either yet.
+        """
+        if not hasattr(external, "adjudicate_unlinked_speakers"):
+            return []
+        candidates = cast_identity.find_unlinked_speakers(source_text, characters)
+        if not candidates:
+            return []
+
+        logger.info(
+            "[CharacterAnalyzer] %d name(s) speak but match no registry entry: %s",
+            len(candidates),
+            ", ".join(f"{n} x{c}" for n, c in list(candidates.items())[:6]),
+        )
+
+        def evidence_for(name: str) -> list[str]:
+            return self._name_evidence_snippets(name, source_text)
+
+        try:
+            result = external.adjudicate_unlinked_speakers(
+                project_dir=project_dir,
+                candidates=candidates,
+                roster=roster,
+                evidence_for=evidence_for,
+            )
+        except Exception as exc:
+            logger.warning("[CharacterAnalyzer] Unlinked speaker adjudication failed: %s", exc)
+            return []
+
+        applied: list[dict[str, Any]] = []
+        for record in result.get("aliases", []):
+            alias, target = record.get("name", ""), record.get("character_id", "")
+            veto = cast_identity.alias_veto(alias, target, characters, source_text)
+            if veto:
+                logger.info("[CharacterAnalyzer] Refused alias '%s' for '%s': %s", alias, target, veto)
+                continue
+            if require_approval:
+                logger.info("[CharacterAnalyzer] Holding alias '%s' for '%s' for approval", alias, target)
+                continue
+            applied.append(cast_identity.apply_alias(alias, target, characters))
+        return applied
+
+    @staticmethod
+    def _name_evidence_snippets(name: str, source_text: str, limit: int = 5) -> list[str]:
+        """Passages where a candidate name is used, for grounding its verdict."""
+        pattern = re.compile(rf"\b{re.escape(name)}\b")
+        snippets: list[str] = []
+        for match in pattern.finditer(source_text):
+            start = max(0, match.start() - 240)
+            end = min(len(source_text), match.end() + 240)
+            snippet = source_text[start:end].replace("\n", " ").strip()
+            if snippet and snippet not in snippets:
+                snippets.append(snippet)
+            if len(snippets) >= limit:
+                break
+        return snippets
 
     @staticmethod
     def _pair_evidence_snippets(
@@ -686,6 +772,7 @@ class CharacterAnalyzer:
         applied: list[dict[str, Any]],
         refused: list[dict[str, Any]],
         require_approval: bool,
+        applied_aliases: list[dict[str, Any]] | None = None,
     ) -> None:
         """Record every decision, including the refusals and why.
 
@@ -702,6 +789,7 @@ class CharacterAnalyzer:
                     "schema_version": 1,
                     "require_approval": require_approval,
                     "applied": applied,
+                    "recovered_aliases": list(applied_aliases or []),
                     "refused": refused,
                     "held_for_review": result.get("review", []),
                     "trace": result.get("trace", []),

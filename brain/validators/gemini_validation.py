@@ -246,6 +246,21 @@ class CastMergeBatch(BaseModel):
     decisions: list[CastMergeDecision] = Field(default_factory=list)
 
 
+class UnlinkedSpeakerDecision(BaseModel):
+    """What an unregistered but speaking name actually is."""
+
+    name: str
+    decision: Literal["alias", "new_character", "not_a_person", "abstain"]
+    character_id: str | None = None
+    confidence: float = Field(ge=0.0, le=1.0)
+    reason: str = Field(max_length=1000)
+    evidence: list[str] = Field(default_factory=list, max_length=6)
+
+
+class UnlinkedSpeakerBatch(BaseModel):
+    decisions: list[UnlinkedSpeakerDecision] = Field(default_factory=list)
+
+
 def _extract_json(text: str) -> dict[str, Any]:
     candidate = text.strip()
     fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", candidate, re.DOTALL)
@@ -795,6 +810,160 @@ class GeminiValidationService:
 
         return {"merges": merges, "review": review, "trace": trace}
 
+    def _call_ladder(
+        self,
+        stages: list[tuple[str, str]],
+        prompt: str,
+        schema: dict[str, Any],
+        web_purpose: str,
+        project_dir: Path,
+        trace: list[dict[str, Any]],
+    ) -> tuple[dict[str, Any] | None, str, int]:
+        """Try each stage in order, returning the first structured response.
+
+        The rest of this module escalates API triage -> API adjudication ->
+        persistent web chat, and the cast passes must too: the API tier is the
+        one with a daily quota, and a 429 there is exactly when the browser
+        session earns its keep. Returns `(payload, stage, latency_ms)`, or
+        `(None, "", 0)` when every tier failed.
+        """
+        for stage, model in stages:
+            try:
+                raw, latency_ms = self._call_stage(
+                    stage,
+                    lambda stage=stage, model=model: (
+                        self.web.generate_json(project_dir, web_purpose, prompt)
+                        if stage == "gemini_web"
+                        else self.api.generate_json(model=model, prompt=prompt, schema=schema)
+                    ),
+                )
+                return raw, stage, latency_ms
+            except _VALIDATION_RECOVERABLE_ERRORS as exc:
+                summary = str(exc).split("\n")[0][:300]
+                logger.warning("%s unavailable (%s): %s", web_purpose, stage, summary)
+                trace.append({"outcome": "unavailable", "stage": stage, "reason": summary})
+        return None, "", 0
+
+    def adjudicate_unlinked_speakers(
+        self,
+        *,
+        project_dir: Path,
+        candidates: dict[str, int],
+        roster: dict[str, dict[str, Any]],
+        evidence_for: Any,
+    ) -> dict[str, Any]:
+        """Classify names that speak in the text but answer to no registry entry.
+
+        Measured on a real book: "Zak" appears 38 times and speaks repeatedly,
+        while the registry holds Zaknafein with no such alias. Nothing links
+        them -- "Zak" is not a registry entry, so identity adjudication never
+        sees it, and it is not lexically derivable from `zaknafein`.
+
+        Each candidate is one of: an `alias` of an existing character, a
+        `new_character`, `not_a_person` (the scan's regex catching a place or
+        an object), or `abstain`. Only `alias` is acted on by the caller; the
+        rest are recorded. Every verdict must cite verbatim source.
+        """
+        if not self.enabled or not self.cast_adjudication_enabled or not candidates:
+            return {"aliases": [], "review": [], "trace": []}
+
+        trace: list[dict[str, Any]] = []
+        snippets: dict[str, list[str]] = {name: list(evidence_for(name) or []) for name in candidates}
+        usable = {name: hits for name, hits in candidates.items() if snippets.get(name)}
+        if not usable:
+            trace.append({"outcome": "rejected", "reason": "no source evidence for any candidate"})
+            return {"aliases": [], "review": [], "trace": trace}
+
+        prompt = (
+            "An audiobook pipeline found these names attributed with a speech "
+            "verb in the source text, but none of them matches a character in "
+            "its registry. Classify each one using ONLY the supplied "
+            "excerpts.\n\n"
+            "- 'alias': it is another name for a character already in the "
+            "registry. Give that character's id in `character_id`.\n"
+            "- 'new_character': a real speaking person the registry is "
+            "missing entirely.\n"
+            "- 'not_a_person': the scan matched a place, object, animal or "
+            "phrase rather than a speaker.\n"
+            "- 'abstain': the excerpts do not settle it.\n\n"
+            "Every entry in `evidence` MUST be copied verbatim from the "
+            "excerpts.\n\n"
+            "Return JSON matching this schema: "
+            + json.dumps(UnlinkedSpeakerBatch.model_json_schema(), ensure_ascii=False)
+            + "\nREGISTRY:\n"
+            + json.dumps(roster, ensure_ascii=False, indent=2)
+            + "\nCANDIDATES:\n"
+            + json.dumps(
+                {name: {"speech_attributions": hits} for name, hits in usable.items()},
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\nEXCERPTS:\n"
+            + json.dumps({name: snippets[name] for name in usable}, ensure_ascii=False, indent=2)
+        )
+
+        raw, stage, latency_ms = self._call_ladder(
+            [
+                ("gemini_api_triage", self.cast_roster_model),
+                ("gemini_api_adjudication", self.cast_merge_model),
+                ("gemini_web", "Gemini web Pro"),
+            ],
+            prompt,
+            UnlinkedSpeakerBatch.model_json_schema(),
+            "unlinked_speakers_v1",
+            project_dir,
+            trace,
+        )
+        if raw is None:
+            return {"aliases": [], "review": [], "trace": trace}
+        try:
+            batch = UnlinkedSpeakerBatch.model_validate(raw)
+        except Exception as exc:
+            trace.append({"outcome": "rejected", "reason": f"unparsable response: {exc}"[:300]})
+            return {"aliases": [], "review": [], "trace": trace}
+
+        aliases: list[dict[str, Any]] = []
+        review: list[dict[str, Any]] = []
+        for decision in batch.decisions:
+            if decision.name not in usable:
+                trace.append({"name": decision.name, "outcome": "rejected", "reason": "not a candidate"})
+                continue
+            grounded = self._cast_evidence_is_grounded(decision, snippets[decision.name])
+            record = {
+                "name": decision.name,
+                "decision": decision.decision,
+                "character_id": decision.character_id,
+                "confidence": decision.confidence,
+                "reason": decision.reason,
+                "evidence": list(decision.evidence),
+                "grounded": grounded,
+                "stage": stage,
+            }
+            self._event(
+                project_dir,
+                "cast",
+                f"unlinked:{decision.name}",
+                "gemini_api" if stage != "gemini_web" else "gemini_web",
+                stage,
+                decision.decision,
+                decision.confidence,
+                self._clean_review_reason("unlinked speaker", decision),
+                latency_ms,
+            )
+            if decision.decision != "alias" or not decision.character_id:
+                trace.append(record)
+                continue
+            if not grounded:
+                trace.append({**record, "outcome": "rejected", "reason": "evidence is not verbatim"})
+                continue
+            if decision.confidence < self.cast_merge_confidence:
+                trace.append({**record, "outcome": "review"})
+                review.append(record)
+                continue
+            trace.append({**record, "outcome": "alias"})
+            aliases.append(record)
+        return {"aliases": aliases, "review": review, "trace": trace}
+
     def _propose_cast_duplicates(
         self,
         project_dir: Path,
@@ -819,29 +988,32 @@ class GeminiValidationService:
             + "\nCAST:\n"
             + json.dumps(roster, ensure_ascii=False, indent=2)
         )
-        stage = "gemini_api_triage"
+        raw, stage, latency_ms = self._call_ladder(
+            [
+                ("gemini_api_triage", self.cast_roster_model),
+                ("gemini_api_adjudication", self.cast_merge_model),
+                ("gemini_web", "Gemini web Pro"),
+            ],
+            prompt,
+            CastRosterBatch.model_json_schema(),
+            "cast_roster_v1",
+            project_dir,
+            trace,
+        )
+        if raw is None:
+            return []
         try:
-            raw, latency_ms = self._call_stage(
-                stage,
-                lambda: self.api.generate_json(
-                    model=self.cast_roster_model,
-                    prompt=prompt,
-                    schema=CastRosterBatch.model_json_schema(),
-                ),
-            )
             batch = CastRosterBatch.model_validate(raw)
-        except _VALIDATION_RECOVERABLE_ERRORS as exc:
-            summary = str(exc).split("\n")[0][:300]
-            logger.warning("Cast duplicate proposal unavailable: %s", summary)
-            trace.append({"outcome": "unavailable", "stage": stage, "reason": summary})
+        except Exception as exc:
+            trace.append({"outcome": "rejected", "reason": f"unparsable roster response: {exc}"[:300]})
             return []
 
         self._event(
             project_dir,
             "cast",
             "roster",
-            "gemini_api",
-            self.cast_roster_model,
+            "gemini_api" if stage != "gemini_web" else "gemini_web",
+            stage,
             "proposed",
             None,
             f"{len(batch.proposals)} duplicate pair(s) proposed from {len(roster)} entries",
@@ -889,30 +1061,27 @@ class GeminiValidationService:
             + "\nEXCERPTS:\n"
             + json.dumps(snippets, ensure_ascii=False, indent=2)
         )
-        stage = "gemini_api_adjudication"
+        raw, stage, latency_ms = self._call_ladder(
+            [
+                ("gemini_api_adjudication", self.cast_merge_model),
+                ("gemini_web", "Gemini web Pro"),
+            ],
+            prompt,
+            CastMergeBatch.model_json_schema(),
+            "cast_merge_v1",
+            project_dir,
+            trace,
+        )
+        if raw is None:
+            return None
         try:
-            raw, latency_ms = self._call_stage(
-                stage,
-                lambda: self.api.generate_json(
-                    model=self.cast_merge_model,
-                    prompt=prompt,
-                    schema=CastMergeBatch.model_json_schema(),
-                ),
-            )
             batch = CastMergeBatch.model_validate(raw)
-        except _VALIDATION_RECOVERABLE_ERRORS as exc:
-            summary = str(exc).split("\n")[0][:300]
-            logger.warning(
-                "Cast merge adjudication unavailable for %s/%s: %s",
-                proposal.left_id,
-                proposal.right_id,
-                summary,
-            )
+        except Exception as exc:
             trace.append(
                 {
                     "pair": [proposal.left_id, proposal.right_id],
-                    "outcome": "unavailable",
-                    "reason": summary,
+                    "outcome": "rejected",
+                    "reason": f"unparsable adjudication response: {exc}"[:300],
                 }
             )
             return None
@@ -923,8 +1092,8 @@ class GeminiValidationService:
                     project_dir,
                     "cast",
                     f"{proposal.left_id}|{proposal.right_id}",
-                    "gemini_api",
-                    self.cast_merge_model,
+                    "gemini_api" if stage != "gemini_web" else "gemini_web",
+                    stage,
                     decision.decision,
                     decision.confidence,
                     self._clean_review_reason("cast", decision),

@@ -251,6 +251,17 @@ Whole-cast duplicate detection, run once after book-wide character analysis.
 | `min_confidence` | Bar a merge must clear, default `0.95`. Higher than an attribute enrichment because a merge gives two characters one voice for a whole book |
 | `require_approval` | `false` (default) applies qualifying merges and records everything in `cast_identity_audit.json`. `true` holds them for approval instead -- safer, but the evidence is verbatim source text, so approving means reading spoilers |
 
+The same pass also recovers **unlinked speaker aliases**: names attributed with
+a speech verb that no registry entry answers to. Measured case -- "Zak" appears
+38 times in a real book and speaks repeatedly, while the registry held
+Zaknafein with no such alias, leaving every attribution unresolvable. Only the
+`alias` verdict is applied; `new_character` and `not_a_person` are recorded
+without acting on them.
+
+All three calls escalate `gemini_api_triage` -> `gemini_api_adjudication` ->
+`gemini_web`, so a daily-quota 429 falls back to the persistent browser session
+rather than disabling the pass.
+
 Every proposal is filtered through local deterministic vetoes the model cannot
 override: the narrator is never merged, explicit genders must not disagree, ids
 differing only by a positional or numeric marker are refused, the citation must

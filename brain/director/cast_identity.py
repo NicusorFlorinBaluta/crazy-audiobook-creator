@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import Counter
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -272,3 +273,172 @@ def choose_primary(
 
     left, right = weight(left_id), weight(right_id)
     return (left_id, right_id) if left >= right else (right_id, left_id)
+
+
+# ---------------------------------------------------------------------------
+# Unlinked speaker recovery
+# ---------------------------------------------------------------------------
+#
+# Measured on the real book: "Zak" appears 38 times and speaks repeatedly
+# ("Zak said", "Zak explained", "Zak admitted"), but the registry holds
+# Zaknafein with aliases ["the weapons master", "Zaknafein"] and no "Zak". It
+# is not a registry entry, so identity adjudication never sees it; it is not
+# lexically linkable to `zaknafein` either. Every one of those attributions is
+# unresolvable at scripting time.
+#
+# That is a *missing alias on an existing character*, which is a different
+# thing from a missing character, and it is the case this scan targets.
+
+# Verbs that mark the preceding or following proper noun as a speaker.
+_SPEECH_VERBS = (
+    r"(?:said|asked|replied|whispered|shouted|murmured|answered|added|called|"
+    r"snapped|growled|declared|explained|admitted|continued|insisted|muttered|"
+    r"agreed|countered|offered|warned|repeated|breathed|laughed)"
+)
+
+# Capitalised words that begin sentences or stand in for names. Without this the
+# scan reports "She said" and "You asked" as unknown speakers.
+_NOT_A_NAME = {
+    "he",
+    "she",
+    "it",
+    "they",
+    "we",
+    "you",
+    "i",
+    "who",
+    "what",
+    "that",
+    "this",
+    "there",
+    "then",
+    "and",
+    "but",
+    "the",
+    "one",
+    "someone",
+    "anyone",
+    "nobody",
+    "everyone",
+    "all",
+    "both",
+    "each",
+    "another",
+    "others",
+    "still",
+    "yet",
+    "when",
+    "where",
+    "why",
+    "how",
+    "his",
+    "her",
+    "their",
+    "its",
+    "our",
+    "my",
+}
+
+
+def find_unlinked_speakers(
+    text: str,
+    characters: dict[str, Any],
+    *,
+    min_attributions: int = 2,
+) -> dict[str, int]:
+    """Names attributed with a speech verb that no registry entry answers to.
+
+    Returns name -> attribution count, highest first.
+
+    `min_attributions` defaults to 2 because a single hit is dominated by
+    noise: on the real book a floor of 1 yields 16 candidates, most of them
+    place names caught by the regex (Taulmaril is a bow, Kryptgarden a forest).
+    The floor does not decide anything -- it only bounds how much gets sent for
+    adjudication, and the model still has to ground every verdict.
+    """
+    if not text:
+        return {}
+
+    known: set[str] = set()
+    for char_id, entry in characters.items():
+        name = entry.get("name") if isinstance(entry, dict) else getattr(entry, "name", None)
+        aliases = entry.get("aliases") if isinstance(entry, dict) else getattr(entry, "aliases", None)
+        for term in [char_id.replace("_", " "), str(name or "")] + [str(a) for a in aliases or []]:
+            for word in re.split(r"[\s_]+", term):
+                cleaned = word.strip("'\".,;:-").casefold()
+                if len(cleaned) >= 3:
+                    known.add(cleaned)
+
+    name_pattern = r"[A-Z][a-z'\-]{2,}"
+    counts: Counter[str] = Counter()
+    for pattern in (
+        rf"\b({name_pattern})\s+{_SPEECH_VERBS}\b",
+        rf"\b{_SPEECH_VERBS}\s+({name_pattern})\b",
+    ):
+        for match in re.finditer(pattern, text):
+            candidate = match.group(1).strip()
+            folded = candidate.casefold()
+            if folded in _NOT_A_NAME or folded in known:
+                continue
+            counts[candidate] += 1
+
+    return {name: count for name, count in counts.most_common() if count >= max(1, min_attributions)}
+
+
+def alias_veto(
+    alias: str,
+    character_id: str,
+    characters: dict[str, Any],
+    text: str,
+) -> str | None:
+    """Return why this alias must not be attached, or None if it may be.
+
+    Adding an alias is far safer than merging -- nothing is destroyed and no
+    character disappears -- so the bar is lower than `merge_veto`. It is not
+    absent, though: an alias silently redirects every future attribution of
+    that name.
+    """
+    alias = (alias or "").strip()
+    if len(alias) < 3:
+        return "an alias must be at least three characters"
+    if character_id not in characters:
+        return "the target character is not in the registry"
+    if character_id == "narrator":
+        return "the narrator does not take aliases"
+
+    folded = alias.casefold()
+    if folded in _NOT_A_NAME:
+        return "the alias is a pronoun or sentence opener, not a name"
+
+    # The alias must actually be in the book. A model-invented name would
+    # redirect attributions that can never occur, and points at a bad proposal.
+    if not re.search(rf"\b{re.escape(alias)}\b", text, re.IGNORECASE):
+        return "the alias does not appear in the source text"
+
+    # It must not already belong to somebody else, or two characters would
+    # answer to the same name and attribution could not choose between them.
+    for other_id, entry in characters.items():
+        if other_id == character_id:
+            continue
+        name = entry.get("name") if isinstance(entry, dict) else getattr(entry, "name", None)
+        aliases = entry.get("aliases") if isinstance(entry, dict) else getattr(entry, "aliases", None)
+        owned = {str(name or "").casefold(), other_id.replace("_", " ").casefold()}
+        owned |= {str(a).casefold() for a in aliases or []}
+        if folded in owned:
+            return f"'{alias}' already belongs to '{other_id}'"
+
+    return None
+
+
+def apply_alias(alias: str, character_id: str, characters: dict[str, Any]) -> dict[str, Any]:
+    """Attach a recovered alias to an existing character."""
+    entry = characters[character_id]
+    aliases = list((entry.get("aliases") if isinstance(entry, dict) else getattr(entry, "aliases", None)) or [])
+    if alias not in aliases:
+        aliases.append(alias)
+    if isinstance(entry, dict):
+        entry["aliases"] = aliases
+    else:
+        entry.aliases = aliases
+    logger.info("[CastIdentity] Recovered alias '%s' for '%s'", alias, character_id)
+    return {"character_id": character_id, "alias": alias}

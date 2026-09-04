@@ -123,22 +123,102 @@ when wanted, and never pushed in front of anyone.
 `require_approval: true` holds every merge instead. Safer, and the right choice
 for a book already read or a cast that must be exactly right.
 
-## What this does not do
+## Unlinked speaker recovery
 
-- **Missing speaking characters.** Detecting a speaker the analysis never
-  registered needs a different evidence shape — scanning unattributed dialogue,
-  not comparing roster entries. Pass 2 already adds speakers and records them
-  with `discovered_in_pass2`.
-- **Spurious entries.** Deleting a "character" that is really a descriptor was
-  considered and left out. Applying it destroys dialogue rather than
-  redistributing it, which is a worse failure than a duplicate voice, and it
-  would double the false-positive surface of the same prompt.
-- **Splits.** One registry entry covering two people is the inverse problem and
-  needs per-line re-attribution, not a roster decision.
+A second, measured gap, found while answering "could Gemini's general knowledge
+recover missing speakers?".
+
+> **"Zak" appears 38 times in the real book and speaks repeatedly** — *"Zak
+> said"*, *"Zak explained"*, *"Zak admitted"* — while the registry holds
+> Zaknafein with aliases `["the weapons master", "Zaknafein"]` and no "Zak".
+
+Nothing links them. "Zak" is not a registry entry, so identity adjudication
+never sees it; it is not lexically derivable from `zaknafein` either. Every one
+of those attributions is unresolvable at scripting time.
+
+Note the category: this is a **missing alias on an existing character**, not a
+missing character. Neither the original design nor the question that prompted it
+had that case in view.
+
+`cast_identity.find_unlinked_speakers` scans for names attributed with a speech
+verb that no registry entry answers to. On the real book, a floor of 2
+attributions yields three candidates — `Zak` ×12, `Spider` ×3, `Ten-` ×2 —
+against sixteen at a floor of 1, where the extra thirteen are pronouns and
+place names the regex catches (`Taulmaril` is a bow, `Kryptgarden` a forest).
+The floor decides nothing; it bounds how much is sent for adjudication.
+
+Each candidate is classified `alias` / `new_character` / `not_a_person` /
+`abstain` against verbatim excerpts. **Only `alias` is acted on.** Its vetoes:
+the alias must appear verbatim in the source, must not already belong to
+another character (two characters answering to one name leaves attribution
+unable to choose), must not be a pronoun, and the narrator takes none.
+
+## On Gemini's general knowledge, and web search
+
+The original idea was to ask Gemini which characters speak, using what it knows
+about the book. Tested against both books in the library:
+
+| Book | Result |
+| --- | --- |
+| The Finest Edge of Twilight — R. A. Salvatore | empty list |
+| Isles of the Emberdark — Brandon Sanderson | empty list |
+
+Asked again **without** permission to decline — the phrasing that should
+provoke confabulation — it still returned zero names. So the failure mode is
+not hallucination for these books; it is simply that both are recent releases
+outside training data.
+
+That makes the feature's value inversely correlated with the need: useful for
+classics, empty for exactly the new fiction this pipeline processes. Not built.
+
+**Google Search grounding** (the `google_search` tool) was proposed as a way
+around that and **has not been tested** — the API key hit its daily quota
+during the experiments above. It is worth testing, with one caution recorded in
+advance: for a new instalment of a long-running series, the searchable material
+is retailer copy, reviews, and a series wiki. A wiki lists the *series* cast,
+not this book's speakers, so grounding could return confidently-sourced names
+of characters who never appear in this volume — a more dangerous failure than
+an empty answer, because it looks well-supported. Any implementation must keep
+the same rule as everything else here: a name that does not appear verbatim in
+the extracted text is rejected, whatever the citation says.
+
+## Not built, and why — revisit with evidence
+
+### Spurious entries (deleting a "character" that is not a person)
+
+The original objection was that deleting destroys dialogue. **That objection
+was wrong for this pass**, and the correction belongs on the record: it assumed
+post-attribution timing, and this runs *before* attribution. At that point no
+lines are assigned, so deletion loses only pass 1's estimated `dialogue_count`.
+If a real character were deleted, attribution would have no candidate and would
+mis-assign or flag — and the attribution gate already blocks on unresolved
+dialogue, so the failure is visible rather than silent.
+
+It is not built because there is **no measured case**. The scan's
+`not_a_person` verdict already records candidates of this shape without acting
+on them; if `cast_identity_audit.json` starts showing real registry entries
+classified that way, that is the evidence to build on.
+
+### Splits (one entry covering two people)
+
+Also defused by the timing: pre-attribution, a split is just "add the second
+character to the registry" and let attribution decide which lines go where. No
+re-attribution pass is needed.
+
+Not built for the same reason — no measured case in this library. The test
+would be a registry entry whose dialogue, on inspection, is spoken by two
+different people.
+
+### New characters
+
+The `new_character` verdict is recorded but never applied. Adding a character
+creates a voice, a reference clip and an attribution candidate; doing that on
+an unmeasured verdict is a bigger bet than annotating an existing entry. Build
+it when the audit shows a grounded `new_character` that is genuinely absent.
 
 ## Verification
 
-`tests/test_cast_identity.py`, 25 tests, no model loaded. The refusals are the
+`tests/test_cast_identity.py`, 36 tests, no model loaded. The refusals are the
 important half:
 
 - the twins are refused, with the conjunction reason;
@@ -154,7 +234,17 @@ important half:
   so attribution can still resolve lines written under the old id;
 - the roster prompt carries no source text;
 - the approval gate holds merges instead of applying them;
-- a disabled adjudicator is a no-op that writes nothing.
+- a disabled adjudicator is a no-op that writes nothing;
+- a speaking name absent from the registry is found, and a known one is not;
+- pronouns and sentence openers are not reported as speakers;
+- an invented alias, an alias owned by another character, a pronoun alias and
+  an unknown target are all refused;
+- applying an alias is additive and idempotent.
+
+All three Gemini calls escalate `gemini_api_triage` → `gemini_api_adjudication`
+→ `gemini_web`, matching the rest of the module. The first implementation of
+the cast pass was API-only, which meant a 429 disabled it entirely rather than
+falling back to the browser session — fixed.
 
 **Not yet run against the live Gemini API.** The local guards are measured
 against real book text; the two Gemini stages are covered only by fakes. The

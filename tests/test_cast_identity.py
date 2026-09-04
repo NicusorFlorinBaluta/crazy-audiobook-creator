@@ -18,9 +18,12 @@ import unittest
 from pathlib import Path
 
 from brain.director.cast_identity import (
+    alias_veto,
+    apply_alias,
     apply_merge,
     choose_primary,
     conjunction_count,
+    find_unlinked_speakers,
     merge_veto,
 )
 
@@ -375,6 +378,85 @@ class CastAdjudicationWiringTests(unittest.TestCase):
         analyzer._adjudicate_cast_identity(registry, book, tmp)
         self.assertEqual(set(registry.characters), before)
         self.assertFalse((tmp / "cast_identity_audit.json").exists())
+
+
+class UnlinkedSpeakerScanTests(unittest.TestCase):
+    """Names that speak in the text but answer to no registry entry.
+
+    The measured case: "Zak" appears 38 times in the real book and speaks
+    repeatedly ("Zak said", "Zak explained", "Zak admitted"), while the
+    registry holds Zaknafein with aliases ["the weapons master", "Zaknafein"].
+    Nothing links them, so every one of those attributions is unresolvable.
+    """
+
+    def test_a_speaking_name_absent_from_the_registry_is_found(self) -> None:
+        text = (
+            '"So, you decided to join us," Zak said. He stood and stretched. '
+            '"I have no desire to see him," Zak admitted quietly afterwards.'
+        )
+        cast = {"zaknafein": {"name": "Zaknafein", "aliases": ["the weapons master"]}}
+        found = find_unlinked_speakers(text, cast)
+        self.assertIn("Zak", found)
+        self.assertEqual(found["Zak"], 2)
+
+    def test_a_known_name_is_not_reported(self) -> None:
+        text = '"Enough," Zaknafein said. "Enough," the weapons master said again.'
+        cast = {"zaknafein": {"name": "Zaknafein", "aliases": ["the weapons master"]}}
+        self.assertEqual(find_unlinked_speakers(text, cast), {})
+
+    def test_pronouns_and_sentence_openers_are_not_speakers(self) -> None:
+        """Without this the scan reports "She said" and "You asked" as names."""
+        text = "She said nothing. You asked twice. They replied. She said it again."
+        self.assertEqual(find_unlinked_speakers(text, {}), {})
+
+    def test_the_frequency_floor_bounds_the_noise(self) -> None:
+        """A floor of 1 yields mostly place names on real text; 2 is the default."""
+        text = '"Yes," Kryptgarden said once. "No," Zak said. "Maybe," Zak added.'
+        self.assertEqual(set(find_unlinked_speakers(text, {}, min_attributions=2)), {"Zak"})
+        self.assertIn("Kryptgarden", find_unlinked_speakers(text, {}, min_attributions=1))
+
+
+class AliasVetoTests(unittest.TestCase):
+    """Adding an alias cannot lose a character, but it does redirect names."""
+
+    TEXT = '"So," Zak said, and Zaknafein turned away. Drizzt watched them both.'
+
+    def _cast(self):
+        return {
+            "zaknafein": {"name": "Zaknafein", "aliases": ["the weapons master"]},
+            "drizzt": {"name": "Drizzt", "aliases": []},
+            "narrator": {"name": "Narrator", "aliases": []},
+        }
+
+    def test_a_grounded_alias_is_allowed(self) -> None:
+        self.assertIsNone(alias_veto("Zak", "zaknafein", self._cast(), self.TEXT))
+
+    def test_an_invented_alias_is_refused(self) -> None:
+        """A name the book never uses would redirect attributions that cannot occur."""
+        veto = alias_veto("Zaknafeen", "zaknafein", self._cast(), self.TEXT)
+        self.assertIn("does not appear in the source text", veto)
+
+    def test_an_alias_owned_by_another_character_is_refused(self) -> None:
+        """Two characters answering to one name leaves attribution unable to choose."""
+        veto = alias_veto("Drizzt", "zaknafein", self._cast(), self.TEXT)
+        self.assertIn("already belongs to", veto)
+
+    def test_the_narrator_takes_no_aliases(self) -> None:
+        self.assertIsNotNone(alias_veto("Zak", "narrator", self._cast(), self.TEXT))
+
+    def test_an_unknown_target_is_refused(self) -> None:
+        self.assertIsNotNone(alias_veto("Zak", "nobody", self._cast(), self.TEXT))
+
+    def test_a_pronoun_is_refused(self) -> None:
+        self.assertIsNotNone(alias_veto("She", "zaknafein", self._cast(), "She said so."))
+
+    def test_applying_an_alias_is_additive(self) -> None:
+        cast = self._cast()
+        apply_alias("Zak", "zaknafein", cast)
+        self.assertEqual(cast["zaknafein"]["aliases"], ["the weapons master", "Zak"])
+        # Idempotent: re-applying does not duplicate.
+        apply_alias("Zak", "zaknafein", cast)
+        self.assertEqual(cast["zaknafein"]["aliases"].count("Zak"), 1)
 
 
 if __name__ == "__main__":
