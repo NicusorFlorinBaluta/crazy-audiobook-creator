@@ -134,6 +134,30 @@ User-uploaded custom voice samples are strictly preserved during casting and re-
 
 A character-analysis fingerprint includes the full extracted book, model, prompt, and voice cap. A change invalidates scripts and voice bootstrap. Voice reference hashes are included in generation fingerprints, so regenerated references invalidate dependent line audio.
 
+### Voice bootstrap: VRAM phase ordering
+
+The VoiceDesign model is a **subprocess** on port 8101, not an in-process
+model, so its VRAM is fully released when the process exits. Bootstrap uses
+that to let the models take turns rather than co-reside on a 24 GB card:
+
+1. Boot VoiceDesign → design every character's reference → shut it down.
+2. Whisper transcript-checks the references → Whisper unloads.
+3. The Base speaker encoder embeds every reference and compares all pairs.
+4. **While voices collide and rounds remain** (`validation.voice_distinctness_rounds`,
+   default 2): re-boot VoiceDesign, redesign only the colliding voices with a
+   brief naming the specific voices they collided with, shut it down, re-embed
+   just those, re-compare the whole cast.
+5. Attach similarity warnings from the final measurement only, then
+   transcript-check whatever was replaced in one Whisper load.
+
+Step 4 is new. Comparison used to be terminal — VoiceDesign was already gone,
+so a collision could be reported but never repaired, and a 52-character cast
+handed the operator 22 flagged pairs. The loop is bounded, costs zero extra
+model boots when the first measurement is clean, never discards a working
+reference on a failed redesign, and replaces only the canonical candidate so
+operator-auditioned alternatives survive. See
+[decisions/2026-09-04-voice-distinctness-convergence.md](decisions/2026-09-04-voice-distinctness-convergence.md).
+
 ## Artifact model
 
 File existence is never sufficient evidence of completion.
@@ -269,6 +293,17 @@ The SQLite job queue performs atomic read-modify-write transactions and closes c
   stop.
 - Generation checks cancellation at safe segment boundaries.
 - Scheduled and deployment pauses park a live worker at chapter boundaries and preserve `active_stage`.
+- **`active_stage` outranks `status` when rendering.** `status` is coarse
+  (`waiting_for_review` means "blocked on a human"); `active_stage` names
+  *which* gate (`voice_review`). The dashboard resolves the pair through a
+  single helper, `resolvePipelineStage`, precisely so the rule is stated once.
+  The one deliberate exception is `renderWorkStatus`, which lets a genuinely
+  *terminal* status win — a paused or errored project must not be described by
+  the stage it happened to stop in. That exception must never be extended to
+  `waiting_for_review`: doing so made the `voice_review` branch unreachable and
+  told an operator blocked on voice approval to "Choose chapters and start the
+  pipeline", which cannot clear a review gate. Pinned by
+  `tests/frontend/work-status.test.mjs`.
 - Models unload only after the active operation releases the model lock, or after true idle time.
 - Starting a second dashboard project first interrupts the current project and
   waits for its worker to release the global GPU lease. If release cannot be

@@ -50,7 +50,17 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+# Imported before the environment setup below because it must run ahead of any
+# import that pulls in torch. `shared.constants` itself imports only `enum`.
+from shared.constants import TORCH_ALLOC_CONF, TORCH_ALLOC_ENV_VARS
+
 os.environ.setdefault("ROCM_SDK_TARGET_FAMILY", "custom")
+# Inherited by the managed Voice Server subprocess. `Pipeline` sets it on the
+# child environment explicitly as well; this covers a Voice Server started by
+# other means from a dashboard process. See `shared.constants` for the
+# crash-log evidence behind the value.
+for _alloc_var in TORCH_ALLOC_ENV_VARS:
+    os.environ.setdefault(_alloc_var, TORCH_ALLOC_CONF)
 
 from brain.dashboard.api.mobile import _chapter_duration
 from brain.dashboard.api.mobile import router as mobile_router

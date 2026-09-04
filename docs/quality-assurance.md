@@ -146,6 +146,34 @@ Qwen VoiceDesign creates each reusable reference by speaking a known gender-appr
 
 The exact spoken test sentence is stored as `ref_text`; it is not inferred from the voice description.
 
+### Cast distinctness convergence
+
+After the references exist, the Base speaker encoder embeds each one and
+compares every pair. A pair at or above `validation.voice_profile_similarity_warning`
+(default `0.985`) is a collision.
+
+This measurement used to be terminal: VoiceDesign had already been unloaded to
+free VRAM for the encoder, so a collision could only ever be reported. A
+52-character cast produced 22 flagged pairs for manual resolution, one of them
+a character at 0.992 against the narrator.
+
+Because VoiceDesign runs as a subprocess, the two models take turns instead.
+Up to `validation.voice_distinctness_rounds` extra rounds (default `2`) re-boot
+it, redesign **only** the colliding voices with a brief naming the specific
+voices they collided with, re-embed just those, and re-measure the whole cast.
+Whatever still collides when the rounds run out is surfaced for manual redesign
+exactly as before, so the loop can improve the outcome but never blocks it.
+
+Redesigned references are transcript-checked in a single Whisper load after the
+rounds finish — a contrast brief moves pitch and speaking rate, which is the
+kind of change that can hurt intelligibility, and the initial WER pass ran
+before any redesign existed.
+
+`BootstrapVoicesResponse.distinctness_rounds` reports per round which voices
+were redesigned and whether the collision count and worst similarity actually
+improved. Read it before assuming the loop is helping. Full rationale in
+[decisions/2026-09-04-voice-distinctness-convergence.md](decisions/2026-09-04-voice-distinctness-convergence.md).
+
 ## Chapter completeness
 
 Chapter requests and responses are reconciled by ID, never by `zip()` position:
@@ -201,6 +229,37 @@ Before a long book:
 7. Select All and confirm the full export is refused until every chapter is valid, then succeeds.
 
 Unit tests use fake engines and do not replace this model-level smoke test.
+
+## Frontend behaviour tests
+
+`tests/test_dashboard_frontend_ux.py` asserts that specific substrings appear
+in the frontend source. That style breaks when an attribute is reordered and
+passes when the surrounding logic is broken, so it cannot catch a wrong branch
+with intact markup — which is what shipped twice:
+
+- `waiting_for_review` was classified as a terminal status, so it shadowed
+  `active_stage` and the `voice_review` branch of `renderWorkStatus` became
+  unreachable. A project blocked on voice approval was told to "Choose chapters
+  and start the pipeline", which cannot clear a review gate.
+- The attention panel rendered "⚠️ Action required … ⚠️ **0** Action Required
+  items" — a red alarm asserting that nothing is wrong.
+
+`tests/frontend/` covers this class. The harness (`harness.mjs`) loads the real
+`index.html` under jsdom, evaluates the real scripts against it, and calls the
+real render functions; only the network and the WebSocket are stubbed. It waits
+for the document to finish loading *before* injecting the scripts, so app.js's
+`DOMContentLoaded` listener never fires and each test controls exactly what is
+rendered.
+
+```powershell
+npm ci
+npm test
+```
+
+`CAC_FRONTEND_DIR` points the harness at a different copy of the sources. That
+exists so a regression test can be proven to fail against pre-fix code rather
+than passing vacuously — the four regression tests above were verified that way.
+
 ## Verification tiers
 
 Use the cheapest tier that can prove the changed contract:

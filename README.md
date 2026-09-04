@@ -151,11 +151,25 @@ Two conventions the linter cannot enforce:
 
 The unit suite does not load the production TTS models. A real end-to-end smoke test still requires the configured Ollama, GPU models, and FFmpeg.
 
-The suite currently contains 527 tests. The 2026-09-03 review pass recorded
-524 passing with 3 intentional skips; the 5 NAS-sync tests additionally require
-the optional `paramiko` dependency. CI also runs `ruff check`, Python
-compilation over the repository root, JavaScript syntax checks for every
-frontend script, local documentation links, and configuration validation.
+The Python suite currently contains 561 tests. The 2026-09-04 pass recorded
+559 passing with 2 intentional skips; the 5 NAS-sync tests additionally require
+the optional `paramiko` dependency.
+
+There is also a behavioural frontend suite. The dashboard's state-machine logic
+lives in JavaScript, and a wrong branch with intact markup — which shipped
+twice — is invisible to both `node --check` and the source-substring assertions
+in `tests/test_dashboard_frontend_ux.py`. These tests load the real
+`index.html`, evaluate the real scripts against it, and call the real render
+functions:
+
+```powershell
+npm ci
+npm test
+```
+
+CI runs `ruff check`, Python compilation over the repository root, the Python
+suite, JavaScript syntax checks for every frontend script, the frontend
+behaviour suite, local documentation links, and configuration validation.
 
 Low-resource verification and environment inspection can be run separately:
 

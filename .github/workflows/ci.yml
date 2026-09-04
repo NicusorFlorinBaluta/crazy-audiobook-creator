@@ -71,6 +71,15 @@ jobs:
             if ($LASTEXITCODE -ne 0) { exit 1 }
           }
           node --check desktop/main.js
+      - name: Frontend behaviour tests
+        # Behavioural DOM tests, as distinct from the syntax check above and
+        # from the source-substring assertions in
+        # tests/test_dashboard_frontend_ux.py. The dashboard's state-machine
+        # logic lives in JavaScript, and a wrong branch with intact markup --
+        # which is what shipped twice -- is invisible to both of the others.
+        run: |
+          npm ci
+          npm test
       - name: Local documentation links
         run: python scripts/check_markdown_links.py
       - name: Configuration validity

@@ -304,7 +304,9 @@ The reference-voice test sentences in this file are informational; the canonical
 | `max_retries` | Additional attempts for fail/flag outcomes |
 | `keep_tts_and_whisper_resident` | Keep both models inside one chapter's retry loop; Whisper is still released at the chapter boundary |
 | `risk_aware_first_attempt` | Listening-approved clarity policy for very short emphatic lines; longer dialogue and ordinary narration remain unchanged |
-| `speaker_similarity_threshold` | Minimum Qwen speaker-encoder cosine similarity |
+| `speaker_similarity_threshold` | Minimum Qwen speaker-encoder cosine similarity between a generated line and its own reference |
+| `voice_profile_similarity_warning` | Cosine similarity at or above which two *different cast members* are judged too close to tell apart. Lower is stricter. Distinct from `speaker_similarity_threshold` above, which compares a line to its own reference |
+| `voice_distinctness_rounds` | Extra design/compare rounds spent separating voices that collide at the threshold above. Default `2`, clamped to `0`–`5`. Each round re-boots the VoiceDesign subprocess and redesigns only the colliding voices with a brief naming who they collided with, then re-measures. `0` restores report-only behaviour. See [decisions/2026-09-04-voice-distinctness-convergence.md](decisions/2026-09-04-voice-distinctness-convergence.md) |
 | `clipping_threshold` | Maximum sample peak in dBFS |
 | `max_silence_seconds` | Longest permitted internal silence |
 | `prosody.*` | Nonblocking monotone-warning enablement and explicit duration/pitch/dynamic-range thresholds; changes invalidate validation cache |
@@ -382,6 +384,36 @@ URLs, schedules, thresholds, attention backends, and validator backends fail
 fast with a combined actionable error. `scripts/runtime_preflight.py` reports
 the resolved Python/packages, FFmpeg, TTS attention backend, Whisper backend,
 model, device, and VAD mode without importing a GPU model.
+
+### GPU allocator environment
+
+Every process that loads a Torch model is started with:
+
+```
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+PYTORCH_HIP_ALLOC_CONF=expandable_segments:True
+```
+
+set via `setdefault`, so an operator override always wins. The value lives in
+`shared/constants.py` (`TORCH_ALLOC_CONF`), is applied by
+`apply_torch_alloc_conf()` in `brain/orchestrator/pipeline.py` when the managed
+Voice Server subprocess is launched, and is duplicated as a literal in
+`start_app.pyw` — which is deliberately dependency-free, so a test asserts the
+two stay in sync.
+
+The evidence is in `voice_crash.log`, which recorded three crashes reading:
+
+> HIP out of memory. Tried to allocate 3.39 GiB. GPU 0 has a total capacity of
+> 23.98 GiB **of which 23.33 GiB is free.**
+
+raised inside `transformers.modeling_utils.caching_allocator_warmup`. Failing a
+3.4 GiB allocation with 23 GiB free is caching-allocator fragmentation, not
+exhaustion — and the error text names this setting as the remedy. The Voice
+service loads, unloads and reloads Qwen3-TTS, the VoiceDesign helper and
+Whisper within one process at every stage boundary, which is precisely the
+pattern that fragments the allocator's arena. ROCm reads the HIP name and
+upstream Torch the CUDA name; both are set so the value survives a Torch
+upgrade that changes which one wins.
 
 `tts.adaptive_max_new_tokens` is experimental and disabled by default. It must
 not be promoted until the fixed TTS fixture proves that its bounded cap and

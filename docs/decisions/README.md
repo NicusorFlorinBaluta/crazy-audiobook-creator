@@ -32,6 +32,7 @@ Newest first.
 
 | Date | Record | Status |
 | --- | --- | --- |
+| 2026-09-04 | [Cast distinctness convergence](2026-09-04-voice-distinctness-convergence.md) | Current |
 | 2026-09-02 | [Pronunciation dictionary, cache hardening, and stability](2026-09-02-pronunciation-caching-and-stability-improvements.md) | Current |
 | 2026-09-02 | [Tiered dialogue attribution auto-fix](2026-09-02-tiered-dialogue-attribution-autofix.md) | Current |
 | 2026-08-23 | [Separate character pass and early attribution gate](separate-character-pass-and-attribution-gate-2026-08-23.md) | Current |
