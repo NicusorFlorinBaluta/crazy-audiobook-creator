@@ -92,10 +92,19 @@ def detect_suspicious_turns(
 
         dialogue_indices = [idx for idx, line in enumerate(lines) if _is_dialogue_line(line)]
 
+        # `lines`, `total` and `chapter` are bound as defaults rather than
+        # captured. The closure is only ever called within this iteration
+        # today, so the capture is currently harmless -- but it is harmless by
+        # accident, and would silently attribute one chapter's turns to another
+        # the moment this call is deferred, batched or made async.
         def build_suspicious_turn(
             idx: int,
             reason: str,
             pattern: str,
+            *,
+            lines: list = lines,
+            total: int = total,
+            chapter=chapter,
         ) -> SuspiciousTurn:
             target = lines[idx]
             w_start = max(0, idx - window_radius)

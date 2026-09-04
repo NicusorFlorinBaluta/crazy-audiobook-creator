@@ -726,7 +726,13 @@ class GeminiValidationService:
             try:
                 raw, latency_ms = self._call_stage(
                     stage,
-                    lambda: (
+                    # Loop variables bound as defaults, not captured.
+                    # `_call_stage` invokes this with no arguments and does so
+                    # within this iteration, so the capture is currently
+                    # harmless -- but it would silently send one stage's prompt
+                    # to another the moment the call is deferred or retried out
+                    # of line.
+                    lambda stage=stage, model=model, prompt=prompt: (
                         self.web.generate_json(
                             project_dir,
                             "character_augmentation_v1",
@@ -855,7 +861,9 @@ class GeminiValidationService:
             try:
                 raw, latency_ms = self._call_stage(
                     stage,
-                    lambda: (
+                    # Loop variables bound as defaults, not captured; see the
+                    # character-augmentation call site for the rationale.
+                    lambda stage=stage, model=model, stage_prompt=stage_prompt: (
                         self.web.generate_json(project_dir, "extraction_v1", stage_prompt)
                         if stage == "gemini_web"
                         else self.api.generate_json(
@@ -1079,7 +1087,13 @@ class GeminiValidationService:
                 try:
                     result, latency_ms = self._call_stage(
                         stage,
-                        lambda: self._run_attribution_stage(stage, model, stage_prompt, project_dir),
+                        # Loop variables bound as defaults, not captured; see
+                        # the character-augmentation call site for why.
+                        lambda stage=stage, model=model, stage_prompt=stage_prompt: (
+                            self._run_attribution_stage(
+                                stage, model, stage_prompt, project_dir
+                            )
+                        ),
                     )
                 except _VALIDATION_RECOVERABLE_ERRORS as exc:
                     err_summary = str(exc).split("\n")[0][:300]
@@ -1241,7 +1255,9 @@ class GeminiValidationService:
             try:
                 raw, latency_ms = self._call_stage(
                     stage,
-                    lambda: (
+                    # Loop variables bound as defaults, not captured; see the
+                    # character-augmentation call site for why.
+                    lambda stage=stage, model=model, prompt=prompt: (
                         self.web.generate_json(
                             project_dir, "audio_qa_v1", prompt, audio_path=audio_path,
                             reference_audio_path=reference_audio_path,

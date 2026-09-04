@@ -63,6 +63,7 @@ from shared.constants import (
     MASTERING_SCHEMA_VERSION,
     GenerationCancelled,
     PipelineStage,
+    apply_torch_alloc_conf,
 )
 from shared.logging_utils import rotate_file
 from shared.models import (
@@ -646,6 +647,9 @@ class Pipeline:
             "ROCM_SDK_TARGET_FAMILY",
             str(voice_cfg.get("rocm_target_family", "custom")),
         )
+        # This subprocess is the one that loads and unloads models repeatedly,
+        # and is where the fragmentation crashes in `voice_crash.log` occurred.
+        apply_torch_alloc_conf(env)
 
         log_path = self.projects_dir / "voice-server-managed.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2564,6 +2568,9 @@ class Pipeline:
 
             try:
                 progress_ticks: dict[str, float] = {}
+                # Which `generate_chapter` stream attempt the ticks above were
+                # measured on. A retry restarts the chapter, invalidating them.
+                stream_state: dict[str, int] = {"attempt": 1}
                 request = GenerateChapterRequest(
                     project_id=project_id,
                     chapter_number=chapter_script.chapter_number,
@@ -2576,13 +2583,42 @@ class Pipeline:
                     language=project_language,
                 )
 
-                def _on_generation_progress(msg: dict) -> None:
+                # `chapter_script`, `request_lines` and `progress_ticks` are
+                # bound as defaults rather than captured. The callback is
+                # consumed synchronously inside this iteration today, so the
+                # capture is currently harmless -- but harmless by accident:
+                # the moment generation is deferred or made async, a late event
+                # would be reported against the *next* chapter's script.
+                def _on_generation_progress(
+                    msg: dict,
+                    *,
+                    chapter_script=chapter_script,
+                    request_lines=request_lines,
+                    progress_ticks=progress_ticks,
+                    stream_state=stream_state,
+                ) -> None:
                     phase = msg.get("phase", "synthesis")
                     now = time.perf_counter()
                     estimator_key = (
                         f"{project_id}:chapter:{chapter_script.chapter_number}:"
                         f"{phase}"
                     )
+                    # A stream retry restarts the chapter from its first
+                    # utterance. Carrying the pre-failure samples forward would
+                    # blend two different runs into one rate estimate and skew
+                    # the ETA for the remainder of the chapter, so drop them and
+                    # re-measure.
+                    stream_attempt = int(msg.get("stream_attempt", 1) or 1)
+                    if stream_state["attempt"] != stream_attempt:
+                        logger.info(
+                            "Voice stream restarted (attempt %d); resetting "
+                            "chapter %d progress estimate",
+                            stream_attempt,
+                            chapter_script.chapter_number,
+                        )
+                        stream_state["attempt"] = stream_attempt
+                        progress_ticks.clear()
+
                     previous_tick = progress_ticks.get(phase)
                     if previous_tick is None:
                         self._progress_estimator.reset(estimator_key)

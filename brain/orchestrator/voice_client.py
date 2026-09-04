@@ -231,6 +231,18 @@ class VoiceClient:
                                 cache_note = " (cache hit)" if msg.get("cache_hit") else ""
                                 logger.info("%s segment %s%s", phase.title(), line_id, cache_note)
                                 if progress_callback:
+                                    # Stamp which stream attempt produced this
+                                    # event. A retry below restarts the chapter
+                                    # from zero, so a consumer keeping rate
+                                    # state (the pipeline's ETA estimator) must
+                                    # be able to tell a restart from forward
+                                    # progress. Without it, the pre-failure
+                                    # samples stay in the average and the ETA
+                                    # is wrong for the rest of the chapter.
+                                    #
+                                    # Distinct from `msg["attempt"]`, which is
+                                    # the Voice service's per-line retry count.
+                                    msg["stream_attempt"] = attempt
                                     progress_callback(msg)
                             elif data.get("type") == "result":
                                 return GenerateChapterResponse(**data.get("data", {}))
