@@ -92,6 +92,12 @@ cd ..
 
 ## Documentation
 
+**[docs/README.md](docs/README.md) is the index.** Every document carries a
+**Status** line under its title saying whether it describes current behaviour or
+is a dated historical record, so nothing has to be dated by guesswork.
+
+The reference set:
+
 - [Architecture](docs/architecture.md)
 - [Windows setup](docs/setup-windows.md)
 - [Configuration](docs/configuration.md)
@@ -101,14 +107,17 @@ cd ..
 - [Dashboard guide](docs/dashboard-guide.md)
 - [Voice design](docs/voice-design.md)
 - [Prompt and source-fidelity rules](docs/prompts.md)
-- [Production-readiness changes and next E2E gates](docs/production-readiness-2026-08-02.md)
-- [Full-book release validation and metrics (2026-08-11)](docs/e2e-run-2026-08-11.md)
-- [Earlier full-book E2E and echo incident baseline (2026-08-09)](docs/e2e-run-2026-08-09.md)
-- [Post-E2E prioritized improvement plan (2026-08-09)](docs/improvement-plan-post-e2e-2026-08-09.md)
-- [Post-release performance results and supported benchmarks (2026-08-11)](docs/performance-improvement-plan-post-release-2026-08-11.md)
-- [Deferred model/GPU/listening validation plan (2026-08-10)](docs/live-validation-plan-2026-08-10.md)
+- [Decision records](docs/decisions/README.md) — why the pipeline behaves as it does
 
-`implementation_plan*.md` and the `*chat*history*.md` conversation dumps are historical records, not current specifications. Current behavior is defined by this README, `docs/`, models, and executable tests.
+Run records, incident write-ups and completed plans are indexed under
+*Historical records* in [docs/README.md](docs/README.md). They are evidence, not
+specifications.
+
+`implementation_plan*.md`, `VOICE_APP_CHANGES_PLAN.md`,
+`VOICE_CLIENT_SERVER_PLAN.md` and the `*chat*history*.md` conversation dumps in
+the repository root are historical planning records from earlier two-machine and
+Ubuntu designs; some describe modules that were never written. Current behavior
+is defined by this README, `docs/`, models, and executable tests.
 
 ## Development
 

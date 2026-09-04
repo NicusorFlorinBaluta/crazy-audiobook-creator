@@ -1,5 +1,7 @@
 # SQLite Embedding Cache & Comprehensive Pipeline Improvements
 
+**Status:** Historical planning record — not a specification. Kept for context; some sections describe modules and deployments that were never built or have since been replaced. Current behavior is defined by [README.md](README.md), [docs/](docs/README.md), the models, and the executable tests.
+
 > **Historical implementation plan — substantially completed and superseded.**
 > Current cache, validation, lifecycle, and artifact behavior is documented in
 > [docs/architecture.md](docs/architecture.md) and

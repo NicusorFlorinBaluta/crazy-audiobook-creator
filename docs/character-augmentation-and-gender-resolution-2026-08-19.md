@@ -1,5 +1,7 @@
 # Character Augmentation and Gender Resolution (2026-08-19)
 
+**Status:** Historical record — A dated record of what was done and why. Evidence, not a specification -- do not implement from it.
+
 ## Context & Motivation
 
 During Stage ② Character Analysis (Pass 1) and Joint Scripting, local LLMs (Qwen 2.5 32B) frequently defaulted character gender classifications to `"other"` for complex fantasy titles, non-traditional names, or alien entities (e.g. *Sixth of the Dusk*, *Master Hoid*, *Nazh*, *Vathi*, *ZeetZi the lawnark*, *Second of Saplings*).

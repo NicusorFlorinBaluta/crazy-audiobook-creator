@@ -1,5 +1,7 @@
 # Voice Design and Speaking Cast
 
+**Status:** Reference — Describes current behaviour. Keep it accurate when the code changes.
+
 The voice path has two separate jobs:
 
 1. **Qwen3-TTS VoiceDesign** creates a reusable reference from a compiled

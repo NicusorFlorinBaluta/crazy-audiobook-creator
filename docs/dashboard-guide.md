@@ -1,5 +1,7 @@
 # Dashboard Guide
 
+**Status:** Reference — Describes current behaviour. Keep it accurate when the code changes.
+
 The dashboard is organized around the current production decision rather than
 the internal pipeline implementation.
 

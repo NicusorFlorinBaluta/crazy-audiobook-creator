@@ -1,5 +1,7 @@
 # Audiobook Creator — Feature Expansion & Windows Consolidation Plan
 
+**Status:** Historical planning record — not a specification. Kept for context; some sections describe modules and deployments that were never built or have since been replaced. Current behavior is defined by [README.md](README.md), [docs/](docs/README.md), the models, and the executable tests.
+
 > **Historical implementation plan — not a current specification.** Most of
 > this work has since been implemented, revised, or replaced. Use
 > [README.md](README.md) and [docs/architecture.md](docs/architecture.md) for

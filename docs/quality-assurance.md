@@ -1,5 +1,7 @@
 # Quality Assurance
 
+**Status:** Reference — Describes current behaviour. Keep it accurate when the code changes.
+
 Quality control is part of generation, not a reporting-only pass. A chapter cannot be marked generated unless every expected script line has one accepted audio file.
 
 ## Per-line checks

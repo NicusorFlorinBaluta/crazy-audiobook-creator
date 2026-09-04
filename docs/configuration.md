@@ -1,5 +1,7 @@
 # Configuration
 
+**Status:** Reference — Describes current behaviour. Keep it accurate when the code changes.
+
 The running configuration lives in `brain/config.yaml` and `voice/config.yaml`. Paths are resolved from the repository root unless stated otherwise.
 
 ## `brain/config.yaml`

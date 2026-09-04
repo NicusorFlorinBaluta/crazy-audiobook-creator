@@ -1,5 +1,7 @@
 # CrazyVoice Mobile Companion
 
+**Status:** Reference — Describes current behaviour. Keep it accurate when the code changes.
+
 **CrazyVoice** is the dedicated Android companion app for **Crazy Audiobook Creator**. Built on the modern AndroidX Media3 and Jetpack Compose architecture, it connects your phone directly to your 24/7 NAS streaming endpoint or Creator workstation.
 
 ---

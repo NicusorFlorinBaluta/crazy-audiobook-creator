@@ -1,5 +1,7 @@
 # Quality and performance hardening — 2026-08-21
 
+**Status:** Historical record — A dated record of what was done and why. Evidence, not a specification -- do not implement from it.
+
 ## Priority
 
 Audiobook fidelity remains the release priority. Performance changes may remove

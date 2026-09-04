@@ -1,5 +1,7 @@
 # Scripting quality and performance policy
 
+**Status:** Reference — Describes current behaviour. Keep it accurate when the code changes.
+
 ## Priority order
 
 Scripting optimizations are evaluated in this order:

@@ -1,5 +1,7 @@
 # Crazy Audiobook Creator Integration Plan for Voice (Android)
 
+**Status:** Historical planning record — not a specification. Kept for context; some sections describe modules and deployments that were never built or have since been replaced. Current behavior is defined by [README.md](README.md), [docs/](docs/README.md), the models, and the executable tests.
+
 ## 1. Executive Summary
 
 This document specifies the technical plan to integrate the **Voice Audiobook Player** (Android) with **Crazy Audiobook Creator** (FastAPI backend).

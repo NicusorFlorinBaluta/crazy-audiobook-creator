@@ -1,5 +1,7 @@
 # Crazy Audiobook Creator — Mobile Client & Streaming Integration Plan
 
+**Status:** Historical planning record — not a specification. Kept for context; some sections describe modules and deployments that were never built or have since been replaced. Current behavior is defined by [README.md](README.md), [docs/](docs/README.md), the models, and the executable tests.
+
 ## 1. Executive Summary
 
 This document specifies the server-side architectural changes, API endpoints, streaming protocols, and discovery mechanisms in **Crazy Audiobook Creator** to support client integration with the **Voice Audiobook Player** (Android).

@@ -1,5 +1,7 @@
 # Performance improvement plan after `sample_book-14`
 
+**Status:** Historical record — A dated record of what was done and why. Evidence, not a specification -- do not implement from it.
+
 ## Purpose
 
 This plan turns the remaining performance observations from the clean

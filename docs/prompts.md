@@ -1,5 +1,7 @@
 # Prompt and Source-Fidelity Rules
 
+**Status:** Reference — Describes current behaviour. Keep it accurate when the code changes.
+
 The LLM performs metadata analysis. It is not allowed to rewrite the audiobook’s source text.
 
 ## Pass 1: book-wide character analysis

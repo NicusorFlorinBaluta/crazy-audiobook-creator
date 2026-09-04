@@ -1,5 +1,7 @@
 # Adaptive scripting recovery — 2026-08-23
 
+**Status:** Historical record — A dated record of what was done and why. Evidence, not a specification -- do not implement from it.
+
 ## Incident
 
 The restarted 63-chapter scripting run was healthy but averaged about 2.0 output

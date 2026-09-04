@@ -1,5 +1,7 @@
 # Socket Resilience & Self-Healing Architecture
 
+**Status:** Reference — Describes current behaviour. Keep it accurate when the code changes.
+
 This document describes the three-layer resilience architecture designed to keep the Crazy Audiobook Creator dashboard and background pipeline online across network disconnects, interface resets, and router reboots.
 
 ---

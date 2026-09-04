@@ -1,5 +1,7 @@
 # Architecture
 
+**Status:** Reference — Describes current behaviour. Keep it accurate when the code changes.
+
 This document describes the current implementation. Historical implementation plans describe earlier two-machine and Ubuntu designs and are not authoritative.
 
 ## Runtime layout

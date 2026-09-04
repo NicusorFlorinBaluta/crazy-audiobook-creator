@@ -1,5 +1,7 @@
 # Home Assistant Audiobook Dashboard Integration
 
+**Status:** Historical record — A dated record of what was done and why. Evidence, not a specification -- do not implement from it.
+
 ## Goal
 
 Add an `Audiobooks` dashboard to the Home Assistant configuration in

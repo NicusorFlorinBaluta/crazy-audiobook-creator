@@ -1,5 +1,7 @@
 # Windows Setup
 
+**Status:** Reference — Describes current behaviour. Keep it accurate when the code changes.
+
 The supported default runs the Brain, Voice, Ollama, dashboard, and audio tools on one Windows workstation.
 
 ## Prerequisites

@@ -1,5 +1,7 @@
 # Tiered Dialogue Attribution Auto-Fix & Audio Regeneration Engine (2026-09-03)
 
+**Status:** Historical record — A dated record of what was done and why. Evidence, not a specification -- do not implement from it.
+
 ## Overview & Background
 During end-to-end processing of *Isles of the Emberdark* (Brandon Sanderson, Secret Projects Book 5), conversational attribution collapse and Windows-specific file handling limitations were identified, analyzed, resolved, and documented for long-term codebase maintenance.
 

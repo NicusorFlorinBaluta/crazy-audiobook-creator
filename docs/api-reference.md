@@ -1,5 +1,7 @@
 # API Reference
 
+**Status:** Reference — Describes current behaviour. Keep it accurate when the code changes.
+
 The application has two local FastAPI services:
 
 - Dashboard/Brain: `http://127.0.0.1:8000`

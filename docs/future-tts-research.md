@@ -1,5 +1,7 @@
 # Future Research — Alternative TTS Model Evaluation
 
+**Status:** Deferred — Evaluated and deliberately not adopted. Revisit only with new evidence.
+
 > **Status: Deferred — not currently in scope.**
 > Current production engine (Qwen3-TTS Base + VoiceDesign) is production-proven
 > and stable. This document captures research for when the emotion-expressiveness

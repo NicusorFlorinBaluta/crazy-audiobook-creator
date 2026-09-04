@@ -1,5 +1,7 @@
 # Scripting schema v4 targeted validation — 2026-08-21
 
+**Status:** Historical record — A dated record of what was done and why. Evidence, not a specification -- do not implement from it.
+
 This validation used isolated source windows from the preserved project baseline.
 It did not rewrite scripts, resume the project, or expose book text. The windows
 covered both manually confirmed high-confidence speaker-attribution failures.

@@ -1,5 +1,7 @@
 # Speaker Attribution & Dialogue Reconciliation Improvements (2026-08-18)
 
+**Status:** Historical record — A dated record of what was done and why. Evidence, not a specification -- do not implement from it.
+
 ## Overview & Background
 During end-to-end processing of *Isles of the Emberdark* (Brandon Sanderson, Secret Projects Book 5, 63 chapters, 3,937 dialogue fragments), several attribution failure modes were identified, analyzed, resolved, and documented for long-term codebase maintenance.
 
