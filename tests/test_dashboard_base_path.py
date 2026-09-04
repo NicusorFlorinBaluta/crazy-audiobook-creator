@@ -64,30 +64,48 @@ class DashboardBasePathTests(unittest.TestCase):
 
         self.assertEqual(len({revision for _, revision in referenced}), 1)
 
-    def test_frontend_build_header_matches_the_asset_revision(self):
-        """Keep the served UI-version header aligned with the asset revision.
+    def test_frontend_build_is_derived_from_the_frontend_on_disk(self):
+        """The reported UI version must follow the assets without human help.
 
-        These are maintained by hand in two files. When they drift, the
-        ``X-Crazy-Audiobook-UI-Version`` header reports a build that does not
-        correspond to the assets actually referenced by ``index.html``, which
-        makes "did the client get the new UI?" unanswerable from a response.
+        This used to compare two hand-maintained strings -- a literal in
+        main.py and the ``?v=`` in index.html -- and require them to match.
+        That kept them equal to each other while both drifted away from the
+        code: the header still said 2026.09.02.1 after two days of frontend
+        changes, so "did this restart pick up the new UI?" was unanswerable
+        from a response, which is the one question the header exists for.
+
+        The value is computed from the files now, so the property worth
+        asserting is that it actually tracks them.
         """
-        index = (FRONTEND / "index.html").read_text(encoding="utf-8")
-        revisions = set(re.findall(r"\.(?:css|js)\?v=([0-9.]+)", index))
-        self.assertEqual(len(revisions), 1, f"assets disagree: {revisions}")
-        asset_revision = revisions.pop()
+        from brain.dashboard.api.main import FRONTEND_BUILD, _frontend_build
+
+        self.assertEqual(FRONTEND_BUILD, _frontend_build(), "not stable across calls")
+        self.assertRegex(FRONTEND_BUILD, r"^\d{4}\.\d{2}\.\d{2}\.[0-9a-f]{8}$")
 
         api_source = Path("brain/dashboard/api/main.py").read_text(encoding="utf-8")
-        match = re.search(r'FRONTEND_BUILD = "([0-9.]+)"', api_source)
-        self.assertIsNotNone(match, "FRONTEND_BUILD not found")
-
-        # "2026.09.02.1" (header) and "20260902.1" (asset query) are the same
-        # revision written in two formats; compare them digit-wise.
-        self.assertEqual(
-            match.group(1).replace(".", ""),
-            asset_revision.replace(".", ""),
-            "FRONTEND_BUILD and the index.html asset revision have drifted",
+        self.assertNotRegex(
+            api_source,
+            r'FRONTEND_BUILD = "',
+            "FRONTEND_BUILD is a literal again; it will drift from the assets",
         )
+
+    def test_frontend_build_changes_when_an_asset_changes(self):
+        """A changed asset must produce a different version string.
+
+        Without this the derivation could silently hash nothing at all and
+        still return a plausible-looking value forever.
+        """
+        from brain.dashboard.api.main import _frontend_build
+
+        target = FRONTEND / "js" / "app.js"
+        before = _frontend_build()
+        original = target.read_bytes()
+        try:
+            target.write_bytes(original + b"// version probe\n")
+            self.assertNotEqual(before, _frontend_build())
+        finally:
+            target.write_bytes(original)
+        self.assertEqual(before, _frontend_build(), "restore did not return the original value")
 
     def test_embedded_frontend_disables_stale_browser_caching(self):
         api_source = Path("brain/dashboard/api/main.py").read_text(encoding="utf-8")

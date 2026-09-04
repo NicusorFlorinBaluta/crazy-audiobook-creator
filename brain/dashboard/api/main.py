@@ -107,7 +107,41 @@ from shared.runtime_preflight import collect_runtime_report
 
 logger = logging.getLogger(__name__)
 
-FRONTEND_BUILD = "2026.09.02.1"
+
+def _frontend_build() -> str:
+    """Identify the frontend that is actually on disk.
+
+    This is what `/api/health` and the `X-Crazy-Audiobook-UI-Version` header
+    report, and Home Assistant reads it to tell whether a restart picked up a
+    deployment. It used to be a hand-edited literal, which meant it answered
+    that question wrongly: it still said 2026.09.02.1 after two days of
+    frontend changes, so a stale server and a fresh one were indistinguishable.
+
+    Hashing the files removes the step a human has to remember. The date comes
+    from the newest asset so the string stays readable at a glance; the digest
+    is what actually makes it unique, because two edits on the same day would
+    otherwise collide.
+
+    Note this is a *version string*, not the cache buster -- `serve_dashboard`
+    rewrites every asset query to a fresh timestamp on each request, so assets
+    can never go stale regardless of this value.
+    """
+    if not FRONTEND_DIR.is_dir():
+        return "unknown"
+    digest = hashlib.sha256()
+    newest = 0.0
+    for path in sorted(FRONTEND_DIR.rglob("*")):
+        if not path.is_file() or path.suffix.lower() not in {".html", ".css", ".js"}:
+            continue
+        digest.update(path.relative_to(FRONTEND_DIR).as_posix().encode("utf-8"))
+        digest.update(path.read_bytes())
+        newest = max(newest, path.stat().st_mtime)
+    stamp = datetime.fromtimestamp(newest, UTC).strftime("%Y.%m.%d") if newest else "unknown"
+    return f"{stamp}.{digest.hexdigest()[:8]}"
+
+
+FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
+FRONTEND_BUILD = _frontend_build()
 
 # ffmpeg is invoked inline while serving a chapter stream. A hung encode must
 # not hold a request thread forever, so every streaming transcode is bounded.
@@ -902,7 +936,7 @@ async def require_dashboard_token(request: Request, call_next):
 # Static files (frontend)
 # ---------------------------------------------------------------------------
 
-frontend_dir = Path(__file__).parent.parent / "frontend"
+frontend_dir = FRONTEND_DIR
 if frontend_dir.exists():
     app.mount("/static", StaticFiles(directory=str(frontend_dir)), name="static")
 
