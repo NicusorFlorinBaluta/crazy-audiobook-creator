@@ -151,8 +151,19 @@ dashboard:
   # as a trusted LAN peer. Set CRAZY_AUDIOBOOK_DASHBOARD_TOKEN and have the
   # proxy inject X-API-Token if the public endpoint must be authenticated by
   # this application rather than only by the proxy.
+  # Tailscale is how Home Assistant reaches this dashboard: its panel points at
+  # a Tailscale address, so a tailnet peer must be trusted or every /api call
+  # from that panel returns 403 and the UI renders an empty project list. The
+  # shipped default includes this range; narrowing the list to the wired LAN on
+  # 2026-09-03 removed it and silently broke the HA panel.
+  #
+  # CGNAT space is only routable inside the tailnet, which Tailscale
+  # authenticates itself, so this is a smaller grant than it looks. It is still
+  # wider than one host -- tighten to the HA peer's /32 if you want the
+  # narrowest boundary.
   trusted_lan_cidrs:
   - 192.168.50.0/24
+  - 100.64.0.0/10
   static_dir: dashboard/frontend
   max_upload_size_mb: 100
   max_epub_expanded_mb: 1000
