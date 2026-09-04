@@ -75,5 +75,13 @@ scratch/
 
 # Raw assistant/IDE transcripts may contain source-book excerpts, local paths,
 # operational logs, and credentials. Preserve decisions in docs/decisions/.
+#
+# `Testing The Audiobook Pipeline 2.md` was committed and lived here until
+# 2026-09-04 because the original `/*chat*.md` pattern did not match its name.
+# The patterns below are deliberately broader than "chat".
 /*chat*.md
+/*Chat*.md
+/*transcript*.md
+/*Transcript*.md
+/Testing*.md
 cahtgpt_chat.md

@@ -281,7 +281,7 @@ under-attribution rather than an error. `F811` now prevents recurrence.
 
 ## Worth your attention
 
-**[Testing The Audiobook Pipeline 2.md](Testing%20The%20Audiobook%20Pipeline%202.md)**
+**`Testing The Audiobook Pipeline 2.md`** (removed from the repository on 2026-09-04)
 (263 KB, repo root) is a raw assistant transcript containing verbatim
 copyrighted book excerpts, local machine paths, and service topology. Your own
 `.gitignore` has a `/*chat*.md` rule and
