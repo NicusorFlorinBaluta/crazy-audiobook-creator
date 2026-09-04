@@ -85,27 +85,36 @@ $env:PYTHONPATH = (
 function Stop-StalePort8000Process {
     <#
         .SYNOPSIS
-        Free port 8000, but only from something that is actually stale.
+        Free port 8000, but only from something that is genuinely stale.
 
         .DESCRIPTION
-        This used to be an unconditional `Stop-Process -Force` on whatever
-        owned port 8000, run at the top of every supervisor iteration and at
-        launcher start. Any second launch of the task -- including Task
-        Scheduler's own restart-on-failure, which fires without anyone asking
-        -- therefore hard-killed a completely healthy dashboard. On 2026-09-04
-        a task relaunch landed three minutes into a book and took the run with
-        it; the pipeline logged "Interrupted by user" for an interruption no
-        user requested.
+        Returns $true when the port is free to bind, $false when a healthy
+        dashboard already holds it and the caller should stand down.
 
-        A listener that answers /api/health is not stale, and a listener that
-        reports a running pipeline must not be disturbed at all. Only after
-        those two checks, and only after a graceful shutdown has been given a
-        chance, does force remain on the table -- which is what keeps the
-        self-healing behaviour for the case it was written for: a wedged
-        process that holds the port and answers nothing.
+        This was an unconditional `Stop-Process -Force` on whatever owned the
+        port, run at the top of every supervisor iteration and at launcher
+        start. Nothing checked that the process was stale, and the task is
+        registered with RestartCount 3 / RestartInterval 1 minute -- so Task
+        Scheduler reaches this code on its own, with nobody asking for a
+        restart. On 2026-09-04 a relaunch landed three minutes into a book and
+        took the run with it; the pipeline recorded "Interrupted by user" for
+        an interruption no user requested.
+
+        The first repair only half worked. It refused to disturb a *busy*
+        dashboard but still asked a healthy *idle* one to shut down so the new
+        supervisor could take over, which produced a loop: scheduler relaunch
+        -> shutdown the idle dashboard -> the task instance ends -> counted as
+        another failure -> relaunch. Two of those were observed within a
+        quarter of an hour.
+
+        So: a listener that answers /api/health is never stale, busy or idle.
+        A second supervisor has nothing to offer a dashboard that is already
+        serving. Force is reserved for a listener that answers nothing, which
+        is the wedged-socket case this function exists for.
+
+        To restart on purpose, use restart_dashboard.ps1 -- it POSTs the
+        shutdown itself and then starts the task.
     #>
-    param([int]$GraceSeconds = 20)
-
     $owners = @(
         Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue |
         Select-Object -ExpandProperty OwningProcess -Unique
@@ -122,42 +131,20 @@ function Stop-StalePort8000Process {
         $health = $null
     }
 
-    if ($health -and $health.pipeline_running) {
+    if ($health) {
+        # Already serving. A second supervisor cannot improve on that, and
+        # replacing a working dashboard is churn at best -- at worst it ends
+        # the run in flight. Back off and let this one keep serving.
+        $busy = if ($health.pipeline_running) { " with a pipeline running" } else { "" }
         Write-Warning (
-            "Port 8000 is held by a healthy dashboard with a pipeline running. " +
-            "Refusing to kill it -- stop the run first, or use " +
-            "scripts/restart_dashboard.ps1, which shuts down cooperatively."
+            "Port 8000 is held by a healthy dashboard$busy. Leaving it alone. " +
+            "To restart deliberately use scripts/restart_dashboard.ps1, which " +
+            "shuts down cooperatively and then starts the task."
         )
         return $false
     }
 
-    if ($health) {
-        Write-Host "Port 8000 is held by a healthy idle dashboard; asking it to shut down." -ForegroundColor Yellow
-        try {
-            Invoke-RestMethod `
-                -Uri "http://127.0.0.1:8000/api/system/shutdown" `
-                -Method Post `
-                -ContentType "application/json" `
-                -Body "{}" `
-                -TimeoutSec 10 | Out-Null
-        }
-        catch {
-            Write-Warning "Cooperative shutdown was refused: $($_.Exception.Message)"
-        }
-
-        $deadline = (Get-Date).AddSeconds($GraceSeconds)
-        while ((Get-Date) -lt $deadline) {
-            Start-Sleep -Milliseconds 500
-            $still = Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue
-            if (-not $still) {
-                return $true
-            }
-        }
-        Write-Warning "The dashboard did not release port 8000 within ${GraceSeconds}s; forcing."
-    }
-    else {
-        Write-Warning "Port 8000 is held by a process that does not answer /api/health; forcing."
-    }
+    Write-Warning "Port 8000 is held by a process that does not answer /api/health; forcing."
 
     foreach ($owningPid in $owners) {
         Stop-Process -Id $owningPid -Force -ErrorAction SilentlyContinue

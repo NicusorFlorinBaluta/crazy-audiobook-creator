@@ -112,11 +112,16 @@ def clear_config_cache() -> None:
 def running_elevated() -> bool:
     r"""True when this Windows process holds an elevated (administrator) token.
 
-    Nothing in normal operation needs elevation, and this was verified rather
-    than assumed: `install_dashboard_task.ps1` registers both scheduled tasks
-    at `RunLevel: Limited` on purpose, and Home Assistant drives the app over
-    HTTP -- `/api/system/restart` runs `schtasks /Run` against a task the user
-    already owns. No elevation anywhere in that path.
+    Nothing in normal operation needs elevation. Home Assistant drives the app
+    over HTTP, and `/api/system/restart` runs `schtasks /Run` against a task
+    the user already owns.
+
+    `RunLevel: Limited` alone does not deliver that, which this docstring used
+    to claim. Measured 2026-09-04 with two throwaway tasks differing only in
+    logon type, RunLevel held at Limited: `S4U` produced an elevated token and
+    Administrators-owned files, `Interactive` did not. UAC filtering applies to
+    interactive-style logons, not to service-for-user, so an account in
+    Administrators gets its full token under S4U regardless.
 
     Only one-time setup needs an elevated shell: registering the S4U scheduled
     task, and the `netsh portproxy` / firewall scripts.
@@ -154,11 +159,14 @@ def warn_if_elevated(log: Any) -> bool:
     if not running_elevated():
         return False
     log.warning(
-        "Running ELEVATED. Nothing here requires it -- the scheduled tasks are "
-        "registered at RunLevel: Limited and Home Assistant drives the app over "
-        "HTTP. Every file written now will be owned by BUILTIN\\Administrators, "
-        "which the normal unelevated service cannot later replace; that surfaces "
-        "as '[WinError 5] Access is denied' on an unrelated write. Restart "
-        "without elevation. See Troubleshooting in docs/setup-windows.md."
+        "Running ELEVATED. Nothing here requires it. Every file written now is "
+        "owned by BUILTIN\\Administrators; where the directory carries no "
+        "inheritable user grant, the normal unelevated service can no longer "
+        "replace those files, and that surfaces later as '[WinError 5] Access "
+        "is denied' on an unrelated write. The usual cause is a scheduled task "
+        "registered with -LogonType S4U: on an account in Administrators that "
+        "returns a full token no matter what RunLevel says. Check with "
+        "`(Get-ScheduledTask -TaskName 'Crazy Audiobook Dashboard').Principal`. "
+        "See Troubleshooting in docs/setup-windows.md."
     )
     return True
