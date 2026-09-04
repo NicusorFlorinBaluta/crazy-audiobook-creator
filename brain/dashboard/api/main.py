@@ -711,6 +711,10 @@ async def lifespan(app: FastAPI):
 
     logging.getLogger().setLevel(logging.INFO)
     logger.info("Brain Dashboard starting...")
+    # An elevated run leaves every artifact it writes owned by Administrators,
+    # which the normal unelevated service can then no longer replace. The
+    # failure appears much later, somewhere unrelated, as WinError 5.
+    shared_paths.warn_if_elevated(logger)
 
     # Check shutdown sentinel to distinguish intentional shutdown from unexpected drops
     sentinel_path = shared_paths.PROJECTS_DIR / ".dashboard_shutdown"

@@ -197,6 +197,12 @@ in it — a worse failure than an empty answer, because it looks well-supported.
 Any future implementation keeps the same rule as everything else here: a name
 absent from the extracted text is rejected, whatever the citation says.
 
+This run also surfaced the `brain/projects` ownership problem: writing the
+browser conversation state failed with `[WinError 5]` because the target was
+owned by `BUILTIN\Administrators` and an unelevated process cannot replace such
+a file. Confirmed by applying `takeown`/`icacls` -- the same writes then
+succeeded. See Troubleshooting in docs/setup-windows.md.
+
 This run also served as the **first live verification of the web escalation
 path** in this codebase — the browser profile, the persistent per-purpose
 conversation, and JSON extraction all worked end to end.

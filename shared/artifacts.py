@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import tempfile
 import time
 from copy import deepcopy
@@ -57,6 +58,51 @@ _REPLACE_ATTEMPTS = 6
 _REPLACE_INITIAL_DELAY_SECONDS = 0.05
 
 
+def _replace_denial_hint(destination: Path) -> str:
+    """Explain a Windows replace denial that no ordinary check predicts.
+
+    `os.replace` over an existing file needs the DELETE right on the *target*.
+    A file owned by `BUILTIN\\Administrators` -- left that way by a run started
+    from an elevated shell -- grants an unelevated token only
+    `BUILTIN\\Users: Write, ReadAndExecute`, which does not include it.
+
+    Every ordinary check says the file is fine: it reports as writable,
+    `os.access(W_OK)` returns True, and it opens exclusively without error.
+    Only the rename fails, and the bare WinError 5 names a temp file, so
+    without this the operator has nothing to act on.
+    """
+    if os.name != "nt":
+        return ""
+    try:
+        result = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                f"(Get-Acl -LiteralPath '{destination}').Owner",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        owner = result.stdout.strip() if result.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if not owner:
+        return ""
+    if "administrator" in owner.casefold() or "system" in owner.casefold():
+        return (
+            f" The destination is owned by '{owner}', so an unelevated process"
+            " cannot replace it: os.replace needs the DELETE right on the"
+            " target, which BUILTIN\\Users does not grant. This is left behind"
+            " by a run started from an elevated shell. See Troubleshooting in"
+            " docs/setup-windows.md for the takeown/icacls fix."
+        )
+    return f" The destination is owned by '{owner}'."
+
+
 def _atomic_replace(temporary: Path, destination: Path) -> None:
     """Replace `destination` with `temporary`, retrying transient lock errors.
 
@@ -70,8 +116,11 @@ def _atomic_replace(temporary: Path, destination: Path) -> None:
         try:
             os.replace(temporary, destination)
             return
-        except PermissionError:
+        except PermissionError as exc:
             if attempt == _REPLACE_ATTEMPTS:
+                hint = _replace_denial_hint(destination)
+                if hint:
+                    raise PermissionError(f"Could not atomically replace {destination}.{hint}") from exc
                 raise
             time.sleep(delay)
             delay *= 2

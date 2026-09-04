@@ -38,9 +38,46 @@ takeown /F "E:\Projects\crazy-audiobook-creator\brain\projects" /R /D Y
 icacls "E:\Projects\crazy-audiobook-creator\brain\projects" /grant "${env:USERNAME}:(OI)(CI)F" /T
 ```
 
-Then stop launching the pipeline from an elevated shell, or each new artifact
-reintroduces the problem. The same cause explains `Access is denied` on
-`.pytest_cache` during test runs.
+### Confirmed on this workstation, 2026-09-04
+
+The fix above was applied and the cause verified end to end:
+
+| | Before `takeown`/`icacls` | After |
+| --- | --- | --- |
+| Sampled files under `brain/projects` | 259 Administrators / 241 user | 500 user |
+| `os.replace` over `characters.json` | denied | succeeds |
+| `atomic_write_json` on a project artifact | raised | succeeds |
+
+`.pytest_cache` needs the same treatment and is not covered by the command
+above -- its ACL cannot even be *read* by the normal user, which is why every
+test run prints `Access is denied` warnings for it. It is a regenerable cache,
+so the simplest fix is to delete it from an elevated shell:
+
+```powershell
+Remove-Item -Recurse -Force "E:\Projects\crazy-audiobook-creator\.pytest_cache"
+```
+
+### Preventing recurrence
+
+Nothing in normal operation needs elevation, and this was verified rather than
+assumed:
+
+- `install_dashboard_task.ps1` registers **both** scheduled tasks at
+  `RunLevel: Limited`, deliberately.
+- Home Assistant drives the app over HTTP. `/api/system/restart` runs
+  `schtasks /Run` against a task the user already owns, which needs no
+  elevation.
+
+Only one-time setup needs an elevated shell: registering the S4U scheduled task
+(`Register-ScheduledTask`), and the `netsh portproxy` / firewall scripts.
+
+Two guards now make a lapse loud instead of silent:
+
+- The dashboard logs a prominent warning at startup if it is running elevated,
+  naming the consequence rather than just the fact.
+- A replace that is denied no longer surfaces as a bare `WinError 5` against a
+  temp file. `shared/artifacts.py` reads the destination's owner and, when it
+  is `BUILTIN\Administrators`, says so and points here.
 
 ## Prerequisites
 

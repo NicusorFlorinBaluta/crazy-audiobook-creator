@@ -24,6 +24,7 @@ and the cached readers give each config file one value per process.
 
 from __future__ import annotations
 
+import os
 import threading
 from pathlib import Path
 from typing import Any
@@ -106,3 +107,58 @@ def clear_config_cache() -> None:
     """Drop every cached config. Intended for tests."""
     with _config_cache_lock:
         _config_cache.clear()
+
+
+def running_elevated() -> bool:
+    r"""True when this Windows process holds an elevated (administrator) token.
+
+    Nothing in normal operation needs elevation, and this was verified rather
+    than assumed: `install_dashboard_task.ps1` registers both scheduled tasks
+    at `RunLevel: Limited` on purpose, and Home Assistant drives the app over
+    HTTP -- `/api/system/restart` runs `schtasks /Run` against a task the user
+    already owns. No elevation anywhere in that path.
+
+    Only one-time setup needs an elevated shell: registering the S4U scheduled
+    task, and the `netsh portproxy` / firewall scripts.
+
+    It matters because a run started elevated leaves every artifact it creates
+    owned by `BUILTIN\Administrators`. `os.replace` over an existing file needs
+    the DELETE right on the target, which `BUILTIN\Users` does not grant, so
+    the normal unelevated service can no longer rewrite those files. The
+    failure surfaces much later and somewhere else, as `[WinError 5] Access is
+    denied` on a rename -- with the file still reporting as writable.
+
+    Measured on this workstation on 2026-09-04: 259 of 500 sampled files under
+    `brain/projects` were Administrators-owned, and `atomic_write_json` against
+    one of them raised. After `takeown` + `icacls`, every sampled file was
+    user-owned and the same writes succeeded.
+    """
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+def warn_if_elevated(log: Any) -> bool:
+    """Log a prominent warning when running elevated. Returns whether it did.
+
+    A warning rather than a refusal: an operator may have a reason to run this
+    way once, and refusing to start would be worse than the problem. But it
+    must not be silent, because the damage is invisible until a later run fails
+    somewhere unrelated.
+    """
+    if not running_elevated():
+        return False
+    log.warning(
+        "Running ELEVATED. Nothing here requires it -- the scheduled tasks are "
+        "registered at RunLevel: Limited and Home Assistant drives the app over "
+        "HTTP. Every file written now will be owned by BUILTIN\\Administrators, "
+        "which the normal unelevated service cannot later replace; that surfaces "
+        "as '[WinError 5] Access is denied' on an unrelated write. Restart "
+        "without elevation. See Troubleshooting in docs/setup-windows.md."
+    )
+    return True
