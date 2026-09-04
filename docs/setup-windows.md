@@ -4,6 +4,44 @@
 
 The supported default runs the Brain, Voice, Ollama, dashboard, and audio tools on one Windows workstation.
 
+## Troubleshooting
+
+### "Access is denied" writing under `brain/projects/`
+
+Symptom: a pipeline step that rewrites a project artifact fails with
+`PermissionError: [WinError 5] Access is denied`, naming a `.tmp` file and its
+target. Reading works; only the atomic replace fails.
+
+Cause: the target file is **owned by `BUILTIN\Administrators`**, left that way
+by a run started from an elevated shell. `os.replace` over an existing file
+needs the DELETE right on the target, and an unelevated token inherits only
+`BUILTIN\Users: Write, ReadAndExecute`, which does not include it. The
+dashboard scheduled task runs at `RunLevel: Limited`, so it is affected too --
+this is not a permissions problem you can see from the file being "writable".
+
+Measured on this workstation on 2026-09-04: of the first 500 files under
+`brain/projects`, **259 were owned by Administrators and 241 by the normal
+user**. The mix is the tell -- some runs were elevated and some were not.
+
+Diagnose:
+
+```powershell
+Get-ChildItem "E:\Projects\crazy-audiobook-creator\brain\projects" -Recurse -File |
+  Group-Object { (Get-Acl $_.FullName).Owner } |
+  ForEach-Object { "{0,6}  {1}" -f $_.Count, $_.Name }
+```
+
+Fix, from an **elevated** PowerShell:
+
+```powershell
+takeown /F "E:\Projects\crazy-audiobook-creator\brain\projects" /R /D Y
+icacls "E:\Projects\crazy-audiobook-creator\brain\projects" /grant "${env:USERNAME}:(OI)(CI)F" /T
+```
+
+Then stop launching the pipeline from an elevated shell, or each new artifact
+reintroduces the problem. The same cause explains `Access is denied` on
+`.pytest_cache` during test runs.
+
 ## Prerequisites
 
 - Windows 10/11

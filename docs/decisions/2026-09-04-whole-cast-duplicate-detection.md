@@ -171,16 +171,35 @@ outside training data.
 That makes the feature's value inversely correlated with the need: useful for
 classics, empty for exactly the new fiction this pipeline processes. Not built.
 
-**Google Search grounding** (the `google_search` tool) was proposed as a way
-around that and **has not been tested** — the API key hit its daily quota
-during the experiments above. It is worth testing, with one caution recorded in
-advance: for a new instalment of a long-running series, the searchable material
-is retailer copy, reviews, and a series wiki. A wiki lists the *series* cast,
-not this book's speakers, so grounding could return confidently-sourced names
-of characters who never appear in this volume — a more dangerous failure than
-an empty answer, because it looks well-supported. Any implementation must keep
-the same rule as everything else here: a name that does not appear verbatim in
-the extracted text is rejected, whatever the citation says.
+**Search grounding was tested**, through the persistent Gemini web session
+rather than the API — the web tier has search built in and does not consume the
+API quota, which had been exhausted by the experiments above. Asked to search
+for the book and list only characters it could support for *this* volume:
+
+| Metric | Result |
+| --- | --- |
+| Names returned | 2 — `Breezy Do'Urden`, `Wulfgar` |
+| Sources cited | 1 — an AbeBooks product listing |
+| Already in the registry | 2 |
+| Recovered (in text, missing from registry) | **0** |
+| Hallucinated (absent from the book) | **0** |
+
+So it is **safe but low-yield**. It invented nothing, and the predicted
+series-wiki failure did not occur — but only because no wiki exists for this
+book yet; the single source was a bookseller page, which is exactly the
+material a new release has. It recovered nothing the pipeline did not already
+know.
+
+Not built, on that evidence. The caution stands for a book that *does* have a
+wiki: a series wiki lists the series cast, not this volume's speakers, so
+grounding could return confidently-sourced names of characters who never appear
+in it — a worse failure than an empty answer, because it looks well-supported.
+Any future implementation keeps the same rule as everything else here: a name
+absent from the extracted text is rejected, whatever the citation says.
+
+This run also served as the **first live verification of the web escalation
+path** in this codebase — the browser profile, the persistent per-purpose
+conversation, and JSON extraction all worked end to end.
 
 ## Not built, and why — revisit with evidence
 
