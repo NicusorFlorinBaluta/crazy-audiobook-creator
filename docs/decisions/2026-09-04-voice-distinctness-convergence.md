@@ -121,7 +121,7 @@ burning model swaps" without re-running a bootstrap.
 
 ## Verification
 
-`tests/test_voice_distinctness_convergence.py`, 16 tests against a faked engine
+`tests/test_voice_distinctness_convergence.py`, 18 tests against a faked engine
 and library — no model is loaded:
 
 - converges in one round and does **not** spend the second;
@@ -134,13 +134,55 @@ and library — no model is loaded:
 - cancellation aborts the round before any generation;
 - redesigned references are transcript-checked, and the re-check is skipped
   when nothing was redesigned;
-- warnings reflect only the final measurement.
+- warnings reflect only the final measurement;
+- a round that makes the cast worse is discarded and rolled back;
+- the previous take is not deleted before a redesign, so rollback has a
+  file to return to.
 
-**Not yet verified against real models.** The convergence behaviour under an
-actual VoiceDesign model — in particular whether a contrast brief reliably
-moves a 0.99 pair below the threshold, and how many rounds that typically
-takes — is unmeasured. That is the next thing to run on the workstation, and
-`distinctness_rounds` in the response is the field to read.
+### Measured against real models — 2026-09-04
+
+Run on the Windows/ROCm workstation against the real VoiceDesign and speaker
+encoder. Four male voices, same age band, **byte-identical** voice descriptions
+and test sentence — deliberately the hardest case, so the contrast brief is the
+only thing that can separate them. Scratch project id; no real project touched.
+
+**Run 1 — production threshold (0.985), 4 voices, 120 s**
+
+Worst pair 0.9784, so nothing collided and zero rounds ran. Confirms the
+"clean cast costs no extra model boot" path on real models.
+
+**Run 2 — threshold lowered to 0.970 to force collisions, 255 s**
+
+| Round | Redesigned | Similar pairs | Worst similarity |
+| --- | --- | --- | --- |
+| start | — | 6 | 0.9881 |
+| 1 | all four | 6 | **0.9915 (worse)** |
+| 2 | all four | 4 | 0.9789 |
+
+The mechanism works: VoiceDesign re-booted per round, only colliding voices
+were regenerated, re-measurement ran, the bound held, unresolved collisions
+degraded to warnings, and the per-round report was accurate.
+
+**The substance is weaker than hoped, and round 1 exposed a real defect.**
+
+A redesign is a *resample from a stochastic model*, not a monotonic
+improvement. Round 1 made the cast worse, and the loop accepted that state as
+the baseline for round 2. That is fixed: the loop now scores each measurement
+(collision count first, worst similarity as tie-break), keeps the best, and if
+a round fails to improve on it, restores the best state and stops rather than
+spending another VoiceDesign boot resampling from a known-worse position.
+`_redesign_for_distinctness` no longer deletes the previous take first — it was
+destroying the only file a rollback could return to, and `_generate_voice`
+re-registers the id anyway. Each round now reports `kept: true|false`.
+
+**What is still not established:** whether a contrast brief can reliably move a
+genuine 0.99 pair below 0.985 on a realistic cast. On four identical
+descriptions it managed 0.9881 → 0.9789 across two rounds — real but modest,
+and it needed the discarded round to get there. A real cast has differing
+descriptions and more headroom, so this is a lower bound rather than an
+expectation. Read `distinctness_rounds` on the next real bootstrap before
+assuming the loop is earning its cost; if `kept` is false on every round, the
+brief is not working and the wording is the thing to change, not the bound.
 
 ## Standing priority order
 

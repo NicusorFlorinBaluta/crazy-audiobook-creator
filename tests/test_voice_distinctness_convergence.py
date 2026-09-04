@@ -374,13 +374,77 @@ class ConvergenceLoopTests(unittest.TestCase):
         ):
             diagnostics, rounds = self._run_loop(designer, voices, embeddings)
 
-        self.assertEqual(len(rounds), 2, "must stop at the configured bound")
-        self.assertEqual(self.service_boots, 2)
+        # A round that does not improve on the best measurement is discarded
+        # and the loop stops: resampling from a state already known to be no
+        # better is not worth another VoiceDesign boot.
+        self.assertEqual(len(rounds), 1)
+        self.assertFalse(rounds[0]["kept"])
+        self.assertEqual(self.service_boots, 1)
         self.assertEqual(rounds[-1]["similar_pairs_after"], 1)
         similar = [d for d in diagnostics if d.status == "similar"]
         self.assertEqual(len(similar), 1)
         # The unresolved collision is still surfaced for manual redesign.
         self.assertTrue(any(w.startswith("Sounds very similar to bob") for w in voices["alice"].warnings))
+
+    def test_a_round_that_makes_things_worse_is_rolled_back(self) -> None:
+        """Measured on real models: round 1 moved the worst pair 0.9881 -> 0.9915.
+
+        A redesign is a resample from a stochastic model, not a monotonic
+        improvement. Without this the loop keeps the regression and builds the
+        next round on top of it.
+        """
+        engine = _FakeEngine({frozenset({"alice", "bob"}): 0.991})
+        designer = _designer(engine, _FakeLibrary(self.root), rounds=2)
+        self._install(designer)
+
+        voices = {name: _result(name, self.root) for name in ("alice", "bob")}
+        embeddings = {name: ("embedding", str(self.root / f"{name}_v1.wav")) for name in voices}
+        original_files = {k: v.file for k, v in voices.items()}
+
+        def _worse(pid, cid, character, **kw):
+            # The new take is worse than what we already had.
+            engine.similarity_by_pair[frozenset({"alice", "bob"})] = 0.998
+            return _result(cid, self.root, "v2")
+
+        with (
+            patch.object(VoiceDesigner, "_generate_voice", side_effect=_worse),
+            patch.object(VoiceDesigner, "_acoustic_diagnostics", return_value=({}, [])),
+        ):
+            diagnostics, rounds = self._run_loop(designer, voices, embeddings)
+
+        self.assertEqual(len(rounds), 1)
+        self.assertFalse(rounds[0]["kept"], "a regression must not be kept")
+        self.assertGreater(rounds[0]["max_similarity_after"], rounds[0]["max_similarity_before"])
+        # The cast is back to the better take, not the regressed one.
+        self.assertEqual({k: v.file for k, v in voices.items()}, original_files)
+        worst = max(d.speaker_similarity for d in diagnostics)
+        self.assertAlmostEqual(worst, 0.991, places=3)
+
+    def test_the_previous_take_is_not_deleted_before_a_redesign(self) -> None:
+        """Rollback needs the file. `_generate_voice` re-registers the id anyway."""
+        engine = _FakeEngine({})
+        library = _FakeLibrary(self.root)
+        designer = _designer(engine, library)
+        self._install(designer)
+
+        voices = {name: _result(name, self.root) for name in ("alice", "bob")}
+        with (
+            patch.object(
+                VoiceDesigner,
+                "_generate_voice",
+                side_effect=lambda pid, cid, ch, **kw: _result(cid, self.root, "v2"),
+            ),
+            patch.object(VoiceDesigner, "_acoustic_diagnostics", return_value=({}, [])),
+        ):
+            designer._redesign_for_distinctness(
+                self.request,
+                {"alice": {"bob"}},
+                voices,
+                lambda *a: None,
+                lambda: None,
+                round_index=1,
+            )
+        self.assertEqual(library.deleted, [], "the previous take must survive")
 
     def test_a_clean_cast_costs_no_model_swap(self) -> None:
         """The common case must not pay for the loop at all."""

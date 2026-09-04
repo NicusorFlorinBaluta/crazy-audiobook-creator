@@ -531,6 +531,16 @@ class VoiceDesigner:
         final diagnostics and a per-round scoreboard.
         """
         convergence_rounds: list[dict[str, Any]] = []
+        # Best measurement seen so far, and enough per-voice state to go back to
+        # it. A round is a resample from a stochastic model, not a monotonic
+        # improvement: measured on real models 2026-09-04, round 1 of a
+        # four-voice cast moved the worst pair from 0.9881 to 0.9915 -- worse --
+        # and the loop then built round 2 on that regressed state. Keeping the
+        # best is what makes the loop safe to run more than once.
+        best_score = self._round_score(self._collision_summary(cast_diagnostics))
+        best_state = self._snapshot_voices(voices_generated, embeddings)
+        best_diagnostics, best_collisions = cast_diagnostics, collisions
+
         for round_index in range(1, self.distinctness_rounds + 1):
             if not collisions:
                 break
@@ -583,6 +593,13 @@ class VoiceDesigner:
 
             cast_diagnostics, collisions = self._compare_cast(embeddings, voices_generated, emit, check_cancelled)
             after = self._collision_summary(cast_diagnostics)
+            score = self._round_score(after)
+            improved = score < best_score
+            if improved:
+                best_score = score
+                best_state = self._snapshot_voices(voices_generated, embeddings)
+                best_diagnostics, best_collisions = cast_diagnostics, collisions
+
             convergence_rounds.append(
                 {
                     "round": round_index,
@@ -591,16 +608,30 @@ class VoiceDesigner:
                     "similar_pairs_after": after["similar_pairs"],
                     "max_similarity_before": before["max_similarity"],
                     "max_similarity_after": after["max_similarity"],
+                    "kept": improved,
                 }
             )
             logger.info(
-                "Distinctness round %d complete: similar pairs %d -> %d, worst similarity %.3f -> %.3f",
+                "Distinctness round %d complete: similar pairs %d -> %d, worst similarity %.3f -> %.3f (%s)",
                 round_index,
                 before["similar_pairs"],
                 after["similar_pairs"],
                 before["max_similarity"],
                 after["max_similarity"],
+                "kept" if improved else "discarded, worse than the best so far",
             )
+
+            if not improved:
+                # Rolling back rather than continuing: a further round would
+                # resample from a state already known to be worse, and each one
+                # costs a VoiceDesign boot.
+                logger.info(
+                    "Distinctness round %d did not improve on the best measurement; restoring it and stopping",
+                    round_index,
+                )
+                self._restore_voices(best_state, voices_generated, embeddings)
+                cast_diagnostics, collisions = best_diagnostics, best_collisions
+                break
 
         if collisions:
             logger.warning(
@@ -737,6 +768,66 @@ class VoiceDesigner:
         return cast_diagnostics, collisions
 
     @staticmethod
+    def _round_score(summary: dict[str, Any]) -> tuple[int, float]:
+        """Order two measurements. Lower is better.
+
+        Collision count dominates: separating one more pair matters more than
+        shaving similarity off a pair that still collides. Worst similarity
+        breaks ties, so progress within an unchanged count is still visible.
+        """
+        return (int(summary["similar_pairs"]), float(summary["max_similarity"]))
+
+    @staticmethod
+    def _snapshot_voices(
+        voices_generated: dict[str, BootstrapVoiceResult],
+        embeddings: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Capture enough per-voice state to undo a redesign round.
+
+        Only the canonical take is ever replaced, so only it needs saving. The
+        previous audio file is left on disk by `_redesign_for_distinctness`
+        precisely so this can point back at it.
+        """
+        return {
+            char_id: {
+                "file": result.file,
+                "duration_seconds": result.duration_seconds,
+                "sample_rate": result.sample_rate,
+                "transcription_wer": result.transcription_wer,
+                "acoustic_metrics": result.acoustic_metrics,
+                "warnings": list(result.warnings),
+                "candidate": result.candidates[0] if result.candidates else None,
+                "embedding": embeddings.get(char_id),
+            }
+            for char_id, result in voices_generated.items()
+        }
+
+    @staticmethod
+    def _restore_voices(
+        snapshot: dict[str, Any],
+        voices_generated: dict[str, BootstrapVoiceResult],
+        embeddings: dict[str, Any],
+    ) -> None:
+        """Put the cast back to a snapshot taken by `_snapshot_voices`."""
+        for char_id, saved in snapshot.items():
+            result = voices_generated.get(char_id)
+            if result is None:
+                continue
+            result.file = saved["file"]
+            result.duration_seconds = saved["duration_seconds"]
+            result.sample_rate = saved["sample_rate"]
+            result.transcription_wer = saved["transcription_wer"]
+            result.acoustic_metrics = saved["acoustic_metrics"]
+            result.warnings = list(saved["warnings"])
+            if saved["candidate"] is not None:
+                if result.candidates:
+                    result.candidates[0] = saved["candidate"]
+                else:
+                    result.candidates = [saved["candidate"]]
+            if saved["embedding"] is not None:
+                embeddings[char_id] = saved["embedding"]
+
+    @staticmethod
     def _collision_summary(
         cast_diagnostics: list[CastPairDiagnostic],
     ) -> dict[str, Any]:
@@ -813,7 +904,11 @@ class VoiceDesigner:
                 contrasted = character.model_copy(update={"voice_description": character.voice_description + contrast})
                 cand_id = self._candidate_id(char_id, 1)
                 try:
-                    self.library.delete_voice(request.project_id, cand_id)
+                    # Deliberately NOT deleting the previous take first.
+                    # `_generate_voice` writes a uuid-suffixed filename and
+                    # re-registers the id itself, so deleting only destroyed the
+                    # file the loop may need to roll back to. Superseded files
+                    # are reclaimed by `library.garbage_collect_project`.
                     result = self._generate_voice(
                         request.project_id,
                         cand_id,
