@@ -464,6 +464,10 @@ class BootstrapVoicesResponse(BaseModel):
     project_id: str
     voices_generated: dict[str, BootstrapVoiceResult]
     cast_diagnostics: list[CastPairDiagnostic] = Field(default_factory=list)
+    # One entry per distinctness convergence round actually run: which voices
+    # were redesigned, and whether the collision count and worst similarity
+    # improved. Empty when the first measurement was already clean.
+    distinctness_rounds: list[dict[str, Any]] = Field(default_factory=list)
 
 
 # ===================================================================

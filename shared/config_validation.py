@@ -260,6 +260,16 @@ def validate_voice_config(config: dict[str, Any]) -> dict[str, Any]:
         errors.append("validation.whisper_backend is invalid")
     _number(errors, validation, "wer_threshold", minimum=0, maximum=1)
     _number(errors, validation, "speaker_similarity_threshold", minimum=-1, maximum=1)
+    _number(
+        errors,
+        validation,
+        "voice_profile_similarity_warning",
+        minimum=-1,
+        maximum=1,
+    )
+    # Upper bound matches the designer's own clamp. Each round re-boots the
+    # VoiceDesign subprocess, so a typo here costs real wall time.
+    _number(errors, validation, "voice_distinctness_rounds", minimum=0, maximum=5)
     _number(errors, validation, "max_retries", minimum=0, maximum=20)
     mastering = config.get("mastering", {})
     _number(errors, mastering, "crossfade_ms", minimum=0, maximum=500)

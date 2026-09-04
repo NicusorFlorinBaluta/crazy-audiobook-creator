@@ -279,6 +279,7 @@ async def lifespan(app: FastAPI):
         acoustic_regeneration_attempts=val_cfg.get(
             "voice_profile_acoustic_regenerations", 1
         ),
+        distinctness_rounds=val_cfg.get("voice_distinctness_rounds", 2),
     )
     audio_analyzer = AudioAnalyzer(
         noise_threshold=val_cfg.get("artifact_noise_threshold", -50),

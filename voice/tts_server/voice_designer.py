@@ -13,10 +13,12 @@ import os
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from shared import paths as shared_paths
 from shared.constants import VOICE_DESIGN_TEST_SENTENCES, Gender
 from shared.models import (
     BootstrapVoiceResult,
@@ -46,6 +48,7 @@ class VoiceDesigner:
         wer_threshold: float = 0.20,
         similarity_warning_threshold: float = 0.88,
         acoustic_regeneration_attempts: int = 1,
+        distinctness_rounds: int = 2,
     ):
         self.engine = engine
         self.library = library
@@ -59,6 +62,12 @@ class VoiceDesigner:
         self.acoustic_regeneration_attempts = max(
             0, int(acoustic_regeneration_attempts)
         )
+        # Extra design/compare rounds spent separating colliding voices.
+        # Bounded on purpose: each round re-boots the VoiceDesign subprocess,
+        # so the cost is real, and a cast that will not separate must end as a
+        # warning rather than an unbounded loop. 0 restores the previous
+        # report-only behaviour.
+        self.distinctness_rounds = max(0, min(5, int(distinctness_rounds)))
         configured_sentences = voice_design_test_sentences or {}
         self.voice_design_test_sentences = {
             "male": configured_sentences.get(
@@ -108,6 +117,94 @@ class VoiceDesigner:
         if candidate_index < 1:
             raise ValueError("candidate_index must start at 1")
         return voice_id if candidate_index == 1 else f"{voice_id}_cand{candidate_index}"
+
+    @contextmanager
+    def _voice_design_service(
+        self,
+        check_cancelled: Callable[[], None],
+        *,
+        round_label: str = "",
+    ) -> Iterator[None]:
+        """Run the VoiceDesign microservice for the duration of the block.
+
+        VoiceDesign is a separate process on port 8101 rather than an in-process
+        model, so its VRAM is fully released when the block exits. That is what
+        makes a regeneration round affordable: the speaker encoder and the
+        design model never need to be co-resident, they simply take turns.
+
+        The block may be entered more than once per bootstrap -- once for the
+        initial cast, then once per convergence round -- so nothing here may
+        assume it runs exactly once.
+        """
+        import httpx
+
+        logger.info(
+            "Booting Qwen VoiceDesign Microservice on port 8101...%s",
+            f" ({round_label})" if round_label else "",
+        )
+        python_exe = Path(sys.executable)
+
+        # Resolved from the repository root, not the working directory. Started
+        # from anywhere else these two were a crash and a stray log file.
+        design_script = shared_paths.REPO_ROOT / "qwen_voice_design_server.py"
+        log_path = shared_paths.REPO_ROOT / "qwen-voice-design.log"
+        log_file = open(log_path, "a", encoding="utf-8")
+
+        popen_kwargs: dict[str, Any] = {
+            "stdout": log_file,
+            "stderr": subprocess.STDOUT,
+            "env": {
+                **os.environ,
+                "QWEN_VOICE_DESIGN_MODEL": self.voice_design_model,
+            },
+        }
+        if os.name == "nt":
+            popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        try:
+            design_proc = subprocess.Popen(
+                [str(python_exe), str(design_script)],
+                **popen_kwargs,
+            )
+        except Exception:
+            log_file.close()
+            raise
+
+        try:
+            # Allow up to 10 minutes for a first-time model download.
+            for _ in range(300):
+                check_cancelled()
+                if design_proc.poll() is not None:
+                    raise RuntimeError(
+                        "Qwen VoiceDesign Microservice exited during startup; "
+                        f"see {log_path}"
+                    )
+                try:
+                    resp = httpx.get("http://127.0.0.1:8101/health", timeout=2.0)
+                    if (
+                        resp.status_code == 200
+                        and resp.json().get("model_loaded") is True
+                    ):
+                        logger.info("Qwen VoiceDesign Microservice is ready!")
+                        break
+                except Exception:
+                    pass
+                time.sleep(2)
+            else:
+                raise RuntimeError(
+                    "Qwen VoiceDesign Microservice failed to start; "
+                    f"see {log_path}"
+                )
+            yield
+        finally:
+            logger.info("Shutting down Qwen VoiceDesign Microservice...")
+            if design_proc.poll() is None:
+                design_proc.terminate()
+                try:
+                    design_proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    design_proc.kill()
+                    design_proc.wait(timeout=10)
+            log_file.close()
 
     def bootstrap_voices(
         self,
@@ -182,8 +279,6 @@ class VoiceDesigner:
             "Loading the voice-design model",
         )
 
-        import httpx
-
         logger.info(
             "Bootstrapping %d voices for project '%s'",
             len(request.characters),
@@ -192,63 +287,13 @@ class VoiceDesigner:
 
         # Boot the dedicated VoiceDesign model only for this stage so its
         # VRAM can be released before the cloning model is loaded.
-        logger.info("Booting Qwen VoiceDesign Microservice on port 8101...")
-        python_exe = Path(sys.executable)
-
-        design_script = Path("qwen_voice_design_server.py").resolve()
-        log_file = open("qwen-voice-design.log", "w", encoding="utf-8")
-        popen_kwargs: dict[str, Any] = {
-            "stdout": log_file,
-            "stderr": subprocess.STDOUT,
-            "env": {
-                **os.environ,
-                "QWEN_VOICE_DESIGN_MODEL": self.voice_design_model,
-            },
-        }
-        if os.name == "nt":
-            popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-        try:
-            design_proc = subprocess.Popen(
-                [str(python_exe), str(design_script)],
-                **popen_kwargs,
+        with self._voice_design_service(check_cancelled):
+            emit(
+                "designing_references",
+                0,
+                candidate_total,
+                f"Preparing {candidate_total} voice reference candidates",
             )
-        except Exception:
-            log_file.close()
-            raise
-        try:
-            # Allow up to 10 minutes for a first-time model download.
-            for _ in range(300):
-                check_cancelled()
-                if design_proc.poll() is not None:
-                    raise RuntimeError(
-                        "Qwen VoiceDesign Microservice exited during startup; "
-                        "see qwen-voice-design.log"
-                    )
-                try:
-                    resp = httpx.get(
-                        "http://127.0.0.1:8101/health",
-                        timeout=2.0,
-                    )
-                    if (
-                        resp.status_code == 200
-                        and resp.json().get("model_loaded") is True
-                    ):
-                        logger.info("Qwen VoiceDesign Microservice is ready!")
-                        emit(
-                            "designing_references",
-                            0,
-                            candidate_total,
-                            f"Preparing {candidate_total} voice reference candidates",
-                        )
-                        break
-                except Exception:
-                    pass
-                time.sleep(2)
-            else:
-                raise RuntimeError(
-                    "Qwen VoiceDesign Microservice failed to start; "
-                    "see qwen-voice-design.log"
-                )
 
             designed_candidates = 0
             for char_id, character in request.characters.items():
@@ -361,17 +406,6 @@ class VoiceDesigner:
                     candidates=candidates,
                 )
 
-        finally:
-            logger.info("Shutting down Qwen VoiceDesign Microservice...")
-            if design_proc.poll() is None:
-                design_proc.terminate()
-                try:
-                    design_proc.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    design_proc.kill()
-                    design_proc.wait(timeout=10)
-            log_file.close()
-
         # Validate only after VoiceDesign has released VRAM.
         if self.validator:
             validation_total = sum(
@@ -473,7 +507,231 @@ class VoiceDesigner:
                     "Acoustic distinctness could not be checked."
                 )
 
+        cast_diagnostics, collisions = self._compare_cast(
+            embeddings, voices_generated, emit, check_cancelled
+        )
+        cast_diagnostics, convergence_rounds = self._converge_distinctness(
+            request,
+            voices_generated,
+            embeddings,
+            cast_diagnostics,
+            collisions,
+            emit,
+            check_cancelled,
+        )
+
+        emit(
+            "complete",
+            1,
+            1,
+            "Voice references are ready for review",
+        )
+        return BootstrapVoicesResponse(
+            status="success",
+            project_id=project_id,
+            voices_generated=voices_generated,
+            cast_diagnostics=cast_diagnostics,
+            distinctness_rounds=convergence_rounds,
+        )
+
+    def _converge_distinctness(
+        self,
+        request: BootstrapVoicesRequest,
+        voices_generated: dict[str, BootstrapVoiceResult],
+        embeddings: dict[str, Any],
+        cast_diagnostics: list[CastPairDiagnostic],
+        collisions: dict[str, set[str]],
+        emit: Callable[[str, int, int, str], None],
+        check_cancelled: Callable[[], None],
+    ) -> tuple[list[CastPairDiagnostic], list[dict[str, Any]]]:
+        """Redesign colliding voices until they separate, or the rounds run out.
+
+        Comparison used to be the end of the road: VoiceDesign had already been
+        shut down to free VRAM for the speaker encoder, so a collision could be
+        reported but never repaired. On a 52-character cast that left 22
+        flagged pairs for a human to resolve by hand, one of them a character
+        measured at 0.992 speaker similarity against the narrator.
+
+        Because VoiceDesign is a subprocess, the two models can take turns
+        instead of being co-resident. Each round re-boots it, redesigns only the
+        colliding voices with a contrast brief naming who they collided with,
+        re-embeds just those, and re-measures.
+
+        Bounded by ``distinctness_rounds``: whatever is still colliding when the
+        rounds run out is surfaced as a warning, exactly as before. Returns the
+        final diagnostics and a per-round scoreboard.
+        """
+        convergence_rounds: list[dict[str, Any]] = []
+        for round_index in range(1, self.distinctness_rounds + 1):
+            if not collisions:
+                break
+            check_cancelled()
+
+            before = self._collision_summary(cast_diagnostics)
+            logger.info(
+                "Distinctness round %d/%d: %d voice(s) collide, worst pair %.3f",
+                round_index,
+                self.distinctness_rounds,
+                len(collisions),
+                before["max_similarity"],
+            )
+            emit(
+                "redesigning_cast",
+                round_index - 1,
+                self.distinctness_rounds,
+                (
+                    f"Redesigning {len(collisions)} voice(s) for distinctness "
+                    f"(round {round_index} of {self.distinctness_rounds})"
+                ),
+            )
+
+            regenerated = self._redesign_for_distinctness(
+                request,
+                collisions,
+                voices_generated,
+                emit,
+                check_cancelled,
+                round_index=round_index,
+            )
+            if not regenerated:
+                logger.info(
+                    "Distinctness round %d produced no new references; stopping",
+                    round_index,
+                )
+                break
+
+            # Re-embed only what changed; the rest of the cast is untouched.
+            for char_id in regenerated:
+                check_cancelled()
+                try:
+                    embeddings[char_id] = self.engine.speaker_embedding(
+                        voices_generated[char_id].file
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Could not re-extract cast embedding for '%s': %s",
+                        char_id,
+                        exc,
+                    )
+
+            cast_diagnostics, collisions = self._compare_cast(
+                embeddings, voices_generated, emit, check_cancelled
+            )
+            after = self._collision_summary(cast_diagnostics)
+            convergence_rounds.append(
+                {
+                    "round": round_index,
+                    "redesigned": sorted(regenerated),
+                    "similar_pairs_before": before["similar_pairs"],
+                    "similar_pairs_after": after["similar_pairs"],
+                    "max_similarity_before": before["max_similarity"],
+                    "max_similarity_after": after["max_similarity"],
+                }
+            )
+            logger.info(
+                "Distinctness round %d complete: similar pairs %d -> %d, "
+                "worst similarity %.3f -> %.3f",
+                round_index,
+                before["similar_pairs"],
+                after["similar_pairs"],
+                before["max_similarity"],
+                after["max_similarity"],
+            )
+
+        if collisions:
+            logger.warning(
+                "%d voice(s) remain acoustically similar after %d round(s); "
+                "surfacing for manual redesign in Voice Review",
+                len(collisions),
+                len(convergence_rounds),
+            )
+
+        # Warnings are attached once, against the final measurement, so a voice
+        # repaired in round 1 does not carry its round-0 collision text.
+        self._apply_similarity_warnings(cast_diagnostics, voices_generated)
+
+        # Transcript-check whatever the rounds replaced. The initial pass ran
+        # before any redesign existed, so without this a regenerated reference
+        # would ship unchecked -- and a contrast brief that pushes pitch and
+        # rate is exactly the kind of change that can hurt intelligibility.
+        # Done once at the end rather than per round: one Whisper load, and
+        # only when something was actually redesigned.
+        redesigned = {
+            char_id
+            for entry in convergence_rounds
+            for char_id in entry["redesigned"]
+        }
+        if redesigned and self.validator:
+            self._revalidate_transcripts(request, redesigned, voices_generated)
+
+        return cast_diagnostics, convergence_rounds
+
+    def _revalidate_transcripts(
+        self,
+        request: BootstrapVoicesRequest,
+        char_ids: set[str],
+        voices_generated: dict[str, BootstrapVoiceResult],
+    ) -> None:
+        """Re-run the WER check over references replaced by a redesign round."""
+        try:
+            for char_id in sorted(char_ids):
+                result = voices_generated.get(char_id)
+                if result is None or not result.candidates:
+                    continue
+                candidate = result.candidates[0]
+                expected = self._build_test_sentence(
+                    char_id, request.characters[char_id]
+                )
+                transcribed = self.validator.transcribe(candidate.file)
+                wer = float(self.validator.calculate_wer(expected, transcribed))
+                candidate.transcription_wer = wer
+                result.transcription_wer = wer
+                if wer > self.wer_threshold:
+                    logger.warning(
+                        "Redesigned reference '%s' has elevated transcript "
+                        "WER=%.3f (threshold=%.2f); retaining for Voice Review",
+                        char_id,
+                        wer,
+                        self.wer_threshold,
+                    )
+                    message = (
+                        f"Reference transcript WER {wer:.2f} exceeded threshold "
+                        f"({self.wer_threshold:.2f}) after distinctness "
+                        "redesign; manual audition and approval required in "
+                        "Voice Review."
+                    )
+                    candidate.warnings.append(message)
+                    result.warnings.append(message)
+        except Exception:
+            # Never fail bootstrap on the transcript check -- the same contract
+            # the initial validation pass follows. The audio is kept and the
+            # operator reviews it.
+            logger.warning(
+                "Transcript re-check after distinctness redesign failed",
+                exc_info=True,
+            )
+        finally:
+            try:
+                self.validator.unload()
+            except Exception:
+                logger.debug("Validator unload after re-check failed", exc_info=True)
+
+    def _compare_cast(
+        self,
+        embeddings: dict[str, Any],
+        voices_generated: dict[str, BootstrapVoiceResult],
+        emit: Callable[[str, int, int, str], None],
+        check_cancelled: Callable[[], None],
+    ) -> tuple[list[CastPairDiagnostic], dict[str, set[str]]]:
+        """Measure every cast pair and report which voices collide.
+
+        Returns the full diagnostic list plus an adjacency map of voice id to
+        the ids it was judged too similar to. The map is what a redesign round
+        needs: it names the specific voices a contrast direction must move
+        away from, rather than asking the model to be vaguely "more distinct".
+        """
         cast_diagnostics: list[CastPairDiagnostic] = []
+        collisions: dict[str, set[str]] = {}
         voice_ids = list(embeddings)
         pair_total = len(voice_ids) * max(0, len(voice_ids) - 1) // 2
         pair_completed = 0
@@ -510,39 +768,155 @@ class VoiceDesigner:
                         f"Compared {pair_completed} of {pair_total} cast pairs",
                     )
                 if diagnostic.status == "similar":
-                    warning = (
-                        f"Sounds very similar to {right_id} "
-                        f"(speaker similarity {similarity:.3f})."
-                    )
-                    voices_generated[left_id].warnings.append(warning)
-                    voices_generated[right_id].warnings.append(
-                        f"Sounds very similar to {left_id} "
-                        f"(speaker similarity {similarity:.3f})."
-                    )
+                    collisions.setdefault(left_id, set()).add(right_id)
+                    collisions.setdefault(right_id, set()).add(left_id)
                     logger.warning(
                         "Cast voices '%s' and '%s' are acoustically similar: %.3f",
                         left_id,
                         right_id,
                         similarity,
                     )
+        return cast_diagnostics, collisions
 
-                    # The VoiceDesign helper has already been stopped so the Base
-                    # speaker encoder can run without VRAM co-residency.  Do not
-                    # attempt an impossible late fallback generation here; the
-                    # warning is surfaced for an explicit user redesign instead.
+    @staticmethod
+    def _collision_summary(
+        cast_diagnostics: list[CastPairDiagnostic],
+    ) -> dict[str, Any]:
+        """Round-over-round scoreboard: how many pairs collide, and how badly."""
+        similar = [d for d in cast_diagnostics if d.status == "similar"]
+        return {
+            "similar_pairs": len(similar),
+            # Worst similarity among pairs that actually count as collisions.
+            # Reporting the max across *all* pairs would be dominated by pairs
+            # that are objectively contrasted and therefore suppressed, hiding
+            # whether the rounds are helping.
+            "max_similarity": max(
+                (float(d.speaker_similarity) for d in similar), default=0.0
+            ),
+        }
 
-        emit(
-            "complete",
-            1,
-            1,
-            "Voice references are ready for review",
-        )
-        return BootstrapVoicesResponse(
-            status="success",
-            project_id=project_id,
-            voices_generated=voices_generated,
-            cast_diagnostics=cast_diagnostics,
-        )
+    @staticmethod
+    def _apply_similarity_warnings(
+        cast_diagnostics: list[CastPairDiagnostic],
+        voices_generated: dict[str, BootstrapVoiceResult],
+    ) -> None:
+        """Attach collision warnings from the final measurement only.
+
+        Applied once at the end rather than during each comparison pass, so a
+        voice that was repaired mid-run does not keep the warning text from a
+        measurement that no longer describes it.
+        """
+        stale = "Sounds very similar to "
+        for result in voices_generated.values():
+            result.warnings = [w for w in result.warnings if not w.startswith(stale)]
+        for diagnostic in cast_diagnostics:
+            if diagnostic.status != "similar":
+                continue
+            left, right = diagnostic.left_voice_id, diagnostic.right_voice_id
+            similarity = float(diagnostic.speaker_similarity)
+            if left in voices_generated:
+                voices_generated[left].warnings.append(
+                    f"{stale}{right} (speaker similarity {similarity:.3f})."
+                )
+            if right in voices_generated:
+                voices_generated[right].warnings.append(
+                    f"{stale}{left} (speaker similarity {similarity:.3f})."
+                )
+
+    def _redesign_for_distinctness(
+        self,
+        request: BootstrapVoicesRequest,
+        collisions: dict[str, set[str]],
+        voices_generated: dict[str, BootstrapVoiceResult],
+        emit: Callable[[str, int, int, str], None],
+        check_cancelled: Callable[[], None],
+        *,
+        round_index: int,
+    ) -> set[str]:
+        """Redesign the colliding voices once, with a targeted contrast brief.
+
+        Only the canonical candidate is regenerated. Alternatives are left
+        alone: they exist for a human to audition, and replacing them would
+        discard a choice the operator may already have made.
+
+        Returns the ids that were actually regenerated.
+        """
+        targets = [
+            char_id
+            for char_id in collisions
+            if char_id in request.characters
+        ]
+        if not targets:
+            return set()
+
+        regenerated: set[str] = set()
+        with self._voice_design_service(
+            check_cancelled, round_label=f"distinctness round {round_index}"
+        ):
+            for position, char_id in enumerate(targets, start=1):
+                check_cancelled()
+                character = request.characters[char_id]
+                collided_with = ", ".join(sorted(collisions[char_id]))
+                contrast = (
+                    " This voice was measured as acoustically too close to "
+                    f"{collided_with}. Move it clearly away from them: choose a "
+                    "different pitch centre, a different speaking rate and a "
+                    "different timbre, while keeping the stated age, gender and "
+                    "character intent intact. Do not caricature the voice."
+                )
+                contrasted = character.model_copy(
+                    update={
+                        "voice_description": character.voice_description + contrast
+                    }
+                )
+                cand_id = self._candidate_id(char_id, 1)
+                try:
+                    self.library.delete_voice(request.project_id, cand_id)
+                    result = self._generate_voice(
+                        request.project_id,
+                        cand_id,
+                        contrasted,
+                        design_fingerprint=request.design_fingerprints.get(
+                            char_id, ""
+                        ),
+                    )
+                except Exception as exc:
+                    # A failed redesign must not lose the voice we already had.
+                    logger.warning(
+                        "Distinctness redesign failed for '%s': %s", char_id, exc
+                    )
+                    continue
+
+                result.warnings.append(
+                    f"Automatically redesigned in distinctness round "
+                    f"{round_index} to separate it from {collided_with}."
+                )
+                existing = voices_generated[char_id]
+                if existing.candidates:
+                    existing.candidates[0] = result
+                else:
+                    existing.candidates = [result]
+                existing.file = result.file
+                existing.duration_seconds = result.duration_seconds
+                existing.sample_rate = result.sample_rate
+                existing.transcription_wer = result.transcription_wer
+
+                metrics, acoustic_warnings = self._acoustic_diagnostics(
+                    Path(result.file), contrasted
+                )
+                result.acoustic_metrics = metrics
+                result.warnings.extend(acoustic_warnings)
+                existing.acoustic_metrics = metrics
+                existing.warnings = list(result.warnings)
+
+                regenerated.add(char_id)
+                emit(
+                    "redesigning_cast",
+                    position,
+                    len(targets),
+                    f"Redesigned {position} of {len(targets)} colliding voices",
+                )
+        return regenerated
 
     @staticmethod
     def _cast_pair_diagnostic(
