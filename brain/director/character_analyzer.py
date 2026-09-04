@@ -648,6 +648,17 @@ class CharacterAnalyzer:
             )
         except Exception as exc:
             logger.warning("[CharacterAnalyzer] Cast identity adjudication failed: %s", exc)
+            # Leave evidence. Without this the project shows an absent audit,
+            # which is exactly what a clean run with no duplicates also shows.
+            self._write_cast_identity_audit(
+                project_dir,
+                {"merges": [], "review": [], "trace": [{"outcome": "failed", "reason": str(exc)[:600]}]},
+                [],
+                [],
+                require_approval,
+                applied_aliases,
+                outcome="failed",
+            )
             return registry
 
         applied: list[dict[str, Any]] = []
@@ -665,8 +676,17 @@ class CharacterAnalyzer:
                 continue
             applied.append(cast_identity.apply_merge(primary, duplicate, characters))
 
-        if applied or refused or result.get("review"):
-            self._write_cast_identity_audit(project_dir, result, applied, refused, require_approval)
+        # Always write it, including for a clean roster. An absent audit used
+        # to mean "no duplicates", "disabled" or "could not reach the model"
+        # indifferently; only the last of those wants attention.
+        self._write_cast_identity_audit(
+            project_dir,
+            result,
+            applied,
+            refused,
+            require_approval,
+            applied_aliases,
+        )
         if applied:
             logger.info(
                 "[CharacterAnalyzer] Cast identity: merged %d duplicate character(s)",
@@ -808,6 +828,7 @@ class CharacterAnalyzer:
         refused: list[dict[str, Any]],
         require_approval: bool,
         applied_aliases: list[dict[str, Any]] | None = None,
+        outcome: str = "completed",
     ) -> None:
         """Record every decision, including the refusals and why.
 
@@ -821,7 +842,10 @@ class CharacterAnalyzer:
             atomic_write_json(
                 project_dir / "cast_identity_audit.json",
                 {
-                    "schema_version": 1,
+                    "schema_version": 2,
+                    # "completed" means the adjudicator answered, whether or
+                    # not it proposed anything. "failed" means it never did.
+                    "outcome": outcome,
                     "require_approval": require_approval,
                     "applied": applied,
                     "recovered_aliases": list(applied_aliases or []),

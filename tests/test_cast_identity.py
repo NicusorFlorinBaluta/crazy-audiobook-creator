@@ -307,6 +307,57 @@ class CastAdjudicationWiringTests(unittest.TestCase):
         if tmp is not None:
             tmp.cleanup()
 
+    def test_a_clean_roster_still_leaves_an_audit(self) -> None:
+        """Finding nothing must not look like never running.
+
+        The audit used to be written only when something happened, so a clean
+        roster produced no file -- the same evidence a disabled pass leaves,
+        and the same a failed one leaves.
+        """
+        analyzer, registry, book, tmp = self._analyzer([])
+        analyzer._adjudicate_cast_identity(registry, book, tmp)
+
+        audit_path = tmp / "cast_identity_audit.json"
+        self.assertTrue(audit_path.is_file(), "a clean run must still record that it ran")
+        audit = json.loads(audit_path.read_text(encoding="utf-8"))
+        self.assertEqual(audit["outcome"], "completed")
+        self.assertEqual(audit["applied"], [])
+        self.assertEqual(audit["refused"], [])
+
+    def test_a_failed_adjudication_says_so_in_the_audit(self) -> None:
+        """The 2026-09-04 run: every rung failed and the project kept no trace."""
+        analyzer, registry, book, tmp = self._analyzer([])
+
+        class _Broken:
+            cast_adjudication_enabled = True
+
+            def adjudicate_cast(self, **_kwargs):
+                raise RuntimeError("all rungs unavailable")
+
+        analyzer.external_validator = _Broken()
+        analyzer._adjudicate_cast_identity(registry, book, tmp)
+
+        audit_path = tmp / "cast_identity_audit.json"
+        self.assertTrue(audit_path.is_file(), "a failure must be recorded, not silent")
+        audit = json.loads(audit_path.read_text(encoding="utf-8"))
+        self.assertEqual(audit["outcome"], "failed")
+        self.assertIn("all rungs unavailable", json.dumps(audit["trace"]))
+
+    def test_recovered_aliases_reach_the_audit(self) -> None:
+        """The success path dropped them, so the audit contradicted the roster."""
+        analyzer, registry, book, tmp = self._analyzer([])
+
+        recovered = [{"character_id": "jarlaxle", "alias": "Jax"}]
+        analyzer._recover_unlinked_speakers = lambda *a, **k: recovered
+        analyzer._adjudicate_cast_identity(registry, book, tmp)
+
+        audit = json.loads((tmp / "cast_identity_audit.json").read_text(encoding="utf-8"))
+        self.assertEqual(
+            audit["recovered_aliases"],
+            recovered,
+            "an alias applied to the roster must appear in the record of it",
+        )
+
     def test_a_grounded_merge_is_applied(self) -> None:
         merges = [
             {
