@@ -315,8 +315,8 @@ class ValidationLoop:
             )
             try:
                 segment_metrics[line.line_id].update(self.engine.get_vram_info())
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Could not read VRAM info; these segment metrics will omit it: %s", exc)
             total_duration += info.duration
             generated_ids.append(line.line_id)
             self._send_progress(

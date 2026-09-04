@@ -384,8 +384,10 @@ class CharacterAnalyzer:
                         msg = f"Pass 1 Character Discovery: unit {idx + 1} of {len(analysis_units)} (Ch {ch.number}: {ch.title})"
                         try:
                             progress_callback(pct, msg, ch.number, idx + 1, len(analysis_units))
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logger.debug(
+                                "Progress callback raised during character discovery; the run continues: %s", exc
+                            )
                     raw_ch = self.ollama.generate_json(
                         ch_prompt,
                         temperature=self.temperature,
@@ -472,8 +474,12 @@ class CharacterAnalyzer:
             if checkpoint_path and checkpoint_path.exists():
                 try:
                     checkpoint_path.unlink(missing_ok=True)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning(
+                        "Could not delete the checkpoint %s; a later run may resume from stale state: %s",
+                        checkpoint_path,
+                        exc,
+                    )
 
         registry = self._ensure_explicit_unnamed_speakers(registry, book)
         # Duplicates are folded BEFORE augmentation and voice assignment: there

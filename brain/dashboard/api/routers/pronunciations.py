@@ -97,8 +97,10 @@ async def update_pronunciation(project_id: str, request: PronunciationRequest):
                 if term_pattern.search(txt):
                     affected_chapters.add(ch_num)
                     break
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                "Could not read %s; its chapter will be missing from the affected-chapter list: %s", chapter_path, exc
+            )
 
     if affected_chapters:
         DeliveryManager(project_dir).mark_stale_for_chapters(
@@ -158,8 +160,12 @@ async def batch_update_pronunciations(project_id: str, request: PronunciationBat
                     if term_pattern.search(txt):
                         affected_chapters.add(ch_num)
                         break
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(
+                    "Could not read %s; its chapter will be missing from the affected-chapter list: %s",
+                    chapter_path,
+                    exc,
+                )
 
         if affected_chapters:
             DeliveryManager(project_dir).mark_stale_for_chapters(

@@ -172,8 +172,8 @@ class VoiceDesigner:
                     if resp.status_code == 200 and resp.json().get("model_loaded") is True:
                         logger.info("Qwen VoiceDesign Microservice is ready!")
                         break
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("VoiceDesign health probe not answering yet; retrying: %s", exc)
                 time.sleep(2)
             else:
                 raise RuntimeError(f"Qwen VoiceDesign Microservice failed to start; see {log_path}")

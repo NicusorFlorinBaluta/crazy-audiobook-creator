@@ -267,8 +267,8 @@ class Qwen3TTSEngine:
                     vram_used = torch.cuda.memory_allocated() / 1e9
                     vram_total = torch.cuda.get_device_properties(0).total_mem / 1e9
                     logger.info("VRAM: %.1f / %.1f GB", vram_used, vram_total)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Could not read VRAM usage for logging: %s", exc)
 
         except Exception as e:
             logger.exception("Failed to load model: %s", e)
@@ -472,8 +472,8 @@ class Qwen3TTSEngine:
             import numpy as _np
 
             _np.random.seed(seed % (2**32 - 1))
-        except Exception:  # pragma: no cover - numpy is a hard dependency
-            pass
+        except Exception as exc:  # pragma: no cover - numpy is a hard dependency
+            logger.debug("numpy not importable, so its RNG is unseeded; generation will not be reproducible: %s", exc)
         try:
             import torch
 

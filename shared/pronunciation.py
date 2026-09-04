@@ -587,8 +587,10 @@ def build_pronunciation_inventory(
                 data = json.loads(inv_path.read_text(encoding="utf-8"))
                 cache_service.set(cache_key, {"sig": current_sig, "data": data}, ttl_seconds=1800)
                 return data
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                "Could not read the cached inventory %s; it will be rebuilt from the scripts: %s", inv_path, exc
+            )
 
     payload = json.loads(script_path.read_text(encoding="utf-8"))
     mappings, mapping_sources = load_pronunciation_dictionary(project_dir)
@@ -730,8 +732,10 @@ def build_pronunciation_inventory(
     if recs_updated:
         try:
             recs_path.write_text(json.dumps(cached_recs, indent=2), encoding="utf-8")
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                "Could not write %s; recorded pronunciations will be recomputed next run: %s", recs_path, exc
+            )
 
     candidates.sort(
         key=lambda item: (
@@ -751,8 +755,10 @@ def build_pronunciation_inventory(
         from shared.artifacts import atomic_write_json
 
         atomic_write_json(inv_path, result)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning(
+            "Could not write the pronunciation inventory %s; the dashboard will show none: %s", inv_path, exc
+        )
 
     cache_service.set(cache_key, {"sig": current_sig, "data": result}, ttl_seconds=1800)
     return result

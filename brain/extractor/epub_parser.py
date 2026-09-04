@@ -425,8 +425,8 @@ class EpubParser:
             values = book.get_metadata("DC", field)
             if values:
                 return str(values[0][0])
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("EPUB has no readable DC:%s metadata: %s", field, exc)
         return None
 
     # ------------------------------------------------------------------

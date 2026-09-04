@@ -746,8 +746,8 @@ def generate_chapter(request: GenerateChapterRequest, fast_req: Request):
             if torch_module is not None:
                 try:
                     result.peak_vram_gb = torch_module.cuda.max_memory_allocated() / 1e9
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Could not read peak VRAM; the response will report none: %s", exc)
             elapsed = time.time() - t0
             logger.info(
                 "[VoiceServer] Chapter %d finished in %.2fs: %d/%d lines generated, %d failed",

@@ -91,8 +91,8 @@ class VoiceClient:
                 if health.status == "ok":
                     logger.info("Voice server is ready: %s", health.model_loaded)
                     return True
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Voice server not ready yet; retrying: %s", exc)
 
             elapsed = int(time.time() - start)
             logger.info(

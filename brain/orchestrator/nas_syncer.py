@@ -150,7 +150,10 @@ class NASSyncer:
                 self._resolved_nas_root = fallback
                 logger.info("Created NAS shared folder at %s", fallback)
                 return fallback
-            except Exception:
+            except Exception as exc:
+                logger.debug(
+                    "Could not create the NAS shared folder at %s; trying the next candidate: %s", fallback, exc
+                )
                 continue
 
         raise NASError(f"Could not locate or create '{self.shared_folder}' on NAS.")

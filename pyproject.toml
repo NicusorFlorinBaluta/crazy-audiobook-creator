@@ -75,12 +75,17 @@ ignore = [
                # nas_syncer was done on 2026-09-04 -- every swallow there
                # now logs, because a silent one meant a delivery had
                # quietly not happened. Count rose from ~198 as new code
-               # landed; the *silent* ones are what matter, see S110.
-    "S110",    # try-except-pass (49, was ~75): nas_syncer cleared 16 and the
-               # mobile API 10, both on 2026-09-04. This is the rule that
-               # actually bites -- a bare `pass` leaves no evidence at all.
-               # Remaining clusters: main.py 19, pipeline.py 12.
-    "S112",    # try-except-continue (4): same programme as S110
+               # landed. The silent subset is gone -- see the S110 note below --
+               # so what remains is broad but at least always logged.
+    # S110 and S112 were cleared on 2026-09-04: ~75 sites that discarded an
+    # exception with no trace now say what was lost. Severity follows
+    # consequence -- `warning` where the user sees something wrong (a chapter
+    # listed as unscripted, a book with no chapters, an empty log view, audio
+    # silently re-rendered), `debug` where the fallback is the normal path (a
+    # health check that fails because the server has not started yet). The one
+    # site left silent is inside `ProjectLogHandler.emit`, where a logger call
+    # would re-enter the handler that just failed; it uses the stdlib's
+    # `handleError` instead. Both rules are enforced from here on.
     # B023 (loop-variable closure) was cleared on 2026-09-04: all 31 sites now
     # bind their loop variables as defaults. Every one was benign -- each
     # closure was consumed inside its own iteration -- but benign by accident,

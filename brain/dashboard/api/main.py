@@ -162,8 +162,8 @@ async def _release_gpu_resources(wait_seconds: float = 15.0) -> None:
     try:
         await asyncio.to_thread(pipeline.voice_client.health_check_once)
         voice_available = True
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Voice service did not answer the pre-shutdown health check; treating it as already down: %s", exc)
 
     if voice_available:
         for project_id in active_projects:
@@ -217,8 +217,11 @@ async def _shutdown_dashboard_process(delay_seconds: float = 0.35) -> None:
         sentinel_path = shared_paths.PROJECTS_DIR / ".dashboard_shutdown"
         sentinel_path.parent.mkdir(parents=True, exist_ok=True)
         sentinel_path.write_text("shutdown", encoding="utf-8")
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning(
+            "Could not write the shutdown sentinel; the next start will report this clean shutdown as an unexpected drop: %s",
+            exc,
+        )
     try:
         await _release_gpu_resources()
     finally:
@@ -356,8 +359,8 @@ def _get_script_summary(project_id: str) -> dict[int, tuple[bool, int, str]]:
             if ch_num is not None:
                 lines = data.get("lines", [])
                 result[int(ch_num)] = (len(lines) > 0, len(lines), str(data.get("chapter_title") or ""))
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Could not read %s; the dashboard will show this chapter as unscripted: %s", path, exc)
 
     cache_service.set(
         cache_key,
@@ -442,8 +445,13 @@ async def _interrupt_pipeline_worker(
     if task and not task.done():
         try:
             await asyncio.wait_for(asyncio.shield(task), timeout=wait_seconds)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(
+                "Project %s did not finish stopping within %ss; continuing with shutdown: %s",
+                project_id,
+                wait_seconds,
+                exc,
+            )
 
 
 def _validate_epub_archive(path: Path, max_expanded_mb: int) -> None:
@@ -552,7 +560,9 @@ class ProjectLogHandler(logging.Handler):
                 with open(log_file, "a", encoding="utf-8") as f:
                     f.write(line + "\n")
             except Exception:
-                pass
+                # Never log from inside a log handler -- it re-enters the
+                # handler that just failed. handleError reports to stderr.
+                self.handleError(record)
 
             # Fan out to SSE subscribers — MUST be thread-safe because
             # the pipeline runs in a thread-pool executor, not the event loop.
@@ -632,8 +642,11 @@ async def lifespan(app: FastAPI):
     if was_graceful_shutdown:
         try:
             sentinel_path.unlink()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                "Could not clear the shutdown sentinel; the next unexpected crash will be reported as a clean shutdown: %s",
+                exc,
+            )
 
     auto_resume = config.get("dashboard", {}).get("auto_resume_in_flight", True)
     jobs_to_resume: list[str] = []
@@ -681,8 +694,10 @@ async def lifespan(app: FastAPI):
                 try:
                     _get_script_summary(pid)
                     collect_review_gate(pid, _project_dir(pid), job_queue)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug(
+                        "Cache warmup failed for %s; the values will be computed on first request instead: %s", pid, exc
+                    )
 
     asyncio.create_task(asyncio.to_thread(_warmup_caches))
 
@@ -700,10 +715,13 @@ async def lifespan(app: FastAPI):
                             for ws in list(ws_connections):
                                 try:
                                     await ws.send_json({"type": "status_update", "project_id": pid, "status": st})
-                                except Exception:
-                                    pass
-                except Exception:
-                    pass
+                                except Exception as exc:
+                                    logger.debug("Dropped a status update to one websocket client: %s", exc)
+                except Exception as exc:
+                    logger.warning(
+                        "Status broadcast cycle failed; connected dashboards will not update until the next tick: %s",
+                        exc,
+                    )
 
     broadcast_task = asyncio.create_task(ws_broadcast_loop())
 
@@ -745,12 +763,12 @@ async def lifespan(app: FastAPI):
         await _release_gpu_resources()
         try:
             pipeline.ollama.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Ollama client did not close cleanly: %s", exc)
         try:
             pipeline.voice_client.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Voice client did not close cleanly: %s", exc)
     lock.release()
 
 
@@ -1070,8 +1088,10 @@ def _safe_delete_tree(path: Path) -> bool:
         try:
             os.chmod(file_path, stat.S_IWRITE | stat.S_IREAD)
             func(file_path)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(
+                "Could not clear the read-only attribute on %s; the delete will fail and report it: %s", file_path, exc
+            )
 
     if path.is_dir():
         try:
@@ -1367,8 +1387,8 @@ async def start_pipeline(
                             "message": str(e),
                         }
                     )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Dropped a pipeline-failure notice to one websocket client: %s", exc)
         finally:
             # The stop endpoint deliberately persists running=True while a
             # cooperative stop is in flight.  A worker can finish at a natural
@@ -1389,8 +1409,11 @@ async def start_pipeline(
             for q in list(_log_subscribers.get(project_id, [])):
                 try:
                     q.put_nowait(None)  # None = stream done
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug(
+                        "Could not send the end-of-run sentinel to a log subscriber; that stream will idle until the client reconnects: %s",
+                        exc,
+                    )
 
     task = asyncio.create_task(run_in_background())
     running_tasks[project_id] = task
@@ -1420,8 +1443,10 @@ def _automatic_extraction_review_pending(
         for section in data.get("sections", []):
             if section.get("review_required") and not section.get("external_validation_attempted"):
                 return True
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning(
+            "Could not read %s; external validation will look unattempted for this project: %s", audit_path, exc
+        )
     return False
 
 
@@ -1870,8 +1895,10 @@ async def stream_chapter_audio(project_id: str, chapter_num: int, format: str = 
                 try:
                     bdata = json.loads(book_json.read_text(encoding="utf-8"))
                     chapters = bdata.get("chapters", [])
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning(
+                        "Could not read %s; the finished book will be listed with no chapters: %s", book_json, exc
+                    )
 
             start_sec = 0.0
             dur_sec = None
@@ -2057,8 +2084,12 @@ async def get_pipeline_status(project_id: str):
                 for idx, ch in enumerate(b_chaps, 1):
                     if isinstance(ch, dict) and ch.get("title"):
                         book_chapter_titles[idx] = ch["title"]
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(
+                    "Could not read %s; the dashboard will show placeholder metadata and no chapter titles: %s",
+                    book_json_path,
+                    exc,
+                )
 
         stage = str(state.get("active_stage") or state.get("status") or "").lower()
         scripted_chapters = set(state.get("scripted_chapters", []))
@@ -2142,8 +2173,12 @@ async def get_pipeline_status(project_id: str):
                         if log_file.exists():
                             try:
                                 logs = log_file.read_text(encoding="utf-8", errors="ignore").splitlines()[-100:]
-                            except Exception:
-                                pass
+                            except Exception as exc:
+                                logger.debug(
+                                    "Could not read %s for chunk progress; the chapter will show no chunk counter: %s",
+                                    log_file,
+                                    exc,
+                                )
                     for line in reversed(logs):
                         m_chunk = re.search(r"Processing fragment chunk\s+(\d+)/(\d+)", line)
                         if m_chunk:
@@ -2867,8 +2902,8 @@ async def get_log_history(project_id: str):
                     lines = all_lines[-500:]
                     # Hydrate RAM buffer
                     _project_logs[project_id] = collections.deque(lines, maxlen=500)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Could not read %s; the log view will come back empty: %s", log_file, exc)
     return {"project_id": project_id, "lines": lines}
 
 

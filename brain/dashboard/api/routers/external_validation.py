@@ -141,8 +141,10 @@ async def retry_external_validation(
             for hp in (health_path, global_health_path):
                 try:
                     hp.unlink(missing_ok=True)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning(
+                        "Could not remove %s; the external-validation circuit breaker stays tripped: %s", hp, exc
+                    )
 
         # Run resolve_attributions in a background thread to keep event loop responsive
         escalation = await asyncio.to_thread(

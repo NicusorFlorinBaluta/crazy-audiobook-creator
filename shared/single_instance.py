@@ -40,8 +40,8 @@ class SingleInstanceLock:
             if self.handle:
                 try:
                     self.handle.close()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Could not close the lock file handle after a failed acquire: %s", exc)
                 self.handle = None
             return False
 
@@ -68,5 +68,7 @@ class SingleInstanceLock:
                 try:
                     if self.lock_file.exists():
                         self.lock_file.unlink()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning(
+                        "Could not remove the lock file %s; the next start may refuse to run: %s", self.lock_file, exc
+                    )

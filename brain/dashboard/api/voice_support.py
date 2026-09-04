@@ -297,7 +297,8 @@ def _chapters_for_speakers(
     for path in sorted(script_dir.glob("chapter_*.json")):
         try:
             chapter = ScriptChapter.model_validate_json(path.read_text(encoding="utf-8"))
-        except Exception:
+        except Exception as exc:
+            logger.warning("Could not parse %s; a recast of these speakers will not reach this chapter: %s", path, exc)
             continue
         if any(line.speaker in speaker_ids for line in chapter.lines):
             affected.append(chapter.chapter_number)

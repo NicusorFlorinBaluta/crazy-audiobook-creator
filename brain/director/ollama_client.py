@@ -90,8 +90,8 @@ class OllamaClient:
             with self._client_lock:
                 try:
                     self._client.close()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Could not force-close the Ollama socket; the stream will end on its own: %s", exc)
         logger.info("[Ollama] Cancellation requested")
 
     def _raise_if_cancelled(self) -> None:
@@ -350,8 +350,8 @@ class OllamaClient:
                 err_text = ""
                 try:
                     err_text = e.response.text
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Could not read the error body from the Ollama response: %s", exc)
                 logger.warning(
                     "[Ollama] ✗ HTTP error (attempt %d/%d): %s — Body: %s",
                     attempt,

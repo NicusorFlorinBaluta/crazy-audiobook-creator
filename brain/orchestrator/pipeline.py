@@ -467,8 +467,8 @@ class Pipeline:
                 if getattr(self, "_ollama_server_log_handle", None) is not None:
                     try:
                         self._ollama_server_log_handle.close()
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.debug("Could not close the Ollama server log handle: %s", exc)
                     self._ollama_server_log_handle = None
                 raise RuntimeError(f"Managed Ollama exited during startup with code {code}")
             if self.ollama.check_health(quiet=True):
@@ -495,8 +495,11 @@ class Pipeline:
             logger.warning("Force killing managed Ollama subprocess: %s", exc)
             try:
                 process.kill()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(
+                    "Could not kill the managed Ollama subprocess; it may survive and keep holding the port and GPU: %s",
+                    exc,
+                )
         finally:
             self._ollama_server_proc = None
             log_handle = getattr(self, "_ollama_server_log_handle", None)
@@ -530,8 +533,8 @@ class Pipeline:
                 )
             try:
                 process.wait(timeout=5)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("taskkill reported success but the process did not reap within 5s: %s", exc)
             return
         process.terminate()
         process.wait(timeout=10)
@@ -552,8 +555,8 @@ class Pipeline:
             if health.status == "ok":
                 logger.info("Voice server is already running and healthy.")
                 return
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Voice server health check failed, so it is not running yet; starting one: %s", exc)
 
         import os
         import subprocess
@@ -704,8 +707,10 @@ class Pipeline:
                 logger.warning("Force killing Voice Server subprocess: %s", e)
                 try:
                     self._voice_server_proc.kill()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning(
+                        "Could not kill the Voice Server subprocess; it may survive and keep holding VRAM: %s", exc
+                    )
             finally:
                 self._voice_server_proc = None
                 log_handle = getattr(self, "_voice_server_log_handle", None)
@@ -780,8 +785,8 @@ class Pipeline:
                     message=f"Pipeline parked for project '{project_id}'. Safe to deploy updates.",
                     app_name="Audiobook Creator",
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Could not raise the safe-deployment desktop notification: %s", exc)
 
             self._pause_at_boundary(
                 project_id,
@@ -1261,10 +1266,10 @@ class Pipeline:
             try:
                 self.voice_client.health_check_once()
                 self.voice_client.unload_models()
-            except Exception:
+            except Exception as exc:
                 # The Voice service is intentionally absent during scripting-only
                 # runs and may already have exited after a cancellation.
-                pass
+                logger.debug("Voice service did not respond to the unload request during cleanup: %s", exc)
             self._stop_voice_server()
             self.job_queue.update_job(
                 project_id,
@@ -1600,8 +1605,13 @@ class Pipeline:
                         from brain.utils.file_utils import atomic_write_text
 
                         atomic_write_text(merged_script, json.dumps(merged_data, indent=2, ensure_ascii=False))
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning(
+                        "Could not prune chapter %s from %s; the merged script keeps the failed chapter: %s",
+                        chapter_num,
+                        merged_script,
+                        exc,
+                    )
             completed = len(self.job_queue.get_job(project_id).get("scripted_chapters", []))
             ch_idx = chapter_num - 1
             ch_obj = book.chapters[ch_idx] if 0 <= ch_idx < len(book.chapters) else None
@@ -3370,16 +3380,20 @@ class Pipeline:
                 try:
                     script_payload = json.loads(script_path.read_text(encoding="utf-8"))
                     collect_text(script_payload.get("chapters", []))
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning(
+                        "Could not read %s; mid-sentence detection will miss this script: %s", script_path, exc
+                    )
 
             if script_dir.is_dir():
                 for ch_file in script_dir.glob("chapter_*.json"):
                     try:
                         ch_payload = json.loads(ch_file.read_text(encoding="utf-8"))
                         collect_text(ch_payload.get("lines", []))
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.warning(
+                            "Could not read %s; mid-sentence detection will miss this chapter: %s", ch_file, exc
+                        )
 
             sentence_words = {
                 "After",
@@ -3479,7 +3493,13 @@ class Pipeline:
                 continue
             try:
                 stored_manifest = json.loads(segment_info_file.read_text(encoding="utf-8"))
-            except Exception:
+            except Exception as exc:
+                logger.warning(
+                    "Could not read %s; chapter %s counts as ungenerated and its audio will be re-rendered: %s",
+                    segment_info_file,
+                    chapter.chapter_number,
+                    exc,
+                )
                 continue
             stored_payload = {key: value for key, value in stored_manifest.items() if key != "manifest_hash"}
             if stored_manifest.get("manifest_hash") != fingerprint(stored_payload):
@@ -3511,7 +3531,13 @@ class Pipeline:
                 continue
             try:
                 master_info = json.loads(master_info_file.read_text(encoding="utf-8"))
-            except Exception:
+            except Exception as exc:
+                logger.warning(
+                    "Could not read %s; chapter %s will be re-mastered: %s",
+                    master_info_file,
+                    chapter.chapter_number,
+                    exc,
+                )
                 continue
             if (
                 master_info.get("segment_manifest_hash") == stored_manifest["manifest_hash"]

@@ -375,8 +375,8 @@ def _script_line_index(project_id: str) -> dict[str, dict[str, Any]]:
                         "voice_id": line.get("voice_id") or line.get("speaker"),
                         "text": line.get("text", ""),
                     }
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Could not index %s; its lines will not resolve in the quality review: %s", path, exc)
 
     cache_service.set(
         cache_key,
