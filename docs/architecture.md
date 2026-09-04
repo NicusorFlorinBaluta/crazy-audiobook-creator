@@ -310,6 +310,22 @@ The SQLite job queue performs atomic read-modify-write transactions and closes c
   stop.
 - Generation checks cancellation at safe segment boundaries.
 - Scheduled and deployment pauses park a live worker at chapter boundaries and preserve `active_stage`.
+- **The dashboard API is decomposed into routers.** `main.py` owns the
+  application, its lifespan and the lifecycle routes; `brain/dashboard/api/`
+  `routers/` owns pronunciations, voice cast, external validation and quality;
+  `runtime.py` owns the process-wide objects (`pipeline`, `job_queue`,
+  `running_tasks`) and the path resolution every router needs. `voice_support.py`
+  holds the voice-cast domain helpers both `main` and its router use.
+
+  The dependency runs one way: a router never imports `main`, and a test
+  asserts it. Where a router needs to *start* a run -- the quality group
+  resumes a paused project once its last blocking review clears -- `runtime`
+  holds a slot that `main` fills with its `start_pipeline` at import. That
+  inversion is what let the quality group move at all; without it the router
+  would have had to import `main` and recreate the cycle the split removes. A
+  test asserts the slot is actually filled, because an unregistered starter
+  fails as a run that silently never happens rather than as an error.
+
 - **`active_stage` outranks `status` when rendering.** `status` is coarse
   (`waiting_for_review` means "blocked on a human"); `active_stage` names
   *which* gate (`voice_review`). The dashboard resolves the pair through a

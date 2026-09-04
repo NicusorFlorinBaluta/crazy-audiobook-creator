@@ -47,12 +47,16 @@ EXTRACTED_ROUTES = [
     ("GET", "/api/projects/pinned/external-validation/events"),
     ("GET", "/api/projects/pinned/external-validation/status"),
     ("POST", "/api/projects/pinned/external-validation/retry"),
-    # still in main.py, and deliberately so: both reach `start_pipeline`
-    # (directly, or through `_schedule_resume_after_reviews`), which would make
-    # the router import main. Pinned here so that stays a decision.
-    ("POST", "/api/projects/pinned/voice-review/approve"),
+    # routers/quality.py -- moved once runtime owned the pipeline-start
+    # indirection, which is what had kept this group in main.
     ("GET", "/api/projects/pinned/quality"),
     ("GET", "/api/projects/pinned/quality/review"),
+    ("POST", "/api/projects/pinned/quality/review"),
+    ("GET", "/api/projects/pinned/reviews"),
+    # still in main.py: approve_voice_cast calls start_pipeline directly rather
+    # than through runtime, and moving it buys little. Pinned so that stays a
+    # decision rather than an oversight.
+    ("POST", "/api/projects/pinned/voice-review/approve"),
 ]
 
 
@@ -86,6 +90,23 @@ class RouterWiringTests(unittest.TestCase):
         response = self.client.get("/api/projects/pinned/definitely-not-a-route")
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.json().get("detail"), "Not Found")
+
+    def test_the_pipeline_starter_is_registered(self) -> None:
+        """The inversion is only real if main actually fills the slot.
+
+        `runtime.schedule_resume_after_reviews` resumes a paused run through
+        `runtime.start_pipeline`. If main never registers its implementation
+        that raises 503, and a project whose last blocking review was just
+        resolved would silently never restart -- a failure with no error
+        anywhere, only a run that does not happen.
+        """
+        from brain.dashboard.api import main, runtime
+
+        self.assertIsNotNone(
+            runtime._pipeline_starter,
+            "main must call runtime.register_pipeline_starter at import",
+        )
+        self.assertIs(runtime._pipeline_starter, main.start_pipeline)
 
     def test_routers_do_not_import_main(self) -> None:
         """The dependency must run one way, or the split buys nothing.

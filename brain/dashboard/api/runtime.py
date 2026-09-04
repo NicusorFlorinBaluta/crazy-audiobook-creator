@@ -13,6 +13,7 @@ module exists for the large amount of route code that does not.
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,8 @@ import yaml
 from fastapi import HTTPException
 
 from shared import paths as shared_paths
+
+logger = logging.getLogger(__name__)
 
 # Installed by `main.lifespan` at startup. `None` before then, and in any test
 # that imports a router without booting the application.
@@ -105,3 +108,61 @@ def load_config(config_path: str = "brain/config.yaml") -> dict[str, Any]:
         with open(path, encoding="utf-8") as handle:
             return yaml.safe_load(handle) or {}
     return {}
+
+
+# ---------------------------------------------------------------------------
+# Pipeline start, inverted
+# ---------------------------------------------------------------------------
+#
+# `start_pipeline` is a route handler in `main`, but several things that are
+# not routes need to start a run -- the scheduler, the deploy-resume path, and
+# `schedule_resume_after_reviews` below. Importing it from `main` would make
+# every such module depend on the whole 4,000-line application, which is the
+# coupling the router split exists to remove.
+#
+# `main` registers its implementation here at import instead, and callers ask
+# `runtime` to start a pipeline without learning where that lives.
+
+_pipeline_starter: Any = None
+
+
+def register_pipeline_starter(starter: Any) -> None:
+    """Install the coroutine that starts a pipeline run. Called once, by `main`."""
+    global _pipeline_starter
+    _pipeline_starter = starter
+
+
+async def start_pipeline(project_id: str, **kwargs: Any) -> Any:
+    """Start a pipeline run through whatever `main` registered."""
+    if _pipeline_starter is None:
+        raise HTTPException(status_code=503, detail="Server not initialized")
+    return await _pipeline_starter(project_id, **kwargs)
+
+
+def schedule_resume_after_reviews(project_id: str) -> bool:
+    """Start a waiting project once its last blocking review is resolved.
+
+    Lives here rather than in `main` because both the monolith and the quality
+    router need it, and it is the only thing either of them needed
+    `start_pipeline` for.
+    """
+    from brain.orchestrator.review_gate import collect_review_gate
+    from shared.constants import PipelineStage
+
+    if not job_queue:
+        return False
+    state = job_queue.get_job(project_id)
+    if state.get("status") != PipelineStage.WAITING_FOR_REVIEW.value:
+        return False
+    gate = collect_review_gate(project_id, project_dir(project_id), job_queue)
+    if gate.blocking_items:
+        return False
+
+    async def resume() -> None:
+        try:
+            await start_pipeline(project_id, override_schedule=True)
+        except HTTPException as exc:
+            logger.warning("Automatic review resume skipped for %s: %s", project_id, exc.detail)
+
+    asyncio.create_task(resume())
+    return True

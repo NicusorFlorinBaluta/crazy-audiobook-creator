@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, patch
 import brain.dashboard.api.main as dashboard
 from brain.dashboard.api import runtime as dashboard_runtime
 from brain.dashboard.api import voice_support
+from brain.dashboard.api.routers import quality as quality_routes
 from brain.dashboard.api.routers import voice_cast as voice_cast_routes
 from brain.extractor.metadata_fetcher import FetchedMetadata, MetadataFetcher
 from shared.constants import PipelineStage
@@ -719,8 +720,8 @@ class DashboardLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     },
                 ]
 
-        with patch.object(dashboard, "job_queue", FakeQueue()):
-            response = await dashboard.get_quality_report("book")
+        with patch.object(dashboard_runtime, "job_queue", FakeQueue()):
+            response = await quality_routes.get_quality_report("book")
 
         self.assertEqual(response["total_segments"], 3)
         self.assertEqual(
@@ -754,8 +755,8 @@ class DashboardLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     }
                 ]
 
-        with patch.object(dashboard, "job_queue", FakeQueue()):
-            response = await dashboard.get_quality_report("book")
+        with patch.object(dashboard_runtime, "job_queue", FakeQueue()):
+            response = await quality_routes.get_quality_report("book")
 
         self.assertEqual(response["total_segments"], 0)
         self.assertEqual(response["stale_records"], 1)
@@ -798,8 +799,8 @@ class DashboardLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     }
                 ]
 
-        with patch.object(dashboard, "job_queue", FakeQueue()):
-            response = await dashboard.get_quality_report("book")
+        with patch.object(dashboard_runtime, "job_queue", FakeQueue()):
+            response = await quality_routes.get_quality_report("book")
 
         self.assertEqual(response["total_segments"], 1)
         self.assertEqual(response["stale_records"], 0)
@@ -886,8 +887,8 @@ class DashboardLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     },
                 ]
 
-        with patch.object(dashboard, "job_queue", FakeQueue()):
-            report = await dashboard.get_quality_report("book")
+        with patch.object(dashboard_runtime, "job_queue", FakeQueue()):
+            report = await quality_routes.get_quality_report("book")
 
         self.assertEqual(report["passed_segments"], 1)
         self.assertEqual(report["accepted_with_warning_segments"], 1)
