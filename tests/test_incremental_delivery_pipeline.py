@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 from fastapi import HTTPException
 
 import brain.dashboard.api.main as dashboard_main
+from brain.dashboard.api import runtime as dashboard_runtime
 from brain.dashboard.api.main import (
     ChapterSelectionRequest,
     DeliverySettingsRequest,
@@ -24,7 +25,7 @@ from brain.orchestrator.job_queue import JobQueue
 from brain.orchestrator.pipeline import Pipeline, _GracefulDeliveryPause
 from shared.artifacts import fingerprint, hash_file
 from shared.constants import PipelineStage
-from shared.models import ScriptChapter
+from shared.models import ScriptChapter, ScriptLine
 
 
 class IncrementalDeliveryPipelineTests(unittest.TestCase):
@@ -413,20 +414,34 @@ class IncrementalDeliveryApiTests(unittest.IsolatedAsyncioTestCase):
 
         self.prev_job_queue = dashboard_main.job_queue
         self.prev_pipeline = dashboard_main.pipeline
+        fake_pipeline = MagicMock()
+        fake_pipeline.job_queue = self.job_queue
         dashboard_main.job_queue = self.job_queue
-        dashboard_main.pipeline = MagicMock()
-        dashboard_main.pipeline.job_queue = self.job_queue
+        dashboard_main.pipeline = fake_pipeline
+        # Routes extracted into brain/dashboard/api/routers/ read the runtime
+        # module rather than main's globals, so bind both.
+        self.prev_runtime = (dashboard_runtime.pipeline, dashboard_runtime.job_queue)
+        dashboard_runtime.bind(pipeline_obj=fake_pipeline, job_queue_obj=self.job_queue)
 
-        # Patch _project_dir in main.py to point to our test directory
+        # Point project-directory resolution at the test directory, in both the
+        # monolith and the extracted routers.
         self.project_dir_patcher = patch(
             "brain.dashboard.api.main._project_dir",
             return_value=self.project_dir,
         )
         self.project_dir_patcher.start()
+        self.runtime_dir_patcher = patch.object(
+            dashboard_runtime, "project_dir", return_value=self.project_dir
+        )
+        self.runtime_dir_patcher.start()
 
     async def asyncTearDown(self) -> None:
         dashboard_main.job_queue = self.prev_job_queue
         dashboard_main.pipeline = self.prev_pipeline
+        dashboard_runtime.bind(
+            pipeline_obj=self.prev_runtime[0], job_queue_obj=self.prev_runtime[1]
+        )
+        self.runtime_dir_patcher.stop()
         self.project_dir_patcher.stop()
         self.temp_dir.cleanup()
 
@@ -545,7 +560,10 @@ class IncrementalDeliveryApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(state2["pause_after_delivery_requested"])
 
     async def test_update_pronunciation_sanitizes_prefix_and_saves(self) -> None:
-        from brain.dashboard.api.main import PronunciationRequest, update_pronunciation
+        from brain.dashboard.api.routers.pronunciations import (
+            PronunciationRequest,
+            update_pronunciation,
+        )
         dashboard_main.projects_dir = self.project_dir.parent
 
         scripts_dir = self.project_dir / "script"
@@ -556,7 +574,7 @@ class IncrementalDeliveryApiTests(unittest.IsolatedAsyncioTestCase):
             chapter_number=1,
             chapter_title="Chapter 1",
             lines=[
-                dashboard_main.ScriptLine(
+                ScriptLine(
                     line_id="ch01_0001",
                     speaker="narrator",
                     text="Highprince Kholin watched from above.",

@@ -6,7 +6,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import brain.dashboard.api.main as dashboard
+from brain.dashboard.api import runtime as dashboard_runtime
+from brain.dashboard.api.routers import pronunciations as pronunciation_routes
 from shared.models import (
     GenerateLineRequest,
     GenerateLineResponse,
@@ -154,18 +155,18 @@ class PronunciationAndHotSwapTests(unittest.IsolatedAsyncioTestCase):
             fake_pipeline.voice_client = FakeVoiceClient()
 
             with (
-                patch.object(dashboard, "job_queue", MagicMock()),
-                patch.object(dashboard, "_require_job", return_value={"project_id": "test"}),
-                patch.object(dashboard, "_project_dir", return_value=project_dir),
-                patch.object(dashboard, "_workspace_project_dir", return_value=workspace_dir),
-                patch.object(dashboard, "pipeline", fake_pipeline),
+                patch.object(dashboard_runtime, "job_queue", MagicMock()),
+                patch.object(dashboard_runtime, "require_job", return_value={"project_id": "test"}),
+                patch.object(dashboard_runtime, "project_dir", return_value=project_dir),
+                patch.object(dashboard_runtime, "workspace_project_dir", return_value=workspace_dir),
+                patch.object(dashboard_runtime, "pipeline", fake_pipeline),
             ):
-                req = dashboard.PronunciationPreviewRequest(
+                req = pronunciation_routes.PronunciationPreviewRequest(
                     term="homeisle",
                     spoken_text="home-aisle",
                     in_sentence=True,
                 )
-                res = await dashboard.preview_pronunciation("test", req)
+                res = await pronunciation_routes.preview_pronunciation("test", req)
 
                 self.assertEqual(res["status"], "success")
                 self.assertTrue(res["has_tts"])
@@ -175,7 +176,7 @@ class PronunciationAndHotSwapTests(unittest.IsolatedAsyncioTestCase):
 
                 # Now test fetching the preview audio
                 preview_id = res["audio_url"].split("/preview/")[1].split("/audio")[0]
-                audio_res = await dashboard.get_pronunciation_preview_audio("test", preview_id)
+                audio_res = await pronunciation_routes.get_pronunciation_preview_audio("test", preview_id)
                 self.assertEqual(audio_res.media_type, "audio/wav")
 
     async def test_preview_endpoint_offline_fallback(self) -> None:
@@ -188,17 +189,17 @@ class PronunciationAndHotSwapTests(unittest.IsolatedAsyncioTestCase):
             workspace_dir.mkdir(parents=True)
 
             with (
-                patch.object(dashboard, "job_queue", MagicMock()),
-                patch.object(dashboard, "_require_job", return_value={"project_id": "test"}),
-                patch.object(dashboard, "_project_dir", return_value=project_dir),
-                patch.object(dashboard, "_workspace_project_dir", return_value=workspace_dir),
-                patch.object(dashboard, "pipeline", None),
+                patch.object(dashboard_runtime, "job_queue", MagicMock()),
+                patch.object(dashboard_runtime, "require_job", return_value={"project_id": "test"}),
+                patch.object(dashboard_runtime, "project_dir", return_value=project_dir),
+                patch.object(dashboard_runtime, "workspace_project_dir", return_value=workspace_dir),
+                patch.object(dashboard_runtime, "pipeline", None),
             ):
-                req = dashboard.PronunciationPreviewRequest(
+                req = pronunciation_routes.PronunciationPreviewRequest(
                     term="homeisle",
                     spoken_text="home-aisle",
                 )
-                res = await dashboard.preview_pronunciation("test", req)
+                res = await pronunciation_routes.preview_pronunciation("test", req)
 
                 self.assertEqual(res["status"], "fallback_webspeech")
                 self.assertFalse(res["has_tts"])
@@ -228,18 +229,18 @@ class PronunciationAndHotSwapTests(unittest.IsolatedAsyncioTestCase):
             (project_dir / "book_script.json").write_text(json.dumps(book_script), encoding="utf-8")
 
             with (
-                patch.object(dashboard, "job_queue", MagicMock()),
-                patch.object(dashboard, "_require_job", return_value={"project_id": "test"}),
-                patch.object(dashboard, "_project_dir", return_value=project_dir),
-                patch.object(dashboard, "_workspace_project_dir", return_value=workspace_dir),
+                patch.object(dashboard_runtime, "job_queue", MagicMock()),
+                patch.object(dashboard_runtime, "require_job", return_value={"project_id": "test"}),
+                patch.object(dashboard_runtime, "project_dir", return_value=project_dir),
+                patch.object(dashboard_runtime, "workspace_project_dir", return_value=workspace_dir),
             ):
-                req = dashboard.PronunciationBatchRequest(
+                req = pronunciation_routes.PronunciationBatchRequest(
                     entries={
                         "homeisle": "Home aisle",
                         "kokerlii": "Coker lee",
                     }
                 )
-                res = await dashboard.batch_update_pronunciations("test", req)
+                res = await pronunciation_routes.batch_update_pronunciations("test", req)
                 self.assertEqual(res["status"], "success")
 
                 dict_data = json.loads((project_dir / "pronunciation_dict.json").read_text(encoding="utf-8"))
