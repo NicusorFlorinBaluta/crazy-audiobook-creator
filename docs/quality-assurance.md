@@ -262,6 +262,45 @@ npm test
 exists so a regression test can be proven to fail against pre-fix code rather
 than passing vacuously — the four regression tests above were verified that way.
 
+## The lint ratchet
+
+`pyproject.toml` ignores a short list of ruff rules that fire in too many
+existing places to fix at once. Each entry carries a count and a plan, and the
+list only ever shrinks. Adding to it needs a comment saying why.
+
+**Cleared so far.** `B023` (loop-variable closure, 31 sites), `B904`, `TRY400`,
+`TRY004`, and `S110`/`S112` -- the last of those being roughly 75 places that
+discarded an exception with no trace at all. Nothing in the project now throws
+away an exception without recording that it happened. The single deliberate
+exception is inside `ProjectLogHandler.emit`, where a logger call would
+re-enter the handler that just failed; it uses the stdlib's `handleError`.
+
+**Still open.** `BLE001` (169, from ~208). These all log now, so what remains
+is breadth rather than silence -- and breadth matters because `except
+Exception` catches the failure you expected *and* the typo you did not. An
+`AttributeError` introduced by a refactor gets swallowed and reported as a
+degraded read instead of failing loudly. That is not hypothetical: on
+2026-09-04 a missing attribute in the cast-adjudication path killed a live run,
+and the same shape one frame away would have been silently absorbed.
+
+When narrowing, name what the guarded call can actually raise, generously:
+
+| What is guarded | Catch |
+| --- | --- |
+| Reading someone else's file | `(OSError, UnicodeDecodeError, ValueError, KeyError, TypeError)` |
+| SQLite and pickle | `(sqlite3.Error, pickle.PickleError, OSError, EOFError, ValueError, TypeError)` |
+| `wave` / `soundfile` | `(OSError, wave.Error, EOFError, ValueError)` |
+
+`ValueError` earns its place in those: `json.JSONDecodeError` is a `ValueError`,
+and so is `int()` or `float()` over a junk field.
+
+Some sites should stay broad, and saying so is part of the job.
+`nas_syncer.py` is the standing example: paramiko raises `SSHException`
+alongside `OSError` and is imported lazily, so the name is not available in an
+`except` clause without making it a hard import. Narrowing to `OSError` alone
+would let an `SSHException` escape in the middle of a delivery, which is worse
+than a broad catch that logs.
+
 ## Verification tiers
 
 Use the cheapest tier that can prove the changed contract:

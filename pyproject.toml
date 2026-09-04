@@ -71,12 +71,34 @@ ignore = [
     # Real signal, but too many existing sites to fix in one pass without
     # risking behaviour. Reduce these over time; do not add entries without a
     # comment explaining the count and the plan.
-    "BLE001",  # blind except (208): narrowing incrementally, worst first.
-               # nas_syncer was done on 2026-09-04 -- every swallow there
-               # now logs, because a silent one meant a delivery had
-               # quietly not happened. Count rose from ~198 as new code
-               # landed. The silent subset is gone -- see the S110 note below --
-               # so what remains is broad but at least always logged.
+    "BLE001",  # blind except (169, from ~208): narrowing incrementally.
+               #
+               # Every one of these already logs -- the silent subset went with
+               # S110, see below -- so what is left is breadth, not silence.
+               # The point of narrowing is that `except Exception` catches the
+               # failure you expected *and* the typo you did not: an
+               # AttributeError from a refactor gets swallowed and logged as a
+               # degraded read rather than crashing in the test suite.
+               #
+               # Cleared so far on 2026-09-04: mobile.py (14), cache.py (6),
+               # pronunciation.py (7). The convention is to name what the
+               # guarded call can actually raise, generously:
+               #
+               #   reading someone else's file  (OSError, UnicodeDecodeError,
+               #                                 ValueError, KeyError, TypeError)
+               #   sqlite + pickle              (sqlite3.Error, pickle.PickleError,
+               #                                 OSError, EOFError, ValueError, TypeError)
+               #   wave/soundfile               (OSError, wave.Error, EOFError, ValueError)
+               #
+               # ValueError is doing real work in those: JSONDecodeError is a
+               # ValueError, and so is int()/float() over a junk field.
+               #
+               # NOT narrowed on purpose: nas_syncer.py (15). paramiko raises
+               # SSHException alongside OSError and is imported lazily, so the
+               # name is not available in an except clause without making it a
+               # hard import. Narrowing to OSError alone would let an
+               # SSHException escape mid-delivery, which is worse than a broad
+               # catch that logs.
     # S110 and S112 were cleared on 2026-09-04: ~75 sites that discarded an
     # exception with no trace now say what was lost. Severity follows
     # consequence -- `warning` where the user sees something wrong (a chapter

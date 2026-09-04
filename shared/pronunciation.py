@@ -146,7 +146,7 @@ def load_pronunciation_dictionary(
             continue
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
-        except Exception as exc:
+        except (OSError, UnicodeDecodeError, ValueError, KeyError, TypeError) as exc:
             raise ValueError(f"Invalid pronunciation dictionary: {path}") from exc
         for word, replacement in _validate_entries(raw, path).items():
             mappings[word.casefold()] = (word, replacement, source_name)
@@ -408,7 +408,7 @@ def _get_configured_ollama() -> tuple[str, str]:
             ollama_cfg = cfg.get("ollama", {})
             host = str(ollama_cfg.get("host") or host)
             model = str(ollama_cfg.get("model") or model)
-        except Exception as exc:
+        except (ImportError, OSError, ValueError) as exc:
             logger.warning(
                 "Could not read %s for pronunciation model selection; falling back to %s: %s",
                 cfg_path,
@@ -541,7 +541,7 @@ def resolve_pronunciations_with_llm(
                 if term and d:
                     result[term] = {"default": d, "alternate": a or d}
             return result
-    except Exception as exc:
+    except (OSError, ValueError, KeyError, TypeError) as exc:
         logger.debug("Ollama pronunciation resolution unavailable: %s", exc)
         return {}
 
@@ -587,7 +587,7 @@ def build_pronunciation_inventory(
                 data = json.loads(inv_path.read_text(encoding="utf-8"))
                 cache_service.set(cache_key, {"sig": current_sig, "data": data}, ttl_seconds=1800)
                 return data
-        except Exception as exc:
+        except (OSError, UnicodeDecodeError, ValueError, KeyError, TypeError) as exc:
             logger.warning(
                 "Could not read the cached inventory %s; it will be rebuilt from the scripts: %s", inv_path, exc
             )
@@ -603,7 +603,7 @@ def build_pronunciation_inventory(
     if recs_path.is_file():
         try:
             cached_recs = json.loads(recs_path.read_text(encoding="utf-8"))
-        except Exception:
+        except (OSError, UnicodeDecodeError, ValueError, KeyError, TypeError):
             cached_recs = {}
 
     character_names: set[str] = set()
@@ -732,7 +732,7 @@ def build_pronunciation_inventory(
     if recs_updated:
         try:
             recs_path.write_text(json.dumps(cached_recs, indent=2), encoding="utf-8")
-        except Exception as exc:
+        except (OSError, ValueError, TypeError) as exc:
             logger.warning(
                 "Could not write %s; recorded pronunciations will be recomputed next run: %s", recs_path, exc
             )
@@ -755,7 +755,7 @@ def build_pronunciation_inventory(
         from shared.artifacts import atomic_write_json
 
         atomic_write_json(inv_path, result)
-    except Exception as exc:
+    except (OSError, ValueError, TypeError) as exc:
         logger.warning(
             "Could not write the pronunciation inventory %s; the dashboard will show none: %s", inv_path, exc
         )

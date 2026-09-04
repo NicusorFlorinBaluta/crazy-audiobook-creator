@@ -118,7 +118,7 @@ def _chapter_duration(project_dir: Path, workspace_dir: Path, chapter_num: int) 
                     rate = handle.getframerate()
                     if rate > 0:
                         return round(frames / float(rate), 2)
-            except Exception:
+            except (OSError, wave.Error, EOFError, ValueError):
                 # Fallback: estimate from file size (24kHz 16-bit mono is 48000 bytes/sec)
                 size = wav_path.stat().st_size
                 if size > 44:
@@ -164,7 +164,7 @@ async def get_catalog(
     active_job_ids = set()
     try:
         active_job_ids = {j.get("project_id") for j in job_queue.list_jobs() if j.get("project_id")}
-    except Exception as exc:
+    except (OSError, ValueError, KeyError, TypeError) as exc:
         logger.debug("Could not list active jobs for the mobile index: %s", exc)
 
     books: list[dict[str, Any]] = []
@@ -197,7 +197,7 @@ async def get_catalog(
                 book_chapters = bdata.get("chapters", [])
                 if total_chapters == 0:
                     total_chapters = len(book_chapters) or int(metadata.get("total_chapters") or 0)
-            except Exception as exc:
+            except (OSError, UnicodeDecodeError, ValueError, KeyError, TypeError) as exc:
                 logger.warning(
                     "Could not read %s; the app will show this book with no chapter count: %s", book_json_path, exc
                 )
@@ -279,7 +279,7 @@ async def get_catalog(
             dm = DeliveryManager(project_dir)
             deliveries = dm.load_index().deliveries
             published_deliveries = sum(1 for d in deliveries if getattr(d, "status", "") == "published")
-        except Exception as exc:
+        except (OSError, ValueError, KeyError, TypeError) as exc:
             logger.warning(
                 "Could not read the delivery index for %s; the app will show zero published parts: %s", project_dir, exc
             )
@@ -337,7 +337,7 @@ async def get_book_detail(project_id: str, request: Request) -> dict[str, Any]:
             bdata = json.loads(book_json_path.read_text(encoding="utf-8"))
             metadata = bdata.get("metadata", {})
             book_chapters = bdata.get("chapters", [])
-        except Exception as exc:
+        except (OSError, UnicodeDecodeError, ValueError, KeyError, TypeError) as exc:
             logger.warning("Could not read %s; the app will show placeholder metadata: %s", book_json_path, exc)
 
     title = metadata.get("title") or job_state.get("title") or project_id
@@ -383,7 +383,7 @@ async def get_book_detail(project_id: str, request: Request) -> dict[str, Any]:
                     if c.get("id") == "narrator" or c.get("name", "").lower() == "narrator":
                         narrator = c.get("speaker_name") or c.get("voice_name") or c.get("name")
                         break
-            except Exception as exc:
+            except (OSError, UnicodeDecodeError, ValueError, KeyError, TypeError) as exc:
                 logger.debug("Could not resolve a narrator name from the character registry: %s", exc)
 
     # Deliveries
@@ -440,7 +440,7 @@ async def get_book_detail(project_id: str, request: Request) -> dict[str, Any]:
                         "chapter_details": part_ch_details,
                     }
                 )
-    except Exception as e:
+    except (OSError, ValueError, KeyError, TypeError) as e:
         logger.warning("Could not load deliveries for %s: %s", project_id, e)
 
     chapters_list = []
@@ -561,7 +561,7 @@ def _resolve_chapter_timeline(project_dir: Path, workspace_dir: Path, chapter_nu
                         for item in t_data
                         if "line_id" in item and "start_ms" in item and "end_ms" in item
                     }
-        except Exception as exc:
+        except (OSError, UnicodeDecodeError, ValueError, KeyError, TypeError) as exc:
             logger.warning("Could not read the chapter timeline; the app cannot seek within this chapter: %s", exc)
 
     # Compute timeline dynamically from segments manifest
@@ -571,7 +571,7 @@ def _resolve_chapter_timeline(project_dir: Path, workspace_dir: Path, chapter_nu
 
     try:
         seg_data = json.loads(seg_manifest_path.read_text(encoding="utf-8"))
-    except Exception:
+    except (OSError, UnicodeDecodeError, ValueError, KeyError, TypeError):
         return {}
 
     segments = seg_data.get("segments", [])
@@ -595,7 +595,7 @@ def _resolve_chapter_timeline(project_dir: Path, workspace_dir: Path, chapter_nu
                     rate = w.getframerate()
                     if rate > 0:
                         dur_ms = int(round((frames / float(rate)) * 1000))
-            except Exception:
+            except (OSError, wave.Error, EOFError, ValueError):
                 size = wav_candidate.stat().st_size
                 if size > 44:
                     dur_ms = int(round(((size - 44) / 48000.0) * 1000))
@@ -635,7 +635,7 @@ def _resolve_chapter_timeline(project_dir: Path, workspace_dir: Path, chapter_nu
         try:
             with wave.open(str(ch_wav), "rb") as w:
                 actual_wav_ms = int(round((w.getnframes() / float(w.getframerate())) * 1000))
-        except Exception as exc:
+        except (OSError, wave.Error, EOFError, ValueError) as exc:
             logger.debug("Could not measure the mastered WAV duration; falling back to the manifest value: %s", exc)
 
         raw_end = raw_lines[-1][2]
@@ -672,7 +672,7 @@ def _resolve_chapter_timeline(project_dir: Path, workspace_dir: Path, chapter_nu
     try:
         timeline_path.parent.mkdir(parents=True, exist_ok=True)
         timeline_path.write_text(json.dumps(cached_list, indent=2), encoding="utf-8")
-    except Exception as exc:
+    except (OSError, ValueError, KeyError, TypeError) as exc:
         logger.warning("Could not cache the chapter timeline; the app will recompute it every request: %s", exc)
 
     return timeline_dict
@@ -693,7 +693,7 @@ async def get_chapter_lyrics(project_id: str, chapter_number: int, request: Requ
 
     try:
         script_data = json.loads(script_file.read_text(encoding="utf-8"))
-    except Exception as exc:
+    except (OSError, UnicodeDecodeError, ValueError, KeyError, TypeError) as exc:
         raise HTTPException(status_code=500, detail="Failed to parse chapter script") from exc
 
     timeline = _resolve_chapter_timeline(project_dir, workspace_dir, chapter_number)
@@ -747,7 +747,7 @@ async def get_chapter_reader(project_id: str, chapter_number: int, request: Requ
                 chapter_text = ch.get("text", "")
                 chapter_title = ch.get("title") or ch.get("source_heading") or chapter_title
                 source_heading = ch.get("source_heading") or chapter_title
-        except Exception as exc:
+        except (OSError, UnicodeDecodeError, ValueError, KeyError, TypeError) as exc:
             logger.debug("Could not read chapter text from book.json; falling back to script lines: %s", exc)
 
     # 2. Load script & timeline for timing alignment
@@ -760,7 +760,7 @@ async def get_chapter_reader(project_id: str, chapter_number: int, request: Requ
             if not chapter_text:
                 # Fallback: assemble text from script lines if book.json text was missing
                 chapter_text = "\n\n".join(l.get("text", "") for l in script_lines if l.get("text"))
-        except Exception as exc:
+        except (OSError, UnicodeDecodeError, ValueError, KeyError, TypeError) as exc:
             logger.warning(
                 "Could not assemble chapter text from script lines; the app will show an empty chapter: %s", exc
             )

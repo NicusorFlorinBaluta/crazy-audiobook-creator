@@ -53,7 +53,7 @@ class CacheService:
                     """
                 )
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_cache_expires ON cache_entries (expires_at)")
-        except Exception as exc:
+        except (sqlite3.Error, pickle.PickleError, OSError, EOFError, ValueError, TypeError) as exc:
             logger.warning("Failed to initialize cache DB: %s", exc)
 
     def get(self, key: str) -> Any | None:
@@ -74,7 +74,7 @@ class CacheService:
                     conn.execute("DELETE FROM cache_entries WHERE key = ?", (key,))
                     return None
                 return pickle.loads(val_blob)
-        except Exception as exc:
+        except (sqlite3.Error, pickle.PickleError, OSError, EOFError, ValueError, TypeError) as exc:
             logger.debug("Cache get failed for key '%s': %s", key, exc)
             return None
         finally:
@@ -99,7 +99,7 @@ class CacheService:
                     """,
                     (key, val_blob, expires_at, now),
                 )
-        except Exception as exc:
+        except (sqlite3.Error, pickle.PickleError, OSError, EOFError, ValueError, TypeError) as exc:
             logger.warning("Cache set failed for key '%s': %s", key, exc)
         finally:
             conn.close()
@@ -116,7 +116,7 @@ class CacheService:
                     f"DELETE FROM cache_entries WHERE key IN ({placeholders})",
                     keys,
                 )
-        except Exception as exc:
+        except (sqlite3.Error, pickle.PickleError, OSError, EOFError, ValueError, TypeError) as exc:
             logger.warning("Cache delete failed for keys %s: %s", keys, exc)
         finally:
             conn.close()
@@ -130,7 +130,7 @@ class CacheService:
                     "DELETE FROM cache_entries WHERE key LIKE ?",
                     (f"{prefix}%",),
                 )
-        except Exception as exc:
+        except (sqlite3.Error, pickle.PickleError, OSError, EOFError, ValueError, TypeError) as exc:
             logger.warning("Cache delete_prefix failed for '%s': %s", prefix, exc)
         finally:
             conn.close()
@@ -141,7 +141,7 @@ class CacheService:
         try:
             with conn:
                 conn.execute("DELETE FROM cache_entries")
-        except Exception as exc:
+        except (sqlite3.Error, pickle.PickleError, OSError, EOFError, ValueError, TypeError) as exc:
             logger.warning("Cache clear failed: %s", exc)
         finally:
             conn.close()
