@@ -230,7 +230,23 @@ if ($token -notmatch "^[A-Za-z0-9_-]{32,128}$") {
     throw "The existing audiobook token is not safe for dotenv and Nginx use."
 }
 
-$audiobookExternalUrl = $haExternalUrl.TrimEnd("/") + "/audiobook/"
+# The panel iframe needs a URL a browser will load inside Home Assistant, which
+# is served over https -- so an http URL is refused outright as mixed content.
+# The derived public URL is https, but it sits behind the proxy's Basic auth,
+# and a browser cannot satisfy that inside an iframe. A Tailscale `serve`
+# endpoint solves both: real certificate, no Basic auth, tailnet only.
+#
+# So do not overwrite one that is already configured. Re-running this script
+# after setting up `tailscale serve` used to silently put the unusable public
+# URL back.
+$existingExternalUrl = Get-YamlScalar $haSecretsPath "audiobook_external_url"
+if ($existingExternalUrl -and $existingExternalUrl -match "^https://[^/]+\.ts\.net(/|$)") {
+    $audiobookExternalUrl = $existingExternalUrl
+    Write-Output "Kept the existing Tailscale panel URL instead of replacing it with the public one."
+}
+else {
+    $audiobookExternalUrl = $haExternalUrl.TrimEnd("/") + "/audiobook/"
+}
 $healthUrl = "http://${crazyPcAddress}:8000/health"
 $releaseGpuUrl = "http://${crazyPcAddress}:8000/api/system/release-gpu"
 

@@ -471,6 +471,16 @@ async def _interrupt_pipeline_worker(
     reason: str,
     wait_seconds: float = 20.0,
 ) -> None:
+    """Stop a running project and wait for its worker to actually finish.
+
+    NOTE: nothing in production calls this. It is exercised only by
+    `test_immediate_interrupt_waits_for_worker_and_marks_paused`, which makes
+    it look maintained while no code path reaches it. Kept rather than deleted
+    because it does something the live stop paths do not -- it waits for the
+    worker and records a specific `pause_reason` -- and `/api/projects/{id}/stop`
+    plus `_release_gpu_resources` both open-code a weaker version. Wiring them
+    to this is a behaviour change worth making deliberately, not as a drive-by.
+    """
     if not pipeline or not job_queue:
         return
     try:
