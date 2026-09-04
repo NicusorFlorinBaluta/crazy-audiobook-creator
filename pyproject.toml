@@ -76,9 +76,10 @@ ignore = [
                # now logs, because a silent one meant a delivery had
                # quietly not happened. Count rose from ~198 as new code
                # landed; the *silent* ones are what matter, see S110.
-    "S110",    # try-except-pass (59, was ~75): 16 cleared in nas_syncer on
-               # 2026-09-04. This is the rule that actually bites -- a
-               # bare `pass` leaves no evidence at all.
+    "S110",    # try-except-pass (49, was ~75): nas_syncer cleared 16 and the
+               # mobile API 10, both on 2026-09-04. This is the rule that
+               # actually bites -- a bare `pass` leaves no evidence at all.
+               # Remaining clusters: main.py 19, pipeline.py 12.
     "S112",    # try-except-continue (4): same programme as S110
     # B023 (loop-variable closure) was cleared on 2026-09-04: all 31 sites now
     # bind their loop variables as defaults. Every one was benign -- each

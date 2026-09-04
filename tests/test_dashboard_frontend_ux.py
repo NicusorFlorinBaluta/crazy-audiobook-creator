@@ -1,3 +1,25 @@
+"""Source-substring checks on the dashboard frontend.
+
+These assert that particular strings appear in `index.html` and the scripts.
+That is a weak form of test and it is worth being explicit about the limits:
+
+- It breaks when an attribute is reordered, even though nothing is wrong.
+- It passes when the surrounding logic is broken, as long as the markup
+  survives. Two shipped bugs proved this -- an unreachable `voice_review`
+  branch and an attention panel reading "0 Action Required items" -- both wrong
+  *branch selection* with entirely intact markup.
+
+`tests/frontend/` is the replacement: a jsdom harness that loads the real page,
+runs the real scripts, and calls the real render functions. It currently covers
+the work-status panel and the attention inbox.
+
+The checks below are **kept, not endorsed**. They cover areas the harness has
+not reached yet -- tab semantics, the upload dialog, review and log filters,
+disclosure behaviour, metadata search, bulk sample download -- and deleting
+them would drop that coverage to zero rather than improve it. Migrate a group
+to `tests/frontend/` when you touch it, and delete its counterpart here then.
+"""
+
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]

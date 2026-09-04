@@ -164,8 +164,8 @@ async def get_catalog(
     active_job_ids = set()
     try:
         active_job_ids = {j.get("project_id") for j in job_queue.list_jobs() if j.get("project_id")}
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Could not list active jobs for the mobile index: %s", exc)
 
     books: list[dict[str, Any]] = []
 
@@ -197,8 +197,10 @@ async def get_catalog(
                 book_chapters = bdata.get("chapters", [])
                 if total_chapters == 0:
                     total_chapters = len(book_chapters) or int(metadata.get("total_chapters") or 0)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(
+                    "Could not read %s; the app will show this book with no chapter count: %s", book_json_path, exc
+                )
 
         title = metadata.get("title") or job_state.get("title") or project_id
         author = metadata.get("author") or job_state.get("author") or "Unknown Author"
@@ -277,8 +279,10 @@ async def get_catalog(
             dm = DeliveryManager(project_dir)
             deliveries = dm.load_index().deliveries
             published_deliveries = sum(1 for d in deliveries if getattr(d, "status", "") == "published")
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                "Could not read the delivery index for %s; the app will show zero published parts: %s", project_dir, exc
+            )
 
         updated_at = (
             job_state.get("updated_at") or datetime.fromtimestamp(project_dir.stat().st_mtime, tz=UTC).isoformat()
@@ -333,8 +337,8 @@ async def get_book_detail(project_id: str, request: Request) -> dict[str, Any]:
             bdata = json.loads(book_json_path.read_text(encoding="utf-8"))
             metadata = bdata.get("metadata", {})
             book_chapters = bdata.get("chapters", [])
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Could not read %s; the app will show placeholder metadata: %s", book_json_path, exc)
 
     title = metadata.get("title") or job_state.get("title") or project_id
     author = metadata.get("author") or job_state.get("author") or "Unknown Author"
@@ -379,8 +383,8 @@ async def get_book_detail(project_id: str, request: Request) -> dict[str, Any]:
                     if c.get("id") == "narrator" or c.get("name", "").lower() == "narrator":
                         narrator = c.get("speaker_name") or c.get("voice_name") or c.get("name")
                         break
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Could not resolve a narrator name from the character registry: %s", exc)
 
     # Deliveries
     deliveries = []
@@ -557,8 +561,8 @@ def _resolve_chapter_timeline(project_dir: Path, workspace_dir: Path, chapter_nu
                         for item in t_data
                         if "line_id" in item and "start_ms" in item and "end_ms" in item
                     }
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Could not read the chapter timeline; the app cannot seek within this chapter: %s", exc)
 
     # Compute timeline dynamically from segments manifest
     seg_manifest_path = project_dir / "manifests" / f"chapter_{chapter_num:03d}.segments.json"
@@ -631,8 +635,8 @@ def _resolve_chapter_timeline(project_dir: Path, workspace_dir: Path, chapter_nu
         try:
             with wave.open(str(ch_wav), "rb") as w:
                 actual_wav_ms = int(round((w.getnframes() / float(w.getframerate())) * 1000))
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Could not measure the mastered WAV duration; falling back to the manifest value: %s", exc)
 
         raw_end = raw_lines[-1][2]
         expected_body_end = max(actual_wav_ms - 2000, start_silence_ms + 1000) if actual_wav_ms > 4000 else raw_end
@@ -668,8 +672,8 @@ def _resolve_chapter_timeline(project_dir: Path, workspace_dir: Path, chapter_nu
     try:
         timeline_path.parent.mkdir(parents=True, exist_ok=True)
         timeline_path.write_text(json.dumps(cached_list, indent=2), encoding="utf-8")
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Could not cache the chapter timeline; the app will recompute it every request: %s", exc)
 
     return timeline_dict
 
@@ -743,8 +747,8 @@ async def get_chapter_reader(project_id: str, chapter_number: int, request: Requ
                 chapter_text = ch.get("text", "")
                 chapter_title = ch.get("title") or ch.get("source_heading") or chapter_title
                 source_heading = ch.get("source_heading") or chapter_title
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Could not read chapter text from book.json; falling back to script lines: %s", exc)
 
     # 2. Load script & timeline for timing alignment
     script_file = project_dir / "script" / f"chapter_{chapter_number:03d}.json"
@@ -756,8 +760,10 @@ async def get_chapter_reader(project_id: str, chapter_number: int, request: Requ
             if not chapter_text:
                 # Fallback: assemble text from script lines if book.json text was missing
                 chapter_text = "\n\n".join(l.get("text", "") for l in script_lines if l.get("text"))
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                "Could not assemble chapter text from script lines; the app will show an empty chapter: %s", exc
+            )
 
     timeline = _resolve_chapter_timeline(project_dir, workspace_dir, chapter_number)
 
