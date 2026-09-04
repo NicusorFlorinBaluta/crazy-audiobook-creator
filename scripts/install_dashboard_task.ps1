@@ -48,11 +48,11 @@ $settings = New-ScheduledTaskSettingsSet `
 #
 # Password gives the same filtered token as Interactive while still running
 # with nobody logged on, which is the one thing S4U was chosen for.
+# No principal object here on purpose: Register-ScheduledTask puts -Principal
+# and -User/-Password in different parameter sets and refuses both together.
+# Supplying -User with -Password is itself what selects a Password logon type,
+# and -RunLevel carries the rest.
 $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-$principal = New-ScheduledTaskPrincipal `
-    -UserId $currentUser `
-    -LogonType Password `
-    -RunLevel Limited
 $restartPrincipal = New-ScheduledTaskPrincipal `
     -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) `
     -LogonType Interactive `
@@ -67,13 +67,16 @@ if ($PSCmdlet.ShouldProcess($TaskName, "Register on-demand audiobook dashboard t
         # Windows keeps it in the Task Scheduler credential vault.
         $credential = Get-Credential -UserName $currentUser `
             -Message "Password for $currentUser, so the dashboard task can run headless without an elevated token"
+        if (-not $credential) {
+            throw "Registration cancelled: the dashboard task needs a password to run headless."
+        }
         Register-ScheduledTask `
             -TaskName $TaskName `
             -Action $action `
             -Settings $settings `
-            -Principal $principal `
             -User $currentUser `
             -Password $credential.GetNetworkCredential().Password `
+            -RunLevel Limited `
             -Description "Runs the Crazy Audiobook Creator dashboard headlessly on demand." | Out-Null
     }
     else {
