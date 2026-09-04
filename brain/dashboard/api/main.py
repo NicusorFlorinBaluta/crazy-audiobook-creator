@@ -189,6 +189,17 @@ async def _release_gpu_resources(wait_seconds: float = 15.0) -> None:
         return
 
     active_projects = [project_id for project_id, task in running_tasks.items() if not task.done()]
+    if active_projects:
+        # These runs are about to be interrupted, and the pipeline will record
+        # them as "Interrupted by user" with no pause_reason -- which is what
+        # the operator sees. Say here that a GPU release did it, or the pause
+        # is indistinguishable from someone pressing stop. Two e2e runs were
+        # lost to exactly that ambiguity on 2026-09-04.
+        logger.warning(
+            "Releasing GPU resources; interrupting %d active run(s): %s",
+            len(active_projects),
+            ", ".join(active_projects),
+        )
     for project_id in active_projects:
         pipeline.stop(project_id)
 
@@ -2371,10 +2382,25 @@ async def get_schedule():
     }
 
 
+def _caller(request: Request) -> str:
+    """Describe who asked for a lifecycle action.
+
+    The shutdown, restart and release-gpu endpoints all interrupt running work
+    and are reachable from the UI, Home Assistant, the desktop shell and two
+    PowerShell helpers. When one of them fires unexpectedly the logs show only
+    the effect, never the origin, which makes the cause guesswork.
+    """
+    client = request.client.host if request.client else "unknown"
+    agent = request.headers.get("user-agent", "no user-agent")
+    return f"{client} ({agent[:80]})"
+
+
 @app.post("/api/system/shutdown", status_code=202)
-async def shutdown_dashboard():
+async def shutdown_dashboard(request: Request):
     """Gracefully stop the dashboard after normal API authentication."""
     global _dashboard_shutdown_task
+
+    logger.warning("Shutdown requested by %s", _caller(request))
 
     if _dashboard_shutdown_task and not _dashboard_shutdown_task.done():
         return {
@@ -3518,8 +3544,9 @@ async def get_segment_candidate_audio(project_id: str, line_id: str, filename: s
 
 
 @app.post("/api/system/release-gpu")
-async def release_gpu():
+async def release_gpu(request: Request):
     """Release all app-owned GPU resources."""
+    logger.warning("GPU release requested by %s", _caller(request))
     await _release_gpu_resources()
     return {"status": "success", "message": "GPU resources released"}
 
@@ -3527,9 +3554,11 @@ async def release_gpu():
 @app.get("/api/projects/{project_id}/external-validation/status")
 @app.post("/api/projects/{project_id}/external-validation/retry")
 @app.post("/api/system/restart")
-async def restart_dashboard_server():
+async def restart_dashboard_server(request: Request):
     """Start the controlled restart helper, then release this API process."""
     global _dashboard_shutdown_task
+
+    logger.warning("Restart requested by %s", _caller(request))
     if _dashboard_shutdown_task is not None and not _dashboard_shutdown_task.done():
         return {
             "status": "already_restarting",

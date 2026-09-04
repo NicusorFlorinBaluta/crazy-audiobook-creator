@@ -9,6 +9,7 @@ import unittest
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import brain.dashboard.api.main as dashboard
@@ -18,6 +19,20 @@ from brain.dashboard.api.routers import quality as quality_routes
 from brain.dashboard.api.routers import voice_cast as voice_cast_routes
 from brain.extractor.metadata_fetcher import FetchedMetadata, MetadataFetcher
 from shared.constants import PipelineStage
+
+
+def _request(host: str = "127.0.0.1", agent: str = "pytest") -> Any:
+    """A Request good enough for the handlers' caller attribution.
+
+    The lifecycle endpoints log who asked, because a shutdown that arrives
+    unattended is otherwise indistinguishable from one the operator pressed.
+    These tests call the handlers directly rather than through the app, so
+    they have to supply the request themselves.
+    """
+    return SimpleNamespace(
+        client=SimpleNamespace(host=host),
+        headers={"user-agent": agent},
+    )
 
 
 class DashboardLifecycleTests(unittest.IsolatedAsyncioTestCase):
@@ -42,7 +57,7 @@ class DashboardLifecycleTests(unittest.IsolatedAsyncioTestCase):
             "_shutdown_dashboard_process",
             side_effect=controlled_shutdown,
         ):
-            response = await dashboard.shutdown_dashboard()
+            response = await dashboard.shutdown_dashboard(_request())
             self.assertEqual(response["status"], "shutting_down")
             self.assertIsNotNone(dashboard._dashboard_shutdown_task)
             blocker.set()
@@ -54,7 +69,7 @@ class DashboardLifecycleTests(unittest.IsolatedAsyncioTestCase):
             "_launch_dashboard_restart_helper",
             return_value="Crazy Audiobook Dashboard Restart",
         ):
-            response = await dashboard.restart_dashboard_server()
+            response = await dashboard.restart_dashboard_server(_request())
 
         self.assertEqual(response["status"], "restarting")
         self.assertEqual(
@@ -70,7 +85,7 @@ class DashboardLifecycleTests(unittest.IsolatedAsyncioTestCase):
             side_effect=RuntimeError("task unavailable"),
         ):
             with self.assertRaises(dashboard.HTTPException) as raised:
-                await dashboard.restart_dashboard_server()
+                await dashboard.restart_dashboard_server(_request())
 
         self.assertEqual(raised.exception.status_code, 503)
         self.assertIsNone(dashboard._dashboard_shutdown_task)

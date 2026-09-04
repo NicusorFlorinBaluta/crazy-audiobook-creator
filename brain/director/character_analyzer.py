@@ -476,16 +476,6 @@ class CharacterAnalyzer:
             }
             registry = self._parse_registry(final_raw, book_title, book_author)
 
-            if checkpoint_path and checkpoint_path.exists():
-                try:
-                    checkpoint_path.unlink(missing_ok=True)
-                except Exception as exc:
-                    logger.warning(
-                        "Could not delete the checkpoint %s; a later run may resume from stale state: %s",
-                        checkpoint_path,
-                        exc,
-                    )
-
         registry = self._ensure_explicit_unnamed_speakers(registry, book)
         # Duplicates are folded BEFORE augmentation and voice assignment: there
         # is no point enriching, or casting a voice for, an entry that is about
@@ -519,6 +509,25 @@ class CharacterAnalyzer:
 
         if reference_audit_path and getattr(book, "reference_material", None):
             self._write_reference_audit(registry, book, reference_audit_path)
+
+        # Only now is the checkpoint spent. It used to be deleted the moment
+        # Pass 1 parsed its registry, with adjudication, augmentation and voice
+        # assignment still to come -- so a failure in any of those threw away
+        # the entire discovery pass and the next run re-ran every unit from
+        # one. An e2e run hit exactly that: it died after unit 9 of 9 and
+        # restarted at unit 1. Discovery is the expensive half of scripting,
+        # so the checkpoint has to outlive everything that can still fail.
+        if isinstance(checkpoint_path, str):
+            checkpoint_path = Path(checkpoint_path)
+        if checkpoint_path is not None and checkpoint_path.exists():
+            try:
+                checkpoint_path.unlink(missing_ok=True)
+            except Exception as exc:
+                logger.warning(
+                    "Could not delete the checkpoint %s; a later run may resume from stale state: %s",
+                    checkpoint_path,
+                    exc,
+                )
 
         return registry
 

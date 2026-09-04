@@ -13,6 +13,7 @@ reviewing proposals to avoid spoilers, so the local vetoes are the last line.
 
 from __future__ import annotations
 
+import ast
 import json
 import unittest
 from pathlib import Path
@@ -546,6 +547,55 @@ class AdjudicationIsNotLoadBearingTests(unittest.TestCase):
         self.assertTrue(
             any(handler.type is None or getattr(handler.type, "id", None) == "Exception" for handler in guarded),
             "the guard must catch broadly -- any failure here is survivable",
+        )
+
+
+class CheckpointLifetimeTests(unittest.TestCase):
+    """The checkpoint must outlive every step that can still fail.
+
+    Observed in an e2e run on 2026-09-04: Pass 1 finished all 9 units, the
+    checkpoint was deleted, adjudication then raised, and the retry restarted
+    at unit 1. Discovery is the expensive half of scripting, so throwing it
+    away for a failure in an advisory step afterwards is the worst possible
+    trade.
+    """
+
+    def _analyze_source(self):
+        import ast
+
+        from brain.director import character_analyzer as module
+
+        tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+        return next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "analyze")
+
+    def test_the_checkpoint_is_deleted_after_the_fallible_steps(self) -> None:
+        analyze = self._analyze_source()
+
+        unlink_lines = [
+            node.lineno
+            for node in ast.walk(analyze)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "unlink"
+        ]
+        self.assertEqual(len(unlink_lines), 1, "expected exactly one checkpoint deletion")
+
+        fallible = [
+            node.lineno
+            for node in ast.walk(analyze)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr
+            in {
+                "_adjudicate_cast_identity",
+                "_augment_characters_with_gemini",
+                "_assign_voice_ids",
+                "_write_reference_audit",
+            }
+        ]
+        self.assertTrue(fallible, "the steps this guards did not parse")
+        self.assertGreater(
+            unlink_lines[0],
+            max(fallible),
+            "the checkpoint is deleted while work that can still fail is pending",
         )
 
 
