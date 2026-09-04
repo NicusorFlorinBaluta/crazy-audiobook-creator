@@ -59,17 +59,61 @@ Remove-Item -Recurse -Force "E:\Projects\crazy-audiobook-creator\.pytest_cache"
 
 ### Preventing recurrence
 
-Nothing in normal operation needs elevation, and this was verified rather than
-assumed:
+Nothing in normal operation needs elevation. Home Assistant drives the app over
+HTTP, and `/api/system/restart` runs `schtasks /Run` against a task the user
+already owns.
 
-- `install_dashboard_task.ps1` registers **both** scheduled tasks at
-  `RunLevel: Limited`, deliberately.
-- Home Assistant drives the app over HTTP. `/api/system/restart` runs
-  `schtasks /Run` against a task the user already owns, which needs no
-  elevation.
+#### `RunLevel: Limited` is not enough on its own — corrected 2026-09-04
 
-Only one-time setup needs an elevated shell: registering the S4U scheduled task
-(`Register-ScheduledTask`), and the `netsh portproxy` / firewall scripts.
+This page used to say both tasks run unelevated because they are registered at
+`RunLevel: Limited`. That is not what happens. The dashboard task also used
+`-LogonType S4U`, and for an account that belongs to Administrators a
+service-for-user logon returns a **full** token: UAC filtering applies to
+interactive-style logons, not to S4U. So the dashboard ran elevated, silently,
+for as long as that registration stood.
+
+Measured with two throwaway tasks differing only in logon type, `RunLevel`
+held at `Limited`:
+
+| Logon type | Token elevated | Files it creates |
+| --- | --- | --- |
+| `S4U` | yes | `BUILTIN\Administrators` |
+| `Interactive` | no | the user |
+
+`install_dashboard_task.ps1` now registers the dashboard with
+`-LogonType Password`, which yields the same filtered token as `Interactive`
+while still running with nobody logged on — the one property S4U was chosen
+for. It prompts for the credential at install time and stores nothing itself;
+Windows keeps it in the Task Scheduler vault.
+
+**An existing task keeps its old principal.** Registering over it does not
+change the logon type, so a machine set up before this must unregister and
+re-run the installer. The script warns when it finds an S4U registration.
+
+#### Why the first fix regressed
+
+The `takeown`/`icacls` above was applied to `brain/projects` only. That tree
+survived the next elevated run untouched, because the inheritable `(OI)(CI)`
+grant means new Administrators-owned files are still replaceable. The trees
+that never got the grant did not: on 2026-09-04 an unelevated `os.replace` of
+a speaker embedding under `voice_library` returned `[WinError 5]` while the
+same operation under `brain/projects` succeeded, same process, same moment.
+
+Apply the grant to every tree the app writes:
+
+```powershell
+foreach ($d in "brain\projects","workspace","voice_library","voice") {
+    $p = "E:\Projects\crazy-audiobook-creator\$d"
+    takeown /F $p /R /D Y | Out-Null
+    icacls $p /grant "${env:USERNAME}:(OI)(CI)F" /T | Out-Null
+}
+```
+
+`install-windows.ps1` does this for a fresh install. The inheritance flags are
+the point: a bare `takeown` fixes only the files that exist when it runs.
+
+Only one-time setup needs an elevated shell: registering the scheduled tasks,
+the ACL grant above, and the `netsh portproxy` / firewall scripts.
 
 Two guards now make a lapse loud instead of silent:
 
