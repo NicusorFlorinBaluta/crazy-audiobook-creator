@@ -175,25 +175,61 @@ spending another VoiceDesign boot resampling from a known-worse position.
 destroying the only file a rollback could return to, and `_generate_voice`
 re-registers the id anyway. Each round now reports `kept: true|false`.
 
-**What is still not established:** whether a contrast brief can reliably move a
-genuine 0.99 pair below 0.985 on a realistic cast. On four identical
-descriptions it managed 0.9881 → 0.9789 across two rounds — real but modest,
-and it needed the discarded round to get there. A real cast has differing
-descriptions and more headroom, so this is a lower bound rather than an
-expectation. Read `distinctness_rounds` on the next real bootstrap before
-assuming the loop is earning its cost; if `kept` is false on every round, the
-brief is not working and the wording is the thing to change, not the bound.
+**A second real-model round, 2026-09-04, after the rollback fix**
 
-## Standing priority order
+Same adversarial setup. This run exercised the loop end to end with the
+rollback working:
 
-This change is priority 1 (final audiobook quality) and priority 2 (human
-intervention reserved for genuinely uncertain decisions). It costs priority 3
-(speed): a book whose cast collides pays up to two extra VoiceDesign boots plus
-the redesigns. That trade is the correct direction per the standing order, and
-the bound is what keeps the cost knowable.
+| Round | Similar pairs | Worst similarity | Kept |
+| --- | --- | --- | --- |
+| start | 6 | 0.9868 | — |
+| 1 | 4 | 0.9915 | yes |
+| 2 | 5 | 0.9797 | **no — rolled back** |
 
-## Related
+Round 1 was kept because collision *count* dominates the score; round 2 raised
+the count from 4 to 5 and was discarded, restoring round 1's cast. The final
+warnings correctly say "redesigned in distinctness round 1", and critically
+**no WER warnings appeared**, which is what confirmed the file bug below was
+real and is now fixed.
 
-- [README.md](README.md) — status convention and index
-- [../architecture.md](../architecture.md) — current implementation
-- [2026-09-02-pronunciation-caching-and-stability-improvements.md](2026-09-02-pronunciation-caching-and-stability-improvements.md)
+### A defect the first real run hid behind a false signal
+
+The earlier run reported `WER 1.00` on all four redesigned references, which
+read as "the contrast brief destroys intelligibility". It was not. The re-check
+took 20 ms per voice against roughly 1 s in the initial pass, and the log said
+`Failed to load audio` — the files were **gone**.
+
+`VoiceLibraryManager.register_voice` reclaims the previous artifact when a new
+file is registered under the same id. Removing the explicit `delete_voice` call
+was therefore not enough: the rollback restored a *path* to a file that
+registration had already deleted, leaving the whole cast pointing at missing
+audio. Whisper could not open them, returned nothing, and WER came back 1.00.
+
+Fixed by copying the audio aside in `_snapshot_voices` rather than only
+recording its path, putting it back and re-registering it on rollback, and
+discarding the copies once they can no longer be needed. A rolled-back round is
+also no longer transcript-rechecked, because its audio is the previous take
+that the initial pass already checked. Three tests cover it.
+
+**On the brief wording itself, the evidence is inconclusive.** The brief was
+rewritten so that each colliding voice receives a *different* direction, ranked
+by measured pitch — the lowest told to go lower, the highest higher, the rest
+separated on timbre and rate — because the original gave every colliding voice
+the identical "be different from them" instruction, and identical instructions
+applied to identical descriptions resample into the same region. That reasoning
+is sound but unproven: both briefs reduced 6 colliding pairs to 4 on this
+setup, the old one reaching a better worst-similarity and the new one a worse
+one, with n=1 each and run-to-run starting variance (0.9817 to 0.9881) of the
+same order as the effect. Treat the new brief as a better-motivated guess, not
+a measured improvement.
+
+**Known limitation of the score.** Collision count dominates worst similarity,
+so a round that removes two collisions while pushing one remaining pair from
+0.9868 to 0.9915 counts as an improvement — which is what round 1 did. Whether
+that ordering is right for the audiobook is a judgement call that has not been
+tested against listening.
+
+**What is still not established:** whether a contrast brief of any wording can
+reliably move a genuine 0.99 pair below 0.985 on a *realistic* cast. Everything
+measured so far used four byte-identical descriptions, which is the worst case
+and not representative. Read `distinctness_rounds` on the next real bootstrap.

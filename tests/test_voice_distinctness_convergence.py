@@ -235,8 +235,63 @@ class ConvergenceLoopTests(unittest.TestCase):
             )
 
         self.assertEqual(len(seen), 1)
-        self.assertIn("acoustically too close to bob", seen[0])
+        self.assertIn("too close to bob", seen[0])
         self.assertIn("A voice for alice.", seen[0])
+
+    def test_each_colliding_voice_gets_a_different_direction(self) -> None:
+        """The first version gave every colliding voice the same brief.
+
+        Measured on real models, that made the cast worse: four voices told to
+        "be different from each other", resampling from the same description,
+        land in the same region. Each must be pushed a *different* way.
+        """
+        engine = _FakeEngine({})
+        designer = _designer(engine, _FakeLibrary(self.root))
+        self._install(designer)
+
+        names = ("alice", "bob", "carol")
+        voices = {n: _result(n, self.root) for n in names}
+        # Distinct measured pitches, so the rank ordering is unambiguous.
+        for pitch, n in zip((90.0, 120.0, 150.0), names, strict=True):
+            voices[n].acoustic_metrics = {"median_f0_hz": pitch}
+
+        seen: dict[str, str] = {}
+
+        def _capture(pid, cid, character, **kw):
+            seen[cid] = character.voice_description
+            return _result(cid, self.root, "v2")
+
+        collisions = {n: set(names) - {n} for n in names}
+        with (
+            patch.object(VoiceDesigner, "_generate_voice", side_effect=_capture),
+            patch.object(VoiceDesigner, "_acoustic_diagnostics", return_value=({}, [])),
+        ):
+            designer._redesign_for_distinctness(
+                self.request,
+                collisions,
+                voices,
+                lambda *a: None,
+                lambda: None,
+                round_index=1,
+            )
+
+        self.assertEqual(len(seen), 3)
+        self.assertEqual(len(set(seen.values())), 3, "briefs must not be identical")
+        # The lowest-pitched voice is pushed lower and the highest higher, so
+        # the group spreads rather than converging.
+        self.assertIn("lower", seen["alice"])
+        self.assertIn("higher", seen["bob"])
+
+    def test_the_direction_assignment_is_deterministic(self) -> None:
+        """A rerun must be reproducible, so rounds are comparable."""
+        voices = {n: _result(n, self.root) for n in ("alice", "bob")}
+        voices["alice"].acoustic_metrics = {"median_f0_hz": 100.0}
+        voices["bob"].acoustic_metrics = {"median_f0_hz": 200.0}
+        collisions = {"alice": {"bob"}, "bob": {"alice"}}
+        targets = ["bob", "alice"]  # deliberately not sorted
+        first = VoiceDesigner._contrast_brief("alice", collisions, voices, targets)
+        second = VoiceDesigner._contrast_brief("alice", collisions, voices, list(reversed(targets)))
+        self.assertEqual(first, second)
 
     def test_a_failed_redesign_keeps_the_previous_reference(self) -> None:
         """Losing a usable voice to a failed retry would be worse than a warning."""
@@ -420,6 +475,87 @@ class ConvergenceLoopTests(unittest.TestCase):
         worst = max(d.speaker_similarity for d in diagnostics)
         self.assertAlmostEqual(worst, 0.991, places=3)
 
+    def test_rollback_restores_audio_that_actually_exists(self) -> None:
+        """The library reclaims the old file when a new one is registered.
+
+        Measured on real models 2026-09-04: a rolled-back round left all four
+        voices pointing at deleted audio, which surfaced downstream as a bogus
+        WER of 1.00 because Whisper could not open them. The snapshot therefore
+        copies the audio aside, not just its path.
+        """
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            original = root / "alice_v1.wav"
+            original.write_bytes(b"RIFF" + b"0" * 512)
+
+            registered: list[str] = []
+
+            class _Library(_FakeLibrary):
+                def register_voice(self, project_id, voice_id, file, **kw):
+                    registered.append(file)
+
+            designer = _designer(_FakeEngine({}), _Library(root))
+            voices = {"alice": _result("alice", root)}
+            voices["alice"].file = str(original)
+            embeddings: dict = {}
+
+            snapshot = designer._snapshot_voices(voices, embeddings)
+            self.assertIsNotNone(snapshot["alice"]["preserved"])
+            self.assertTrue(Path(snapshot["alice"]["preserved"]).is_file())
+
+            # Simulate what register_voice does to the superseded artifact.
+            original.unlink()
+            voices["alice"].file = str(root / "alice_v2.wav")
+
+            designer._restore_voices(snapshot, voices, embeddings, "proj")
+
+            self.assertEqual(voices["alice"].file, str(original))
+            self.assertTrue(original.is_file(), "restored audio must exist on disk")
+            self.assertEqual(registered, [str(original)], "library must be repointed")
+
+            designer._discard_snapshot(snapshot)
+            self.assertFalse(Path(snapshot["alice"]["preserved"]).is_file())
+
+    def test_a_rolled_back_round_is_not_transcript_rechecked(self) -> None:
+        """Its audio is the previous take, which the initial pass already checked."""
+        engine = _FakeEngine({frozenset({"alice", "bob"}): 0.99})
+        designer = _designer(engine, _FakeLibrary(self.root), rounds=1)
+
+        class _Validator:
+            calls = 0
+
+            def transcribe(self, path):
+                type(self).calls += 1
+                return ""
+
+            def calculate_wer(self, expected, actual):
+                return 1.0
+
+            def unload(self):
+                pass
+
+        designer.validator = _Validator()
+        self._install(designer)
+
+        voices = {name: _result(name, self.root) for name in ("alice", "bob")}
+        embeddings = {n: ("embedding", str(self.root / f"{n}_v1.wav")) for n in voices}
+
+        with (
+            patch.object(
+                VoiceDesigner,
+                "_generate_voice",
+                side_effect=lambda pid, cid, ch, **kw: _result(cid, self.root, "v1"),
+            ),
+            patch.object(VoiceDesigner, "_acoustic_diagnostics", return_value=({}, [])),
+        ):
+            _, rounds = self._run_loop(designer, voices, embeddings)
+
+        self.assertEqual(len(rounds), 1)
+        self.assertFalse(rounds[0]["kept"])
+        self.assertEqual(_Validator.calls, 0, "no re-check for a discarded round")
+
     def test_the_previous_take_is_not_deleted_before_a_redesign(self) -> None:
         """Rollback needs the file. `_generate_voice` re-registers the id anyway."""
         engine = _FakeEngine({})
@@ -512,6 +648,9 @@ class ConvergenceLoopTests(unittest.TestCase):
         embeddings = {name: ("embedding", str(self.root / f"{name}_v1.wav")) for name in voices}
 
         def _regenerate(pid, cid, character, **kw):
+            # Separate them, so the round is kept -- only a kept round's audio
+            # is new and therefore worth re-checking.
+            engine.similarity_by_pair.pop(frozenset({"alice", "bob"}), None)
             new = _result(cid, self.root, "v2")
             new.candidates = []
             return new

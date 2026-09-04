@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -597,6 +598,7 @@ class VoiceDesigner:
             improved = score < best_score
             if improved:
                 best_score = score
+                self._discard_snapshot(best_state)
                 best_state = self._snapshot_voices(voices_generated, embeddings)
                 best_diagnostics, best_collisions = cast_diagnostics, collisions
 
@@ -629,7 +631,7 @@ class VoiceDesigner:
                     "Distinctness round %d did not improve on the best measurement; restoring it and stopping",
                     round_index,
                 )
-                self._restore_voices(best_state, voices_generated, embeddings)
+                self._restore_voices(best_state, voices_generated, embeddings, request.project_id)
                 cast_diagnostics, collisions = best_diagnostics, best_collisions
                 break
 
@@ -651,10 +653,13 @@ class VoiceDesigner:
         # rate is exactly the kind of change that can hurt intelligibility.
         # Done once at the end rather than per round: one Whisper load, and
         # only when something was actually redesigned.
-        redesigned = {char_id for entry in convergence_rounds for char_id in entry["redesigned"]}
+        # Only rounds whose output was kept. A rolled-back round left the previous
+        # audio in place, and the initial pass already checked that.
+        redesigned = {char_id for entry in convergence_rounds if entry["kept"] for char_id in entry["redesigned"]}
         if redesigned and self.validator:
             self._revalidate_transcripts(request, redesigned, voices_generated)
 
+        self._discard_snapshot(best_state)
         return cast_diagnostics, convergence_rounds
 
     def _revalidate_transcripts(
@@ -767,6 +772,73 @@ class VoiceDesigner:
                     )
         return cast_diagnostics, collisions
 
+    # Orthogonal directions, applied one per colliding voice by rank. The point
+    # is that colliding voices receive *different* instructions: telling all of
+    # them "be different from each other" is what the first version did, and on
+    # real models it made the cast worse, because each one resamples from the
+    # same description into the same region.
+    _CONTRAST_DIRECTIONS = (
+        (
+            "pitch the voice noticeably lower than before, with a chesty, "
+            "resonant weight and an unhurried, deliberate pace"
+        ),
+        (
+            "pitch the voice noticeably higher than before, with a brighter, "
+            "more forward tone and a quicker, lighter pace"
+        ),
+        (
+            "keep the pitch where it is but make the timbre distinctly drier "
+            "and more nasal, with clipped, precise articulation"
+        ),
+        (
+            "keep the pitch where it is but make the timbre distinctly softer "
+            "and breathier, with a warm, rounded delivery"
+        ),
+        ("lower the pitch slightly and add a rougher, gravellier edge, with a slightly halting rhythm"),
+    )
+
+    @classmethod
+    def _contrast_brief(
+        cls,
+        char_id: str,
+        collisions: dict[str, set[str]],
+        voices_generated: dict[str, BootstrapVoiceResult],
+        targets: list[str],
+    ) -> str:
+        """Build a redesign brief that pushes this voice away from its peers.
+
+        Each colliding voice gets a *different* direction, assigned by its rank
+        in the group's measured pitch, so the group spreads instead of all
+        moving the same way. The lowest voice is told to go lower and the
+        highest to go higher; the rest are separated on timbre and rate, which
+        the diagnostic also measures.
+
+        Deterministic: the same collision set produces the same assignment, so
+        a rerun is reproducible and a round is comparable to the last.
+        """
+
+        def pitch_of(cid: str) -> float:
+            metrics = (voices_generated[cid].acoustic_metrics or {}) if cid in voices_generated else {}
+            return float(metrics.get("median_f0_hz", 0.0) or 0.0)
+
+        # Rank within the colliding group, low pitch first; ties broken by id so
+        # the assignment never depends on dict ordering.
+        group = sorted(targets, key=lambda cid: (pitch_of(cid), cid))
+        try:
+            rank = group.index(char_id)
+        except ValueError:
+            rank = 0
+
+        direction = cls._CONTRAST_DIRECTIONS[rank % len(cls._CONTRAST_DIRECTIONS)]
+        collided_with = ", ".join(sorted(collisions.get(char_id, ())))
+        return (
+            f" A speaker-similarity measurement found this voice too close to "
+            f"{collided_with} to tell apart. To separate them, {direction}. "
+            "Keep the stated age, gender and character intent exactly as "
+            "described above, and keep the delivery natural -- do not "
+            "caricature the voice or add an accent."
+        )
+
     @staticmethod
     def _round_score(summary: dict[str, Any]) -> tuple[int, float]:
         """Order two measurements. Lower is better.
@@ -784,13 +856,30 @@ class VoiceDesigner:
     ) -> dict[str, Any]:
         """Capture enough per-voice state to undo a redesign round.
 
-        Only the canonical take is ever replaced, so only it needs saving. The
-        previous audio file is left on disk by `_redesign_for_distinctness`
-        precisely so this can point back at it.
+        Only the canonical take is ever replaced, so only it needs saving.
+
+        The audio is *copied* to a sidecar rather than merely referenced.
+        `VoiceLibraryManager.register_voice` reclaims the previous artifact when
+        a new file is registered under the same id, so a snapshot holding only
+        the old path would restore a pointer to a deleted file. Measured on real
+        models 2026-09-04: a rolled-back round left all four voices referencing
+        missing audio, which surfaced downstream as a bogus WER of 1.00 because
+        Whisper could not open them.
         """
-        return {
-            char_id: {
+        snapshot: dict[str, Any] = {}
+        for char_id, result in voices_generated.items():
+            preserved: str | None = None
+            source = Path(result.file) if result.file else None
+            if source is not None and source.is_file():
+                candidate = source.with_name(f"{source.stem}.rollback{source.suffix}")
+                try:
+                    shutil.copy2(source, candidate)
+                    preserved = str(candidate)
+                except OSError as exc:
+                    logger.warning("Could not preserve %s for rollback: %s", source, exc)
+            snapshot[char_id] = {
                 "file": result.file,
+                "preserved": preserved,
                 "duration_seconds": result.duration_seconds,
                 "sample_rate": result.sample_rate,
                 "transcription_wer": result.transcription_wer,
@@ -799,20 +888,56 @@ class VoiceDesigner:
                 "candidate": result.candidates[0] if result.candidates else None,
                 "embedding": embeddings.get(char_id),
             }
-            for char_id, result in voices_generated.items()
-        }
+        return snapshot
 
     @staticmethod
+    def _discard_snapshot(snapshot: dict[str, Any]) -> None:
+        """Delete a snapshot's preserved audio once it can no longer be needed."""
+        for saved in snapshot.values():
+            preserved = saved.get("preserved")
+            if not preserved:
+                continue
+            try:
+                Path(preserved).unlink(missing_ok=True)
+            except OSError as exc:
+                logger.debug("Could not remove rollback copy %s: %s", preserved, exc)
+
     def _restore_voices(
+        self,
         snapshot: dict[str, Any],
         voices_generated: dict[str, BootstrapVoiceResult],
         embeddings: dict[str, Any],
+        project_id: str,
     ) -> None:
-        """Put the cast back to a snapshot taken by `_snapshot_voices`."""
+        """Put the cast back to a snapshot taken by `_snapshot_voices`.
+
+        The preserved copy is put back at the original path and re-registered,
+        so the library points at audio that exists rather than at the file a
+        later `register_voice` reclaimed.
+        """
         for char_id, saved in snapshot.items():
             result = voices_generated.get(char_id)
             if result is None:
                 continue
+            preserved = saved.get("preserved")
+            if preserved and saved["file"]:
+                target = Path(saved["file"])
+                try:
+                    if not target.is_file():
+                        shutil.copy2(preserved, target)
+                    self.library.register_voice(
+                        project_id,
+                        char_id,
+                        str(target),
+                        duration_seconds=saved["duration_seconds"],
+                        sample_rate=saved["sample_rate"],
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Could not restore the previous reference for '%s': %s",
+                        char_id,
+                        exc,
+                    )
             result.file = saved["file"]
             result.duration_seconds = saved["duration_seconds"]
             result.sample_rate = saved["sample_rate"]
@@ -894,13 +1019,7 @@ class VoiceDesigner:
                 check_cancelled()
                 character = request.characters[char_id]
                 collided_with = ", ".join(sorted(collisions[char_id]))
-                contrast = (
-                    " This voice was measured as acoustically too close to "
-                    f"{collided_with}. Move it clearly away from them: choose a "
-                    "different pitch centre, a different speaking rate and a "
-                    "different timbre, while keeping the stated age, gender and "
-                    "character intent intact. Do not caricature the voice."
-                )
+                contrast = self._contrast_brief(char_id, collisions, voices_generated, targets)
                 contrasted = character.model_copy(update={"voice_description": character.voice_description + contrast})
                 cand_id = self._candidate_id(char_id, 1)
                 try:
