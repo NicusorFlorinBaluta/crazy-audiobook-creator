@@ -245,7 +245,7 @@ class WhisperValidator:
                     cost = 0 if ref_words[i - 1] == hyp_words[j - 1] else 1
                     d[i][j] = min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + cost)
             return min(d[len(ref_words)][len(hyp_words)] / len(ref_words), 1.0)
-        except Exception as e:
+        except (ValueError, TypeError, ZeroDivisionError, IndexError) as e:
             logger.exception("WER calculation failed: %s", e)
             return 1.0  # Assume worst case
 
@@ -338,7 +338,7 @@ class WhisperValidator:
             if not hasattr(WhisperValidator, "_english_normalizer"):
                 WhisperValidator._english_normalizer = EnglishTextNormalizer()
             text = WhisperValidator._english_normalizer(text)
-        except Exception:
+        except ImportError:
             text = text.lower()
 
         # Step 2: Dynamically convert any remaining numbers/ordinals to words
@@ -349,13 +349,13 @@ class WhisperValidator:
                 num_str = match.group(1)
                 try:
                     return " " + num2words.num2words(int(num_str), to="ordinal") + " "
-                except Exception:
+                except (ValueError, TypeError, OverflowError):
                     return match.group(0)
 
             def replace_cardinal(match):
                 try:
                     return " " + num2words.num2words(int(match.group(0))) + " "
-                except Exception:
+                except (ValueError, TypeError, OverflowError):
                     return match.group(0)
 
             # Match ordinals first (e.g., 21st, 100th)

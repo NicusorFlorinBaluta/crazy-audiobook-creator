@@ -97,7 +97,7 @@ async def update_pronunciation(project_id: str, request: PronunciationRequest):
                 if term_pattern.search(txt):
                     affected_chapters.add(ch_num)
                     break
-        except Exception as exc:
+        except (OSError, UnicodeDecodeError, ValueError, KeyError, TypeError) as exc:
             logger.warning(
                 "Could not read %s; its chapter will be missing from the affected-chapter list: %s", chapter_path, exc
             )
@@ -160,7 +160,7 @@ async def batch_update_pronunciations(project_id: str, request: PronunciationBat
                     if term_pattern.search(txt):
                         affected_chapters.add(ch_num)
                         break
-            except Exception as exc:
+            except (OSError, UnicodeDecodeError, ValueError, KeyError, TypeError) as exc:
                 logger.warning(
                     "Could not read %s; its chapter will be missing from the affected-chapter list: %s",
                     chapter_path,
@@ -211,7 +211,7 @@ async def preview_pronunciation(project_id: str, request: PronunciationPreviewRe
                     (vid for vid in voices if "narrator" in vid.lower()),
                     next(iter(voices.keys()), None),
                 )
-            except Exception:
+            except (OSError, UnicodeDecodeError, ValueError, KeyError, TypeError):
                 voice_id = None
     voice_id = voice_id or "narrator"
 

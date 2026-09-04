@@ -86,7 +86,7 @@ def convert_mp3_to_wav_if_needed(prompt_path: str) -> tuple[str, Path | None]:
                 logger.info("Converted MP3 voice prompt to WAV for better quality: %s", Path(prompt_path).name)
                 return str(temp_mp3_conv), temp_mp3_conv
             temp_mp3_conv.unlink(missing_ok=True)
-    except Exception as e:
+    except OSError as e:
         logger.warning("Failed to convert MP3 voice prompt to WAV: %s", e)
 
     return prompt_path, None
@@ -155,7 +155,7 @@ class AudioPostProcessor:
                 raise RuntimeError(result.stderr.strip() or "SoX post-processing failed")
             processed, _ = sf.read(str(output_path), dtype="float32")
             return processed.astype(np.float32, copy=False)
-        except Exception as exc:  # pragma: no cover - fallback to raw audio
+        except OSError as exc:  # pragma: no cover - fallback to raw audio
             logger.warning("SoX post-processing failed: %s", exc)
             return audio
         finally:
@@ -192,7 +192,12 @@ class AudioPostProcessor:
         if self._can_use_sox(fx):
             try:
                 processed = self._apply_speed_pitch_sox(processed, sample_rate, fx.speed, fx.pitch_semitones)
-            except Exception as exc:  # pragma: no cover - fallback for local installs
+            except (
+                OSError,
+                subprocess.SubprocessError,
+                ValueError,
+                RuntimeError,
+            ) as exc:  # pragma: no cover - fallback for local installs
                 if not self.allow_phase_vocoder_fallback:
                     raise RuntimeError("SoX voice FX failed and the phase-vocoder fallback is disabled") from exc
                 logger.warning("SoX FX failed (%s); using opted-in librosa fallback.", exc)
@@ -273,7 +278,7 @@ class AudioPostProcessor:
                 processed = self._apply_speed_pitch_librosa(audio, sr, fx)
                 sf.write(str(output_path), processed, sr)
             return output_path
-        except Exception:
+        except (OSError, subprocess.SubprocessError, ValueError, RuntimeError):
             output_path.unlink(missing_ok=True)
             raise
 

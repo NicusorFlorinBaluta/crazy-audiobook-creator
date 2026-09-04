@@ -483,7 +483,7 @@ class OllamaClient:
             response.raise_for_status()
             logger.info("[Ollama] Unloaded model '%s'", target_model)
             return True
-        except Exception as exc:
+        except (httpx.HTTPError, OSError, ValueError, KeyError, TypeError) as exc:
             logger.warning(
                 "[Ollama] Could not unload model '%s': %s",
                 target_model,
@@ -543,7 +543,7 @@ class OllamaClient:
                 logger.info("[JSON] Parsed via json_repair successfully. Keys: %s", list(result.keys())[:8])
                 return result
             logger.warning("[JSON] json_repair returned non-dict type: %s", type(result))
-        except Exception as e:
+        except (ValueError, TypeError, KeyError) as e:
             logger.exception("[JSON] json_repair failed: %s", e)
 
         logger.error(
@@ -571,7 +571,7 @@ class OllamaClient:
                 )
             return available
 
-        except Exception as e:
+        except (httpx.HTTPError, OSError, ValueError, KeyError, TypeError) as e:
             if quiet:
                 logger.debug("Ollama health preflight failed: %s", e)
             else:
@@ -598,7 +598,7 @@ class OllamaClient:
                 for fallback in self.fallback_models:
                     if any(self._model_names_match(fallback, installed) for installed in models):
                         return fallback
-        except Exception as e:
+        except (httpx.HTTPError, OSError, ValueError, KeyError, TypeError) as e:
             logger.warning("[Ollama] Failed to resolve configured fallback models: %s", e)
         return None
 
