@@ -12,6 +12,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import brain.dashboard.api.main as dashboard
+from brain.dashboard.api import runtime as dashboard_runtime
+from brain.dashboard.api import voice_support
+from brain.dashboard.api.routers import voice_cast as voice_cast_routes
 from brain.extractor.metadata_fetcher import FetchedMetadata, MetadataFetcher
 from shared.constants import PipelineStage
 
@@ -909,15 +912,15 @@ class DashboardLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 encoding="utf-8",
             )
             with (
-                patch.object(dashboard, "_voice_project_dir", return_value=voice_dir),
-                patch.object(dashboard, "_require_job", return_value={"title": "A Book: One?"}),
+                patch.object(voice_support, "_voice_project_dir", return_value=voice_dir),
+                patch.object(dashboard_runtime, "require_job", return_value={"title": "A Book: One?"}),
                 patch.object(
-                    dashboard,
+                    voice_support,
                     "_load_or_build_voice_cast",
                     return_value={"voices": {"narrator": {"name": "The Narrator"}}},
                 ),
             ):
-                response = await dashboard.download_project_voice("book", "narrator")
+                response = await voice_cast_routes.download_project_voice("book", "narrator")
 
             disposition = response.headers["content-disposition"]
             self.assertIn("attachment", disposition)
@@ -969,22 +972,22 @@ class DashboardLifecycleTests(unittest.IsolatedAsyncioTestCase):
             chars_path = project_dir / "characters.json"
             chars_path.write_text(json.dumps(registry), encoding="utf-8")
             with (
-                patch.object(dashboard, "job_queue", queue),
-                patch.object(dashboard, "_project_dir", return_value=project_dir),
+                patch.object(dashboard_runtime, "job_queue", queue),
+                patch.object(dashboard_runtime, "project_dir", return_value=project_dir),
                 patch.object(
-                    dashboard,
+                    voice_support,
                     "_load_character_registry",
                     return_value=(chars_path, registry),
                 ),
-                patch.object(dashboard, "_load_or_build_voice_cast", return_value=cast),
-                patch.object(dashboard, "_save_voice_cast") as save_cast,
-                patch.object(dashboard, "_chapters_for_speakers", return_value=[2, 7]),
-                patch.object(dashboard, "_mark_voice_chapters_stale") as mark_stale,
+                patch.object(voice_support, "_load_or_build_voice_cast", return_value=cast),
+                patch.object(voice_support, "_save_voice_cast") as save_cast,
+                patch.object(voice_support, "_chapters_for_speakers", return_value=[2, 7]),
+                patch.object(voice_support, "_mark_voice_chapters_stale") as mark_stale,
             ):
-                result = await dashboard.update_character_profile(
+                result = await voice_cast_routes.update_character_profile(
                     "book",
                     "speaker",
-                    dashboard.CharacterProfileUpdate(
+                    voice_cast_routes.CharacterProfileUpdate(
                         gender="female",
                         age_range="30s",
                         voice_description="A warm, precise speaking voice",
@@ -1012,9 +1015,9 @@ class DashboardLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 json.dumps({"voices": {"character": {"file": str(outside)}}}),
                 encoding="utf-8",
             )
-            with patch.object(dashboard, "_voice_project_dir", return_value=voice_dir):
+            with patch.object(voice_support, "_voice_project_dir", return_value=voice_dir):
                 with self.assertRaisesRegex(Exception, "Invalid voice registry path"):
-                    dashboard._registered_voice_path("book", "character")
+                    voice_support._registered_voice_path("book", "character")
 
     async def test_all_voice_download_contains_named_samples_and_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1053,12 +1056,12 @@ class DashboardLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 }
             }
             with (
-                patch.object(dashboard, "_voice_project_dir", return_value=voice_dir),
-                patch.object(dashboard, "_require_job", return_value={"title": "A Book"}),
-                patch.object(dashboard, "_load_or_build_voice_cast", return_value=cast),
+                patch.object(voice_support, "_voice_project_dir", return_value=voice_dir),
+                patch.object(dashboard_runtime, "require_job", return_value={"title": "A Book"}),
+                patch.object(voice_support, "_load_or_build_voice_cast", return_value=cast),
             ):
-                response = await dashboard.download_all_project_voices("book")
-                response_all = await dashboard.download_all_project_voices("book", all_variants=True)
+                response = await voice_cast_routes.download_all_project_voices("book")
+                response_all = await voice_cast_routes.download_all_project_voices("book", all_variants=True)
 
             self.assertEqual(response.media_type, "application/zip")
             self.assertEqual(response.headers["x-voice-sample-count"], "1")
@@ -1140,22 +1143,24 @@ class DashboardLifecycleTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             characters_path = Path(directory) / "characters.json"
             with (
-                patch.object(dashboard, "pipeline", fake_pipeline),
-                patch.object(dashboard, "_ensure_voice_editable"),
+                patch.object(dashboard_runtime, "pipeline", fake_pipeline),
+                patch.object(voice_support, "_ensure_voice_editable"),
                 patch.object(
-                    dashboard,
+                    voice_support,
                     "_load_character_registry",
                     return_value=(characters_path, registry),
                 ),
-                patch.object(dashboard, "_load_or_build_voice_cast", return_value=cast),
-                patch.object(dashboard, "_save_voice_cast"),
-                patch.object(dashboard, "_chapters_for_speakers", return_value=[]),
-                patch.object(dashboard, "_mark_voice_chapters_stale"),
+                patch.object(voice_support, "_load_or_build_voice_cast", return_value=cast),
+                patch.object(voice_support, "_save_voice_cast"),
+                patch.object(voice_support, "_chapters_for_speakers", return_value=[]),
+                patch.object(voice_support, "_mark_voice_chapters_stale"),
             ):
-                result = await dashboard.regenerate_project_voice(
+                result = await voice_cast_routes.regenerate_project_voice(
                     "book",
                     "narrator_male",
-                    dashboard.VoiceRegenerationRequest(voice_description="A warm, composed audiobook narrator voice"),
+                    voice_cast_routes.VoiceRegenerationRequest(
+                        voice_description="A warm, composed audiobook narrator voice"
+                    ),
                 )
 
         self.assertEqual(result["status"], "success")

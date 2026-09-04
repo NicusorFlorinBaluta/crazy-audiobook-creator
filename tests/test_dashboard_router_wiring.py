@@ -27,11 +27,25 @@ LOOPBACK = ("127.0.0.1", 50000)
 # 503 "Server not initialized" from `runtime.require_job`. An unmounted one
 # answers 404. That difference is the whole test.
 EXTRACTED_ROUTES = [
+    # routers/pronunciations.py
     ("GET", "/api/projects/pinned/pronunciations"),
     ("POST", "/api/projects/pinned/pronunciations"),
     ("POST", "/api/projects/pinned/pronunciations/batch"),
     ("POST", "/api/projects/pinned/pronunciations/preview"),
     ("GET", "/api/projects/pinned/pronunciations/preview/abc/audio"),
+    # routers/voice_cast.py
+    ("GET", "/api/projects/pinned/characters"),
+    ("GET", "/api/projects/pinned/voices"),
+    ("GET", "/api/projects/pinned/voices/download-all"),
+    ("GET", "/api/projects/pinned/voices/v1/preview"),
+    ("GET", "/api/projects/pinned/voices/v1/download"),
+    ("PATCH", "/api/projects/pinned/characters/c1/voice"),
+    ("PATCH", "/api/projects/pinned/characters/c1/profile"),
+    ("POST", "/api/projects/pinned/voices/v1/regenerate"),
+    ("POST", "/api/projects/pinned/voices/v1/upload"),
+    # still in main.py -- approve_voice_cast calls start_pipeline, so moving it
+    # would make the router import main. Pinned here so that stays deliberate.
+    ("POST", "/api/projects/pinned/voice-review/approve"),
 ]
 
 
@@ -40,19 +54,31 @@ class RouterWiringTests(unittest.TestCase):
         self.client = TestClient(app, client=LOOPBACK)
 
     def test_extracted_routes_are_mounted(self) -> None:
+        # An *unmounted* route is Starlette's routing 404, whose body is exactly
+        # {"detail": "Not Found"}. A mounted handler may legitimately answer 404
+        # too (`{"detail": "Characters not analyzed yet"}`), so the status alone
+        # cannot tell the two apart and the body is what discriminates.
         for method, path in EXTRACTED_ROUTES:
             with self.subTest(route=f"{method} {path}"):
                 response = self.client.request(method, path, json={})
+                if response.status_code != 404:
+                    continue
+                detail = ""
+                try:
+                    detail = response.json().get("detail", "")
+                except ValueError:
+                    pass
                 self.assertNotEqual(
-                    response.status_code,
-                    404,
+                    detail,
+                    "Not Found",
                     f"{method} {path} is not mounted; check include_router in main.py",
                 )
 
     def test_an_unmounted_path_really_does_404(self) -> None:
-        """Guard the guard: prove 404 is distinguishable here."""
+        """Guard the guard: the discriminator above must actually fire."""
         response = self.client.get("/api/projects/pinned/definitely-not-a-route")
         self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json().get("detail"), "Not Found")
 
     def test_routers_do_not_import_main(self) -> None:
         """The dependency must run one way, or the split buys nothing.

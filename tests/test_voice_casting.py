@@ -365,7 +365,7 @@ class VoiceUploadValidationTests(unittest.TestCase):
             handle.writeframes(samples.tobytes())
 
     def test_clean_reference_is_accepted(self) -> None:
-        from brain.dashboard.api.main import _inspect_pcm_voice
+        from brain.dashboard.api.voice_support import _inspect_pcm_voice
 
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "voice.wav"
@@ -376,7 +376,7 @@ class VoiceUploadValidationTests(unittest.TestCase):
         self.assertAlmostEqual(info["duration_seconds"], 3.2, places=1)
 
     def test_silent_reference_is_rejected(self) -> None:
-        from brain.dashboard.api.main import _inspect_pcm_voice
+        from brain.dashboard.api.voice_support import _inspect_pcm_voice
 
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "silent.wav"
@@ -385,7 +385,7 @@ class VoiceUploadValidationTests(unittest.TestCase):
                 _inspect_pcm_voice(path)
 
     def test_uploaded_transcript_mismatch_fails_closed(self) -> None:
-        from brain.dashboard.api.main import _uploaded_transcript_error
+        from brain.dashboard.api.voice_support import _uploaded_transcript_error
 
         error = _uploaded_transcript_error(
             SimpleNamespace(
@@ -399,7 +399,7 @@ class VoiceUploadValidationTests(unittest.TestCase):
         self.assertIn("different words", error)
 
     def test_uploaded_transcript_orthographic_equivalence_is_accepted(self) -> None:
-        from brain.dashboard.api.main import _uploaded_transcript_error
+        from brain.dashboard.api.voice_support import _uploaded_transcript_error
 
         error = _uploaded_transcript_error(
             SimpleNamespace(
