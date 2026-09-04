@@ -231,8 +231,13 @@ class NASSyncer:
         if remote_size != local_size:
             try:
                 sftp.remove(tmp_remote)
-            except Exception:
-                pass
+            except Exception as exc:
+                # The NASError below is the real failure; this cleanup is best
+                # effort. Log it so a NAS that has started refusing removals
+                # leaves a trace instead of quietly accruing .tmp_ files.
+                logger.debug(
+                    "Could not remove partial upload %s: %s", tmp_remote, exc
+                )
             raise NASError(
                 f"SFTP upload corrupted: local {local_size} bytes != remote {remote_size} bytes"
             )
@@ -242,10 +247,19 @@ class NASSyncer:
             # POSIX rename overwrites target atomically
             sftp.posix_rename(tmp_remote, remote_path)
         except Exception:
+            # Server has no POSIX rename extension. Non-atomic fallback:
+            # drop the target first, since plain rename will not overwrite.
             try:
                 sftp.remove(remote_path)
-            except Exception:
-                pass
+            except Exception as exc:
+                # Usually just "target does not exist", which is the
+                # normal first-upload case. The rename below is the
+                # operation that must succeed, and it raises if it cannot.
+                logger.debug(
+                    "Could not pre-remove rename target %s: %s",
+                    remote_path,
+                    exc,
+                )
             sftp.rename(tmp_remote, remote_path)
 
         logger.info("Atomically published %s", remote_path)
@@ -270,10 +284,19 @@ class NASSyncer:
         try:
             sftp.posix_rename(tmp_remote, remote_path)
         except Exception:
+            # Server has no POSIX rename extension. Non-atomic fallback:
+            # drop the target first, since plain rename will not overwrite.
             try:
                 sftp.remove(remote_path)
-            except Exception:
-                pass
+            except Exception as exc:
+                # Usually just "target does not exist", which is the
+                # normal first-upload case. The rename below is the
+                # operation that must succeed, and it raises if it cannot.
+                logger.debug(
+                    "Could not pre-remove rename target %s: %s",
+                    remote_path,
+                    exc,
+                )
             sftp.rename(tmp_remote, remote_path)
 
     def sync_delivery_part(
@@ -309,8 +332,12 @@ class NASSyncer:
                     try:
                         sftp.remove(posixpath.join(parts_remote_dir, superseded))
                         logger.info("Pruned superseded part on NAS: %s", superseded)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.warning(
+                            "Could not prune superseded part %s: %s",
+                            superseded,
+                            exc,
+                        )
 
             # 4. Generate & upload book.json and api/mobile/v1 alias
             book_manifest = self._generate_book_manifest(project_id, project_dir, sftp, proj_remote_dir)
@@ -363,10 +390,20 @@ class NASSyncer:
                             try:
                                 sftp.remove(posixpath.join(parts_remote_dir, item))
                                 logger.info("Pruned partial delivery file on NAS: %s", item)
-                            except Exception:
-                                pass
-                except OSError:
-                    pass
+                            except Exception as exc:
+                                logger.warning(
+                                    "Could not prune partial delivery file "
+                                    "%s: %s",
+                                    item,
+                                    exc,
+                                )
+                except OSError as exc:
+                    # parts/ absent is the normal first-delivery case.
+                    logger.debug(
+                        "Could not list %s while pruning: %s",
+                        parts_remote_dir,
+                        exc,
+                    )
 
             # 4. Generate & upload book.json and api/mobile/v1 alias
             book_manifest = self._generate_book_manifest(project_id, project_dir, sftp, proj_remote_dir)
@@ -445,8 +482,12 @@ class NASSyncer:
                 if raw_cov:
                     p = Path(raw_cov)
                     cover_candidates.insert(0, p if p.is_absolute() else (project_dir / p))
-            except Exception:
-                pass
+            except (OSError, ValueError) as exc:
+                # Falling through means the delivery ships with a fallback
+                # cover. Worth a line: it is otherwise invisible.
+                logger.warning(
+                    "Could not read cover path from %s: %s", book_json, exc
+                )
 
         for candidate in cover_candidates:
             if candidate.is_file() and candidate.stat().st_size > 0:
@@ -474,8 +515,15 @@ class NASSyncer:
                 bdata = json.loads(book_json_path.read_text(encoding="utf-8"))
                 metadata = bdata.get("metadata", {})
                 book_chapters = bdata.get("chapters", [])
-            except Exception:
-                pass
+            except (OSError, ValueError) as exc:
+                # Without this the delivery is published under the project id
+                # rather than the book title, which reads like a naming bug
+                # instead of an unreadable book.json.
+                logger.warning(
+                    "Could not read book metadata from %s: %s",
+                    book_json_path,
+                    exc,
+                )
 
         title = str(metadata.get("title") or project_id)
         author = str(metadata.get("author") or "Unknown Author")
@@ -522,8 +570,12 @@ class NASSyncer:
                         delivery_info_map[url] = deliv
                         for c_num in deliv.get("chapter_numbers", []):
                             delivery_chapter_map[c_num] = url
-            except Exception:
-                pass
+            except (OSError, ValueError, TypeError) as exc:
+                logger.warning(
+                    "Could not read the delivery index; published parts will "
+                    "not be cross-referenced: %s",
+                    exc,
+                )
 
         # Helper to compute duration of a chapter
         def get_chapter_duration(ch_num: int) -> float:
@@ -534,8 +586,10 @@ class NASSyncer:
                     d = m_d.get("mastering_quality", {}).get("duration_seconds") or m_d.get("duration_seconds")
                     if d:
                         return float(d)
-                except Exception:
-                    pass
+                except (OSError, ValueError, TypeError) as exc:
+                    logger.debug(
+                        "Could not read duration from %s: %s", m_file, exc
+                    )
             # Try workspace wav
             for cand in [
                 shared_paths.WORKSPACE_DIR / project_id / "chapters" / f"chapter_{ch_num:03d}.wav",
@@ -550,14 +604,21 @@ class NASSyncer:
                             rate = handle.getframerate()
                             if rate > 0:
                                 return round(frames / float(rate), 2)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        # `wave` raises a grab-bag of types on a malformed
+                        # header; soundfile below is the fallback.
+                        logger.debug("wave could not read %s: %s", cand, exc)
                     try:
                         import soundfile as sf
                         info = sf.info(str(cand))
                         return round(float(info.duration), 2)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        # Both readers failed; the caller reports 0.0 duration,
+                        # which the companion app renders as an unseekable
+                        # chapter. Leave evidence for that.
+                        logger.warning(
+                            "Could not determine duration for %s: %s", cand, exc
+                        )
             return 0.0
 
         # Check delivery parts directory on NAS
@@ -576,8 +637,12 @@ class NASSyncer:
                         try:
                             sftp.remove(posixpath.join(parts_remote_dir, item))
                             logger.info("Pruned superseded part artifact on NAS: %s", item)
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logger.warning(
+                                "Could not prune superseded artifact %s: %s",
+                                item,
+                                exc,
+                            )
                         continue
 
                     m_part = re.search(r"Part\s+(\d+)", item, re.IGNORECASE)
@@ -735,8 +800,14 @@ class NASSyncer:
                 proj_dir = posixpath.join(nas_root, entry)
                 try:
                     self._safe_rmtree_sftp(sftp, proj_dir)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    # Pruning is housekeeping, not delivery. Keep going, but a
+                    # NAS that cannot be pruned will fill up silently.
+                    logger.warning(
+                        "Could not prune stale project %s from NAS: %s",
+                        entry,
+                        exc,
+                    )
                 continue
 
             proj_dir = posixpath.join(nas_root, entry)
@@ -815,8 +886,15 @@ class NASSyncer:
                             if row and row[0]:
                                 active_project_ids.add(str(row[0]))
                     conn.close()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    # An empty active set disables pruning entirely, which is
+                    # the safe direction -- but must not be silent, or the NAS
+                    # quietly stops being tidied.
+                    logger.warning(
+                        "Could not read active project ids; NAS pruning is "
+                        "disabled for this run: %s",
+                        exc,
+                    )
 
         synced_books = []
         with self.sftp_session() as sftp:

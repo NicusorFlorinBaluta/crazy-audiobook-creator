@@ -314,5 +314,61 @@ class EpubGoldenStructureTests(unittest.TestCase):
             self.assertGreater(section["coverage_ratio"], 0.5)
 
 
+class BookTitleNormalizationTests(unittest.TestCase):
+    """A title reaches the dashboard, the M4B metadata and the Android app.
+
+    Separator debris from whatever produced the EPUB should be cleaned once at
+    the source rather than in each consumer -- but conservatively, because a
+    single interior separator is real punctuation in a great many titles.
+    """
+
+    def test_duplicate_separator_debris_is_collapsed(self) -> None:
+        # Observed verbatim in this library.
+        self.assertEqual(
+            EpubParser._normalize_book_title(
+                "The Finest Edge of Twilight - - Book"
+            ),
+            "The Finest Edge of Twilight - Book",
+        )
+        self.assertEqual(
+            EpubParser._normalize_book_title("Title - : Subtitle"),
+            "Title - Subtitle",
+        )
+
+    def test_a_single_interior_separator_is_preserved(self) -> None:
+        for title in (
+            "Dune - Book Two",
+            "Isles of the Emberdark: A Cosmere Novel",
+            "A Perfectly Normal Title",
+        ):
+            self.assertEqual(EpubParser._normalize_book_title(title), title)
+
+    def test_an_intra_word_double_hyphen_is_left_alone(self) -> None:
+        """`--` inside a word is an ASCII em-dash, not separator debris."""
+        self.assertEqual(
+            EpubParser._normalize_book_title("Wait--what? A Novel"),
+            "Wait--what? A Novel",
+        )
+
+    def test_leading_and_trailing_separators_are_stripped(self) -> None:
+        self.assertEqual(
+            EpubParser._normalize_book_title("  - Leading and trailing -  "),
+            "Leading and trailing",
+        )
+
+    def test_whitespace_runs_are_collapsed(self) -> None:
+        self.assertEqual(
+            EpubParser._normalize_book_title("Mixed   whitespace   title"),
+            "Mixed whitespace title",
+        )
+
+    def test_a_title_of_only_separators_is_returned_unchanged(self) -> None:
+        """Never normalise a title down to nothing; something is better."""
+        self.assertEqual(EpubParser._normalize_book_title("---"), "---")
+
+    def test_empty_input_stays_empty(self) -> None:
+        self.assertEqual(EpubParser._normalize_book_title(""), "")
+
+
 if __name__ == "__main__":
     unittest.main()

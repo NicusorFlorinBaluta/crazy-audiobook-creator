@@ -389,9 +389,37 @@ class EpubParser:
     # Metadata extraction
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _normalize_book_title(raw: str) -> str:
+        """Tidy separator debris in a book title without rewriting the title.
+
+        Titles arrive either from EPUB metadata or from a filename stem, and
+        both routinely carry the residue of whatever produced the file --
+        "The Finest Edge of Twilight - - Book" is a real example from this
+        library. That string reaches the dashboard, the M4B metadata and the
+        Android companion, so it is worth fixing once at the source.
+
+        Deliberately conservative. Only *adjacent duplicate* separators are
+        collapsed, and only leading/trailing ones are stripped. A single
+        interior separator is load-bearing punctuation in a great many real
+        titles ("Dune - Book Two"), so it is left exactly as written.
+        """
+        if not raw:
+            return ""
+        title = re.sub(r"\s+", " ", raw.strip())
+        # A run of two or more separators standing as its own word, e.g.
+        # "Twilight - - Book" or "Title - : Subtitle". Whitespace on both sides
+        # is required so an intra-word double hyphen ("Wait--what?"), which is
+        # an ASCII em-dash rather than debris, is left alone.
+        title = re.sub(r"(?<=\s)[-–—:|](?:\s*[-–—:|])+(?=\s)", "-", title)
+        title = title.strip(" -–—:|").strip()
+        return title or raw.strip()
+
     def _extract_metadata(self, book: epub.EpubBook, epub_path: Path) -> BookMetadata:
         """Extract book metadata from EPUB."""
-        title = self._get_meta(book, "title") or epub_path.stem
+        title = self._normalize_book_title(
+            self._get_meta(book, "title") or epub_path.stem
+        )
         author = self._get_meta(book, "creator") or "Unknown"
         language = self._get_meta(book, "language") or "en"
 

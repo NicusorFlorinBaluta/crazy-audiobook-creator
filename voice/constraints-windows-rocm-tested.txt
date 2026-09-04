@@ -16,9 +16,9 @@ faster-whisper==1.2.1
 silero-vad==6.2.1
 openai-whisper==20250625
 
-# TODO(workstation): `qwen-tts` is the package that produces the audio and is
-# currently unpinned, so it is the one gap in this file. Run
-# `python scripts/runtime_preflight.py` on the tested workstation, take the
-# reported `packages["qwen-tts"]` value, and add it here as
-# `qwen-tts==<version>`. Until then the preflight reports it as a warning and
-# generated audio is not reproducible across a reinstall.
+# `qwen-tts` is the package that produces the audio. Pinned 2026-09-03 from the
+# tested Windows/ROCm workstation venv (E:\PyTorch env\my_venv, Python 3.12.0,
+# torch 2.9.1+rocmsdk20260116) via `python scripts/runtime_preflight.py`.
+# To refresh after a validated release, re-run that script and take the
+# reported `packages["qwen-tts"]` value.
+qwen-tts==0.1.1

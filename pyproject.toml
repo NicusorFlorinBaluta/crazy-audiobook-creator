@@ -15,7 +15,7 @@ target-version = "py312"
 line-length = 120
 extend-exclude = [
     "scratch",
-    "temp.py",
+    "node_modules",
 ]
 
 [tool.ruff.lint]
@@ -67,20 +67,30 @@ ignore = [
     # Real signal, but too many existing sites to fix in one pass without
     # risking behaviour. Reduce these over time; do not add entries without a
     # comment explaining the count and the plan.
-    "BLE001",  # blind except (~198): narrowing incrementally, worst first
-    "S110",    # try-except-pass (~75): narrowing incrementally
+    "BLE001",  # blind except (201): narrowing incrementally, worst first.
+               # nas_syncer was done on 2026-09-04 -- every swallow there
+               # now logs, because a silent one meant a delivery had
+               # quietly not happened. Count rose from ~198 as new code
+               # landed; the *silent* ones are what matter, see S110.
+    "S110",    # try-except-pass (59, was ~75): 16 cleared in nas_syncer on
+               # 2026-09-04. This is the rule that actually bites -- a
+               # bare `pass` leaves no evidence at all.
     "S112",    # try-except-continue (4): same programme as S110
-    "B023",    # loop-variable closure (~31): needs case-by-case review
+    # B023 (loop-variable closure) was cleared on 2026-09-04: all 31 sites now
+    # bind their loop variables as defaults. Every one was benign -- each
+    # closure was consumed inside its own iteration -- but benign by accident,
+    # and each would have misattributed data across iterations the moment its
+    # call became deferred or async. The rule is enforced from here on.
     "ARG",     # unused arguments: mostly protocol/callback signatures
     "TRY400",  # logger.error -> logger.exception in except (22): mechanical but
                # changes log volume, so batch it with a logging review
     "TRY004",  # raise TypeError for type checks (22): changes exception types
                # that callers may already handle
     "B904",    # raise ... from (13): mechanical, batch separately
-    "SIM102",  # collapsible if (9)
+    "SIM102",  # collapsible if (4)
     "SIM103",  # needless bool (5)
-    "SIM108",  # ternary instead of if/else (5): often less readable here
-    "SIM117",  # combine with-statements (2)
+    "SIM108",  # ternary instead of if/else (4): often less readable here
+    "SIM117",  # combine with-statements (1)
     "B905",    # zip without strict= (6): needs per-site length reasoning
     "B007",    # unused loop variable (5)
     "DTZ007",  # naive strptime (5): all parse operator-entered local times
