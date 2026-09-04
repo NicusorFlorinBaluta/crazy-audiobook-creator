@@ -1791,6 +1791,23 @@ class Pipeline:
                         "[TieredAttribution] Tier 1 adjudication finished: %s",
                         tier1_report.summary,
                     )
+                    if not is_dry_run and tier1_report.summary.get("local_resolved"):
+                        # Checkpoint the decisions now. Everything between here
+                        # and the save at the end of this stage -- the audit,
+                        # the Gemini escalation, the deterministic re-repair --
+                        # can be interrupted, and an interruption used to throw
+                        # away every resolution this pass just paid for. It also
+                        # left the report on disk describing decisions the
+                        # scripts did not contain.
+                        for script in chapter_scripts:
+                            atomic_write_text(
+                                scripts_dir / f"chapter_{script.chapter_number:03d}.json",
+                                script.model_dump_json(indent=2),
+                            )
+                        logger.info(
+                            "[TieredAttribution] Checkpointed %d chapter script(s) so the pass survives an interruption",
+                            len(chapter_scripts),
+                        )
             except Exception as exc:
                 logger.warning("[TieredAttribution] Tiered adjudication encountered error: %s", exc)
 
