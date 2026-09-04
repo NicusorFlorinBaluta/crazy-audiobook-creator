@@ -253,9 +253,18 @@ class CastAdjudicationWiringTests(unittest.TestCase):
                 self.roster_seen = roster
                 return {"merges": merges, "review": [], "trace": []}
 
-        analyzer = object.__new__(CharacterAnalyzer)
-        analyzer.external_validator = _Validator()
-        analyzer.config = {"external_validation": {"cast_adjudication": {"require_approval": require_approval}}}
+        # Build it the way the pipeline does. This used to be
+        # `object.__new__(CharacterAnalyzer)` with the attributes hand-set,
+        # which meant the fixture invented the object's shape: it supplied a
+        # `config` attribute that `__init__` never created, so every test here
+        # passed while the real analyzer raised AttributeError on the first
+        # book it saw. Going through the constructor is what makes these tests
+        # able to fail.
+        analyzer = CharacterAnalyzer(
+            ollama=None,
+            external_validator=_Validator(),
+            config={"external_validation": {"cast_adjudication": {"require_approval": require_approval}}},
+        )
 
         def char(cid, name, aliases, gender, count):
             return Character(
@@ -457,6 +466,87 @@ class AliasVetoTests(unittest.TestCase):
         # Idempotent: re-applying does not duplicate.
         apply_alias("Zak", "zaknafein", cast)
         self.assertEqual(cast["zaknafein"]["aliases"].count("Zak"), 1)
+
+
+class AdjudicationIsNotLoadBearingTests(unittest.TestCase):
+    """The e2e failure of 2026-09-04, and the guard that keeps it non-fatal.
+
+    A real run died five minutes in with `'CharacterAnalyzer' object has no
+    attribute 'config'`. Two things were wrong and both are covered here.
+    """
+
+    def test_a_pipeline_built_analyzer_has_what_adjudication_reads(self) -> None:
+        """The attribute the adjudication path reads must come from __init__.
+
+        `self.config` was read for the approval-gate default and was never
+        assigned anywhere. Every existing test passed because the fixture
+        built the analyzer with `object.__new__` and set `config` by hand --
+        the test supplied the very thing production was missing. Constructing
+        it normally, with nothing passed, is the check that has teeth.
+        """
+        from brain.director.character_analyzer import CharacterAnalyzer
+
+        analyzer = CharacterAnalyzer(ollama=None)
+        self.assertEqual(analyzer.config, {}, "config must default, not be absent")
+        # The exact expression that raised in production.
+        require_approval = bool(
+            (analyzer.config.get("external_validation", {}).get("cast_adjudication", {}) or {}).get(
+                "require_approval", False
+            )
+        )
+        self.assertFalse(require_approval)
+
+    def test_the_pipeline_passes_its_config_to_the_analyzer(self) -> None:
+        """A default of {} is only correct if the real caller supplies one."""
+        import ast
+        import inspect
+
+        from brain.director.character_analyzer import CharacterAnalyzer
+        from brain.orchestrator import pipeline as pipeline_module
+
+        self.assertIn("config", inspect.signature(CharacterAnalyzer.__init__).parameters)
+
+        tree = ast.parse(Path(pipeline_module.__file__).read_text(encoding="utf-8"))
+        construction = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "CharacterAnalyzer"
+        )
+        passed = {kw.arg for kw in construction.keywords}
+        self.assertIn("config", passed, f"pipeline builds the analyzer without config: {passed}")
+
+    def test_a_failure_in_adjudication_does_not_fail_the_run(self) -> None:
+        """Duplicate detection is advisory and must never end a book.
+
+        The inner try covers only the Gemini call, so everything around it --
+        roster construction, config, alias recovery -- reached the pipeline as
+        a hard failure. A roster with a duplicate left in it is a much better
+        outcome than a dead run.
+
+        This reads the call site rather than driving a full `analyze()`, which
+        would need a live LLM. It proves the guard is present and catches
+        broadly; it cannot prove the body behaves, which is what the
+        constructor test above is for.
+        """
+        import ast
+
+        from brain.director import character_analyzer as module
+
+        tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+        analyze = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "analyze")
+        guarded = [
+            handler
+            for node in ast.walk(analyze)
+            if isinstance(node, ast.Try)
+            for call in ast.walk(node)
+            if isinstance(call, ast.Attribute) and call.attr == "_adjudicate_cast_identity"
+            for handler in node.handlers
+        ]
+        self.assertTrue(guarded, "_adjudicate_cast_identity is called outside a try")
+        self.assertTrue(
+            any(handler.type is None or getattr(handler.type, "id", None) == "Exception" for handler in guarded),
+            "the guard must catch broadly -- any failure here is survivable",
+        )
 
 
 if __name__ == "__main__":

@@ -192,6 +192,7 @@ class Pipeline:
             temperature=ollama_cfg.get("temperature_pass1", 0.3),
             max_unique_voices=self.config.get("script", {}).get("max_unique_voices", 0),
             external_validator=self.external_validator,
+            config=self.config,
         )
 
         script_cfg = self.config.get("script", {})

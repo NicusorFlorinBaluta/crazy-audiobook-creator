@@ -230,6 +230,7 @@ class CharacterAnalyzer:
         max_unique_voices: int = 0,
         single_pass_threshold: int = 15_000,
         external_validator: Any | None = None,
+        config: dict[str, Any] | None = None,
     ):
         self.ollama = ollama
         self.temperature = temperature
@@ -237,6 +238,10 @@ class CharacterAnalyzer:
         self.max_unique_voices = max_unique_voices
         self.single_pass_threshold = single_pass_threshold
         self.external_validator = external_validator
+        # Cast adjudication reads `external_validation.cast_adjudication`.
+        # It defaults to empty rather than being required, so an analyzer built
+        # without config behaves as "no approval gate" instead of raising.
+        self.config: dict[str, Any] = config or {}
 
     def analyze(
         self,
@@ -485,11 +490,26 @@ class CharacterAnalyzer:
         # Duplicates are folded BEFORE augmentation and voice assignment: there
         # is no point enriching, or casting a voice for, an entry that is about
         # to be absorbed into another.
-        registry = self._adjudicate_cast_identity(
-            registry,
-            book,
-            Path(project_dir) if project_dir else None,
-        )
+        try:
+            registry = self._adjudicate_cast_identity(
+                registry,
+                book,
+                Path(project_dir) if project_dir else None,
+            )
+        except Exception as exc:
+            # Duplicate detection is advisory. The pipeline produced usable
+            # books before it existed and must keep doing so when it breaks --
+            # a roster with a duplicate in it is a far better outcome than a
+            # failed run. The internal try covers only the Gemini call, so
+            # everything around it (roster construction, config, alias
+            # recovery) reached the pipeline as a hard failure until an e2e
+            # run stopped here on a missing attribute.
+            logger.warning(
+                "[CharacterAnalyzer] Cast identity adjudication failed; using the "
+                "roster as discovered, with any duplicates left in: %s",
+                exc,
+                exc_info=True,
+            )
         registry = self._augment_characters_with_gemini(
             registry,
             book,
