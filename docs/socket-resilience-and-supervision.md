@@ -59,8 +59,15 @@ flowchart TD
 - **Role**: Automatically detects socket unresponsiveness or unexpected crashes and restarts the server in $<2$ seconds.
 - **Mechanism**:
   - Launches the Python dashboard in a monitored child process.
-  - Probes `http://127.0.0.1:8000/health` on 10-second intervals.
-  - If 3 consecutive probes fail without an intentional user shutdown, the supervisor terminates the stuck PID, frees port 8000, and restarts the process.
+  - Probes `http://127.0.0.1:8000/health` every `$CheckIntervalSeconds` (default 15).
+  - If `$MaxFailedChecks` consecutive probes fail (default 5) without an intentional user shutdown, the supervisor terminates the stuck PID, frees port 8000, and restarts the process.
+  - Freeing port 8000 is **conditional**. `Stop-StalePort8000Process` was an
+    unconditional `Stop-Process -Force` on whatever was listening, which meant
+    any relaunch — including Task Scheduler's own restart-on-failure, which
+    fires without anyone asking — could kill a healthy dashboard mid-book. It
+    now refuses a listener that reports a running pipeline, asks an idle one to
+    shut down cooperatively, and forces only a listener that answers nothing.
+    See [e2e-run-2026-09-04.md](e2e-run-2026-09-04.md).
 - **Manual vs Automatic Shutdown Distinction**:
   - **Intentional Shutdown**: When a user clicks **Shutdown** in the UI (`POST /api/system/shutdown`) or presses `Ctrl+C` in the console, the server creates a `.dashboard_shutdown` sentinel and exits with code `0`. The supervisor detects this and terminates immediately without restarting.
   - **Unplanned Crash / Socket Freeze**: The supervisor triggers automatic recovery only when no shutdown sentinel is present.
