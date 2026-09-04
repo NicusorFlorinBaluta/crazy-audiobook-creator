@@ -258,6 +258,12 @@ class TieredAttributionAdjudicator:
         # Phase 3: Apply Decisions (unless dry_run)
         # -------------------------------------------------------------
         local_resolved_count = 0
+        # A resolution that keeps the speaker is a confirmation, not a repair.
+        # Counted apart because the two say opposite things about scripting
+        # quality: many confirmations mean the suspicion heuristic is broad,
+        # many reattributions mean attribution itself is wrong.
+        confirmed_count = 0
+        reattributed_count = 0
         escalated_count = 0
 
         for res in results:
@@ -288,14 +294,25 @@ class TieredAttributionAdjudicator:
                             "evidence": res.evidence_quote,
                         }
                     )
-                    logger.info(
-                        "[TieredAttribution] Repaired %s (%s -> %s, conf=%.2f): %s",
-                        res.line_id,
-                        prev_speaker,
-                        res.resolved_speaker,
-                        res.confidence,
-                        res.reason,
-                    )
+                    if prev_speaker == res.resolved_speaker:
+                        confirmed_count += 1
+                        logger.info(
+                            "[TieredAttribution] Confirmed %s as %s (conf=%.2f, no longer flagged): %s",
+                            res.line_id,
+                            res.resolved_speaker,
+                            res.confidence,
+                            res.reason,
+                        )
+                    else:
+                        reattributed_count += 1
+                        logger.info(
+                            "[TieredAttribution] Reattributed %s (%s -> %s, conf=%.2f): %s",
+                            res.line_id,
+                            prev_speaker,
+                            res.resolved_speaker,
+                            res.confidence,
+                            res.reason,
+                        )
             else:
                 escalated_count += 1
                 if not dry_run:
@@ -320,6 +337,11 @@ class TieredAttributionAdjudicator:
         summary = {
             "total_suspicious": len(suspicious_turns),
             "local_resolved": local_resolved_count,
+            # local_resolved == confirmed + reattributed. Kept as the total for
+            # existing readers; the split is what answers "was attribution
+            # actually wrong, or merely uncertain?"
+            "confirmed": confirmed_count,
+            "reattributed": reattributed_count,
             "escalated_to_tier2": escalated_count,
             "dry_run": dry_run,
         }

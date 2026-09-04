@@ -3,6 +3,7 @@
 import pytest
 
 from brain.director.attribution_detector import (
+    SuspiciousTurn,
     detect_suspicious_turns,
 )
 from brain.director.script_generator import ScriptGenerator
@@ -405,3 +406,80 @@ def test_chapter_scoping_ignores_bare_generic_descriptors():
     scoped_specific = ScriptGenerator._get_chapter_scoped_speakers(text_specific, registry)
 
     assert "armored_alien" in scoped_specific
+
+
+def test_summary_separates_confirmations_from_reattributions(sample_registry, tmp_path):
+    """A resolution that keeps the speaker is not a repair.
+
+    On the 2026-09-04 run, 91 lines were logged as "Repaired" and 89 of them
+    were `starling -> starling`. The work is real -- a confirmation raises
+    confidence and clears the review flag -- but the combined count reads as
+    "attribution was wrong 91 times" when it was wrong twice, and nothing
+    downstream could tell the two apart.
+    """
+    lines = [
+        ScriptLine(line_id="ch01_0001", speaker="dajer", text='"One."', dialogue_kind="spoken"),
+        ScriptLine(line_id="ch01_0002", speaker="dajer", text='"Two."', dialogue_kind="spoken"),
+        ScriptLine(line_id="ch01_0003", speaker="dajer", text='"Three."', dialogue_kind="spoken"),
+    ]
+    chapter = ScriptChapter(chapter_number=1, chapter_title="Chapter 1", lines=lines)
+
+    def result(line_id, resolved, tier):
+        return AdjudicationResult(
+            line_id=line_id,
+            chapter_number=1,
+            text="text",
+            original_speaker="dajer",
+            resolved_speaker=resolved,
+            resolver_tier=tier,
+            confidence=0.99,
+            reason="test",
+            evidence_quote="",
+            guardrail_results={},
+        )
+
+    canned = {
+        # unchanged -> a confirmation
+        "ch01_0001": result("ch01_0001", "dajer", "local_qwen"),
+        # changed -> a genuine reattribution
+        "ch01_0002": result("ch01_0002", "starling", "local_qwen"),
+        # not resolved locally -> escalated, neither of the above
+        "ch01_0003": result("ch01_0003", "dajer", "gemini_api"),
+    }
+
+    adjudicator = TieredAttributionAdjudicator(
+        ollama=None,
+        external_validator=None,
+        registry=sample_registry,
+    )
+    adjudicator._adjudicate_turn_tier1 = lambda turn, _chapter: canned[turn.line_id]
+    adjudicator._apply_reciprocal_turn_guardrail = lambda *_a, **_k: None
+
+    turns = [
+        SuspiciousTurn(
+            line_id=line_id,
+            chapter_number=1,
+            text="text",
+            current_speaker="dajer",
+            detection_reason="test",
+            detection_pattern="test",
+            surrounding_lines=[],
+            scene_text="text",
+        )
+        for line_id in canned
+    ]
+
+    report = adjudicator.adjudicate(turns, tmp_path, [chapter], dry_run=False)
+    summary = report.summary
+
+    assert summary["confirmed"] == 1, summary
+    assert summary["reattributed"] == 1, summary
+    assert summary["escalated_to_tier2"] == 1, summary
+    # The total still means what it always meant.
+    assert summary["local_resolved"] == summary["confirmed"] + summary["reattributed"]
+
+    # And the confirmation did real work: flag cleared, confidence raised.
+    confirmed_line = lines[0]
+    assert confirmed_line.speaker == "dajer"
+    assert confirmed_line.attribution_review_required is False
+    assert confirmed_line.speaker_confidence == pytest.approx(0.99)
