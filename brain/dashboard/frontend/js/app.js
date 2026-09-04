@@ -18,13 +18,38 @@ const state = window.state = {
     metadataCandidate: null
 };
 
+/**
+ * Resolve the pipeline stage to render for a project or job payload.
+ *
+ * Contract, load-bearing: `active_stage` wins over `status`. `status` is the
+ * coarse state ("waiting_for_review" — blocked on a human decision) while
+ * `active_stage` names *which* phase that refers to ("voice_review"). The
+ * stage is strictly the more specific of the two.
+ *
+ * `renderWorkStatus` is the one caller that deliberately lets a *terminal*
+ * status win instead, because a paused or errored project must not be
+ * described by whatever stage it was in when it stopped. That exception is
+ * spelled out at its call site; it must never be extended to
+ * `waiting_for_review`, which is not terminal but blocked, and whose
+ * `active_stage` is the only thing that says what the operator has to do.
+ *
+ * @param {object|null|undefined} source A project or job-update payload.
+ * @returns {string} Lowercased stage, or '' when neither field is present.
+ */
+function resolvePipelineStage(source) {
+    if (!source) return '';
+    return String(source.active_stage || source.status || '').toLowerCase();
+}
+
 const savedAttentionPageSize = (() => {
     try { return localStorage.getItem('crazy_audiobook_attention_page_size') || '10'; } catch (_) { return '10'; }
 })();
 const savedAttentionPill = (() => {
     try { return localStorage.getItem('crazy_audiobook_attention_pill') || 'all'; } catch (_) { return 'all'; }
 })();
-const attentionState = {
+// Exposed on `window` like `state` above, so the behavioural DOM tests can
+// seed it directly instead of faking the network.
+const attentionState = window.attentionState = {
     data: null,
     page: 1,
     pageSize: savedAttentionPageSize === 'all' ? 999999 : parseInt(savedAttentionPageSize, 10) || 10,
@@ -565,7 +590,7 @@ function scheduleDetailPoll() {
     if (detailPollTimer) clearTimeout(detailPollTimer);
     if (!state.currentProjectId) return;
     const project = state.currentProject || {};
-    const stage = String(project.active_stage || project.status || '').toLowerCase();
+    const stage = resolvePipelineStage(project);
     const status = String(project.status || '').toLowerCase();
     const rapidStages = new Set([
         'extracting', 'scripting', 'bootstrapping', 'generating',
@@ -642,7 +667,7 @@ async function fetchProjectDetails(projectId, isPoll = false) {
         }
         
         // Let pipeline.js and script-viewer.js update their parts
-        const stage = String(data.active_stage || data.status || '').toLowerCase();
+        const stage = resolvePipelineStage(data);
         if (window.PipelineManager) {
             const status = String(data.status || '').toLowerCase();
             const activeStages = ['extracting', 'scripting', 'bootstrapping', 'generating', 'validating', 'mastering', 'exporting', 'pausing'];
@@ -651,7 +676,7 @@ async function fetchProjectDetails(projectId, isPoll = false) {
             const coarseStatus = isRunning ? 'running' : status;
             window.LogConsole?.setProjectRunning(isRunning);
             
-            window.PipelineManager.updateTracker(data.active_stage || data.status, isRunning ? 'running' : coarseStatus, data);
+            window.PipelineManager.updateTracker(stage, isRunning ? 'running' : coarseStatus, data);
             window.PipelineManager.toggleControls(data.status, isRunning, data);
         }
         
@@ -1287,8 +1312,18 @@ function renderAttentionInbox(project = state.currentProject) {
             kicker.textContent = isWaitingForReview ? '⚠️ Action required' : '⚠️ Attention required';
             kicker.className = 'attention-kicker attention-kicker-warning';
         }
+        // The panel also opens for `waiting_for_review`, where the pipeline is
+        // blocked on a human decision that is not itself an inbox item. Naming
+        // the blocking count there produced the contradiction "⚠️ Action
+        // required ... 0 Action Required items" -- a red alarm asserting that
+        // nothing is wrong. Lead with the decision that is actually pending.
         const plural = blockingCount === 1 ? '' : 's';
-        document.getElementById('attention-summary').innerHTML = `<span class="attention-warning-text">⚠️ <strong>${blockingCount} Action Required item${plural}</strong> • ${pronunciationCount} Pronunciation Terms • ${characterCount} Character Notes <em>(Click to expand)</em></span>`;
+        const lead = blockingCount > 0
+            ? `<strong>${blockingCount} Action Required item${plural}</strong>`
+            : (project?.pause_reason
+                ? `<strong>${escapeHtml(project.pause_reason)}</strong>`
+                : '<strong>Approval required before the pipeline can continue</strong>');
+        document.getElementById('attention-summary').innerHTML = `<span class="attention-warning-text">⚠️ ${lead} • ${pronunciationCount} Pronunciation Terms • ${characterCount} Character Notes <em>(Click to expand)</em></span>`;
     } else {
         panel.classList.remove('attention-panel-warning');
         panel.classList.add('attention-panel-resolved');
@@ -1976,7 +2011,7 @@ function renderChapterList(project) {
         let statusBackground = 'rgba(148, 163, 184, 0.12)';
         let statusColor = '#94a3b8';
         let download = '<span></span>';
-        const stage = String(project.active_stage || project.status || '').toLowerCase();
+        const stage = resolvePipelineStage(project);
 
         const isSelectedInBatch = selection === null || selection.has(chapter);
 
@@ -2189,8 +2224,18 @@ function formatChapterActivityMessage(message, detailMap) {
 }
 
 function renderWorkStatus(project) {
+    // Statuses that must describe the project themselves rather than defer to
+    // `active_stage`: a paused, errored or finished project must not be
+    // described by whatever stage it happened to stop in.
+    //
+    // `waiting_for_review` is deliberately NOT in this set. It is blocked, not
+    // terminal, and its `active_stage` is the only field that says which gate
+    // is blocking. Including it made the `voice_review` branch below
+    // unreachable, so a project awaiting voice-cast approval fell through to
+    // the generic default and was told to "Choose chapters and start the
+    // pipeline" — an instruction that cannot clear a review gate.
     const terminalStatuses = new Set([
-        'paused', 'pausing', 'paused_scheduled', 'deploy_paused', 'waiting_for_review', 'error',
+        'paused', 'pausing', 'paused_scheduled', 'deploy_paused', 'error',
         'complete', 'completed', 'selection_complete'
     ]);
     const details = project.chapter_details || [];
@@ -2213,7 +2258,11 @@ function renderWorkStatus(project) {
     const status = String(project.status || 'created').toLowerCase();
     const stage = terminalStatuses.has(status)
         ? status
-        : String(project.active_stage || status).toLowerCase();
+        : resolvePipelineStage(project);
+    // Any review gate, whatever `active_stage` names it. A future gate whose
+    // stage this function does not know must still render review copy rather
+    // than fall through to "Waiting to start".
+    const isAwaitingReview = status === 'waiting_for_review';
     const currentChapterDetail = currentChapter ? (detailMap.get(currentChapter) || {}) : {};
     const chapterTitle = currentChapter
         ? (currentChapterDetail.title || `Chapter ${currentChapter}`)
@@ -2299,15 +2348,25 @@ function renderWorkStatus(project) {
                 description += ` · Selected for audio: ${batchSummary}`;
             }
         }
-    } else if (stage === 'voice_review') {
+    } else if (stage === 'voice_review' || isAwaitingReview) {
         overall = 100;
         overallLabel = 'Voice preparation';
         chapterMetric = 'Ready';
         chapterLabel = 'Speaking cast';
         lineMetric = 'Approval';
         lineLabel = 'Next action';
-        activity = 'Waiting for voice-cast approval';
-        description = 'Preview or change the speaking voices in the Voice casting tab, then approve them once to begin audio generation.';
+        if (stage === 'voice_review') {
+            activity = 'Waiting for voice-cast approval';
+            description = 'Preview or change the speaking voices in the Voice casting tab, then approve them once to begin audio generation.';
+        } else {
+            // A review gate this function does not have specific copy for.
+            // Say so honestly rather than inventing a next step.
+            overallLabel = 'Review';
+            chapterLabel = 'Pipeline';
+            activity = 'Waiting for review';
+            description = project.pause_reason
+                || 'The pipeline is paused for review and will continue once the pending items are approved.';
+        }
     } else if (stage.includes('bootstrap')) {
         activity = 'Preparing character voice references';
         description = 'Creating reusable voice identities before chapter generation.';
