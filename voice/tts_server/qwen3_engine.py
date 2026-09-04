@@ -271,7 +271,7 @@ class Qwen3TTSEngine:
                     pass
 
         except Exception as e:
-            logger.error("Failed to load model: %s", e)
+            logger.exception("Failed to load model: %s", e)
             self._is_loaded = False
             raise
 

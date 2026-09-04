@@ -87,7 +87,7 @@ def load_yaml_config(path: str | Path, *, refresh: bool = False) -> dict[str, An
     else:
         value = {}
     if not isinstance(value, dict):
-        raise ValueError(f"{resolved} must contain a YAML mapping")
+        raise TypeError(f"{resolved} must contain a YAML mapping")
     with _config_cache_lock:
         _config_cache[key] = value
     return value

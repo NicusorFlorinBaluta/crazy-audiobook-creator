@@ -115,7 +115,7 @@ class DeliveryManager:
     def _read_index(path: Path) -> DeliveryIndex:
         raw = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(raw, dict):
-            raise ValueError("Delivery index root must be an object")
+            raise TypeError("Delivery index root must be an object")
         version = int(raw.get("schema_version", 1) or 1)
         if version > DELIVERY_INDEX_SCHEMA_VERSION:
             raise DeliveryIndexVersionError(
@@ -144,7 +144,7 @@ class DeliveryManager:
         except DeliveryIndexVersionError:
             raise
         except Exception as exc:
-            logger.error("Failed to load delivery index %s: %s", self.index_path, exc)
+            logger.exception("Failed to load delivery index %s: %s", self.index_path, exc)
             corrupt_path = self.index_path.with_name(
                 f"index.json.corrupt-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}"
             )

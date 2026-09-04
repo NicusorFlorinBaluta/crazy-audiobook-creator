@@ -110,7 +110,7 @@ class NASSyncer:
             finally:
                 sftp.close()
         except (paramiko.SSHException, OSError) as exc:
-            logger.error("Failed to connect to NAS %s@%s:%d - %s", self.username, self.host, self.port, exc)
+            logger.exception("Failed to connect to NAS %s@%s:%d - %s", self.username, self.host, self.port, exc)
             raise NASConnectionError(f"NAS SSH/SFTP connection failed: {exc}") from exc
         finally:
             ssh.close()
@@ -772,7 +772,7 @@ class NASSyncer:
         try:
             entries = sftp.listdir(nas_root)
         except OSError as e:
-            logger.error("Could not list NAS directory %s: %s", nas_root, e)
+            logger.exception("Could not list NAS directory %s: %s", nas_root, e)
             return {"books": []}
 
         for entry in sorted(entries):

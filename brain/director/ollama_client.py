@@ -544,7 +544,7 @@ class OllamaClient:
                 return result
             logger.warning("[JSON] json_repair returned non-dict type: %s", type(result))
         except Exception as e:
-            logger.error("[JSON] json_repair failed: %s", e)
+            logger.exception("[JSON] json_repair failed: %s", e)
 
         logger.error(
             "[JSON] ✗ All parse attempts failed. Response head: %r | Response tail: %r",
@@ -575,7 +575,7 @@ class OllamaClient:
             if quiet:
                 logger.debug("Ollama health preflight failed: %s", e)
             else:
-                logger.error("Ollama health check failed: %s", e)
+                logger.exception("Ollama health check failed: %s", e)
             return False
 
     @staticmethod

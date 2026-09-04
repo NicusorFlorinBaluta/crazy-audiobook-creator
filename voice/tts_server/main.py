@@ -761,7 +761,7 @@ def generate_chapter(request: GenerateChapterRequest, fast_req: Request):
         except GenerationCancelled as exc:
             q.put({"type": "error", "error": "cancelled", "detail": str(exc)})
         except Exception as exc:
-            logger.error("Generation error: %s", exc)
+            logger.exception("Generation error: %s", exc)
             q.put({"type": "error", "error": "exception", "detail": str(exc)})
         finally:
             with run_state_lock:

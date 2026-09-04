@@ -114,11 +114,11 @@ def _is_sentence_initial(text: str, start: int) -> bool:
 
 def _validate_entries(payload: Any, source: Path) -> dict[str, str]:
     if not isinstance(payload, dict):
-        raise ValueError(f"Pronunciation dictionary must be an object: {source}")
+        raise TypeError(f"Pronunciation dictionary must be an object: {source}")
     result: dict[str, str] = {}
     for word, replacement in payload.items():
         if not isinstance(word, str) or not isinstance(replacement, str):
-            raise ValueError("Pronunciation entries must map text to text")
+            raise TypeError("Pronunciation entries must map text to text")
         word = word.strip()
         replacement = replacement.strip()
         if not word or not replacement:

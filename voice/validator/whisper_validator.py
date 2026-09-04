@@ -90,7 +90,7 @@ class WhisperValidator:
             )
 
         except Exception as e:
-            logger.error("Failed to load Whisper: %s", e)
+            logger.exception("Failed to load Whisper: %s", e)
             raise
 
     def unload(self) -> None:
@@ -246,7 +246,7 @@ class WhisperValidator:
                     d[i][j] = min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + cost)
             return min(d[len(ref_words)][len(hyp_words)] / len(ref_words), 1.0)
         except Exception as e:
-            logger.error("WER calculation failed: %s", e)
+            logger.exception("WER calculation failed: %s", e)
             return 1.0  # Assume worst case
 
     def calculate_text_similarity(

@@ -275,7 +275,7 @@ def _extract_json(text: str) -> dict[str, Any]:
         raise ValueError("Gemini response did not contain a JSON object")
     value, _ = json.JSONDecoder().raw_decode(candidate[start:])
     if not isinstance(value, dict):
-        raise ValueError("Gemini response was not a JSON object")
+        raise TypeError("Gemini response was not a JSON object")
     return value
 
 
@@ -303,7 +303,7 @@ def _gemini_response_schema(schema: dict[str, Any]) -> dict[str, Any]:
 
     converted = convert(schema)
     if not isinstance(converted, dict):
-        raise ValueError("Gemini response schema must be an object")
+        raise TypeError("Gemini response schema must be an object")
     return converted
 
 

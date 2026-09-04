@@ -182,7 +182,7 @@ def load_model():
         tokenizer = AutoTokenizer.from_pretrained(model_name)
         logger.info("Parler-TTS loaded successfully!")
     except Exception as e:
-        logger.error(f"Failed to load Parler-TTS: {e}")
+        logger.exception(f"Failed to load Parler-TTS: {e}")
 
 
 @app.post("/voices/design")
@@ -227,8 +227,8 @@ def design_voice(request: VoiceDesignRequest):
         import traceback
 
         tb = traceback.format_exc()
-        logger.error(f"Error designing voice:\n{tb}")
-        raise HTTPException(status_code=500, detail=f"{e}\n{tb}")
+        logger.exception(f"Error designing voice:\n{tb}")
+        raise HTTPException(status_code=500, detail=f"{e}\n{tb}") from e
 
 
 @app.get("/health")

@@ -86,11 +86,21 @@ ignore = [
     # and each would have misattributed data across iterations the moment its
     # call became deferred or async. The rule is enforced from here on.
     "ARG",     # unused arguments: mostly protocol/callback signatures
-    "TRY400",  # logger.error -> logger.exception in except (22): mechanical but
-               # changes log volume, so batch it with a logging review
-    "TRY004",  # raise TypeError for type checks (22): changes exception types
-               # that callers may already handle
-    "B904",    # raise ... from (13): mechanical, batch separately
+    # TRY400, TRY004 and B904 were cleared on 2026-09-04.
+    #
+    # TRY400 (22): every `logger.error` inside an `except` is now
+    # `logger.exception`, so the traceback reaches the log instead of just the
+    # message. A redundant `exc_info=True` was dropped where present.
+    #
+    # TRY004 (22): 21 converted. All the script_generator sites parse LLM
+    # output and their callers already catch `(TypeError, ValueError)`, so the
+    # change is invisible to them. The exception is
+    # `configured_trusted_lan_cidrs`, which keeps ValueError -- see the
+    # per-file ignore below.
+    #
+    # B904 (13): every `raise` inside an `except` now chains with `from`, and
+    # the handlers that discarded the exception bind it instead, so the
+    # original cause survives into the traceback.
     "SIM102",  # collapsible if (4)
     "SIM103",  # needless bool (5)
     "SIM108",  # ternary instead of if/else (4): often less readable here
@@ -121,6 +131,13 @@ ignore = [
 # The cache only ever unpickles values it wrote itself, in a local SQLite file
 # under the project workspace. Nothing external reaches it.
 "shared/cache.py" = ["S301"]
+
+# `configured_trusted_lan_cidrs` validates a config value, and every other bad
+# setting in this project raises ValueError (see shared/config_validation.py).
+# TRY004 would have it raise TypeError because the check is an isinstance; one
+# convention for config errors is worth more than the rule here, and a test
+# asserts the current type.
+"brain/dashboard/api/security.py" = ["TRY004"]
 
 # `urllib.request` against the operator's own configured local endpoints
 # (Ollama, Home Assistant), not arbitrary user input.

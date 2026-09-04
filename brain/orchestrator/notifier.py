@@ -137,10 +137,10 @@ class HANotifier:
                 return {"status": "success", "http_status": status_code, "response": body}
         except urllib.error.HTTPError as e:
             err_body = e.read().decode("utf-8", errors="replace")
-            logger.error("Failed to send Home Assistant notification: HTTP %d - %s", e.code, err_body)
+            logger.exception("Failed to send Home Assistant notification: HTTP %d - %s", e.code, err_body)
             return {"status": "error", "http_status": e.code, "error": err_body}
         except Exception as e:
-            logger.error("Failed to send Home Assistant notification: %s", e)
+            logger.exception("Failed to send Home Assistant notification: %s", e)
             return {"status": "error", "error": str(e)}
 
     def notify_async(self, payload: NotificationPayload) -> None:

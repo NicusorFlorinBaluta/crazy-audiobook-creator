@@ -1615,7 +1615,7 @@ class ScriptGenerator:
                 # Reissuing the same oversized or looping prompt can consume
                 # the safeguard budget again. Once bounded splitting is no
                 # longer safe, fall back conservatively and surface confidence.
-                logger.error(
+                logger.exception(
                     "Runaway metadata generation stopped for chapter %d: %s. "
                     "Adaptive splitting is unavailable or exhausted; skipping "
                     "duplicate full-request retries.",
@@ -1990,12 +1990,12 @@ class ScriptGenerator:
             )
         response_lines = response.get("lines") if isinstance(response, dict) else None
         if not isinstance(response_lines, list):
-            raise ValueError("Focused delivery response must contain a lines array")
+            raise TypeError("Focused delivery response must contain a lines array")
         issue_map = {issue.fragment_index: issue for issue in issues}
         replacements: dict[int, dict[str, Any]] = {}
         for item in response_lines:
             if not isinstance(item, dict):
-                raise ValueError("Focused delivery response line is invalid")
+                raise TypeError("Focused delivery response line is invalid")
             try:
                 item_id = int(item.get("id"))
             except (TypeError, ValueError) as exc:
@@ -2067,7 +2067,7 @@ class ScriptGenerator:
         narrator defaults are explicit model outputs.
         """
         if not isinstance(raw, dict):
-            raise ValueError("LLM metadata response must be an object")
+            raise TypeError("LLM metadata response must be an object")
         scenes = raw.get("scenes")
         if not isinstance(scenes, list) or not scenes:
             raise ValueError("Dialogue-focused metadata requires scenes")
@@ -2075,7 +2075,7 @@ class ScriptGenerator:
         scene_starts: list[int] = []
         for scene_index, scene in enumerate(scenes):
             if not isinstance(scene, dict):
-                raise ValueError(f"Scene {scene_index} must be an object")
+                raise TypeError(f"Scene {scene_index} must be an object")
             try:
                 start_id = int(scene["start_id"])
             except (KeyError, TypeError, ValueError) as exc:
@@ -2090,11 +2090,11 @@ class ScriptGenerator:
 
         raw_lines = raw.get("lines")
         if not isinstance(raw_lines, list):
-            raise ValueError("LLM response has no lines array")
+            raise TypeError("LLM response has no lines array")
         line_map: dict[int, dict[str, Any]] = {}
         for item in raw_lines:
             if not isinstance(item, dict):
-                raise ValueError("Every sparse metadata row must be an object")
+                raise TypeError("Every sparse metadata row must be an object")
             try:
                 fragment_id = int(item["id"])
             except (KeyError, TypeError, ValueError) as exc:
@@ -2149,11 +2149,11 @@ class ScriptGenerator:
         here.
         """
         if not isinstance(raw, dict):
-            raise ValueError("LLM metadata response must be an object")
+            raise TypeError("LLM metadata response must be an object")
         received_characters = len(json.dumps(raw, ensure_ascii=False, separators=(",", ":")))
         raw_lines = raw.get("lines")
         if not isinstance(raw_lines, list):
-            raise ValueError("LLM response has no lines array")
+            raise TypeError("LLM response has no lines array")
         cls._validate_metadata_ids(raw, len(fragments))
 
         current_scene = 0
@@ -2396,7 +2396,7 @@ class ScriptGenerator:
             raise ValueError("Focused attribution response must contain exactly one line")
         replacement = response_lines[0]
         if not isinstance(replacement, dict):
-            raise ValueError("Focused attribution response line is invalid")
+            raise TypeError("Focused attribution response line is invalid")
         try:
             replacement_id = int(replacement.get("id"))
         except (TypeError, ValueError) as exc:
@@ -2543,12 +2543,12 @@ class ScriptGenerator:
             )
         response_lines = response.get("lines") if isinstance(response, dict) else None
         if not isinstance(response_lines, list):
-            raise ValueError("Focused attribution response must contain a lines array")
+            raise TypeError("Focused attribution response must contain a lines array")
         replacements: dict[int, dict[str, Any]] = {}
         allowed_fields = {"id", "speaker", "speaker_confidence", "speaker_evidence", "dialogue_kind"}
         for item in response_lines:
             if not isinstance(item, dict):
-                raise ValueError("Focused attribution response line is invalid")
+                raise TypeError("Focused attribution response line is invalid")
             try:
                 item_id = int(item.get("id"))
             except (TypeError, ValueError) as exc:
@@ -2836,7 +2836,7 @@ class ScriptGenerator:
         """Admit only source-evidenced speakers discovered by the joint pass."""
         updates = raw.get("character_updates", [])
         if not isinstance(updates, list):
-            raise ValueError("character_updates must be an array in joint mode")
+            raise TypeError("character_updates must be an array in joint mode")
         line_map = self._metadata_line_map(raw)
         dialogue_by_speaker: dict[str, list[int]] = {}
         for index, item in line_map.items():
@@ -2850,7 +2850,7 @@ class ScriptGenerator:
 
         for update in updates:
             if not isinstance(update, dict):
-                raise ValueError("character_updates contains a non-object entry")
+                raise TypeError("character_updates contains a non-object entry")
             character_id = self._normalize_speaker_id(update.get("character_id") or update.get("id"))
             if character_id == "narrator":
                 continue
@@ -3118,7 +3118,7 @@ class ScriptGenerator:
     def _validate_metadata_ids(raw: dict[str, Any], expected_count: int) -> None:
         raw_lines = raw.get("lines")
         if not isinstance(raw_lines, list):
-            raise ValueError("LLM response has no lines array")
+            raise TypeError("LLM response has no lines array")
         ids: list[int] = []
         for line in raw_lines:
             if not isinstance(line, dict) or "id" not in line:

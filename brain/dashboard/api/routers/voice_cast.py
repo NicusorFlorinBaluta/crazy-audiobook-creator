@@ -753,9 +753,9 @@ except Exception as e:
                 mismatch_err = voice_support._uploaded_transcript_error(DummyResult())
                 if mismatch_err:
                     raise ValueError(mismatch_err)
-            except json.JSONDecodeError:
-                logger.error("Could not decode validator output: %s", proc.stdout)
-                raise ValueError("Whisper validator returned invalid format.")
+            except json.JSONDecodeError as exc:
+                logger.exception("Could not decode validator output: %s", proc.stdout)
+                raise ValueError("Whisper validator returned invalid format.") from exc
         finally:
             Path(script_path).unlink(missing_ok=True)
 

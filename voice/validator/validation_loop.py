@@ -250,7 +250,7 @@ class ValidationLoop:
                     except Exception as exc:
                         last_error = exc
                         self._unlink_audio_artifacts(output_path)
-                        logger.error(
+                        logger.exception(
                             "Generation failed for %s (attempt %d/%d): %s",
                             line.line_id,
                             generation_attempt,
@@ -586,7 +586,7 @@ class ValidationLoop:
                         retried += 1
                     except Exception as exc:
                         self._unlink_audio_artifacts(attempt_path)
-                        logger.error(
+                        logger.exception(
                             "Retry generation failed for %s (attempt %d): %s",
                             line.line_id,
                             attempt,

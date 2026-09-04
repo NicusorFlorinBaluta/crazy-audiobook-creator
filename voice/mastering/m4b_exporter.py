@@ -366,7 +366,7 @@ class M4BExporter:
 
             logger.info("FFmpeg completed successfully")
 
-        except subprocess.TimeoutExpired:
-            raise RuntimeError("FFmpeg export timed out")
-        except FileNotFoundError:
-            raise RuntimeError("FFmpeg not found. Install FFmpeg and add it to PATH")
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError("FFmpeg export timed out") from exc
+        except FileNotFoundError as exc:
+            raise RuntimeError("FFmpeg not found. Install FFmpeg and add it to PATH") from exc

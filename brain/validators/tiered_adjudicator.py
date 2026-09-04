@@ -171,7 +171,7 @@ def _extract_json(text: str) -> dict[str, Any]:
         raise ValueError("Response did not contain a JSON object")
     value, _ = json.JSONDecoder().raw_decode(candidate[start:])
     if not isinstance(value, dict):
-        raise ValueError("Response was not a JSON object")
+        raise TypeError("Response was not a JSON object")
     return value
 
 

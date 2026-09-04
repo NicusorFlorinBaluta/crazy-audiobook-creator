@@ -1114,8 +1114,8 @@ async def create_project(
         }
 
     except Exception as e:
-        logger.error("[DashboardAPI] Failed to create project from '%s': %s", file.filename, e)
-        raise HTTPException(status_code=400, detail=str(e))
+        logger.exception("[DashboardAPI] Failed to create project from '%s': %s", file.filename, e)
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
     finally:
         if temp_path.exists():
@@ -1144,8 +1144,8 @@ async def get_project(project_id: str):
                 exc_info=True,
             )
         return await get_pipeline_status(project_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Project not found")
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Project not found") from exc
 
 
 def _safe_delete_tree(path: Path) -> bool:
@@ -1287,7 +1287,7 @@ async def test_nas_connection():
         result = syncer.test_connection()
         return result
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"NAS connection failed: {e}")
+        raise HTTPException(status_code=502, detail=f"NAS connection failed: {e}") from e
 
 
 @app.post("/api/nas/sync-all")
@@ -1300,7 +1300,7 @@ async def sync_all_to_nas():
         result = syncer.sync_all_projects()
         return result
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to sync projects to NAS: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to sync projects to NAS: {e}") from e
 
 
 @app.get("/api/notifications/settings")
@@ -1446,7 +1446,7 @@ async def start_pipeline(
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(None, pipeline.run, project_id)
         except Exception as e:
-            logger.error("Pipeline failed for %s: %s", project_id, e)
+            logger.exception("Pipeline failed for %s: %s", project_id, e)
             for ws in ws_connections:
                 try:
                     await ws.send_json(
@@ -1552,8 +1552,8 @@ async def stop_pipeline(
 
     try:
         state = job_queue.get_job(project_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Project not found")
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Project not found") from exc
 
     will_resume_on_schedule = bool(resume_on_schedule or (pipeline and not pipeline.schedule_is_open()))
     if will_resume_on_schedule:
@@ -1616,8 +1616,8 @@ async def reset_pipeline_stage(project_id: str, request: Request):
 
     try:
         stage = PipelineStage(stage_value)
-    except ValueError:
-        raise HTTPException(status_code=400, detail=f"Invalid stage: {stage_value}")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid stage: {stage_value}") from exc
     supported = {
         PipelineStage.EXTRACTING,
         PipelineStage.SCRIPTING,
@@ -1859,8 +1859,8 @@ async def reset_pipeline_stage(project_id: str, request: Request):
         packaging_guard.__exit__(None, None, None)
         packaging_guard = None
         return {"status": "success", "project_id": project_id, "stage": stage.value}
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Project not found")
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Project not found") from exc
     finally:
         if packaging_guard is not None:
             packaging_guard.__exit__(None, None, None)
@@ -2282,8 +2282,8 @@ async def get_pipeline_status(project_id: str):
 
         state["chapter_details"] = chapter_details
         return state
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Project not found")
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Project not found") from exc
 
 
 # ---------------------------------------------------------------------------

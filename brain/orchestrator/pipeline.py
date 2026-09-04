@@ -2098,7 +2098,7 @@ class Pipeline:
             )
             logger.info("Voice bootstrapping complete: %d voices generated", len(response.voices_generated))
         except Exception as e:
-            logger.error("Failed to bootstrap voices: %s", e)
+            logger.exception("Failed to bootstrap voices: %s", e)
             raise
 
     def _run_incremental_delivery(self, project_id: str, project_dir: Path, current_stage: PipelineStage) -> None:
@@ -2741,9 +2741,9 @@ class Pipeline:
                     response.total_lines,
                 )
             except Exception as e:
-                logger.error("Failed to generate chapter %d: %s", chapter_script.chapter_number, e)
+                logger.exception("Failed to generate chapter %d: %s", chapter_script.chapter_number, e)
                 if self._stop_flags.get(project_id):
-                    raise KeyboardInterrupt("Pipeline stopped during chapter generation")
+                    raise KeyboardInterrupt("Pipeline stopped during chapter generation") from e
                 raise
 
         self.job_queue.update_job(project_id, {"current_gen_chapter": None})
@@ -2908,7 +2908,7 @@ class Pipeline:
                     response.lufs,
                 )
             except Exception as e:
-                logger.error("Failed to master chapter %d: %s", chapter_script.chapter_number, e)
+                logger.exception("Failed to master chapter %d: %s", chapter_script.chapter_number, e)
                 raise
 
     def _run_export(
