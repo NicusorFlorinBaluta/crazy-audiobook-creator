@@ -1,5 +1,7 @@
 # Pronunciation Dictionary, Cache Hardening, and Stability Improvements — 2026-09-02
 
+**Status:** Current
+
 ## Overview
 
 This record documents the architectural enhancements, bug fixes, and stability hardening implemented for the audiobook creation pipeline, dashboard, and voice synthesis engine.
@@ -36,7 +38,7 @@ Audiobook narration of fantasy, science fiction, and non-English proper nouns fr
 In-memory dictionary caches were susceptible to concurrency races, memory ballooning, and did not persist across dashboard service restarts.
 
 ### Implementation
-- Implemented **`CacheService`** in [`shared/cache.py`](file:///e:/Projects/crazy-audiobook-creator/shared/cache.py) using embedded SQLite in **Write-Ahead Logging (WAL)** mode (`PRAGMA journal_mode = WAL`, `PRAGMA synchronous = NORMAL`).
+- Implemented **`CacheService`** in [`shared/cache.py`](../../shared/cache.py) using embedded SQLite in **Write-Ahead Logging (WAL)** mode (`PRAGMA journal_mode = WAL`, `PRAGMA synchronous = NORMAL`).
 - **Zero External Dependencies**: 100% bare-metal, native Python, survives restarts, thread-safe, multi-process safe, zero background service overhead, and no 10-day license limits.
 - Supports binary serialization via `pickle` with TTL support, exact key deletions, and prefix invalidation.
 
@@ -59,7 +61,7 @@ Previously, `max(all chapter mtimes)` was used as a single coarse invalidation s
 Unbounded error strings and cumulative validation history in `attribution_confidence_history` caused exponential JSON growth over repeated retries, bloating project manifests and causing memory/transport bottlenecks.
 
 ### Implementation
-- Added `_cap_decision_trail()` in [`brain/orchestrator/review_gate.py`](file:///e:/Projects/crazy-audiobook-creator/brain/orchestrator/review_gate.py).
+- Added `_cap_decision_trail()` in [`brain/orchestrator/review_gate.py`](../../brain/orchestrator/review_gate.py).
 - Caps decision history to the **last 10 entries** and truncates verbose strings to **500 characters** at the HTTP serialization boundary.
 - Source-level error logging in `gemini_validation.py` is capped to 300 characters.
 
@@ -78,7 +80,7 @@ Unbounded error strings and cumulative validation history in `attribution_confid
 ## 6. Registry-Aware Generic Speaker Resolution
 
 ### Implementation
-- `_normalize_speaker_id` in [`brain/director/script_generator.py`](file:///e:/Projects/crazy-audiobook-creator/brain/director/script_generator.py) is strictly pure string normalization.
+- `_normalize_speaker_id` in [`brain/director/script_generator.py`](../../brain/director/script_generator.py) is strictly pure string normalization.
 - In `_resolve_pass2_speakers`, alias lookup is applied as **Step 3 fallback only after** searching exact IDs and canonical aliases in the character registry, preventing named characters referred to as "the woman" from being stolen by generic archetype pools.
 
 ---

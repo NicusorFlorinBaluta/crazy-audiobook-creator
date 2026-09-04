@@ -13,30 +13,32 @@ import soundfile as sf
 from brain.orchestrator.job_queue import JobQueue
 from brain.orchestrator.pipeline import Pipeline
 from shared.artifacts import (
+    atomic_write_bytes,
     atomic_write_json,
+    atomic_write_text,
     build_segment_manifest,
     finalize_segment_manifest,
     hash_file,
     manifest_path,
     master_manifest_path,
 )
+from shared.constants import Gender
 from shared.models import (
     AudiobookMetadata,
+    Character,
+    ExportChapterInfo,
     ExportConfig,
     MasterChapterRequest,
     MasterSegmentInfo,
-    ExportChapterInfo,
     ScriptChapter,
     ScriptLine,
 )
+from shared.single_instance import SingleInstanceLock
 from voice.mastering.assembler import AudioAssembler
 from voice.mastering.m4b_exporter import M4BExporter
 from voice.tts_server.embedding_store import EmbeddingStore
 from voice.tts_server.voice_designer import VoiceDesigner
 from voice.tts_server.voice_library import VoiceLibraryManager
-from shared.constants import Gender
-from shared.models import Character
-from shared.single_instance import SingleInstanceLock
 
 
 class SingleInstanceTests(unittest.TestCase):
@@ -264,13 +266,27 @@ class ArtifactStateTests(unittest.TestCase):
                 segment = root / "workspace" / project_id / "segments" / "ch01_0000.wav"
                 segment.parent.mkdir(parents=True)
                 sf.write(segment, np.ones(2400, dtype=np.float32) * 0.01, 24000)
+                # Build the manifest with the same voice-generation config the
+                # reconciler will hash. `_voice_generation_config` resolves
+                # `voice/config.yaml` from the repository root, so it is found
+                # regardless of the working directory -- it previously returned
+                # `{}` whenever the CWD differed, which quietly dropped the TTS
+                # and validation settings out of the generation fingerprint.
                 manifest = finalize_segment_manifest(
-                    build_segment_manifest(project_id, chapter),
+                    build_segment_manifest(
+                        project_id,
+                        chapter,
+                        Pipeline._voice_generation_config(project_id),
+                    ),
                     root / "workspace",
                 )
                 atomic_write_json(manifest_path(project_dir, 1), manifest)
 
                 pipeline = object.__new__(Pipeline)
+                # The workspace root is an explicit attribute rather than a
+                # working-directory-relative global, so point it at this
+                # temporary tree instead of relying on the `os.chdir` above.
+                pipeline.workspace_dir = root / "workspace"
                 generated, mastered = pipeline._reconcile_artifacts(
                     project_id,
                     project_dir,
@@ -765,3 +781,70 @@ class ExportMetadataTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AtomicWriteDurabilityTests(unittest.TestCase):
+    """`atomic_write_*` must never leave a partially written artifact.
+
+    The artifact model treats manifests and state files as authoritative
+    evidence that a chapter finished. A truncated one is worse than a missing
+    one, so a transient Windows lock is retried and a persistent one raises
+    rather than degrading to a non-atomic `shutil.copyfile`.
+    """
+
+    def test_text_write_replaces_existing_content_completely(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "state.json"
+            atomic_write_text(target, "a" * 5000)
+            atomic_write_text(target, "b")
+            self.assertEqual(target.read_text(encoding="utf-8"), "b")
+
+    def test_no_temporary_files_are_left_behind(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            atomic_write_json(root / "manifest.json", {"ok": True})
+            leftovers = [p.name for p in root.iterdir() if p.name != "manifest.json"]
+            self.assertEqual(leftovers, [])
+
+    def test_a_transient_permission_error_is_retried(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "state.json"
+            real_replace = os.replace
+            calls = {"n": 0}
+
+            def flaky_replace(src, dst):
+                calls["n"] += 1
+                if calls["n"] < 3:
+                    raise PermissionError("simulated antivirus handle")
+                return real_replace(src, dst)
+
+            with patch("shared.artifacts.os.replace", side_effect=flaky_replace):
+                atomic_write_text(target, "recovered")
+
+            self.assertEqual(calls["n"], 3)
+            self.assertEqual(target.read_text(encoding="utf-8"), "recovered")
+
+    def test_a_persistent_permission_error_raises_instead_of_copying(self) -> None:
+        """The old fallback truncated the destination; that must not return."""
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "state.json"
+            atomic_write_text(target, "original-content")
+
+            with patch(
+                "shared.artifacts.os.replace",
+                side_effect=PermissionError("held open"),
+            ):
+                with self.assertRaises(PermissionError):
+                    atomic_write_text(target, "replacement")
+
+            # The prior good content must survive a failed write untouched.
+            self.assertEqual(target.read_text(encoding="utf-8"), "original-content")
+            leftovers = [p.name for p in Path(tmp).iterdir() if p.name != "state.json"]
+            self.assertEqual(leftovers, [], "temp file leaked on the failure path")
+
+    def test_bytes_write_is_atomic_too(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "cover.jpg"
+            atomic_write_bytes(target, b"\xff\xd8original")
+            atomic_write_bytes(target, b"\xff\xd8new")
+            self.assertEqual(target.read_bytes(), b"\xff\xd8new")

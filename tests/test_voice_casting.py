@@ -1,7 +1,7 @@
-import unittest
 import array
 import math
 import tempfile
+import unittest
 import wave
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,8 +11,8 @@ from shared.models import Character, CharacterRegistry, ScriptChapter, ScriptLin
 from shared.voice_casting import (
     build_voice_cast,
     compile_effective_voice_prompt,
-    speaking_character_ids,
     required_voice_character_ids,
+    speaking_character_ids,
 )
 
 

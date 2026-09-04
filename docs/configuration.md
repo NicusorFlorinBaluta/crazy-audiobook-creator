@@ -14,7 +14,11 @@ The running configuration lives in `brain/config.yaml` and `voice/config.yaml`. 
 | `auto_start` | Start a pipeline-owned Ollama server when the configured endpoint is unavailable |
 | `executable` | Ollama executable used by the managed server |
 | `models_dir` | Existing Ollama model store passed as `OLLAMA_MODELS` |
-| `vulkan_visible_devices` | Vulkan device IDs exposed to managed Ollama, such as `0` for the discrete GPU |
+| `gpu_backend` | Backend for the managed Ollama server: `vulkan` or `rocm`. Both isolate the discrete GPU; on RDNA3 the ROCm/hipBLAS backend is usually markedly faster at *prompt processing*, and `flash_attention` only takes effect there. Screen a change with `scripts/benchmark_script_chunks.py` |
+| `visible_devices` | GPU device IDs exposed to managed Ollama, such as `0` for the discrete GPU. Applied as `GGML_VK_VISIBLE_DEVICES` (vulkan) or `HIP_VISIBLE_DEVICES`/`ROCR_VISIBLE_DEVICES` (rocm). `vulkan_visible_devices` is still read for backward compatibility |
+| `num_parallel` | Ollama server slots; keep at `1`. Ollama otherwise autodetects (commonly 4), which reserves KV cache **per slot** -- 4 x 16384 tokens on a 27B model can push layers off the GPU despite `num_gpu=99` -- and lets sequential chunk requests land on different slots, defeating prefix-cache reuse of the system prompt. That prompt is byte-identical for every chunk within a chapter, so re-evaluating it per chunk is pure waste |
+| `kv_cache_type` | Quantized KV cache (`q8_0`, `q4_0`); requires `flash_attention: true`. Frees VRAM so a 27B model stays fully offloaded at a 16k context. Empty uses Ollama's `f16` default |
+| `keep_alive` | Model idle-unload window passed as `OLLAMA_KEEP_ALIVE`. The pipeline unloads explicitly at stage boundaries, so this only avoids an unnecessary ~45 s reload if a stage stalls |
 | `startup_timeout_seconds` | Maximum wait for the managed server and configured model |
 | `context_window` | Per-request context tokens; size from measured prompt plus response headroom, then reduce cautiously when VRAM is tight |
 | `temperature_pass1` | Character-analysis temperature |
@@ -133,12 +137,24 @@ hash-invalid parts are never offered as downloads.
 | `host`, `port` | Dashboard bind address |
 | `cors_origins` | Exact browser origins allowed |
 | `api_token` | Optional token for peers outside trusted LANs |
-| `trusted_lan_cidrs` | TCP-peer CIDRs allowed without an application token |
+| `trusted_lan_cidrs` | TCP-peer CIDRs allowed without an application token. **Omitting the key falls back to every RFC1918 range plus the Tailscale CGNAT range** (`10/8`, `172.16/12`, `192.168/16`, `100.64/10`, `fc00::/7`, `fe80::/10`), which is almost always wider than intended. An empty list disables token-free LAN access entirely, leaving loopback plus a token. Invalid CIDRs fail at startup rather than being discarded |
 | `max_upload_size_mb` | Compressed upload limit |
 | `max_epub_expanded_mb` | Total expanded EPUB limit |
 
 Loopback and configured trusted-LAN peers may use the dashboard without an
 application token. Authorization uses the socket peer, not `X-Forwarded-For`.
+
+**A reverse proxy connects from its own address.** If nginx on this LAN proxies
+the dashboard to the public internet, that proxy address is inside
+`trusted_lan_cidrs`, so every internet request arriving through it is authorized
+as a trusted LAN peer and this application performs no authentication of its
+own. Set `CRAZY_AUDIOBOOK_DASHBOARD_TOKEN` and have the proxy inject
+`X-API-Token` if the public endpoint must be authenticated by the application
+rather than only by the proxy.
+
+Binding to a non-loopback host is refused at import time unless either a token
+or an explicit `trusted_lan_cidrs` list is configured. That check runs however
+the app is started, including `uvicorn brain.dashboard.api.main:app`.
 Public remote access should still be placed behind authenticated Home Assistant
 or a reverse proxy and protected by firewall rules.
 

@@ -2,7 +2,6 @@
 
 from enum import StrEnum
 
-
 # ---------------------------------------------------------------------------
 # Pipeline & Orchestration
 # ---------------------------------------------------------------------------
@@ -162,3 +161,44 @@ DEFAULT_TIMEOUT_SECONDS = 30
 DEFAULT_RETRIES = 3
 DEFAULT_RETRY_DELAY_SECONDS = 5
 DEFAULT_RECONNECT_INTERVAL_SECONDS = 60
+
+# ---------------------------------------------------------------------------
+# Local model identity
+# ---------------------------------------------------------------------------
+
+# Single source of truth for the fallback Ollama tag used when
+# `brain/config.yaml` is missing or unreadable.
+#
+# This previously existed as four separate literals across the codebase, two of
+# which disagreed (`pipeline.py` defaulted to `qwen3:32b` while
+# `shared/pronunciation.py`, `scripts/repair_attributions.py` and
+# `brain/validators/tiered_adjudicator.py` used `qwen3.8:27b`). A config-read
+# failure therefore silently ran attribution, pronunciation and scripting on
+# different models within one book, which contradicts the
+# `ollama.fallback_models: []` policy of never substituting a model.
+#
+# Keep this aligned with `ollama.model` in `brain/config.yaml`.
+DEFAULT_OLLAMA_MODEL = "qwen3.8:27b"
+DEFAULT_OLLAMA_HOST = "http://127.0.0.1:11435"
+
+
+# ---------------------------------------------------------------------------
+# Cooperative cancellation
+# ---------------------------------------------------------------------------
+
+
+class GenerationCancelled(BaseException):
+    """Raised to unwind a stage when the operator requests a pause.
+
+    Deliberately derived from ``BaseException`` rather than ``Exception``. The
+    pipeline contains well over a hundred broad ``except Exception`` handlers,
+    many of which legitimately swallow errors; a cancellation must tunnel
+    through all of them to the stage runner instead of being absorbed as a
+    recoverable failure.
+
+    `OllamaClient` previously reused the built-in ``KeyboardInterrupt`` for
+    this, which worked for the same reason but conflated a programmatic pause
+    with a real Ctrl-C from the terminal, and made the intent unreadable at the
+    catch site. The Voice service already had its own ``GenerationCancelled``;
+    this is the shared definition both sides can use.
+    """

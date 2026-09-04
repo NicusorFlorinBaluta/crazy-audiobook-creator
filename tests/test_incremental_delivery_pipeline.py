@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
-import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
 from fastapi import HTTPException
 
+import brain.dashboard.api.main as dashboard_main
 from brain.dashboard.api.main import (
     ChapterSelectionRequest,
     DeliverySettingsRequest,
@@ -18,12 +19,11 @@ from brain.dashboard.api.main import (
     set_chapter_selection,
     update_delivery_settings,
 )
-import brain.dashboard.api.main as dashboard_main
 from brain.orchestrator.delivery_manager import DeliveryManager
 from brain.orchestrator.job_queue import JobQueue
 from brain.orchestrator.pipeline import Pipeline, _GracefulDeliveryPause
-from shared.constants import PipelineStage
 from shared.artifacts import fingerprint, hash_file
+from shared.constants import PipelineStage
 from shared.models import ScriptChapter
 
 
@@ -97,9 +97,8 @@ class IncrementalDeliveryPipelineTests(unittest.TestCase):
                 # Simulate export output
                 temp_output.write_bytes(b"dummy partial audio content")
                 return {"duration_seconds": 120.0}
-            else:
-                full_export_called = True
-                return {"duration_seconds": 240.0}
+            full_export_called = True
+            return {"duration_seconds": 240.0}
 
         self.pipeline._run_generation = mock_gen
         self.pipeline._run_mastering = mock_master

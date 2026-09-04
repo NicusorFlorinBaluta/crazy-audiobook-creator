@@ -3008,15 +3008,7 @@ function formatProjectStatus(status) {
     return labels[token] || token.replaceAll('_', ' ').replace(/\b\w/g, letter => letter.toUpperCase());
 }
 
-function escapeHtml(unsafe) {
-    if (!unsafe) return '';
-    return unsafe
-         .replace(/&/g, "&amp;")
-         .replace(/</g, "&lt;")
-         .replace(/>/g, "&gt;")
-         .replace(/"/g, "&quot;")
-         .replace(/'/g, "&#039;");
-}
+// escapeHtml now lives in js/dom-utils.js, which loads before this file.
 
 // ============================================================================
 // WebSocket & Health Checks

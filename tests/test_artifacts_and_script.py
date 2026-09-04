@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -15,18 +17,18 @@ from brain.director.script_generator import (
     SourceFragment,
 )
 from brain.orchestrator.pipeline import Pipeline
-from shared.constants import Gender
 from shared.artifacts import (
     assert_script_covers_source,
     build_segment_manifest,
     format_chapter_set,
 )
+from shared.constants import Gender
 from shared.models import (
+    BookMetadata,
     Character,
     CharacterRegistry,
     ExtractedBook,
     ExtractedChapter,
-    BookMetadata,
     GenerateChapterRequest,
     ScriptChapter,
     ScriptLine,
@@ -2611,7 +2613,7 @@ class PartialGenerationTests(unittest.TestCase):
         )
         generator = ScriptGenerator(ollama=None)
         generator._detect_new_characters(script, registry)
-        
+
         self.assertEqual(script.lines[0].speaker, "minor_female")
         self.assertEqual(script.lines[1].speaker, "minor_male")
         self.assertIn("minor_female", registry.characters)
@@ -2622,3 +2624,47 @@ class PartialGenerationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class VoiceGenerationConfigResolutionTests(unittest.TestCase):
+    """TTS and validation settings must always reach the generation fingerprint.
+
+    `_voice_generation_config` used to read `Path("voice/config.yaml")`, a
+    working-directory-relative literal, and return `{}` when the file was not
+    found there. Any launch from another directory therefore dropped `tts` and
+    `validation` out of the generation fingerprint entirely -- so changing the
+    dtype, WER threshold or attention backend would not invalidate cached
+    audio, and stale segments would be silently reused.
+    """
+
+    def test_config_is_found_regardless_of_the_working_directory(self) -> None:
+        from brain.orchestrator.pipeline import Pipeline
+
+        original = Path.cwd()
+        with tempfile.TemporaryDirectory() as elsewhere:
+            os.chdir(elsewhere)
+            try:
+                config = Pipeline._voice_generation_config()
+            finally:
+                os.chdir(original)
+
+        self.assertIn("tts", config)
+        self.assertIn("validation", config)
+        self.assertTrue(
+            config["tts"],
+            "tts settings must not be empty; an empty dict silently removes "
+            "them from the generation fingerprint",
+        )
+
+    def test_the_same_config_is_returned_from_the_repository_root(self) -> None:
+        from brain.orchestrator.pipeline import Pipeline
+
+        from_root = Pipeline._voice_generation_config()
+        original = Path.cwd()
+        with tempfile.TemporaryDirectory() as elsewhere:
+            os.chdir(elsewhere)
+            try:
+                from_elsewhere = Pipeline._voice_generation_config()
+            finally:
+                os.chdir(original)
+        self.assertEqual(from_root, from_elsewhere)

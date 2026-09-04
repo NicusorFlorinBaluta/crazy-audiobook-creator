@@ -1,16 +1,17 @@
 """Unit and integration tests for Home Assistant notification engine."""
 
 import json
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
+
 import pytest
 from fastapi.testclient import TestClient
 
+from brain.dashboard.api.main import app
 from brain.orchestrator.notifier import (
     HANotifier,
-    NotificationPayload,
     NotificationEventType,
+    NotificationPayload,
 )
-from brain.dashboard.api.main import app
 
 
 @pytest.fixture

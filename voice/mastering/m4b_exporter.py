@@ -11,11 +11,11 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import subprocess
 from pathlib import Path
 from typing import Any
 
+from shared import paths as shared_paths
 from shared.models import (
     AudiobookMetadata,
     ExportChapterInfo,
@@ -36,7 +36,7 @@ class M4BExporter:
         chapters: list[ExportChapterInfo],
         cover_art: str | None = None,
         output_config: ExportConfig | None = None,
-        workspace: Path = Path("workspace"),
+        workspace: Path | None = None,
         output_name: str | None = None,
     ) -> ExportM4BResponse:
         """Export all chapters as a single M4B audiobook file.
@@ -59,6 +59,11 @@ class M4BExporter:
             ExportM4BResponse with output file info.
         """
         config = output_config or ExportConfig()
+        # `workspace` defaulted to a bare relative Path("workspace"), which
+        # silently depended on the process working directory. Resolve from the
+        # repository root instead when the caller supplies nothing.
+        if workspace is None:
+            workspace = shared_paths.WORKSPACE_DIR
         project_dir = workspace / project_id
         output_dir = project_dir / "output"
         output_dir.mkdir(parents=True, exist_ok=True)

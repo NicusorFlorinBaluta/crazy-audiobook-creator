@@ -18,7 +18,20 @@ from typing import Any
 
 import httpx
 
+from shared.constants import (
+    DEFAULT_OLLAMA_HOST,
+    DEFAULT_OLLAMA_MODEL,
+    GenerationCancelled,
+)
+
 logger = logging.getLogger(__name__)
+
+# How often to emit a liveness log line, in received stream chunks.
+LOG_INTERVAL_CHUNKS = 200
+# How often to test the response tail for a repetition loop. Deliberately
+# independent of LOG_INTERVAL_CHUNKS: this is a quality gate, not diagnostics,
+# and changing the log cadence must not change how quickly a loop is caught.
+REPETITION_CHECK_INTERVAL_CHUNKS = 100
 
 
 class OllamaClient:
@@ -26,8 +39,8 @@ class OllamaClient:
 
     def __init__(
         self,
-        host: str = "http://localhost:11434",
-        model: str = "qwen3:32b",
+        host: str = DEFAULT_OLLAMA_HOST,
+        model: str = DEFAULT_OLLAMA_MODEL,
         fallback_models: list[str] | tuple[str, ...] | None = None,
         timeout: int = 120,
         max_retries: int = 3,
@@ -85,7 +98,7 @@ class OllamaClient:
 
     def _raise_if_cancelled(self) -> None:
         if self._cancel_event.is_set():
-            raise KeyboardInterrupt("Ollama generation cancelled")
+            raise GenerationCancelled("Ollama generation cancelled")
 
     def _wait_for_retry(self, seconds: int) -> None:
         """Wait between retries while remaining immediately cancellable."""
@@ -178,6 +191,7 @@ class OllamaClient:
                 full_text = []
                 token_count = 0
                 last_log_tokens = 0
+                last_repetition_check = 0
                 final_chunk: dict[str, Any] = {}
 
                 client = self._ensure_client()
@@ -252,16 +266,26 @@ class OllamaClient:
                                         "Ollama generation reached the configured "
                                         f"{self.max_output_tokens}-token output limit"
                                     )
-                                # Log every 200 tokens so we know it's alive
-                                if token_count - last_log_tokens >= 200:
+                                # Liveness logging.
+                                if token_count - last_log_tokens >= LOG_INTERVAL_CHUNKS:
                                     elapsed = time.time() - t0
                                     logger.info(
-                                        "[Ollama] ↻ Streaming... %d tokens | %.1f tok/s | %.0fs elapsed",
+                                        "[Ollama] ↻ Streaming... %d chunks | %.1f chunk/s | %.0fs elapsed",
                                         token_count,
                                         token_count / elapsed if elapsed > 0 else 0,
                                         elapsed,
                                     )
                                     last_log_tokens = token_count
+
+                                # Repetition detection is a quality gate and
+                                # must not inherit its sensitivity from the log
+                                # interval, which is what happened while this
+                                # check lived inside the logging branch above.
+                                if (
+                                    token_count - last_repetition_check
+                                    >= REPETITION_CHECK_INTERVAL_CHUNKS
+                                ):
+                                    last_repetition_check = token_count
                                     if self._has_repeated_tail(full_text):
                                         self._record_generation_abort(
                                             attempt=attempt,
@@ -293,8 +317,10 @@ class OllamaClient:
                     )
 
                 if not text.strip():
-                    with open("empty_response_debug.txt", "w", encoding="utf-8") as f:
-                        f.write(text)
+                    # No debug artifact is written here: by definition of this
+                    # branch the response is empty, so the file only ever
+                    # contained "". The log line below carries the useful
+                    # signal (chunk count and elapsed time).
                     logger.error(
                         "[Ollama] ✗ Empty response after streaming! %d token chunks received in %.1fs",
                         token_count,
@@ -530,20 +556,19 @@ class OllamaClient:
                 pass
 
         import json_repair
-        
+
         # Try robust parsing using json_repair
         try:
             logger.info("[JSON] Attempting robust json_repair parsing...")
             target_str = fenced_match.group(1) if fenced_match else text
             brace_match = re.search(r"\{.*\}", target_str, re.DOTALL)
             json_text = brace_match.group(0) if brace_match else target_str
-            
+
             result = json_repair.loads(json_text)
             if isinstance(result, dict):
                 logger.info("[JSON] Parsed via json_repair successfully. Keys: %s", list(result.keys())[:8])
                 return result
-            else:
-                logger.warning("[JSON] json_repair returned non-dict type: %s", type(result))
+            logger.warning("[JSON] json_repair returned non-dict type: %s", type(result))
         except Exception as e:
             logger.error("[JSON] json_repair failed: %s", e)
 

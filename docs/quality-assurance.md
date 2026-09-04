@@ -69,6 +69,28 @@ A cached segment is eligible only when:
 
 The cache is keyed by line identity but validated by dependencies. Editing one line can regenerate only that line; changing a character reference invalidates every dependent line.
 
+### Reproducible synthesis
+
+Synthesis is deterministic, so a cache hit and a regeneration produce the same
+audio rather than merely the same *acceptability*.
+
+The engine samples with `do_sample: true` at `temperature: 0.9`. Each line is
+therefore seeded from its project, line ID, synthesis text, voice, and attempt
+number. Consequences:
+
+- Purging the cache no longer changes the audiobook. Previously "same
+  fingerprint implies same audio" held only because the WAV was cached, not
+  because generation was repeatable.
+- A repaired line regenerated among untouched neighbours reproduces exactly,
+  instead of landing as an independently sampled take with different prosody —
+  a mismatch that WER and speaker similarity both pass.
+- Listening A/B comparisons are repeatable in production, not only in the
+  benchmark harness.
+
+The attempt number is part of the seed deliberately. A validation retry exists
+because the previous take failed; reusing its seed would reproduce that exact
+failure and the retry could never succeed.
+
 ## Speaker consistency
 
 Before metadata is accepted, deterministic evidence rejects contradictions
@@ -90,6 +112,33 @@ boundary. VoiceDesign, Qwen Base, and Whisper are loaded lazily so reference
 bootstrap never requires all models to coexist in VRAM.
 
 The default similarity threshold is a starting point, not a universal calibration. Calibrate it against known-good reference/generated pairs from the actual model and hardware before raising it.
+
+### Within-chapter delivery consistency
+
+Every check above is either per-segment (WER, clipping, duration, pitch CV,
+speaker similarity) or cross-chapter (`cross_chapter_voice_drift`). Neither
+measures whether *adjacent lines in the same chapter* match each other, which
+is the artifact a listener notices first.
+
+`brain/orchestrator/quality_trends.py` therefore also reports, per voice per
+chapter:
+
+| Metric | Meaning |
+|---|---|
+| `pitch_relative_spread` | stdev / median of `pitch_median` across the chapter's accepted lines |
+| `speaking_rate_relative_spread` | same, for characters per audio second |
+| `largest_adjacent_pitch_jump_ratio` | biggest line-to-line pitch change, relative to the chapter median |
+
+These are **warning-only** and never block a release. They are computed
+entirely from measurements already paid for during validation, so they add no
+inference cost. Thresholds are deliberately quiet on the current corpus: the
+useful signal is a *change* in spread between runs, not an absolute level. They
+exist so a future sampling or seeding change has something to be evaluated
+against — see [Scripting quality and performance policy](scripting-quality-performance-policy.md)
+for the promotion protocol.
+
+A chapter with fewer than six measured segments is reported but never warned:
+below that, expressive variation and inconsistency cannot be distinguished.
 
 ## Reference-voice validation
 

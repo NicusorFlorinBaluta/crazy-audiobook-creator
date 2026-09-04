@@ -293,15 +293,7 @@ window.PipelineManager = (() => {
     }
     
     // Expose HTML escaping utility locally
-    function escapeHtml(unsafe) {
-        if (!unsafe) return '';
-        return unsafe.toString()
-             .replace(/&/g, "&amp;")
-             .replace(/</g, "&lt;")
-             .replace(/>/g, "&gt;")
-             .replace(/"/g, "&quot;")
-             .replace(/'/g, "&#039;");
-    }
+    // escapeHtml now lives in js/dom-utils.js, which loads before this file.
 
     // Run init on load
     document.addEventListener('DOMContentLoaded', init);

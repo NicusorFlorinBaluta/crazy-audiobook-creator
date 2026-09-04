@@ -1,0 +1,117 @@
+# Static-analysis configuration for Crazy Audiobook Creator.
+#
+# This project has no build/packaging step; the file exists so that `ruff` has a
+# single checked-in configuration shared by CI, pre-commit, and local runs.
+#
+# Policy: the Pyflakes (`F`) rules are non-negotiable and must stay at zero.
+# They are what catch undefined names and duplicate definitions, which is the
+# failure class that previously reached production in this repository:
+#   - `F811` duplicate method definitions in `ScriptGenerator`
+#   - `F821` calls to a `ProgressEvent` class that was never written
+# Everything else is enabled where it is already clean and ratcheted otherwise.
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+extend-exclude = [
+    "scratch",
+    "temp.py",
+]
+
+[tool.ruff.lint]
+select = [
+    "F",     # Pyflakes: undefined names, duplicate definitions, unused imports
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "I",     # isort: import ordering
+    "UP",    # pyupgrade: deprecated syntax for the target version
+    "B",     # flake8-bugbear: likely bugs (loop-variable closures, mutable defaults)
+    "C4",    # flake8-comprehensions
+    "DTZ",   # flake8-datetimez: naive datetime use
+    "PTH105",# os.replace -> Path.replace (kept; the rest of PTH is noise here)
+    "RET",   # flake8-return
+    "SIM",   # flake8-simplify
+    "S",     # flake8-bandit: security
+    "BLE",   # flake8-blind-except
+    "TRY004",# raise TypeError for type checks
+    "TRY201",# verbose raise
+    "TRY400",# logger.error -> logger.exception inside except
+]
+
+ignore = [
+    # --- Deliberate project conventions -----------------------------------
+    "S101",    # assert: used intentionally in tests and internal invariants
+    "S603",    # subprocess call: every call site uses list-form argv, never shell=True
+    "S607",    # partial executable path: ffmpeg/ollama are resolved from PATH by design
+    "TRY003",  # long messages in raise: this codebase deliberately raises explanatory errors
+    "RET504",  # unnecessary assignment before return: often clearer with a named result
+    "SIM105",  # contextlib.suppress: explicit try/except/pass is used with comments
+    "E501",    # line length is reported separately; see `line-length` above
+    "E402",    # imports after code: `os.environ.setdefault` for ROCm and
+               # `sys.path` setup in scripts must run before project imports
+    "PTH105",  # os.replace over Path.replace: `shared/artifacts.py` needs the
+               # os-level call for its retry loop; see `_atomic_replace`
+    "S105",    # false positives only: env-var *names* (CRAZY_AUDIOBOOK_*_TOKEN)
+               # and the `ValidationStatus.PASS` enum member
+    "S608",    # false positives only: every flagged site builds a `?`
+               # placeholder list and binds values as parameters
+    "E741",    # ambiguous names (`l`) in short numeric/audio helpers
+    "B008",    # function call in argument default: this IS the FastAPI idiom
+               # for `File(...)` / `Form(...)` dependencies
+    "UP042",   # str+Enum -> StrEnum: NOT behaviour-preserving. `str()` and
+               # f-string output change from "Class.MEMBER" to the value, and
+               # `NotificationEventType` values are serialized into Home
+               # Assistant payloads. Migrate only with a payload review.
+
+    # --- Ratchet list ------------------------------------------------------
+    # Real signal, but too many existing sites to fix in one pass without
+    # risking behaviour. Reduce these over time; do not add entries without a
+    # comment explaining the count and the plan.
+    "BLE001",  # blind except (~198): narrowing incrementally, worst first
+    "S110",    # try-except-pass (~75): narrowing incrementally
+    "S112",    # try-except-continue (4): same programme as S110
+    "B023",    # loop-variable closure (~31): needs case-by-case review
+    "ARG",     # unused arguments: mostly protocol/callback signatures
+    "TRY400",  # logger.error -> logger.exception in except (22): mechanical but
+               # changes log volume, so batch it with a logging review
+    "TRY004",  # raise TypeError for type checks (22): changes exception types
+               # that callers may already handle
+    "B904",    # raise ... from (13): mechanical, batch separately
+    "SIM102",  # collapsible if (9)
+    "SIM103",  # needless bool (5)
+    "SIM108",  # ternary instead of if/else (5): often less readable here
+    "SIM117",  # combine with-statements (2)
+    "B905",    # zip without strict= (6): needs per-site length reasoning
+    "B007",    # unused loop variable (5)
+    "DTZ007",  # naive strptime (5): all parse operator-entered local times
+    "F841",    # unused locals (11 remaining, all in tests/scripts)
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests legitimately use asserts, private access, and hardcoded fixture secrets.
+"tests/**" = [
+    "S105", "S106", "S108", "SIM117", "B017",
+    "DTZ001", "DTZ005", "DTZ007",
+    "E731",   # inline lambdas are fine for building fixture payloads
+]
+
+# These handles are intentionally long-lived and owned by an object, so a
+# context manager would close them too early:
+#   pipeline.py         -> managed Ollama / Voice subprocess log handles
+#   single_instance.py  -> the lock file must stay open to hold the lock
+#   voice_designer.py   -> the VoiceDesign helper's log handle
+"brain/orchestrator/pipeline.py" = ["SIM115"]
+"shared/single_instance.py" = ["SIM115"]
+"voice/tts_server/voice_designer.py" = ["SIM115"]
+
+# The cache only ever unpickles values it wrote itself, in a local SQLite file
+# under the project workspace. Nothing external reaches it.
+"shared/cache.py" = ["S301"]
+
+# `urllib.request` against the operator's own configured local endpoints
+# (Ollama, Home Assistant), not arbitrary user input.
+"shared/pronunciation.py" = ["S310"]
+"brain/orchestrator/notifier.py" = ["S310"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["brain", "voice", "shared"]

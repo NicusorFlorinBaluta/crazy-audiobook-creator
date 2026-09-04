@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
-METRICS_SCHEMA_VERSION = 3
+# 4 adds `script_director_llm`: prefill/decode throughput and prefix-cache
+# health derived from the per-call Ollama telemetry that was previously
+# recorded but never summarized.
+METRICS_SCHEMA_VERSION = 4
 
 
 def _percentile(values: list[float], quantile: float) -> float:
@@ -184,6 +188,109 @@ def latest_chapter_records(
     return [latest[key] for key in sorted(latest)]
 
 
+def _llm_call_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """Summarize local-LLM cost from the per-call `ollama` telemetry.
+
+    `OllamaClient` has always recorded `prompt_eval_count`, `eval_count`,
+    `prompt_eval_duration_ns`, `eval_duration_ns` and `load_duration_ns`, and
+    `ScriptGenerator` has always forwarded them into `call_metrics`. Nothing
+    consumed them, so the scripting half of the pipeline -- roughly half of
+    total book wall time -- had only wall-clock totals while TTS had a full
+    substage breakdown.
+
+    The load-bearing output is `prefix_cache`: mean `prompt_eval_count` for the
+    first request of a chapter versus every later request in the same chapter.
+    The system prompt is byte-identical across a chapter's chunks, so with
+    prefix-cache reuse working the later figure should be far smaller. If the
+    two are similar, the shared prefix is being re-evaluated every chunk and
+    `OLLAMA_NUM_PARALLEL` / the GPU backend are worth screening.
+    """
+    calls: list[dict[str, Any]] = []
+    for record in records:
+        if record.get("event") != "script_generation":
+            continue
+        for call in record.get("calls") or []:
+            if isinstance(call, dict) and isinstance(call.get("ollama"), dict):
+                calls.append(call)
+    if not calls:
+        return {"calls": 0}
+
+    prompt_tokens = 0
+    generated_tokens = 0
+    prefill_seconds = 0.0
+    decode_seconds = 0.0
+    load_seconds = 0.0
+    prompt_eval_counts: list[float] = []
+
+    # chapter -> ordered prompt_eval_count values, to separate the first
+    # request of a chapter from its successors.
+    per_chapter: defaultdict[Any, list[float]] = defaultdict(list)
+
+    for call in calls:
+        ollama = call["ollama"]
+        prompt_tokens += _safe_int(ollama.get("prompt_eval_count"))
+        generated_tokens += _safe_int(ollama.get("eval_count"))
+        prefill_seconds += _safe_float(ollama.get("prompt_eval_duration_ns")) / 1e9
+        decode_seconds += _safe_float(ollama.get("eval_duration_ns")) / 1e9
+        load_seconds += _safe_float(ollama.get("load_duration_ns")) / 1e9
+        count = _safe_float(ollama.get("prompt_eval_count"))
+        if count > 0:
+            prompt_eval_counts.append(count)
+            per_chapter[call.get("chapter_number")].append(count)
+
+    first_of_chapter: list[float] = []
+    later_in_chapter: list[float] = []
+    for values in per_chapter.values():
+        if not values:
+            continue
+        first_of_chapter.append(values[0])
+        later_in_chapter.extend(values[1:])
+
+    def _mean(values: list[float]) -> float:
+        return round(sum(values) / len(values), 2) if values else 0.0
+
+    first_mean = _mean(first_of_chapter)
+    later_mean = _mean(later_in_chapter)
+    reuse_ratio = round(later_mean / first_mean, 4) if first_mean > 0 else None
+
+    return {
+        "calls": len(calls),
+        "prompt_tokens": prompt_tokens,
+        "generated_tokens": generated_tokens,
+        "prefill_seconds": round(prefill_seconds, 6),
+        "decode_seconds": round(decode_seconds, 6),
+        "model_load_seconds": round(load_seconds, 6),
+        "prefill_tokens_per_second": (
+            round(prompt_tokens / prefill_seconds, 2) if prefill_seconds > 0 else 0.0
+        ),
+        "decode_tokens_per_second": (
+            round(generated_tokens / decode_seconds, 2) if decode_seconds > 0 else 0.0
+        ),
+        "prefill_share_of_compute": (
+            round(prefill_seconds / (prefill_seconds + decode_seconds), 4)
+            if (prefill_seconds + decode_seconds) > 0
+            else 0.0
+        ),
+        "prompt_eval_count": {
+            "p50": _percentile(prompt_eval_counts, 0.50),
+            "p95": _percentile(prompt_eval_counts, 0.95),
+        },
+        "prefix_cache": {
+            "chapters_observed": len(per_chapter),
+            "first_request_mean_prompt_tokens": first_mean,
+            "later_request_mean_prompt_tokens": later_mean,
+            # ~1.0 means the shared system prompt is re-evaluated every chunk.
+            # Well below 1.0 means prefix reuse is working.
+            "later_to_first_ratio": reuse_ratio,
+            "reuse_detected": (
+                bool(reuse_ratio is not None and reuse_ratio < 0.75)
+                if later_in_chapter
+                else None
+            ),
+        },
+    }
+
+
 def summarize_metrics(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
     """Build cache- and resume-aware totals from versioned JSONL records."""
     records = list(records)
@@ -239,5 +346,6 @@ def summarize_metrics(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
         "timing_totals_seconds": dict(sorted(timing_totals.items())),
         "tts_segments": _tts_segment_summary(generation),
         "script_director_runs": director_runs,
+        "script_director_llm": _llm_call_summary(records),
         "chapters": generation,
     }

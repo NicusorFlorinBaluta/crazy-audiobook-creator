@@ -6,17 +6,15 @@ for pipeline events (voice review, errors, delivery published, full book ready).
 
 from __future__ import annotations
 
-import asyncio
+import json
 import logging
 import os
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from enum import Enum
-from pathlib import Path
 from typing import Any
-import urllib.request
-import urllib.error
-import json
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +56,7 @@ class HANotifier:
         self.api_token = api_token if api_token is not None else os.getenv("HA_API_TOKEN", "")
         self.notify_service = (notify_service if notify_service is not None else os.getenv("HA_NOTIFY_SERVICE", "crazywiz_notification_group")).replace("notify.", "")
         self.dashboard_url = dashboard_url if dashboard_url is not None else os.getenv("DASHBOARD_PUBLIC_URL", "https://crazyha.mywire.org/audiobook/")
-        
+
         # Deduplication cache: key -> timestamp
         self._sent_cache: dict[str, float] = {}
         self._dedup_window_seconds = 300.0  # 5 minutes
@@ -89,7 +87,7 @@ class HANotifier:
             return {"status": "suppressed", "reason": "duplicate"}
 
         endpoint = f"{self.base_url}/api/services/notify/{self.notify_service}"
-        
+
         click_url = payload.dashboard_url or self.dashboard_url
         if click_url and not click_url.endswith("/"):
             click_url += "/"

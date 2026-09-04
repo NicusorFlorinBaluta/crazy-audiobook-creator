@@ -14,19 +14,20 @@ import json
 import logging
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from brain.director.ollama_client import OllamaClient, OllamaGenerationLimitError
-from shared.constants import CHUNK_OVERLAP_WORDS, CHUNK_SIZE_WORDS, Gender
 from shared.artifacts import (
     assert_script_covers_source,
     atomic_write_json,
     atomic_write_text,
     script_fingerprint,
 )
+from shared.constants import CHUNK_OVERLAP_WORDS, CHUNK_SIZE_WORDS, Gender
 from shared.models import (
     Character,
     CharacterRegistry,
@@ -1058,7 +1059,7 @@ class ScriptGenerator:
             for i, fragment in enumerate(fragments)
         ]
         chapter_text_json = json.dumps(fragment_dicts, indent=2)
-        
+
         prompt = _USER_PROMPT.format(chapter_text_json=chapter_text_json)
         dialogue_ids = [
             item["id"] for item in fragment_dicts if item["dialogue"]
@@ -2235,38 +2236,6 @@ class ScriptGenerator:
                 raw["lines"][index] = updated
                 return
         raise ValueError(f"No metadata row exists for fragment {fragment_index}")
-    @staticmethod
-    def _metadata_line_map(raw: dict[str, Any]) -> dict[int, dict[str, Any]]:
-        result: dict[int, dict[str, Any]] = {}
-        for item in raw.get("lines", []):
-            if not isinstance(item, dict) or "id" not in item:
-                continue
-            try:
-                result[int(item["id"])] = item
-            except (TypeError, ValueError):
-                continue
-        return result
-
-    @staticmethod
-    def _replace_metadata_line(
-        raw: dict[str, Any],
-        fragment_index: int,
-        replacement: dict[str, Any],
-    ) -> None:
-        for index, item in enumerate(raw.get("lines", [])):
-            if not isinstance(item, dict):
-                continue
-            try:
-                item_id = int(item.get("id"))
-            except (TypeError, ValueError):
-                continue
-            if item_id == fragment_index:
-                updated = dict(item)
-                updated.update(replacement)
-                updated["id"] = fragment_index
-                raw["lines"][index] = updated
-                return
-        raise ValueError(f"No metadata row exists for fragment {fragment_index}")
 
     @staticmethod
     def _apply_deterministic_attribution_repairs(
@@ -2770,7 +2739,8 @@ class ScriptGenerator:
             chapter_speakers.update(
                 line.speaker for line in chunk_script.lines if line.speaker
             )
-            if hasattr(chunk_script, 'scenes'): all_scenes.extend(chunk_script.scenes)
+            if hasattr(chunk_script, 'scenes'):
+                all_scenes.extend(chunk_script.scenes)
             if chunk_script.chapter_summary:
                 summaries.append(chunk_script.chapter_summary)
             prior_turn_context = [
@@ -2825,7 +2795,7 @@ class ScriptGenerator:
             spk = ScriptGenerator._normalize_speaker_id(line.speaker)
             if not spk or spk == "narrator":
                 continue
-            
+
             # 1. Check canonical speaker resolution (exact ID, aliases, display names, name variants)
             canonical = spk
             if spk not in known_ids:
@@ -2861,7 +2831,7 @@ class ScriptGenerator:
                     canonical,
                     script.chapter_number,
                 )
-            
+
             if canonical != line.speaker:
                 line.speaker = canonical
 
@@ -3920,41 +3890,6 @@ class ScriptGenerator:
         return None, None, None
 
     @staticmethod
-    def _resolve_dialogue_speaker(
-        fragment_index: int,
-        fragments: list[SourceFragment],
-        metadata_map: dict[int, dict[str, Any]],
-        allowed_speakers: set[str],
-        *,
-        registry: CharacterRegistry,
-        target_gender: Gender | None = None,
-    ) -> str | None:
-        """Resolve a candidate speaker matching a target gender from paragraph or nearby context."""
-        if target_gender is None:
-            return None
-
-        # 1. Look within nearby dialogue fragments for a character of matching gender
-        for offset in (-2, -1, 1, 2):
-            neighbor_idx = fragment_index + offset
-            if 0 <= neighbor_idx < len(fragments):
-                meta = metadata_map.get(neighbor_idx, {})
-                sp = meta.get("speaker")
-                if sp and sp != "narrator" and sp in allowed_speakers and sp in registry.characters:
-                    char = registry.characters[sp]
-                    if char.gender == target_gender:
-                        return sp
-
-        # 2. Check characters matching target_gender in allowed_speakers
-        matching_chars = [
-            cid for cid in allowed_speakers
-            if cid != "narrator" and cid in registry.characters and registry.characters[cid].gender == target_gender
-        ]
-        if len(matching_chars) == 1:
-            return matching_chars[0]
-
-        return None
-
-    @staticmethod
     def _validate_dialogue_tag_attribution(
         speaker: str,
         tag_text: str,
@@ -4100,6 +4035,22 @@ class ScriptGenerator:
 
         The result is never release-grade evidence by itself. Callers must keep
         contextual candidates below the attribution audit threshold.
+
+        Contract, load-bearing — do not change without updating both call sites:
+
+        * The unresolved sentinel is the string ``"narrator"``, never ``None``.
+          Callers therefore test ``if resolved and resolved != "narrator"``.
+          A variant of this method that returned ``None`` for "unresolved" was
+          duplicated below this one for some time and silently shadowed. Because
+          both call sites tolerate a falsy result, reintroducing the ``None``
+          contract would degrade into *silent* under-attribution rather than an
+          error. See docs/speaker-attribution-incident-2026-08-11.md.
+        * ``registry`` is optional and positional. Both production call sites
+          pass it by keyword.
+        * Evidence strength is deliberately ordered: an explicit adjacent speech
+          tag is deterministic; a *unique* adjacent alias is a candidate only;
+          gender and turn alternation are used only when they leave exactly one
+          possibility.
         """
         next_text = fragments[frag_idx + 1].text if frag_idx + 1 < len(fragments) else ""
         prev_text = fragments[frag_idx - 1].text if frag_idx > 0 else ""
@@ -4213,10 +4164,10 @@ class ScriptGenerator:
         """Parse LLM JSON metadata output into a ScriptChapter using static fragments."""
         raw_lines = raw.get("lines", [])
         lines: list[ScriptLine] = []
-        
+
         fragments = fragments or []
         metadata_map = {}
-        
+
         for raw_line in raw_lines:
             if not isinstance(raw_line, dict):
                 continue
@@ -4230,12 +4181,12 @@ class ScriptGenerator:
         allowed_speakers = allowed_speakers if allowed_speakers is not None else {"narrator"}
         for i, fragment in enumerate(fragments):
             meta = metadata_map.get(i, {})
-            
+
             try:
                 scene_idx = int(meta.get("scene_index", 0))
             except (ValueError, TypeError):
                 scene_idx = 0
-            
+
             scenes = raw.get("scenes", [])
             base_pace = 1.0
             if scenes and 0 <= scene_idx < len(scenes):
@@ -4245,15 +4196,15 @@ class ScriptGenerator:
                         base_pace = float(scene_pace)
                 except (ValueError, TypeError):
                     pass
-            
+
             is_dialogue = ScriptGenerator._is_dialogue_fragment(fragment.text)
-            
+
             # Apply bounds to speed based on the scene pace
             try:
                 raw_speed = float(meta.get("speed", base_pace))
             except (ValueError, TypeError):
                 raw_speed = base_pace
-                
+
             # Allow a tighter bound for narrator, looser for expressive dialogue
             bound_offset = 0.25 if is_dialogue else 0.15
             speed = max(base_pace - bound_offset, min(base_pace + bound_offset, raw_speed))

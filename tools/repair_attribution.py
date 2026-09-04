@@ -6,7 +6,7 @@ import argparse
 import json
 import shutil
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -15,7 +15,6 @@ from brain.director.attribution_audit import audit_book_attribution
 from brain.orchestrator.pipeline import Pipeline
 from shared.artifacts import atomic_write_json, atomic_write_text, hash_file
 from shared.models import BookScript, CharacterRegistry, ExtractedBook, ScriptChapter
-
 
 CANDIDATE_CACHE_VERSION = "focused-attribution-v3-kind-boundaries"
 
@@ -121,7 +120,7 @@ def main() -> int:
             + json.dumps(final_report["issues"], ensure_ascii=False)
         )
 
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     backup_dir = project_dir / "recovery" / f"attribution-{timestamp}"
     backup_dir.mkdir(parents=True, exist_ok=False)
     shutil.copytree(project_dir / "script", backup_dir / "script")
@@ -163,7 +162,7 @@ def main() -> int:
     atomic_write_json(project_dir / "attribution_audit.json", final_report)
     recovery = {
         "repair_version": "focused-conversation-batch-v3",
-        "completed_at": datetime.now(timezone.utc).isoformat(),
+        "completed_at": datetime.now(UTC).isoformat(),
         "backup_dir": str(backup_dir),
         "changed_chapters": changed_chapters,
         "initial_report": initial_report,

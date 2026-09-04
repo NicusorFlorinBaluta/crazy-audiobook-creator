@@ -27,8 +27,8 @@ from shared.models import (
     GenerateLineResponse,
     MasterChapterRequest,
     MasterChapterResponse,
-    ValidateRequest,
     QualityResult,
+    ValidateRequest,
     VoiceHealthResponse,
 )
 
@@ -196,7 +196,7 @@ class VoiceClient:
         return GenerateLineResponse(**data)
 
     def generate_chapter(
-        self, 
+        self,
         request: GenerateChapterRequest,
         progress_callback=None
     ) -> GenerateChapterResponse:
@@ -209,7 +209,7 @@ class VoiceClient:
             request.project_id,
         )
         url = f"{self.host}/generate/chapter"
-        
+
         last_error = None
         for attempt in range(1, self.retries + 1):
             try:
@@ -223,7 +223,7 @@ class VoiceClient:
                                 data = json.loads(line)
                             except json.JSONDecodeError:
                                 continue
-                            
+
                             if data.get("type") == "progress":
                                 msg = data.get("data", {})
                                 line_id = msg.get("line_id", "unknown")

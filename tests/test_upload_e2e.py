@@ -7,13 +7,12 @@ They are excluded from ordinary discovery unless ``RUN_LIVE_UPLOAD_E2E=1``.
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import shutil
-from tempfile import TemporaryDirectory
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import httpx
-
 
 RUN_LIVE = os.environ.get("RUN_LIVE_UPLOAD_E2E") == "1"
 BASE_URL = os.environ.get("UPLOAD_E2E_BASE_URL", "http://127.0.0.1:8000")

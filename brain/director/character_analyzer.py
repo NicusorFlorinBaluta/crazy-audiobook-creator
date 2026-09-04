@@ -9,8 +9,8 @@ Reads the full book text and produces a Character Registry with:
 
 from __future__ import annotations
 
-import logging
 import json
+import logging
 import re
 from collections.abc import Callable
 from pathlib import Path
@@ -76,8 +76,8 @@ _SYSTEM_PROMPT = """You are an expert audiobook director and strict data extract
 - A named or personified place/object is not a speaking character unless the
   text explicitly attributes spoken dialogue to that entity. Thoughts,
   descriptions, invocations, and figurative personification are not dialogue.
-- Animal noises (e.g. chirping, barking, roaring, squawking) and mental 
-  impressions do NOT count as spoken dialogue. An animal is only a character 
+- Animal noises (e.g. chirping, barking, roaring, squawking) and mental
+  impressions do NOT count as spoken dialogue. An animal is only a character
   if it speaks actual linguistic words in quotes.
 
 ### Gender Resolution Guidelines
@@ -630,7 +630,7 @@ class CharacterAnalyzer:
         """Reconcile and consolidate discovered characters from joint director pass."""
         remap = {cid: cid for cid in registry.characters}
         reconciled_chars: dict[str, Character] = {}
-        
+
         # Sort characters so longer / alias-owning characters take precedence
         sorted_chars = sorted(
             registry.characters.values(),
@@ -655,7 +655,7 @@ class CharacterAnalyzer:
                     break
             if not matched:
                 reconciled_chars[char.id] = char
-        
+
         reconciled = CharacterRegistry(
             book_title=registry.book_title,
             book_author=registry.book_author,
@@ -842,9 +842,7 @@ class CharacterAnalyzer:
             gender_str = str(char_data.get("gender", "other")).lower().strip()
             if gender_str in ("male", "man", "boy", "he", "him", "his", "masculine", "gentleman", "sir", "father", "son", "brother", "husband", "lord", "king"):
                 gender = Gender.MALE
-            elif gender_str in ("female", "woman", "girl", "she", "her", "feminine", "lady", "ma'am", "mother", "daughter", "sister", "wife", "queen", "loremother"):
-                gender = Gender.FEMALE
-            elif re.search(r"\b(female|woman|girl|lady|she|her|mother|daughter)\b", gender_str):
+            elif gender_str in ("female", "woman", "girl", "she", "her", "feminine", "lady", "ma'am", "mother", "daughter", "sister", "wife", "queen", "loremother") or re.search(r"\b(female|woman|girl|lady|she|her|mother|daughter)\b", gender_str):
                 gender = Gender.FEMALE
             elif re.search(r"\b(male|man|boy|he|his|him|father|son)\b", gender_str):
                 gender = Gender.MALE
@@ -942,14 +940,12 @@ class CharacterAnalyzer:
                 for character in ranked[: self.max_unique_voices - 1]
             ]
             important = set(selected_order)
-            representatives: dict[Gender, list[str]] = {
-                gender: [
-                    character_id
-                    for character_id in selected_order
-                    if characters[character_id].gender == gender
-                ]
-                for gender in Gender
-            }
+            # NOTE: a per-gender `representatives` map used to be built here so
+            # an overflow character could share a *compatible major character's*
+            # voice. It was never read: the loop below assigns the dedicated
+            # `minor_female`/`minor_male` archetypes (or the narrator) instead.
+            # docs/architecture.md still describes the older behaviour; the
+            # archetype fallback is what actually ships.
             for character_id, character in characters.items():
                 if character_id in important:
                     character.voice_id = character_id
@@ -1149,7 +1145,7 @@ class CharacterAnalyzer:
                     existing_aliases = set(target_info.get("aliases", []))
                     existing_aliases.add(variant_info.get("name", variant_id))
                     existing_aliases.add(variant_id)
-                    target_info["aliases"] = sorted(list(existing_aliases))
+                    target_info["aliases"] = sorted(existing_aliases)
                     merged_into[variant_id] = target_id
 
         return {k: v for k, v in accumulated_chars.items() if k not in merged_into}

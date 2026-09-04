@@ -8,12 +8,11 @@ import platform
 import shutil
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import yaml
-
 
 PACKAGE_NAMES = (
     "torch",
@@ -33,6 +32,18 @@ PACKAGE_NAMES = (
 )
 
 
+# Packages whose version directly changes generated audio or transcription, and
+# which must therefore be pinned for a run to be reproducible and comparable to
+# a recorded benchmark.
+AUDIO_CRITICAL_PACKAGES = (
+    "qwen-tts",
+    "transformers",
+    "openai-whisper",
+    "faster-whisper",
+    "silero-vad",
+)
+
+
 def _package_versions() -> dict[str, str]:
     versions: dict[str, str] = {}
     for name in PACKAGE_NAMES:
@@ -41,6 +52,62 @@ def _package_versions() -> dict[str, str]:
         except importlib.metadata.PackageNotFoundError:
             versions[name] = "not-installed"
     return versions
+
+
+def _parse_constraints(path: Path) -> dict[str, str]:
+    """Read `name==version` pins from a pip constraints file."""
+    pins: dict[str, str] = {}
+    if not path.is_file():
+        return pins
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.split("#", 1)[0].strip()
+        if not line or "==" not in line:
+            continue
+        name, _, version = line.partition("==")
+        name = name.strip().lower().replace("_", "-")
+        version = version.strip()
+        if name and version:
+            pins[name] = version
+    return pins
+
+
+def _constraint_findings(
+    packages: dict[str, str],
+    constraints_path: Path,
+) -> list[str]:
+    """Report audio-critical packages that are unpinned or drifting.
+
+    An unpinned `qwen-tts` can change voice cloning between two runs of the same
+    book with no fingerprint change, so a recorded benchmark stops being
+    attributable to a stack. Reporting it here surfaces the gap on the machine
+    that actually has the package installed.
+    """
+    findings: list[str] = []
+    pins = _parse_constraints(constraints_path)
+    if not pins:
+        findings.append(
+            f"No tested version constraints found at {constraints_path}; "
+            "generated audio is not reproducible across reinstalls"
+        )
+        return findings
+    for name in AUDIO_CRITICAL_PACKAGES:
+        installed = packages.get(name, "not-installed")
+        if installed == "not-installed":
+            continue
+        pinned = pins.get(name.lower().replace("_", "-"))
+        if pinned is None:
+            findings.append(
+                f"{name}=={installed} is installed but not pinned in "
+                f"{constraints_path.name}; add it so the audio stack is "
+                "reproducible"
+            )
+        elif pinned != installed:
+            findings.append(
+                f"{name} is {installed} but {constraints_path.name} pins "
+                f"{pinned}; benchmark results are not comparable across this "
+                "difference"
+            )
+    return findings
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -53,6 +120,7 @@ def collect_runtime_report(
     *,
     brain_config_path: str | Path = "brain/config.yaml",
     voice_config_path: str | Path = "voice/config.yaml",
+    constraints_path: str | Path = "voice/constraints-windows-rocm-tested.txt",
     run_pip_check: bool = False,
 ) -> dict[str, Any]:
     """Collect a non-model-loading environment/config compatibility report."""
@@ -90,6 +158,7 @@ def collect_runtime_report(
         errors.append("FFmpeg is not available on PATH")
     if not ffprobe:
         warnings.append("ffprobe is not available; export verification is limited")
+    warnings.extend(_constraint_findings(packages, Path(constraints_path)))
 
     pip_check: dict[str, Any] = {"ran": False, "ok": None, "output": ""}
     if run_pip_check:
@@ -111,7 +180,7 @@ def collect_runtime_report(
 
     return {
         "schema_version": 1,
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
         "compatible": not errors,
         "python": {
             "executable": sys.executable,
@@ -134,6 +203,7 @@ def collect_runtime_report(
             "amd_rocm_profile": amd_rocm_profile,
         },
         "executables": {"ffmpeg": ffmpeg, "ffprobe": ffprobe},
+        "audio_stack_pins": _parse_constraints(Path(constraints_path)),
         "pip_check": pip_check,
         "errors": errors,
         "warnings": warnings,

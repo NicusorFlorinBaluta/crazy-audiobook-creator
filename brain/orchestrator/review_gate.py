@@ -10,7 +10,6 @@ from typing import Any
 
 from shared.pronunciation import build_pronunciation_inventory
 
-
 RESOLVED_SEGMENT_DISPOSITIONS = {"acceptable", "regenerate"}
 RESOLVED_EXTRACTION_DISPOSITIONS = {"include", "exclude", "reference"}
 RESOLVED_ATTRIBUTION_DISPOSITIONS = {
@@ -54,6 +53,8 @@ class ReviewGate:
             "release_ready": not self.blocking_items,
         }
 
+
+from datetime import UTC
 
 from shared.cache import cache_service
 
@@ -412,11 +413,12 @@ def collect_review_gate(project_id: str, project_dir: Path, job_queue: Any) -> R
 
 def write_release_report(project_id: str, project_dir: Path, job_queue: Any) -> dict[str, Any]:
     """Persist the exact pre-master decision for audit and UI display."""
-    from datetime import datetime, timezone
+    from datetime import datetime
+
     from shared.artifacts import atomic_write_json
 
     report = collect_review_gate(project_id, project_dir, job_queue).to_dict()
-    report["generated_at"] = datetime.now(timezone.utc).isoformat()
+    report["generated_at"] = datetime.now(UTC).isoformat()
     report["schema"] = 1
     atomic_write_json(project_dir / "pre_master_release.json", report)
     return report

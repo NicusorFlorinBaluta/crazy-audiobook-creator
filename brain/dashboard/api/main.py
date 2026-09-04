@@ -16,8 +16,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-import asyncio
 import array
+import asyncio
 import collections
 import csv
 import hashlib
@@ -26,19 +26,18 @@ import json
 import logging
 import math
 import os
-import queue
 import re
 import shutil
 import sqlite3
 import subprocess
-import time
 import threading
+import time
 import unicodedata
 import uuid
 import wave
 import zipfile
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import quote
@@ -53,20 +52,24 @@ from pydantic import BaseModel, Field
 
 os.environ.setdefault("ROCM_SDK_TARGET_FAMILY", "custom")
 
-from brain.orchestrator.delivery_manager import DeliveryError, DeliveryManager
-from brain.orchestrator.nas_syncer import NASError, NASSyncer
-from brain.orchestrator.pipeline import Pipeline
+from brain.dashboard.api.mobile import _chapter_duration
+from brain.dashboard.api.mobile import router as mobile_router
 from brain.dashboard.api.security import (
+    TOKEN_ENV_VAR,
     configured_dashboard_token,
+    configured_trusted_lan_cidrs,
     dashboard_request_authorized,
     is_cross_site_mutation,
     is_loopback_client,
 )
-from brain.orchestrator.job_queue import JobQueue
-from brain.orchestrator.review_gate import collect_review_gate
 from brain.orchestrator.audio_candidates import list_candidates
+from brain.orchestrator.delivery_manager import DeliveryError, DeliveryManager
+from brain.orchestrator.job_queue import JobQueue
+from brain.orchestrator.nas_syncer import NASSyncer
+from brain.orchestrator.pipeline import Pipeline
+from brain.orchestrator.review_gate import collect_review_gate
 from brain.orchestrator.stage_runner import PipelineResumePlan
-from shared.constants import PipelineStage, VOICE_CAST_SCHEMA_VERSION
+from shared import paths as shared_paths
 from shared.artifacts import (
     atomic_write_bytes,
     atomic_write_json,
@@ -74,28 +77,29 @@ from shared.artifacts import (
     fingerprint,
     hash_file,
 )
+from shared.constants import VOICE_CAST_SCHEMA_VERSION, PipelineStage
+from shared.models import GenerateLineRequest, ScriptChapter, ScriptLine
+from shared.performance import read_metrics, summarize_metrics
+from shared.pronunciation import (
+    apply_pronunciations,
+    build_pronunciation_inventory,
+    normalize_phonetic_text,
+)
+from shared.runtime_preflight import collect_runtime_report
 from shared.voice_casting import (
     build_voice_cast,
     compile_effective_voice_prompt,
     required_voice_character_ids,
-    speaking_character_ids,
 )
-from shared.performance import read_metrics, summarize_metrics
-from shared.runtime_preflight import collect_runtime_report
-from shared.pronunciation import (
-    build_pronunciation_inventory,
-    apply_pronunciations,
-    load_pronunciation_dictionary,
-    normalize_phonetic_text,
-)
-from shared.models import GenerateLineRequest, ScriptLine, ScriptChapter
-from shared.artifacts import atomic_write_text, atomic_write_json
 from voice.tts_server.voice_library import VoiceLibraryManager
-from brain.dashboard.api.mobile import router as mobile_router
 
 logger = logging.getLogger(__name__)
 
-FRONTEND_BUILD = "2026.08.21.2"
+FRONTEND_BUILD = "2026.09.02.1"
+
+# ffmpeg is invoked inline while serving a chapter stream. A hung encode must
+# not hold a request thread forever, so every streaming transcode is bounded.
+FFMPEG_STREAM_TIMEOUT_SECONDS = 300
 
 
 class AsyncioConnectionResetFilter(logging.Filter):
@@ -168,13 +172,22 @@ async def _release_gpu_resources(wait_seconds: float = 15.0) -> None:
 
     try:
         await asyncio.to_thread(pipeline.ollama.unload_model)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Ollama model unload failed during release: %s", exc)
     if voice_available:
         try:
             await asyncio.to_thread(pipeline.voice_client.unload_models)
-        except Exception:
-            pass
+        except Exception as exc:
+            # A 409 here means a GPU job did not reach its cancellation
+            # boundary inside `wait_seconds`. That is expected under a long
+            # segment; the Voice server's idle-unload loop releases VRAM once
+            # the job finishes. Log it so a stuck job is visible rather than
+            # silently indistinguishable from a clean unload.
+            logger.warning(
+                "Voice model unload declined or failed during release "
+                "(a GPU job may still be finishing): %s",
+                exc,
+            )
     pipeline._stop_ollama_server()
     pipeline._stop_voice_server()
 
@@ -189,7 +202,7 @@ async def _shutdown_dashboard_process(delay_seconds: float = 0.35) -> None:
     """
     await asyncio.sleep(delay_seconds)
     try:
-        sentinel_path = Path("brain/projects/.dashboard_shutdown")
+        sentinel_path = shared_paths.PROJECTS_DIR / ".dashboard_shutdown"
         sentinel_path.parent.mkdir(parents=True, exist_ok=True)
         sentinel_path.write_text("shutdown", encoding="utf-8")
     except Exception:
@@ -330,7 +343,7 @@ def _validation_reset_targets(state) -> list[int]:
     return sorted({int(chapter) for chapter in selection if int(chapter) > 0})
 
 def _project_dir(project_id: str) -> Path:
-    root = Path("brain/projects").resolve()
+    root = shared_paths.PROJECTS_DIR.resolve()
     candidate = (root / project_id).resolve()
     if not candidate.is_relative_to(root) or candidate == root:
         raise HTTPException(status_code=400, detail="Invalid project ID")
@@ -338,7 +351,7 @@ def _project_dir(project_id: str) -> Path:
 
 
 def _workspace_project_dir(project_id: str) -> Path:
-    root = Path("workspace").resolve()
+    root = shared_paths.WORKSPACE_DIR.resolve()
     candidate = (root / project_id).resolve()
     if not candidate.is_relative_to(root) or candidate == root:
         raise HTTPException(status_code=400, detail="Invalid project ID")
@@ -346,14 +359,9 @@ def _workspace_project_dir(project_id: str) -> Path:
 
 
 def _voice_project_dir(project_id: str) -> Path:
-    config_path = Path("voice/config.yaml")
-    config = (
-        yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-        if config_path.exists()
-        else {}
-    )
-    root = Path(
-        config.get("storage", {}).get("voice_library_dir", "voice_library")
+    config = shared_paths.voice_config()
+    root = shared_paths.repo_path(
+        str(config.get("storage", {}).get("voice_library_dir", "voice_library"))
     ).resolve()
     candidate = (root / project_id).resolve()
     if not candidate.is_relative_to(root) or candidate == root:
@@ -707,12 +715,7 @@ def _load_or_build_voice_cast(
     registry = CharacterRegistry.model_validate(registry_data)
     chapters = _script_chapters(project_id)
     speaker_ids = required_voice_character_ids(chapters, registry)
-    voice_config_path = Path("voice/config.yaml")
-    voice_config = (
-        yaml.safe_load(voice_config_path.read_text(encoding="utf-8")) or {}
-        if voice_config_path.exists()
-        else {}
-    )
+    voice_config = shared_paths.voice_config()
     tts_config = voice_config.get("tts", {})
     cast = build_voice_cast(
         project_id=project_id,
@@ -839,7 +842,7 @@ async def _interrupt_pipeline_worker(
         },
     )
     pipeline.stop(project_id)
-    
+
     task = running_tasks.get(project_id)
     if task and not task.done():
         try:
@@ -973,7 +976,7 @@ def _purge_project_cache(
     reference_hashes: list[str] | None = None,
 ) -> None:
     """Remove project-scoped cache rows and clone prompts for its references."""
-    cache_path = Path("voice_cache.db")
+    cache_path = shared_paths.repo_path("voice_cache.db")
     if not cache_path.is_file():
         return
     if reference_hashes is None:
@@ -1055,7 +1058,7 @@ class ProjectLogHandler(logging.Handler):
 
             # Append to disk log file so logs survive server restarts
             try:
-                log_file = Path("brain/projects") / pid / "pipeline.log"
+                log_file = shared_paths.PROJECTS_DIR / pid / "pipeline.log"
                 log_file.parent.mkdir(parents=True, exist_ok=True)
                 with open(log_file, "a", encoding="utf-8") as f:
                     f.write(line + "\n")
@@ -1099,7 +1102,7 @@ def load_config(config_path: str = "brain/config.yaml") -> dict[str, Any]:
     """Load configuration from YAML."""
     path = Path(config_path)
     if path.exists():
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             return yaml.safe_load(f) or {}
     return {}
 
@@ -1122,12 +1125,12 @@ async def lifespan(app: FastAPI):
     app.state.pipeline = pipeline
     app.state.job_queue = job_queue
     app.state.running_tasks = running_tasks
-    
+
     logging.getLogger().setLevel(logging.INFO)
     logger.info("Brain Dashboard starting...")
 
     # Check shutdown sentinel to distinguish intentional shutdown from unexpected drops
-    sentinel_path = Path("brain/projects/.dashboard_shutdown")
+    sentinel_path = shared_paths.PROJECTS_DIR / ".dashboard_shutdown"
     was_graceful_shutdown = sentinel_path.exists()
     if was_graceful_shutdown:
         try:
@@ -1271,10 +1274,49 @@ app.include_router(mobile_router)
 
 _import_config = load_config()
 _dashboard_cfg = _import_config.get("dashboard", {})
+_TRUSTED_LAN_CIDRS = configured_trusted_lan_cidrs(_dashboard_cfg)
 _cors_origins = _dashboard_cfg.get(
     "cors_origins",
     ["*"],
 )
+
+
+def _assert_safe_bind(dashboard_config: dict[str, Any]) -> None:
+    """Refuse a token-free non-loopback bind, however the app was started.
+
+    This check used to live only in ``main()``. Nothing starts the dashboard
+    through ``main()`` -- ``start_app.pyw``, ``desktop/main.js`` and the
+    documented quick-start command all run
+    ``uvicorn brain.dashboard.api.main:app`` and import ``app`` directly, so the
+    guard never executed. Running it at import time makes it apply to every
+    launch path.
+
+    Binding beyond loopback is still allowed; it just requires either an
+    application token or an explicitly narrowed
+    ``dashboard.trusted_lan_cidrs``. A deployment that is reachable from a
+    reverse proxy should set a token, because the proxy's own LAN address is
+    otherwise inside the default trust boundary.
+    """
+    host = str(dashboard_config.get("host", "127.0.0.1")).strip()
+    if host in ("127.0.0.1", "localhost", "::1", ""):
+        return
+    if configured_dashboard_token(dashboard_config):
+        return
+    if "trusted_lan_cidrs" in dashboard_config:
+        # The operator has explicitly declared the boundary; that is the
+        # documented way to run token-free on a LAN.
+        return
+    raise RuntimeError(
+        f"Refusing to bind the Dashboard to {host!r} without either "
+        f"{TOKEN_ENV_VAR} / dashboard.api_token or an explicit "
+        "dashboard.trusted_lan_cidrs list. Set one of them in brain/config.yaml "
+        "or the environment. Binding to 0.0.0.0 with neither would trust every "
+        "RFC1918 and Tailscale CGNAT peer without authentication."
+    )
+
+
+_assert_safe_bind(_dashboard_cfg)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
@@ -1319,6 +1361,7 @@ async def require_dashboard_token(request: Request, call_next):
             client_host=client_host,
             configured_token=token,
             presented_token=request.headers.get("X-API-Token"),
+            trusted_lan_cidrs=_TRUSTED_LAN_CIDRS,
         )
     ):
         if not token and not is_loopback_client(client_host):
@@ -1390,7 +1433,7 @@ async def dashboard_health():
         "status": "ok",
         "ready": pipeline is not None and job_queue is not None,
         "pipeline_running": any(not task.done() for task in running_tasks.values()),
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "version": FRONTEND_BUILD,
     }
 
@@ -1439,7 +1482,7 @@ async def create_project(
     max_expanded_mb = int(dashboard_cfg.get("max_epub_expanded_mb", 1000))
 
     # Stream to a unique temporary file with a hard byte limit.
-    temp_dir = Path("brain/projects/_uploads")
+    temp_dir = shared_paths.PROJECTS_DIR / "_uploads"
     temp_dir.mkdir(parents=True, exist_ok=True)
     safe_filename = Path(file.filename or "upload.epub").name
     if Path(safe_filename).suffix.lower() != ".epub":
@@ -1702,7 +1745,7 @@ async def get_notification_settings():
 @app.post("/api/notifications/test")
 async def test_notification():
     """Send a test notification to Home Assistant to verify mobile delivery."""
-    from brain.orchestrator.notifier import notifier, NotificationPayload, NotificationEventType
+    from brain.orchestrator.notifier import NotificationEventType, NotificationPayload, notifier
     if not notifier.is_configured:
         raise HTTPException(status_code=400, detail="Home Assistant notification engine is not configured.")
     payload = NotificationPayload(
@@ -1822,18 +1865,10 @@ async def start_pipeline(
             "review_blocking_item_ids": [],
         },
     )
-    if hasattr(job_queue, "emit_progress"):
-        job_queue.emit_progress(
-            project_id,
-            ProgressEvent(
-                stage=resume_stage.value,
-                phase="starting",
-                message=f"Starting {resume_stage.value}...",
-                chapter=0,
-                chapter_total=0,
-                percent=0.0,
-            ),
-        )
+    # Progress for this transition is carried by the `update_job` call above and
+    # by the versioned progress snapshot written in `Pipeline._update_stage`.
+    # A second `emit_progress`/`ProgressEvent` mechanism was referenced here but
+    # never implemented, so the block was unreachable dead code.
 
     # Clear old logs for this project on a fresh start
     _project_logs[project_id] = collections.deque(maxlen=500)
@@ -1948,7 +1983,7 @@ async def stop_pipeline(
     """Request a cooperative stop and report a transitional PAUSING state."""
     if not pipeline or not job_queue:
         raise HTTPException(status_code=503, detail="Server not initialized")
-        
+
     try:
         state = job_queue.get_job(project_id)
     except KeyError:
@@ -2009,15 +2044,15 @@ async def reset_pipeline_stage(project_id: str, request: Request):
     """Reset the pipeline to a specific stage."""
     if not job_queue or not pipeline:
         raise HTTPException(status_code=503, detail="Server not initialized")
-        
+
     if project_id in running_tasks and not running_tasks[project_id].done():
         raise HTTPException(status_code=409, detail="Cannot reset while pipeline is running. Please stop it first.")
-        
+
     data = await request.json()
     stage_value = data.get("stage")
     if not stage_value:
         raise HTTPException(status_code=400, detail="Missing 'stage' in request body")
-        
+
     try:
         stage = PipelineStage(stage_value)
     except ValueError:
@@ -2037,7 +2072,7 @@ async def reset_pipeline_stage(project_id: str, request: Request):
             status_code=422,
             detail=f"Stage '{stage_value}' is not supported for reset",
         )
-        
+
     packaging_guard = None
     try:
         project_dir = _project_dir(project_id)
@@ -2048,9 +2083,9 @@ async def reset_pipeline_stage(project_id: str, request: Request):
         except DeliveryError as exc:
             packaging_guard = None
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        
+
         import shutil
-        
+
         update: dict[str, Any] = {
             "status": "paused",
             "active_stage": stage.value,
@@ -2059,7 +2094,7 @@ async def reset_pipeline_stage(project_id: str, request: Request):
             "running": False,
             "reset_target_stage": stage.value,
         }
-        
+
         def _safe_unlink(p: Path) -> None:
             try:
                 p.unlink(missing_ok=True)
@@ -2114,7 +2149,7 @@ async def reset_pipeline_stage(project_id: str, request: Request):
                 "mastered_chapters": [],
                 "force_character_analysis": True,
             })
-                    
+
         elif stage == PipelineStage.BOOTSTRAPPING:
             job_queue.clear_review_items(project_id, item_type="segment")
             update.update({
@@ -2131,7 +2166,7 @@ async def reset_pipeline_stage(project_id: str, request: Request):
             for d in [project_dir / "segments", project_dir / "mastered", workspace_dir / "segments", workspace_dir / "mastered"]:
                 if d.exists() and d.is_dir():
                     shutil.rmtree(d)
-                    
+
         elif stage == PipelineStage.VOICE_REVIEW:
             job_queue.clear_review_items(project_id, item_type="segment")
             update.update({
@@ -2148,7 +2183,7 @@ async def reset_pipeline_stage(project_id: str, request: Request):
             for d in [project_dir / "segments", project_dir / "mastered", workspace_dir / "segments", workspace_dir / "mastered"]:
                 if d.exists() and d.is_dir():
                     shutil.rmtree(d)
-                    
+
         elif stage == PipelineStage.GENERATING:
             job_queue.clear_review_items(project_id, item_type="segment")
             update.update({
@@ -2176,7 +2211,7 @@ async def reset_pipeline_stage(project_id: str, request: Request):
             for d in [project_dir / "mastered", workspace_dir / "mastered"]:
                 if d.exists() and d.is_dir():
                     shutil.rmtree(d)
-                    
+
         elif stage == PipelineStage.MASTERING:
             update.update({"mastered_chapters": []})
             for d in [project_dir / "mastered", workspace_dir / "mastered"]:
@@ -2194,7 +2229,7 @@ async def reset_pipeline_stage(project_id: str, request: Request):
             if deliveries_dir.is_dir():
                 history_root = project_dir / "delivery_history"
                 history_root.mkdir(parents=True, exist_ok=True)
-                archive = history_root / datetime.now(timezone.utc).strftime(
+                archive = history_root / datetime.now(UTC).strftime(
                     "%Y%m%dT%H%M%S%fZ"
                 )
                 os.replace(deliveries_dir, archive)
@@ -2232,22 +2267,13 @@ async def reset_pipeline_stage(project_id: str, request: Request):
             "elapsed_seconds": 0.0,
             "eta_seconds": None,
             "eta_confidence": None,
-            "started_at": datetime.now(timezone.utc).isoformat(),
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "started_at": datetime.now(UTC).isoformat(),
+            "updated_at": datetime.now(UTC).isoformat(),
         }
         job_queue.update_job(project_id, update)
-        if hasattr(job_queue, "emit_progress"):
-            job_queue.emit_progress(
-                project_id,
-                ProgressEvent(
-                    stage=stage.value,
-                    phase="idle",
-                    message=f"Reset to {stage.value}",
-                    chapter=0,
-                    chapter_total=0,
-                    percent=0.0,
-                ),
-            )
+        # The reset itself is the progress signal; the `update` above already
+        # clears elapsed/eta and stamps `updated_at`. See the note in
+        # `start_pipeline` about the unimplemented `emit_progress` path.
         packaging_guard.__exit__(None, None, None)
         packaging_guard = None
         return {"status": "success", "project_id": project_id, "stage": stage.value}
@@ -2297,7 +2323,7 @@ async def download_audiobook(project_id: str, delivery_id: str | None = None):
             m4b_path = partials[-1]
         else:
             raise HTTPException(status_code=404, detail="Audiobook file not found")
-        
+
     title = project_id
     book_json = project_dir / "book.json"
     if book_json.is_file():
@@ -2407,13 +2433,25 @@ async def stream_chapter_audio(project_id: str, chapter_num: int, format: str = 
             aac_file = transcodes_dir / f"chapter_{chapter_num:03d}.m4a"
 
             if not aac_file.exists() or aac_file.stat().st_mtime < m4b_path.stat().st_mtime:
-                import subprocess
                 cmd = ["ffmpeg", "-y", "-ss", f"{start_sec:.2f}"]
                 if dur_sec:
                     cmd.extend(["-t", f"{dur_sec:.2f}"])
                 cmd.extend(["-i", str(m4b_path), "-c", "copy", "-movflags", "+faststart", str(aac_file)])
                 try:
-                    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    subprocess.run(
+                        cmd,
+                        check=True,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=FFMPEG_STREAM_TIMEOUT_SECONDS,
+                    )
+                except subprocess.TimeoutExpired:
+                    logger.warning(
+                        "ffmpeg m4b chapter slice timed out after %ss for %s chapter %d",
+                        FFMPEG_STREAM_TIMEOUT_SECONDS,
+                        project_id,
+                        chapter_num,
+                    )
                 except Exception as e:
                     logger.warning("Could not extract chapter slice from m4b: %s", e)
 
@@ -2434,7 +2472,6 @@ async def stream_chapter_audio(project_id: str, chapter_num: int, format: str = 
         aac_file = transcodes_dir / f"chapter_{chapter_num:03d}.m4a"
 
         if not aac_file.exists() or aac_file.stat().st_mtime < ch_file.stat().st_mtime:
-            import subprocess
             try:
                 cmd = [
                     "ffmpeg", "-y",
@@ -2444,7 +2481,19 @@ async def stream_chapter_audio(project_id: str, chapter_num: int, format: str = 
                     "-movflags", "+faststart",
                     str(aac_file)
                 ]
-                subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.run(
+                    cmd,
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=FFMPEG_STREAM_TIMEOUT_SECONDS,
+                )
+            except subprocess.TimeoutExpired:
+                logger.warning(
+                    "AAC transcoding timed out after %ss, falling back to WAV",
+                    FFMPEG_STREAM_TIMEOUT_SECONDS,
+                )
+                aac_file = ch_file
             except Exception as e:
                 logger.warning("AAC transcoding failed, falling back to WAV: %s", e)
                 aac_file = ch_file
@@ -2533,7 +2582,7 @@ async def get_pipeline_status(project_id: str):
                 bdata = json.loads(book_json_path.read_text(encoding="utf-8"))
                 meta = bdata.get("metadata", {})
                 b_chaps = bdata.get("chapters", [])
-                
+
                 if not state.get("title") or state.get("title") == "Unknown":
                     state["title"] = meta.get("title") or "Untitled"
                 if not state.get("author") or state.get("author") == "Unknown":
@@ -2608,7 +2657,7 @@ async def get_pipeline_status(project_id: str):
             current_script_ch = min(max(existing_scripted) + 1, total_chapters)
         else:
             current_script_ch = state.get("current_script_chapter") or 1
-            
+
         work_prog = state.get("work_progress") or {}
 
         for ch_num in range(1, total_chapters + 1):
@@ -2755,7 +2804,7 @@ async def update_schedule(request: Request):
         "timezone": timezone_name,
         "windows": normalized_windows,
     }
-    config_path = Path("brain/config.yaml")
+    config_path = shared_paths.BRAIN_CONFIG_PATH
     _replace_yaml_section(config_path, "schedule", data)
     if pipeline:
         pipeline.config = pipeline._load_config()
@@ -2842,6 +2891,16 @@ async def get_voice_health():
         return {"online": False, "status": "offline"}
 
 
+def _pronunciation_llm():
+    """Return the pipeline's Ollama client, if one is available.
+
+    Routing recommendation lookups through it gives them the retry budget,
+    repetition-loop detection and cooperative cancellation that a bare HTTP
+    call to Ollama does not have.
+    """
+    return getattr(pipeline, "ollama", None) if pipeline else None
+
+
 def _metadata_lock(project_id: str) -> threading.Lock:
     with _metadata_locks_guard:
         return _metadata_locks.setdefault(project_id, threading.Lock())
@@ -2878,7 +2937,7 @@ def _read_metadata_candidate(
         cache_hours = float(
             load_config().get("metadata", {}).get("cache_hours", 24)
         )
-        age_seconds = (datetime.now(timezone.utc) - fetched_at).total_seconds()
+        age_seconds = (datetime.now(UTC) - fetched_at).total_seconds()
         if (
             candidate.get("status") != "matched"
             or candidate.get("cache_key") != cache_key
@@ -2904,7 +2963,7 @@ def _persist_metadata_candidate(
     candidate.update(
         {
             "cache_key": cache_key,
-            "fetched_at": datetime.now(timezone.utc).isoformat(),
+            "fetched_at": datetime.now(UTC).isoformat(),
             "cached": False,
         }
     )
@@ -3162,7 +3221,7 @@ def _fetch_metadata_sync(
                         "author": metadata.get("author", ""),
                         "export_metadata_stale": False,
                         "export_metadata_refreshed_at": datetime.now(
-                            timezone.utc
+                            UTC
                         ).isoformat(),
                     },
                 )
@@ -3363,7 +3422,7 @@ async def get_log_history(project_id: str):
         log_file = _project_dir(project_id) / "pipeline.log"
         if log_file.exists():
             try:
-                with open(log_file, "r", encoding="utf-8") as f:
+                with open(log_file, encoding="utf-8") as f:
                     all_lines = [line.rstrip() for line in f if line.strip()]
                     lines = all_lines[-500:]
                     # Hydrate RAM buffer
@@ -3401,7 +3460,7 @@ async def stream_logs(project_id: str, request: Request):
                         yield "data: [PIPELINE ENDED]\n\n"
                         break
                     yield f"data: {line}\n\n"
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     yield "data: \n\n"  # heartbeat keep-alive
         finally:
             try:
@@ -4392,9 +4451,9 @@ async def upload_project_voice(
         # Phase 3.3: Validate uploaded reference sample transcription
         # Run Whisper validation in a thread so the server stays responsive
         # during the 30-90 second model load + inference.
-        import tempfile
-        import sys
         import json
+        import sys
+        import tempfile
         val_script = """
 import sys, json, os
 from voice.validator.whisper_validator import WhisperValidator
@@ -4416,7 +4475,7 @@ except Exception as e:
         with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False, encoding="utf-8") as f:
             f.write(val_script)
             script_path = f.name
-        
+
         try:
             env = os.environ.copy()
             env["PYTHONPATH"] = str(Path(__file__).resolve().parent.parent.parent.parent)
@@ -4431,20 +4490,19 @@ except Exception as e:
             if proc.returncode != 0:
                 logger.error("Whisper validation script failed: %s", proc.stderr)
                 raise ValueError(f"Whisper validation failed: {proc.stderr[-200:]}")
-                
+
             try:
                 val_res = json.loads(proc.stdout)
                 if "error" in val_res:
                     raise ValueError(f"Whisper validation script error: {val_res['error']}")
-                else:
-                    class DummyResult:
-                        wer = val_res["wer"]
-                        transcribed_text = val_res["transcribed_text"]
-                        effective_text_error = val_res["wer"]
-                    
-                    mismatch_err = _uploaded_transcript_error(DummyResult())
-                    if mismatch_err:
-                        raise ValueError(mismatch_err)
+                class DummyResult:
+                    wer = val_res["wer"]
+                    transcribed_text = val_res["transcribed_text"]
+                    effective_text_error = val_res["wer"]
+
+                mismatch_err = _uploaded_transcript_error(DummyResult())
+                if mismatch_err:
+                    raise ValueError(mismatch_err)
             except json.JSONDecodeError:
                 logger.error("Could not decode validator output: %s", proc.stdout)
                 raise ValueError("Whisper validator returned invalid format.")
@@ -4452,7 +4510,7 @@ except Exception as e:
             Path(script_path).unlink(missing_ok=True)
 
         target_path = voice_dir / f"{voice_id}_{uuid.uuid4().hex[:8]}.wav"
-        
+
         # We do not overwrite the exact same filename to prevent WinError 5 locking.
         os.replace(canonical_path, target_path)
         try:
@@ -4581,7 +4639,7 @@ async def approve_voice_cast(
             },
         )
 
-    approved_at = datetime.now(timezone.utc).isoformat()
+    approved_at = datetime.now(UTC).isoformat()
     job_queue.update_job(
         project_id,
         {
@@ -4703,11 +4761,7 @@ async def download_support_bundle(project_id: str):
     bundle_dir.mkdir(parents=True, exist_ok=True)
     bundle_path = bundle_dir / f"{project_id}-support.zip"
     brain_config = load_config()
-    voice_config = (
-        yaml.safe_load(Path("voice/config.yaml").read_text(encoding="utf-8"))
-        if Path("voice/config.yaml").is_file()
-        else {}
-    ) or {}
+    voice_config = shared_paths.voice_config()
     with zipfile.ZipFile(bundle_path, "w", zipfile.ZIP_DEFLATED) as archive:
         archive.writestr(
             "job-state.json",
@@ -4740,7 +4794,7 @@ async def download_support_bundle(project_id: str):
             if path.is_file():
                 data = path.read_bytes()
                 archive.writestr(name, data[-1_000_000:])
-        managed_log = Path("brain/projects/voice-server-managed.log")
+        managed_log = shared_paths.PROJECTS_DIR / "voice-server-managed.log"
         if managed_log.is_file():
             archive.writestr(
                 "voice-server-managed.log", managed_log.read_bytes()[-1_000_000:]
@@ -4926,7 +4980,7 @@ async def get_pronunciations(project_id: str):
     """Return the book pronunciation inventory and custom mappings."""
     _require_job(project_id)
     project_dir = _project_dir(project_id)
-    return build_pronunciation_inventory(project_dir)
+    return build_pronunciation_inventory(project_dir, client=_pronunciation_llm())
 
 
 @app.post("/api/projects/{project_id}/pronunciations")
@@ -4982,7 +5036,7 @@ async def update_pronunciation(project_id: str, request: PronunciationRequest):
 
     return {
         "status": "success",
-        "inventory": build_pronunciation_inventory(project_dir),
+        "inventory": build_pronunciation_inventory(project_dir, client=_pronunciation_llm()),
         "affected_chapters": sorted(affected_chapters),
     }
 
@@ -5043,7 +5097,7 @@ async def batch_update_pronunciations(project_id: str, request: PronunciationBat
 
     return {
         "status": "success",
-        "inventory": build_pronunciation_inventory(project_dir),
+        "inventory": build_pronunciation_inventory(project_dir, client=_pronunciation_llm()),
         "affected_chapters": sorted(affected_chapters),
     }
 
@@ -5085,7 +5139,7 @@ async def preview_pronunciation(project_id: str, request: PronunciationPreviewRe
                 voice_id = None
     voice_id = voice_id or "narrator"
 
-    preview_hash = hashlib.sha256(f"{voice_id}_{text_to_speak}".encode("utf-8")).hexdigest()[:16]
+    preview_hash = hashlib.sha256(f"{voice_id}_{text_to_speak}".encode()).hexdigest()[:16]
     previews_dir = workspace_dir / "previews"
     previews_dir.mkdir(parents=True, exist_ok=True)
     audio_path = previews_dir / f"pron_{preview_hash}.wav"
@@ -5212,11 +5266,11 @@ async def get_quality_report(project_id: str):
     try:
         job = job_queue.get_job(project_id)
         if isinstance(job, dict) and ("generated_chapters" in job or "mastered_chapters" in job):
-            current_chapters = set(
+            current_chapters = {
                 int(ch) for ch in (
                     job.get("generated_chapters", []) + job.get("mastered_chapters", [])
                 )
-            )
+            }
         if hasattr(job_queue, "get_review_items"):
             active_review_item_ids = {
                 item["item_id"]
@@ -5241,7 +5295,7 @@ async def get_quality_report(project_id: str):
             stale_line_ids.add(lid)
         else:
             filtered_logs.append(log)
-    
+
     summary = {
         "total_segments": 0,
         "passed_segments": 0,
@@ -5257,7 +5311,7 @@ async def get_quality_report(project_id: str):
         "stale_records": len(stale_line_ids),
         "stale": bool(stale_line_ids),
     }
-    
+
     if not filtered_logs:
         return summary
 
@@ -5338,10 +5392,10 @@ async def get_quality_report(project_id: str):
         for log in filtered_logs
         if log["line_id"] in retried_ids
     ]
-            
+
     summary["total_segments"] = len(lines)
     total_wer = 0.0
-    
+
     for line in lines.values():
         if line["status"] == "pass":
             summary["passed_segments"] += 1
@@ -5352,7 +5406,7 @@ async def get_quality_report(project_id: str):
         else:
             summary["failed_segments"] += 1
         total_wer += line["wer"] or 0.0
-        
+
         details = line.get("details", {})
         if details.get("has_long_silence", False):
             summary["failed_silence"] += 1
@@ -5366,10 +5420,10 @@ async def get_quality_report(project_id: str):
             summary["final_attempts"].append(
                 _attempt_payload(line, include_audio=True)
             )
-            
+
     if summary["total_segments"] > 0:
         summary["average_wer"] = total_wer / summary["total_segments"]
-        
+
     return summary
 
 
@@ -5488,7 +5542,7 @@ async def retry_external_validation(
         # If requested, reset circuit breaker health
         if reset_circuit:
             health_path = project_dir / ".external_validation_health.json"
-            global_health_path = Path("brain/projects/.external_validation_health.json")
+            global_health_path = shared_paths.PROJECTS_DIR / ".external_validation_health.json"
             for hp in (health_path, global_health_path):
                 try:
                     hp.unlink(missing_ok=True)
@@ -5687,6 +5741,7 @@ async def websocket_updates(websocket: WebSocket):
         client_host=client_host,
         configured_token=token,
         presented_token=presented_token,
+        trusted_lan_cidrs=_TRUSTED_LAN_CIDRS,
     ):
         await websocket.close(
             code=1013 if not token and not is_loopback_client(client_host) else 1008
@@ -5715,6 +5770,7 @@ async def websocket_updates(websocket: WebSocket):
 def main():
     """Run the Brain Dashboard server."""
     import argparse
+
     import uvicorn
 
     parser = argparse.ArgumentParser(description="Crazy Audiobook Creator — Brain Dashboard")
@@ -5728,11 +5784,9 @@ def main():
 
     host = args.host or dashboard_cfg.get("host", "127.0.0.1")
     port = args.port or dashboard_cfg.get("port", 8000)
-    token = configured_dashboard_token(dashboard_cfg)
-    if host not in ("127.0.0.1", "localhost", "::1") and not token:
-        raise RuntimeError(
-            "Refusing to bind Dashboard beyond loopback without dashboard.api_token"
-        )
+    # `_assert_safe_bind` already ran at import against the configured host.
+    # Re-check here so an explicit `--host` override cannot widen exposure.
+    _assert_safe_bind({**dashboard_cfg, "host": host})
 
     logging.basicConfig(
         level=logging.INFO,

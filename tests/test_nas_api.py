@@ -2,10 +2,10 @@
 
 import unittest
 from unittest.mock import MagicMock, patch
+
 from fastapi.testclient import TestClient
 
 from brain.dashboard.api.main import app
-from brain.dashboard.api.security import configured_dashboard_token
 
 
 class TestNASApi(unittest.TestCase):

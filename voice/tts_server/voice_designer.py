@@ -17,17 +17,17 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from voice.tts_server.qwen3_engine import Qwen3TTSEngine
-from voice.tts_server.voice_library import VoiceLibraryManager
-from shared.constants import Gender, VOICE_DESIGN_TEST_SENTENCES
+from shared.constants import VOICE_DESIGN_TEST_SENTENCES, Gender
 from shared.models import (
     BootstrapVoiceResult,
-    VoiceCandidate,
     BootstrapVoicesRequest,
     BootstrapVoicesResponse,
     CastPairDiagnostic,
     Character,
+    VoiceCandidate,
 )
+from voice.tts_server.qwen3_engine import Qwen3TTSEngine
+from voice.tts_server.voice_library import VoiceLibraryManager
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +85,7 @@ class VoiceDesigner:
             gender_key,
             self.voice_design_test_sentences.get("neutral", self.voice_design_test_sentences.get("other", "This is a fallback test sentence to ensure adequate duration for voice design references.")),
         )
-        
+
         importance = getattr(character, "importance", "minor")
         if not character.test_sentence:
             if importance == "minor":
@@ -94,12 +94,12 @@ class VoiceDesigner:
                 f"Major voice '{char_id}' has no usable source-backed "
                 "reference text; choose dialogue before bootstrapping"
             )
-            
+
         # Pad short sentences to ensure VoiceDesign has enough text to generate ~10s of audio
         # Only do this for minor characters, to avoid making all major characters sound too similar.
         if len(character.test_sentence.split()) < 12 and importance == "minor":
             return f"{character.test_sentence.strip()} {fallback}"
-            
+
         return character.test_sentence
 
     @staticmethod
@@ -183,7 +183,7 @@ class VoiceDesigner:
         )
 
         import httpx
-        
+
         logger.info(
             "Bootstrapping %d voices for project '%s'",
             len(request.characters),
@@ -268,7 +268,7 @@ class VoiceDesigner:
                     # real registry entry under char_id makes a newly bootstrapped
                     # major voice immediately usable and approvable.
                     cand_id = self._candidate_id(char_id, cand_idx)
-                    
+
                     if not request.force_regenerate and self.library.voice_exists(
                         project_id, cand_id
                     ):
@@ -316,7 +316,7 @@ class VoiceDesigner:
                         character,
                         design_fingerprint=request.design_fingerprints.get(char_id, ""),
                     )
-                    
+
                     for redesign_attempt in range(1, self.acoustic_regeneration_attempts + 1):
                         _, early_warnings = self._acoustic_diagnostics(Path(result.file), character)
                         if not any("requested adult" in warning for warning in early_warnings):
@@ -340,7 +340,7 @@ class VoiceDesigner:
                             design_fingerprint=request.design_fingerprints.get(char_id, ""),
                         )
                         result.warnings.append("Automatically redesigned once after an acoustic register mismatch.")
-                    
+
                     candidates.append(result)
                     designed_candidates += 1
                     emit(
@@ -360,7 +360,7 @@ class VoiceDesigner:
                     warnings=candidates[0].warnings,
                     candidates=candidates,
                 )
-        
+
         finally:
             logger.info("Shutting down Qwen VoiceDesign Microservice...")
             if design_proc.poll() is None:
@@ -754,7 +754,7 @@ class VoiceDesigner:
             },
             timeout=600,
         )
-        
+
         if resp.status_code != 200:
             raise RuntimeError(f"Qwen VoiceDesign microservice failed: {resp.text}")
 

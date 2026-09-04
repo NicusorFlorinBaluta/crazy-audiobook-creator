@@ -5,20 +5,21 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
 from fastapi import HTTPException
 
+import brain.dashboard.api.main as dashboard_main
 from brain.dashboard.api.main import (
     ScriptLineUpdate,
     regenerate_chapter,
     update_script_line,
 )
-import brain.dashboard.api.main as dashboard_main
 from brain.director.attribution_audit import audit_book_attribution
 from brain.director.character_analyzer import CharacterAnalyzer
 from brain.director.script_generator import ScriptGenerator, SourceFragment
 from brain.orchestrator.job_queue import JobQueue
 from shared.constants import Gender
-from shared.models import Character, CharacterRegistry, ExtractedBook, ExtractedChapter, ScriptChapter
+from shared.models import Character, CharacterRegistry, ExtractedBook, ScriptChapter
 
 
 def _frag(text: str, start: int = 0) -> SourceFragment:

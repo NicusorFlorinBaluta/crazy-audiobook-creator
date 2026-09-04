@@ -1,33 +1,34 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
-import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import numpy as np
 
+from brain.orchestrator.job_queue import JobQueue
+from brain.orchestrator.pipeline import Pipeline
+from brain.orchestrator.voice_client import VoiceClient
 from shared.constants import Gender, ValidationStatus
 from shared.models import (
     BookMetadata,
+    BootstrapVoicesRequest,
     Character,
+    ExportM4BResponse,
     ExtractedBook,
     ExtractedChapter,
-    ExportM4BResponse,
-    QualityResult,
     MasterChapterResponse,
-    VoiceFXSettings,
-    BootstrapVoicesRequest,
+    QualityResult,
     VoiceCandidate,
+    VoiceFXSettings,
 )
-from brain.orchestrator.voice_client import VoiceClient
-from brain.orchestrator.job_queue import JobQueue
-from brain.orchestrator.pipeline import Pipeline
-from voice.tts_server.qwen3_engine import Qwen3TTSEngine
 from voice.tts_server.audio_effects import AudioPostProcessor
+from voice.tts_server.qwen3_engine import Qwen3TTSEngine
 from voice.tts_server.voice_designer import VoiceDesigner
+from voice.validator.validation_loop import ValidationLoop
 
 
 class _FakeLibrary:
@@ -380,3 +381,95 @@ class ProjectSourceContractTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DeterministicSynthesisSeedTests(unittest.TestCase):
+    """Generated audio must be reproducible from the script plus settings.
+
+    The engine samples with `do_sample: true` at `temperature: 0.9`. Without a
+    seed, "same fingerprint implies same audio" held only because the WAV was
+    cached -- after a cache purge the same script produced a different
+    audiobook, and a single repaired line landed as a fresh draw among
+    untouched neighbours.
+    """
+
+    def test_a_hex_fingerprint_maps_to_a_stable_seed(self) -> None:
+        first = Qwen3TTSEngine._resolve_seed("a3f9c1d2b4e5f607")
+        second = Qwen3TTSEngine._resolve_seed("a3f9c1d2b4e5f607")
+        self.assertEqual(first, second)
+        self.assertIsInstance(first, int)
+
+    def test_seeds_stay_inside_the_torch_range(self) -> None:
+        for candidate in ("f" * 16, "0" * 16, "deadbeefdeadbeef", -(2**70), 2**70):
+            resolved = Qwen3TTSEngine._resolve_seed(candidate)
+            self.assertIsNotNone(resolved)
+            self.assertGreaterEqual(resolved, 0)
+            self.assertLess(resolved, 2**63 - 1)
+
+    def test_absent_seed_leaves_sampling_random(self) -> None:
+        self.assertIsNone(Qwen3TTSEngine._resolve_seed(None))
+        self.assertIsNone(Qwen3TTSEngine._resolve_seed(""))
+        self.assertIsNone(Qwen3TTSEngine._resolve_seed("   "))
+
+    def test_a_non_hex_string_is_still_accepted_deterministically(self) -> None:
+        first = Qwen3TTSEngine._resolve_seed("chapter-1-line-7")
+        second = Qwen3TTSEngine._resolve_seed("chapter-1-line-7")
+        self.assertEqual(first, second)
+        self.assertNotEqual(first, Qwen3TTSEngine._resolve_seed("chapter-1-line-8"))
+
+    def test_applying_a_seed_makes_torch_sampling_repeatable(self) -> None:
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("torch is not installed")
+        Qwen3TTSEngine._apply_seed(1234)
+        first = torch.randn(4).tolist()
+        Qwen3TTSEngine._apply_seed(1234)
+        second = torch.randn(4).tolist()
+        self.assertEqual(first, second)
+
+
+class LineSeedDerivationTests(unittest.TestCase):
+    def test_the_same_line_and_attempt_always_seeds_identically(self) -> None:
+        args = ("proj", "ch01_0001", "Hello there.", "narrator", 1)
+        self.assertEqual(
+            ValidationLoop._line_seed(*args),
+            ValidationLoop._line_seed(*args),
+        )
+
+    def test_a_retry_must_not_reproduce_the_failing_take(self) -> None:
+        """Attempt is part of the seed on purpose.
+
+        A retry exists because the previous take failed validation. Reusing the
+        identical seed would regenerate that exact audio and the retry could
+        never succeed.
+        """
+        first = ValidationLoop._line_seed("p", "ch01_0001", "Text.", "narrator", 1)
+        second = ValidationLoop._line_seed("p", "ch01_0001", "Text.", "narrator", 2)
+        self.assertNotEqual(first, second)
+
+    def test_seed_varies_with_every_identity_bearing_input(self) -> None:
+        base = ValidationLoop._line_seed("p", "ch01_0001", "Text.", "narrator", 1)
+        self.assertNotEqual(
+            base, ValidationLoop._line_seed("other", "ch01_0001", "Text.", "narrator", 1)
+        )
+        self.assertNotEqual(
+            base, ValidationLoop._line_seed("p", "ch01_0002", "Text.", "narrator", 1)
+        )
+        self.assertNotEqual(
+            base, ValidationLoop._line_seed("p", "ch01_0001", "Text!", "narrator", 1)
+        )
+        self.assertNotEqual(
+            base, ValidationLoop._line_seed("p", "ch01_0001", "Text.", "kvothe", 1)
+        )
+
+    def test_seed_is_not_confusable_across_field_boundaries(self) -> None:
+        """Fields are separated, so concatenation cannot collide."""
+        self.assertNotEqual(
+            ValidationLoop._line_seed("a", "b", "c", "narrator", 1),
+            ValidationLoop._line_seed("ab", "", "c", "narrator", 1),
+        )
+
+    def test_the_engine_no_longer_advertises_fake_batching(self) -> None:
+        """`generate_speech_batch` looped sequentially; it must stay removed."""
+        self.assertFalse(hasattr(Qwen3TTSEngine, "generate_speech_batch"))

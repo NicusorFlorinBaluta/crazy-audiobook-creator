@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from ipaddress import ip_network
 from typing import Any
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
@@ -49,6 +50,22 @@ def validate_brain_config(config: dict[str, Any]) -> dict[str, Any]:
         _number(errors, ollama, "max_generation_seconds", minimum=1, maximum=7200)
         _number(errors, ollama, "repetition_window_chars", minimum=0, maximum=8192)
         _number(errors, ollama, "repetition_count", minimum=2, maximum=20)
+        _number(errors, ollama, "num_parallel", minimum=1, maximum=16)
+        backend = str(ollama.get("gpu_backend", "vulkan")).strip().lower()
+        if backend not in {"vulkan", "rocm"}:
+            errors.append("ollama.gpu_backend must be 'vulkan' or 'rocm'")
+        kv_cache_type = str(ollama.get("kv_cache_type", "") or "").strip()
+        if kv_cache_type and kv_cache_type not in {"f16", "q8_0", "q4_0"}:
+            errors.append(
+                "ollama.kv_cache_type must be empty, f16, q8_0, or q4_0"
+            )
+        if kv_cache_type in {"q8_0", "q4_0"} and not ollama.get(
+            "flash_attention", True
+        ):
+            errors.append(
+                "ollama.kv_cache_type quantization requires "
+                "ollama.flash_attention: true"
+            )
         think = ollama.get("think")
         if think is not None and not (
             isinstance(think, bool)
@@ -181,6 +198,38 @@ def validate_brain_config(config: dict[str, Any]) -> dict[str, Any]:
                 )
     if schedule.get("enabled") and not windows:
         errors.append("enabled schedule requires at least one window")
+
+    dashboard = config.get("dashboard", {})
+    if not isinstance(dashboard, dict):
+        errors.append("dashboard must be an object")
+    else:
+        # A malformed CIDR must fail at startup. Silently discarding it would
+        # widen unauthenticated LAN access instead of narrowing it, which is
+        # the opposite of what the operator intended by setting the key.
+        if "trusted_lan_cidrs" in dashboard:
+            cidrs = dashboard.get("trusted_lan_cidrs")
+            if isinstance(cidrs, str):
+                cidrs = [cidrs]
+            if cidrs is None or not isinstance(cidrs, (list, tuple)):
+                errors.append(
+                    "dashboard.trusted_lan_cidrs must be a list of CIDR strings"
+                )
+            else:
+                for entry in cidrs:
+                    try:
+                        ip_network(str(entry).strip(), strict=False)
+                    except ValueError:
+                        errors.append(
+                            "dashboard.trusted_lan_cidrs contains an invalid "
+                            f"network: {entry!r}"
+                        )
+        origins = dashboard.get("cors_origins")
+        if origins is not None and not isinstance(origins, (list, tuple)):
+            errors.append("dashboard.cors_origins must be a list")
+        _number(errors, dashboard, "port", minimum=1, maximum=65535)
+        _number(errors, dashboard, "max_upload_size_mb", minimum=1)
+        _number(errors, dashboard, "max_epub_expanded_mb", minimum=1)
+
     if errors:
         raise ValueError("Invalid brain configuration: " + "; ".join(errors))
     return config

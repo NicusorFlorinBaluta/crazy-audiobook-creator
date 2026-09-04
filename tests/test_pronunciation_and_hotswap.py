@@ -1,33 +1,27 @@
 """Unit and integration tests for pronunciation replacements, previewing, and audio hot-swapping."""
 
-import asyncio
 import json
-import os
-from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch, MagicMock
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
+import brain.dashboard.api.main as dashboard
+from shared.models import (
+    GenerateLineRequest,
+    GenerateLineResponse,
+)
 from shared.pronunciation import (
     apply_pronunciations,
     build_pronunciation_inventory,
-    load_pronunciation_dictionary,
 )
-from shared.models import (
-    ScriptLine,
-    ScriptChapter,
-    GenerateLineRequest,
-    GenerateLineResponse,
-    QualityResult,
-)
-import brain.dashboard.api.main as dashboard
 from voice.mastering.assembler import AudioAssembler
 
 
 def _make_dummy_wav(path: Path, duration_s: float = 0.5, sample_rate: int = 24000) -> None:
     """Create a minimal valid PCM WAV file for audio tests."""
-    import wave
     import struct
+    import wave
     path.parent.mkdir(parents=True, exist_ok=True)
     num_samples = int(duration_s * sample_rate)
     with wave.open(str(path), "wb") as wf:

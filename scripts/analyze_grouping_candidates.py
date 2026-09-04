@@ -8,7 +8,7 @@ import json
 import subprocess
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +18,6 @@ if str(ROOT) not in sys.path:
 
 from brain.director.script_generator import ScriptGenerator
 from shared.models import ScriptChapter
-
 
 DEFAULT_CANDIDATES = "300:50:400:68,340:58:460:78"
 
@@ -76,9 +75,7 @@ def _fragment_ids(script: ScriptChapter) -> list[int]:
 def _source_mismatches(script: ScriptChapter, source_text: str) -> list[str]:
     mismatches: list[str] = []
     for line in script.lines:
-        if line.source_start is None or line.source_end is None:
-            mismatches.append(line.line_id)
-        elif line.text != source_text[line.source_start : line.source_end]:
+        if line.source_start is None or line.source_end is None or line.text != source_text[line.source_start : line.source_end]:
             mismatches.append(line.line_id)
     return mismatches
 
@@ -160,7 +157,12 @@ def analyze_chapter(
 def _source_control() -> dict[str, Any]:
     def run(*args: str) -> str:
         return subprocess.check_output(
-            ["git", *args], cwd=ROOT, text=True, stderr=subprocess.DEVNULL
+            ["git", *args],
+            cwd=ROOT,
+            text=True,
+            stderr=subprocess.DEVNULL,
+            # Provenance metadata must never stall an analysis run.
+            timeout=30,
         ).strip()
 
     try:
@@ -180,7 +182,7 @@ def analyze_project(project_dir: Path, candidates: list[GroupingBounds]) -> dict
     }
     report: dict[str, Any] = {
         "schema_version": 1,
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
         "project": project_dir.name,
         "source_control": _source_control(),
         "control": {

@@ -6,10 +6,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from brain.orchestrator.pipeline import Pipeline
-from brain.validators.gemini_validation import GeminiValidationService
 from brain.validators.gemini_validation import (
     ExtractionBatch,
     GeminiApiClient,
+    GeminiValidationService,
     _extract_json,
     _gemini_response_schema,
 )

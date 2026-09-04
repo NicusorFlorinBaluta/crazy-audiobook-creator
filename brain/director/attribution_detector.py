@@ -6,8 +6,8 @@ staccato misattribution, narrator-separated attribution collapse, or low confide
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
 import re
+from dataclasses import asdict, dataclass
 from typing import Any
 
 from shared.models import ScriptChapter, ScriptLine
@@ -91,7 +91,6 @@ def detect_suspicious_turns(
             continue
 
         dialogue_indices = [idx for idx, line in enumerate(lines) if _is_dialogue_line(line)]
-        dialogue_set = set(dialogue_indices)
 
         def build_suspicious_turn(
             idx: int,

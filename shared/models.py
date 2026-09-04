@@ -6,7 +6,7 @@ pipeline state persistence, and inter-stage data flow.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -17,7 +17,6 @@ from shared.constants import (
     PipelineStage,
     ValidationStatus,
 )
-
 
 # ===================================================================
 # Book & Chapter Models (Stage ①: Text Extraction)
@@ -316,14 +315,14 @@ class VoiceReference(BaseModel):
     gender: Gender
     duration_seconds: float = 0.0
     sample_rate: int = 24000
-    generated_at: datetime = Field(default_factory=datetime.utcnow)
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class VoiceLibrary(BaseModel):
     """Collection of voice reference clips for a project."""
 
     project_id: str
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     voices: dict[str, VoiceReference] = Field(default_factory=dict)
 
 
@@ -559,7 +558,7 @@ class BookQualityReport(BaseModel):
     """Aggregated quality metrics for the entire book."""
 
     project_id: str
-    generated_at: datetime = Field(default_factory=datetime.utcnow)
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     total_segments: int = 0
     passed: int = 0
     accepted_with_warning: int = 0
@@ -722,7 +721,7 @@ class ProgressSnapshot(BaseModel):
     eta_confidence: Literal["none", "low", "medium", "high"] = "none"
     started_at: datetime | None = None
     updated_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc)
+        default_factory=lambda: datetime.now(UTC)
     )
 
 
@@ -780,7 +779,7 @@ class ProjectSummary(BaseModel):
     total_chapters: int
     total_words: int
     estimated_audio_hours: float = 0.0
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 # ===================================================================

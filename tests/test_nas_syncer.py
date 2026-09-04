@@ -1,15 +1,32 @@
 """Unit tests for NASSyncer module."""
 
 import json
-import posixpath
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock, patch
 
-from brain.orchestrator.nas_syncer import NASConnectionError, NASError, NASSyncer
+from brain.orchestrator.nas_syncer import NASSyncer
+
+# `paramiko` is an optional dependency: `nas_syncer` imports it defensively so
+# the pipeline still runs without it, with the 24/7 NAS streaming feature
+# simply unavailable. These tests patch `paramiko.SSHClient`, which needs the
+# real module to be importable, so they skip rather than error when it is
+# absent -- matching how the code itself treats the dependency.
+#
+# Deliberately not `pytest.importorskip`: the suite must also run under plain
+# `python -m unittest discover`, which is how CI invokes it.
+try:
+    import paramiko  # noqa: F401
+    HAS_PARAMIKO = True
+except ImportError:  # pragma: no cover - exercised only without the optional dep
+    HAS_PARAMIKO = False
 
 
+@unittest.skipUnless(
+    HAS_PARAMIKO,
+    "optional NAS sync dependency 'paramiko' is not installed",
+)
 class TestNASSyncer(unittest.TestCase):
     """Test suite for NASSyncer operations."""
 

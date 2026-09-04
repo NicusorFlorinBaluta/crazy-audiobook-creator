@@ -1,0 +1,35 @@
+# Local guardrails, matching the CI `lint` job.
+#
+# Install once:
+#   python -m pip install pre-commit
+#   pre-commit install
+#
+# The ruff hooks are the important ones: `F811` (duplicate definition) and
+# `F821` (undefined name) are the rules that catch the defect class which
+# previously survived several manual audits of this repository.
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.6
+    hooks:
+      - id: ruff
+        args: [--fix]
+      # `ruff-format` is intentionally omitted until the repository has been
+      # reformatted once in a dedicated commit; enabling it here first would
+      # make every unrelated commit carry formatting churn.
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+        # brain/config.yaml and voice/config.yaml are plain YAML; the workflow
+        # files use GitHub's `on:`/`if:` keys which check-yaml handles fine.
+      - id: check-json
+      - id: check-merge-conflict
+      - id: mixed-line-ending
+        args: [--fix=no]
+      - id: check-added-large-files
+        args: [--maxkb=512]
+      - id: check-ast
+      - id: check-illegal-windows-names

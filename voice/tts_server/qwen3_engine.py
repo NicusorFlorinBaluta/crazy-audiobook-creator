@@ -20,7 +20,7 @@ from typing import Any
 
 import numpy as np
 import soundfile as sf
-import yaml
+
 from voice.tts_server.audio_effects import AudioPostProcessor
 
 logger = logging.getLogger(__name__)
@@ -265,6 +265,7 @@ class Qwen3TTSEngine:
         speed: float = 1.0,
         voice_fx: Any | None = None,
         output_path: str | Path | None = None,
+        seed: int | str | None = None,
     ) -> np.ndarray:
         """Generate speech audio for a script line.
 
@@ -280,6 +281,14 @@ class Qwen3TTSEngine:
             speed: Speed multiplier (0.8=slow, 1.0=normal, 1.2=fast).
             voice_fx: Optional VoiceFXSettings for pitch/tone processing.
             output_path: If provided, save the audio to this file.
+            seed: Deterministic sampling seed. Accepts an int or a hex string
+                (typically the line's generation fingerprint). With
+                `do_sample: true` and `temperature: 0.9`, omitting this makes
+                every synthesis an independent draw, so the same line
+                regenerated after a cache purge -- or a single repaired line
+                regenerated among untouched neighbours -- produces different
+                prosody. Passing a per-line seed makes output reproducible
+                without reducing variety between lines.
 
         Returns:
             NumPy array of audio samples.
@@ -298,6 +307,7 @@ class Qwen3TTSEngine:
             "text_parts": 0,
             "cold_model_load": not self._is_loaded,
             "attention_implementation": self.attn_implementation,
+            "seed": None,
         }
         self.last_generation_metrics = metrics
         generation_started = time.perf_counter()
@@ -312,6 +322,11 @@ class Qwen3TTSEngine:
                         time.perf_counter() - load_started
                     )
             metrics["attention_implementation"] = self.attn_implementation
+
+            resolved_seed = self._resolve_seed(seed)
+            metrics["seed"] = resolved_seed
+            if resolved_seed is not None:
+                self._apply_seed(resolved_seed)
 
             parts = self._split_tts_text(text)
             metrics["text_parts"] = len(parts)
@@ -401,6 +416,56 @@ class Qwen3TTSEngine:
         finally:
             metrics["total_seconds"] = time.perf_counter() - generation_started
 
+    # Torch seeds are 64-bit; keep derived values inside the positive range.
+    _SEED_MODULUS = 2**63 - 1
+
+    @classmethod
+    def _resolve_seed(cls, seed: int | str | None) -> int | None:
+        """Normalize a seed to a positive 63-bit int, or None to stay random.
+
+        Accepts a hex digest so a caller can pass a line's generation
+        fingerprint directly, which ties the audio deterministically to exactly
+        the inputs that already decide whether regeneration is needed.
+        """
+        if seed is None:
+            return None
+        if isinstance(seed, int):
+            return abs(seed) % cls._SEED_MODULUS
+        text = str(seed).strip()
+        if not text:
+            return None
+        try:
+            value = int(text, 16)
+        except ValueError:
+            # Any other string: hash it so callers are not forced to pre-encode.
+            import hashlib
+
+            value = int(
+                hashlib.sha256(text.encode("utf-8")).hexdigest()[:16], 16
+            )
+        return value % cls._SEED_MODULUS
+
+    @staticmethod
+    def _apply_seed(seed: int) -> None:
+        """Seed every RNG the TTS sampler may draw from."""
+        import random
+
+        random.seed(seed)
+        try:
+            import numpy as _np
+
+            _np.random.seed(seed % (2**32 - 1))
+        except Exception:  # pragma: no cover - numpy is a hard dependency
+            pass
+        try:
+            import torch
+
+            torch.manual_seed(seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(seed)
+        except Exception as exc:  # pragma: no cover - torch absent in CI-lite
+            logger.debug("Could not seed torch RNG: %s", exc)
+
     def post_processing_context(self) -> dict[str, Any]:
         """Return the audio-policy identity used by synthesis fingerprints."""
         return {
@@ -409,35 +474,31 @@ class Qwen3TTSEngine:
             "allow_phase_vocoder_fallback": self.allow_phase_vocoder_fallback,
         }
 
-    def generate_speech_batch(
-        self,
-        batch_requests: list[dict[str, Any]],
-    ) -> list[np.ndarray]:
-        """Generate speech for multiple lines sequentially (batch mocked).
-        
-        Since qwen_tts does not natively support batching yet, we fallback
-        to iterating over the items and calling generate_speech sequentially.
-        """
-        self._ensure_loaded()
-        
-        audios = []
-        for req in batch_requests:
-            try:
-                audio = self.generate_speech(
-                    text=req["text"],
-                    voice_reference_path=req.get("voice_reference_path"),
-                    ref_text=req.get("ref_text", ""),
-                    emotion_instruction=req.get("emotion_instruction", ""),
-                    speed=req.get("speed", 1.0),
-                    voice_fx=req.get("voice_fx"),
-                    output_path=req.get("output_path")
-                )
-                audios.append(audio)
-            except Exception:
-                logger.exception("Sequential TTS generation failed for batch item")
-                raise
-                
-        return audios
+    # NOTE: a `generate_speech_batch` method used to live here. It was never
+    # called from anywhere, and its own docstring conceded it was "batch
+    # mocked" -- it simply looped `generate_speech` sequentially. It was
+    # removed because a code search for batching support would find it and
+    # wrongly conclude batching existed.
+    #
+    # Real batching remains the largest theoretical TTS win: the benchmark in
+    # docs/performance-improvement-plan-post-release-2026-08-11.md measured
+    # autoregressive decode at 183.62 s of 184.49 s total, with RTF p50 1.245
+    # against p95 4.469 -- that tail is short dialogue lines running as
+    # batch-size-1 decodes where the GPU is memory-bandwidth bound.
+    #
+    # Before assuming the wrapper cannot do it, check the installed signature:
+    # `_generate` calls `wavs, _ = self._model.generate_voice_clone(text=...)`
+    # and takes `wavs[0]`, and a function returning a *list* of waveforms for a
+    # single text is often one that accepts a list of texts. The capabilities
+    # worth watching for, in descending value:
+    #   1. `past_key_values` reuse, so a voice's reference prefix is prefilled
+    #      once per voice rather than once per line (~605 calls per book, with
+    #      the narrator dominating);
+    #   2. batched `generate_voice_clone` accepting `list[str]`;
+    #   3. `_supports_static_cache` becoming True, which unblocks torch.compile.
+    #
+    # Any of these changes sampling order, so promoting one requires a
+    # generation-fingerprint bump and full re-synthesis.
 
     def _generate(
         self,
@@ -733,7 +794,7 @@ class Qwen3TTSEngine:
                 )
             except Exception as e:
                 logger.warning("Could not load cached embedding %s: %s", pt_path, e)
-                
+
         self._ensure_loaded()
         import librosa
 
@@ -751,7 +812,7 @@ class Qwen3TTSEngine:
             audio=audio,
             sr=target_rate,
         ).detach().float().flatten().cpu()
-        
+
         temp_path = pt_path.with_name(f".{pt_path.name}.tmp")
         try:
             torch.save(emb, temp_path)
@@ -759,7 +820,7 @@ class Qwen3TTSEngine:
         except Exception as e:
             logger.warning("Could not save cached embedding %s: %s", pt_path, e)
             temp_path.unlink(missing_ok=True)
-            
+
         return emb
 
     @staticmethod

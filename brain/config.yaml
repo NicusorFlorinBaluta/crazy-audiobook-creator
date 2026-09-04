@@ -14,8 +14,36 @@ ollama:
   auto_start: true
   executable: C:\Users\nicus\AppData\Local\Programs\Ollama\ollama.exe
   models_dir: E:\.ollama\models
-  vulkan_visible_devices: '0'     # Vulkan0 = Radeon RX 7900 XTX on this PC
+  # Backend used by the app-owned Ollama server: 'vulkan' or 'rocm'.
+  # Both isolate the discrete GPU; they differ in throughput. On RDNA3 the
+  # ROCm/hipBLAS backend is usually markedly faster at *prompt processing*
+  # (prefill) and is where OLLAMA_FLASH_ATTENTION actually takes effect.
+  #
+  # Measured on 2026-08-23 under Vulkan: 3,635 prompt tokens took 25.41 s
+  # (~143 tok/s prefill) out of 76.73 s of request working time -- 33% of the
+  # request spent on prefill. That is the single largest unscreened scripting
+  # cost. Screen 'rocm' against 'vulkan' with
+  # `scripts/benchmark_script_chunks.py` before promoting a change; compare
+  # prefill tok/s derived from `prompt_eval_duration_ns`.
+  gpu_backend: vulkan
+  visible_devices: '0'            # Device 0 = Radeon RX 7900 XTX on this PC
   flash_attention: true
+  # Slots the Ollama server runs. Keep at 1.
+  #
+  # Ollama otherwise autodetects (commonly 4), which reserves KV cache per slot
+  # -- 4 x 16384 tokens on a 27B model can push layers off the GPU despite
+  # num_gpu=99 -- and lets sequential chunk requests land on different slots,
+  # defeating prefix-cache reuse of the system prompt. That prompt is
+  # byte-identical for every chunk within a chapter, so re-evaluating it per
+  # chunk is pure waste.
+  num_parallel: 1
+  # Quantized KV cache (requires flash_attention). Frees VRAM so a 27B model
+  # stays fully offloaded at a 16k context. Leave empty for Ollama's default
+  # (f16); screen 'q8_0' before promoting.
+  kv_cache_type: ''
+  # The pipeline unloads explicitly at stage boundaries, so a long keep-alive
+  # only avoids paying an unnecessary ~45 s model reload if a stage stalls.
+  keep_alive: 30m
   startup_timeout_seconds: 90
   log_path: brain/projects/ollama-managed.log
   debug: true
@@ -36,12 +64,16 @@ ollama:
 # Managed local Voice service
 voice_server:
   host: http://127.0.0.1:8100
+  # Token the Brain presents to the Voice service. Leave empty for the
+  # supported loopback setup. The Voice service also accepts
+  # CRAZY_AUDIOBOOK_VOICE_TOKEN from the environment so the secret need not be
+  # committed here; set the same value on both sides if you use it.
+  #
+  # There is deliberately no LAN-CIDR allowance for the Voice service: it binds
+  # to loopback and refuses to bind beyond it without a token. (A
+  # `trusted_lan_cidrs` key used to be documented here, but the Voice service
+  # never implemented one, and it read voice/config.yaml rather than this file.)
   api_token: ''
-  # Only the socket peer is considered; X-Forwarded-For cannot grant access.
-  # Home Assistant/nginx and other devices on these LANs may use the API
-  # without an application token.
-  trusted_lan_cidrs:
-  - 192.168.50.0/24
   venv: E:\PyTorch env\my_venv
   # The Windows 3.12 venv launcher misparses its own base path when invoked
   # through the spaced long form. The stable 8.3 path preserves the ROCm env.
@@ -97,9 +129,30 @@ script:
 dashboard:
   port: 8000
   host: 0.0.0.0
+  # Browser origins allowed to read API responses. '*' lets any page a LAN
+  # user visits read this dashboard's data cross-origin, because responses
+  # then carry Access-Control-Allow-Origin: *. List the real origins instead.
   cors_origins:
-  - '*'
+  - http://127.0.0.1:8000
+  - http://localhost:8000
+  - http://192.168.50.44:8000
+  - https://crazyha.mywire.org
   api_token: ''
+  # TCP-peer CIDRs allowed without an application token. Only the real socket
+  # peer is considered; X-Forwarded-For never grants trust.
+  #
+  # Omitting this key falls back to every RFC1918 range plus the Tailscale
+  # CGNAT range, which is almost always wider than intended. An empty list
+  # disables token-free LAN access entirely (loopback plus token only).
+  #
+  # NOTE: a reverse proxy connects from its own address. If nginx on this LAN
+  # proxies the dashboard to the public internet, that proxy address is inside
+  # the range below and every internet request arriving through it is treated
+  # as a trusted LAN peer. Set CRAZY_AUDIOBOOK_DASHBOARD_TOKEN and have the
+  # proxy inject X-API-Token if the public endpoint must be authenticated by
+  # this application rather than only by the proxy.
+  trusted_lan_cidrs:
+  - 192.168.50.0/24
   static_dir: dashboard/frontend
   max_upload_size_mb: 100
   max_epub_expanded_mb: 1000

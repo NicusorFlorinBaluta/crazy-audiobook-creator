@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import deque
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from statistics import median
 from typing import Any
 
@@ -20,7 +20,7 @@ class ProgressEstimator:
 
     def reset(self, key: str) -> None:
         self._samples.pop(key, None)
-        self._started_at[key] = datetime.now(timezone.utc)
+        self._started_at[key] = datetime.now(UTC)
 
     def observe(self, key: str, completed_units: float, elapsed_seconds: float) -> None:
         if completed_units <= 0 or elapsed_seconds <= 0:
@@ -58,7 +58,7 @@ class ProgressEstimator:
         total_units: float,
         **details: Any,
     ) -> ProgressSnapshot:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         started = self._started_at.setdefault(key, now)
         eta, confidence = self.estimate(
             key,

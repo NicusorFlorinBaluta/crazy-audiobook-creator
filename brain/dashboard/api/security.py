@@ -74,18 +74,49 @@ def is_private_client(
         return False
 
 
+def configured_trusted_lan_cidrs(
+    dashboard_config: dict[str, Any],
+) -> tuple[str, ...]:
+    """Return the operator-configured LAN trust boundary.
+
+    ``dashboard.trusted_lan_cidrs`` is the documented, auditable control for
+    unauthenticated LAN access. When it is absent the boundary falls back to
+    ``DEFAULT_TRUSTED_LAN_CIDRS``, which spans all RFC1918 space plus the
+    Tailscale CGNAT range -- far wider than most deployments want. Setting the
+    key narrows it; an empty list disables token-free LAN access entirely and
+    leaves only loopback plus an explicit token.
+    """
+    if "trusted_lan_cidrs" not in dashboard_config:
+        return DEFAULT_TRUSTED_LAN_CIDRS
+    configured = dashboard_config.get("trusted_lan_cidrs")
+    if configured is None:
+        return DEFAULT_TRUSTED_LAN_CIDRS
+    if isinstance(configured, str):
+        configured = [configured]
+    if not isinstance(configured, (list, tuple)):
+        raise ValueError(
+            "dashboard.trusted_lan_cidrs must be a list of CIDR strings"
+        )
+    return tuple(str(entry).strip() for entry in configured if str(entry).strip())
+
+
 def dashboard_request_authorized(
     *,
     client_host: str | None,
     configured_token: str,
     presented_token: str | None,
-    is_forwarded: bool = False,
     trusted_lan_cidrs: tuple[str, ...] | list[str] = DEFAULT_TRUSTED_LAN_CIDRS,
 ) -> bool:
     """Authorize local/LAN peers without a token and public peers by token.
 
     Authentication is based on the actual TCP peer. Forwarding headers are not
     trusted here, so a public client cannot spoof an RFC1918 address.
+
+    Callers MUST pass ``trusted_lan_cidrs`` from configuration. The default is
+    intentionally the widest sane boundary rather than a narrow one, so an
+    omission fails open loudly in review rather than silently locking out a
+    working deployment -- but relying on the default means the documented
+    ``dashboard.trusted_lan_cidrs`` setting has no effect.
     """
     if is_loopback_client(client_host) or is_private_client(
         client_host, trusted_lan_cidrs

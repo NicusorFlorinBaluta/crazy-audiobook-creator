@@ -7,9 +7,20 @@ import logging
 import re
 from collections import defaultdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
+
+from shared.constants import (
+    DEFAULT_OLLAMA_HOST,
+    DEFAULT_OLLAMA_MODEL,
+    GenerationCancelled,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _repo_root() -> Path:
+    """Resolve the repository root from this file, not the working directory."""
+    return Path(__file__).resolve().parents[1]
 
 
 _COMMON_SENTENCE_WORDS = {
@@ -58,7 +69,7 @@ def load_pronunciation_dictionary(
     global_path: Path | None = None,
 ) -> tuple[dict[str, str], dict[str, str]]:
     """Load validated mappings and their source, with project entries winning."""
-    global_path = global_path or Path("brain/pronunciation_dict.json")
+    global_path = global_path or _repo_root() / "brain" / "pronunciation_dict.json"
     mappings: dict[str, tuple[str, str, str]] = {}
     for source_name, path in (
         ("global", global_path),
@@ -251,11 +262,40 @@ def apply_pronunciations(text: str, mappings: dict[str, str]) -> str:
     return pattern.sub(lambda match: folded[match.group(0).casefold()][1], text)
 
 
+class PronunciationLLM(Protocol):
+    """Minimal interface this module needs from an LLM client.
+
+    Satisfied by ``brain.director.ollama_client.OllamaClient``. Declaring it as
+    a Protocol keeps ``shared`` free of a dependency on ``brain`` while letting
+    callers inject the real client, which brings retry budgets, repetition-loop
+    detection, output-limit enforcement and -- most importantly -- cooperative
+    cancellation, so a user pause actually interrupts this work.
+    """
+
+    def generate(
+        self,
+        prompt: str,
+        *,
+        temperature: float = ...,
+        top_p: float = ...,
+        system: str | None = ...,
+        format: str | None = ...,
+    ) -> str:
+        ...
+
+
 def _get_configured_ollama() -> tuple[str, str]:
-    """Retrieve configured Ollama host and model from brain/config.yaml or defaults."""
-    cfg_path = Path("brain/config.yaml")
-    host = "http://127.0.0.1:11435"
-    model = "qwen3.8:27b"
+    """Retrieve configured Ollama host and model from brain/config.yaml.
+
+    Only used on the fallback path when no client is injected. The config path
+    is resolved from this file's location rather than the process working
+    directory, because a dashboard started from another directory would
+    otherwise silently fall back to the defaults below and could resolve
+    pronunciations on a different model than the one scripting the book.
+    """
+    cfg_path = _repo_root() / "brain" / "config.yaml"
+    host = DEFAULT_OLLAMA_HOST
+    model = DEFAULT_OLLAMA_MODEL
     if cfg_path.is_file():
         try:
             import yaml
@@ -263,9 +303,48 @@ def _get_configured_ollama() -> tuple[str, str]:
             ollama_cfg = cfg.get("ollama", {})
             host = str(ollama_cfg.get("host") or host)
             model = str(ollama_cfg.get("model") or model)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                "Could not read %s for pronunciation model selection; "
+                "falling back to %s: %s",
+                cfg_path,
+                model,
+                exc,
+            )
     return host, model
+
+
+_PRONUNCIATION_PROMPT_HEADER = (
+    "You are an expert fantasy and fiction pronunciation director for audiobooks.\n"
+    "For each candidate proper noun or out-of-vocabulary term and its book context, provide the exact spoken phonetic respelling for a Neural TTS engine.\n"
+    "Rules:\n"
+    "1. Write phonetic respellings in plain English syllables (e.g. 'KALL-uh-din', 'Zeth', 'tah-rah-VAN-jee-an', 'shah-LAHN').\n"
+    "2. Capitalize the stressed syllable.\n"
+    "3. Provide 1 default respelling and 1 alternate valid respelling.\n"
+    "4. Output STRICT JSON with key 'recommendations': [{\"term\": \"...\", \"default\": \"...\", \"alternate\": \"...\"}]\n\n"
+    "CANDIDATES:\n"
+)
+
+
+def _pronunciation_prompt(items: list[tuple[str, str]]) -> str:
+    return _PRONUNCIATION_PROMPT_HEADER + json.dumps(
+        [{"term": t, "context": c[:200]} for t, c in items],
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+def _parse_pronunciation_response(raw_text: str) -> dict[str, dict[str, str]]:
+    """Extract normalized recommendations from a strict-JSON model response."""
+    parsed = json.loads(raw_text)
+    result: dict[str, dict[str, str]] = {}
+    for record in parsed.get("recommendations", []):
+        term = str(record.get("term", "")).strip().casefold()
+        default = normalize_phonetic_text(str(record.get("default", "")))
+        alternate = normalize_phonetic_text(str(record.get("alternate", "")))
+        if term and default:
+            result[term] = {"default": default, "alternate": alternate or default}
+    return result
 
 
 def resolve_pronunciations_with_llm(
@@ -273,10 +352,37 @@ def resolve_pronunciations_with_llm(
     ollama_host: str | None = None,
     model: str | None = None,
     timeout_s: float = 12.0,
+    client: PronunciationLLM | None = None,
 ) -> dict[str, dict[str, str]]:
-    """Batch-resolve TTS-ready phonetic respellings via local Ollama LLM."""
+    """Batch-resolve TTS-ready phonetic respellings via the local LLM.
+
+    Prefer passing ``client`` (the pipeline's own ``OllamaClient``). That path
+    inherits the retry budget, repetition-loop detection, output-token cap and
+    cooperative cancellation, so a user pause interrupts pronunciation
+    resolution instead of leaving it running against the GPU.
+
+    The direct-HTTP fallback exists only for callers that have no client to
+    hand (standalone dashboard requests). It has none of those protections.
+    """
     if not items:
         return {}
+
+    if client is not None:
+        try:
+            raw_text = client.generate(
+                _pronunciation_prompt(items),
+                temperature=0.2,
+                top_p=0.9,
+                format="json",
+            )
+            return _parse_pronunciation_response(raw_text)
+        except (GenerationCancelled, KeyboardInterrupt):
+            # Cooperative cancellation from `OllamaClient`; propagate so the
+            # pipeline parks instead of silently continuing.
+            raise
+        except Exception as exc:
+            logger.debug("Injected LLM pronunciation resolution failed: %s", exc)
+            return {}
 
     default_host, default_model = _get_configured_ollama()
     target_host = ollama_host or default_host
@@ -337,8 +443,17 @@ def resolve_pronunciations_with_llm(
 from shared.cache import cache_service
 
 
-def build_pronunciation_inventory(project_dir: Path, use_llm: bool = True) -> dict[str, Any]:
-    """Inventory verified mappings and repeated unresolved book terms with recommendations."""
+def build_pronunciation_inventory(
+    project_dir: Path,
+    use_llm: bool = True,
+    client: PronunciationLLM | None = None,
+) -> dict[str, Any]:
+    """Inventory verified mappings and repeated unresolved book terms with recommendations.
+
+    Pass ``client`` (the pipeline's ``OllamaClient``) wherever one is available
+    so LLM recommendation lookups are cancellable and share the pipeline's
+    retry and safety limits.
+    """
     script_path = project_dir / "book_script.json"
     if not script_path.exists():
         return {"schema": 1, "verified": 0, "unresolved": 0, "candidates": []}
@@ -469,7 +584,10 @@ def build_pronunciation_inventory(project_dir: Path, use_llm: bool = True) -> di
                 ctx = contexts.get(key, [""])[0]
                 missing_llm_items.append((d_term, ctx))
         if missing_llm_items:
-            llm_results = resolve_pronunciations_with_llm(missing_llm_items)
+            llm_results = resolve_pronunciations_with_llm(
+                missing_llm_items,
+                client=client,
+            )
             for raw_k, rec_data in llm_results.items():
                 cached_recs[raw_k.casefold()] = rec_data
                 recs_updated = True

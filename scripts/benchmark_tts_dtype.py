@@ -8,7 +8,7 @@ import hashlib
 import json
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -34,7 +34,6 @@ from shared.live_test_guard import add_model_opt_in
 from voice.tts_server.qwen3_engine import Qwen3TTSEngine
 from voice.tts_server.voice_library import VoiceLibraryManager
 from voice.validator.whisper_validator import WhisperValidator
-
 
 CONTROL_DTYPE = "float16"
 CANDIDATE_DTYPE = "bfloat16"
@@ -115,7 +114,7 @@ def main() -> int:
     modes = {"A": ("float16", CONTROL_DTYPE), "B": ("bfloat16", CANDIDATE_DTYPE)}
     report: dict[str, Any] = {
         "schema_version": 1,
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
         "project": args.project,
         "source_control": git_identity(ROOT),
         "dependencies": dependency_versions(),

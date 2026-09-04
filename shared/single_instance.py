@@ -1,9 +1,9 @@
 """Single Instance Lock — Prevents multiple concurrent instances of the application or voice server.
 """
 
-import sys
-import os
 import logging
+import os
+import sys
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -33,7 +33,7 @@ class SingleInstanceLock:
             self.handle.write(str(os.getpid()))
             self.handle.flush()
             return True
-        except (IOError, OSError) as e:
+        except OSError as e:
             logger.warning("Another instance is already running (lock file: %s, error: %s)", self.lock_file, e)
             if self.handle:
                 try:

@@ -8,7 +8,7 @@ import os
 import shutil
 import stat
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -69,7 +69,7 @@ def main() -> int:
     chapter = json.loads(chapter_path.read_text(encoding="utf-8"))
     line_ids = [str(line.get("line_id") or line.get("id")) for line in chapter.get("lines", [])]
 
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     backup = project_dir / "stage_canary_backups" / stamp
     if not args.prepared:
         for root in (REPO_ROOT / "workspace" / args.project_id, project_dir):

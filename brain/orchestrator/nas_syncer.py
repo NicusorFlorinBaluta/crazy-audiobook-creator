@@ -7,18 +7,19 @@ shared storage over SFTP/SSH.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
 import posixpath
 import re
-import socket
+from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 from urllib.parse import quote
+
+from shared import paths as shared_paths
 
 try:
     import paramiko
@@ -123,7 +124,7 @@ class NASSyncer:
                 yield sftp
             finally:
                 sftp.close()
-        except (paramiko.SSHException, socket.error, OSError) as exc:
+        except (paramiko.SSHException, OSError) as exc:
             logger.error("Failed to connect to NAS %s@%s:%d - %s", self.username, self.host, self.port, exc)
             raise NASConnectionError(f"NAS SSH/SFTP connection failed: {exc}") from exc
         finally:
@@ -149,11 +150,12 @@ class NASSyncer:
 
         for candidate in candidates:
             try:
-                stat = sftp.stat(candidate)
-                # Found existing directory
+                # `stat` raises OSError when the path is absent; the call
+                # itself is the existence check, so its result is unused.
+                sftp.stat(candidate)
                 self._resolved_nas_root = candidate
                 return candidate
-            except (IOError, OSError):
+            except OSError:
                 continue
 
         # If not found, try to create /volume1/{shared_folder} or ~/{shared_folder}
@@ -196,10 +198,10 @@ class NASSyncer:
             current = posixpath.join(current, part)
             try:
                 sftp.stat(current)
-            except (IOError, OSError):
+            except OSError:
                 try:
                     sftp.mkdir(current)
-                except (IOError, OSError):
+                except OSError:
                     # May exist or parent created
                     pass
 
@@ -363,7 +365,7 @@ class NASSyncer:
                                 logger.info("Pruned partial delivery file on NAS: %s", item)
                             except Exception:
                                 pass
-                except (IOError, OSError):
+                except OSError:
                     pass
 
             # 4. Generate & upload book.json and api/mobile/v1 alias
@@ -408,8 +410,9 @@ class NASSyncer:
     def _rmtree(self, sftp: paramiko.SFTPClient, remote_path: str) -> None:
         """Recursively delete a remote directory."""
         try:
-            stat = sftp.stat(remote_path)
-        except (IOError, OSError):
+            # Existence check only; OSError means there is nothing to delete.
+            sftp.stat(remote_path)
+        except OSError:
             return
 
         try:
@@ -417,7 +420,7 @@ class NASSyncer:
                 child = posixpath.join(remote_path, item)
                 try:
                     sftp.remove(child)
-                except IOError:
+                except OSError:
                     self._rmtree(sftp, child)
             sftp.rmdir(remote_path)
         except Exception as e:
@@ -488,7 +491,7 @@ class NASSyncer:
         try:
             sftp.stat(posixpath.join(proj_remote_dir, "cover.jpg"))
             cover_url = f"{project_id}/cover.jpg"
-        except (IOError, OSError):
+        except OSError:
             pass
 
         # Check full M4B
@@ -501,7 +504,7 @@ class NASSyncer:
                     full_m4b_name = item
                     full_m4b_size = sftp.stat(posixpath.join(full_remote_dir, item)).st_size
                     break
-        except (IOError, OSError):
+        except OSError:
             pass
 
         # Check delivery parts mapping from deliveries/index.json if present
@@ -535,7 +538,7 @@ class NASSyncer:
                     pass
             # Try workspace wav
             for cand in [
-                Path("workspace") / project_id / "chapters" / f"chapter_{ch_num:03d}.wav",
+                shared_paths.WORKSPACE_DIR / project_id / "chapters" / f"chapter_{ch_num:03d}.wav",
                 project_dir.parent.parent / "workspace" / project_id / "chapters" / f"chapter_{ch_num:03d}.wav",
                 project_dir / "chapters" / f"chapter_{ch_num:03d}.wav",
             ]:
@@ -621,7 +624,7 @@ class NASSyncer:
                         "status": "published",
                         "download_url": download_url,
                     })
-        except (IOError, OSError):
+        except OSError:
             pass
 
         # Build chapter manifests
@@ -699,7 +702,7 @@ class NASSyncer:
             "file_size_bytes": full_m4b_size if full_m4b_name else None,
             "deliveries": parts_list,
             "chapters": chapters_manifest,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(UTC).isoformat(),
         }
 
     def rebuild_global_catalog(
@@ -720,7 +723,7 @@ class NASSyncer:
 
         try:
             entries = sftp.listdir(nas_root)
-        except (IOError, OSError) as e:
+        except OSError as e:
             logger.error("Could not list NAS directory %s: %s", nas_root, e)
             return {"books": []}
 
@@ -762,16 +765,16 @@ class NASSyncer:
                             "download_url": str(bdata.get("download_url") or ""),
                             "file_size_bytes": bdata.get("file_size_bytes"),
                             "published_deliveries_count": len(bdata.get("deliveries") or []),
-                            "updated_at": str(bdata.get("updated_at") or datetime.now(timezone.utc).isoformat()),
+                            "updated_at": str(bdata.get("updated_at") or datetime.now(UTC).isoformat()),
                         }
                         books.append(summary)
-            except (IOError, OSError, ValueError, TypeError):
+            except (OSError, ValueError, TypeError):
                 continue
 
         catalog = {
             "version": "2.0",
             "server_name": "Crazy Audiobook Creator (NAS Shared Library)",
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(UTC).isoformat(),
             "total_books": len(books),
             "books": sorted(books, key=lambda b: b.get("updated_at", ""), reverse=True),
         }
@@ -830,7 +833,7 @@ class NASSyncer:
                 # Check if project has a full M4B or deliveries
                 full_m4b = p_dir / f"{project_id}.m4b"
                 if not full_m4b.is_file():
-                    workspace_full = Path("workspace") / project_id / "output" / f"{project_id}.m4b"
+                    workspace_full = shared_paths.WORKSPACE_DIR / project_id / "output" / f"{project_id}.m4b"
                     if workspace_full.is_file():
                         full_m4b = workspace_full
 

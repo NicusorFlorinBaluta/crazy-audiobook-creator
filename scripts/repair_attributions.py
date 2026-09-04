@@ -14,16 +14,18 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-from pathlib import Path
 import sys
+from pathlib import Path
+
 import yaml
 
 from brain.director.attribution_detector import detect_suspicious_turns
 from brain.director.ollama_client import OllamaClient
 from brain.validators.gemini_validation import GeminiValidationService
 from brain.validators.tiered_adjudicator import TieredAttributionAdjudicator
-from shared.models import CharacterRegistry, ScriptChapter
 from shared.artifacts import atomic_write_json, atomic_write_text
+from shared.constants import DEFAULT_OLLAMA_MODEL
+from shared.models import CharacterRegistry, ScriptChapter
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,7 +38,7 @@ def load_config() -> dict:
     cfg_path = Path("brain/config.yaml")
     if not cfg_path.exists():
         cfg_path = Path(__file__).resolve().parent.parent / "brain" / "config.yaml"
-    with open(cfg_path, "r", encoding="utf-8") as f:
+    with open(cfg_path, encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
@@ -130,7 +132,7 @@ def main():
     ollama_cfg = config.get("ollama", {})
     ollama = OllamaClient(
         host=ollama_cfg.get("host", "http://127.0.0.1:11435"),
-        model=ollama_cfg.get("model", "qwen3.8:27b"),
+        model=ollama_cfg.get("model", DEFAULT_OLLAMA_MODEL),
         timeout=ollama_cfg.get("timeout", 600),
         think=ollama_cfg.get("think", False),
         max_output_tokens=350,

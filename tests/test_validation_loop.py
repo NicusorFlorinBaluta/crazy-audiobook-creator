@@ -10,8 +10,8 @@ import soundfile as sf
 
 from shared.constants import ValidationStatus
 from shared.models import ScriptLine
-from voice.validator.validation_loop import ValidationLoop
 from voice.tts_server.embedding_store import EmbeddingStore
+from voice.validator.validation_loop import ValidationLoop
 
 
 class FakeEngine:

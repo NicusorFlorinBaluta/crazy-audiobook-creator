@@ -1,5 +1,7 @@
 # Tiered Dialogue Attribution Auto-Fix System — 2026-09-02
 
+**Status:** Current
+
 ## Overview
 
 During Pass 2 audiobook script generation, rapid back-and-forth dialogue ("staccato banter", e.g., *"Do you know about the cave?" / "What cave?" / "The cave of death"*) frequently suffers from attribution collapse in bulk extraction. In *Isles of the Emberdark*, Chapter 39 collapsed multiple turns into single speakers (attributing Dusk's line *"What cave?"* to Colonel Dajer). Across the entire book, 63 such dialogue turn collapses were detected.

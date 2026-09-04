@@ -16,7 +16,7 @@ import os
 import re
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
@@ -55,7 +55,7 @@ def _normalized_identity(value: str) -> str:
 
 
 def _attribution_identity_conflict(
-    decision: "AttributionDecision",
+    decision: AttributionDecision,
     candidates: dict[str, dict[str, Any]],
 ) -> str | None:
     """Reject a resolver that names one person but returns another/generic ID."""
@@ -146,7 +146,7 @@ class _ProviderHealth:
         try:
             state = self._read()
             entry = dict(state.get(provider, {}))
-            now = datetime.now(timezone.utc).isoformat()
+            now = datetime.now(UTC).isoformat()
             entry["last_latency_ms"] = latency_ms
             if success:
                 entry.update({"consecutive_failures": 0, "last_success": now,

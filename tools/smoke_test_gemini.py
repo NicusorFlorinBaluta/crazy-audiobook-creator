@@ -15,7 +15,6 @@ import yaml
 
 from brain.validators.gemini_validation import GeminiApiClient, GeminiWebClient
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 

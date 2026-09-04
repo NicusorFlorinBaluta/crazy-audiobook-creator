@@ -5,15 +5,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from brain.orchestrator.audio_candidates import candidate_score, list_candidates, preserve_candidate
-from brain.orchestrator.job_queue import JobQueue
-from brain.orchestrator.review_gate import collect_review_gate, write_release_report
-from brain.orchestrator.stage_runner import PipelineResumePlan
+import brain.dashboard.api.main as dashboard_main
 from brain.dashboard.api.main import (
     _automatic_extraction_review_pending,
     _automatic_pipeline_review_pending,
 )
-import brain.dashboard.api.main as dashboard_main
+from brain.orchestrator.audio_candidates import candidate_score, list_candidates, preserve_candidate
+from brain.orchestrator.job_queue import JobQueue
+from brain.orchestrator.review_gate import collect_review_gate, write_release_report
+from brain.orchestrator.stage_runner import PipelineResumePlan
 from shared.constants import PipelineStage
 from shared.models import QualityResult, ValidationStatus
 

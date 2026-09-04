@@ -24,7 +24,6 @@ if str(repo_root) not in sys.path:
 
 from brain.orchestrator.pipeline import Pipeline
 from brain.orchestrator.review_gate import collect_review_gate
-from shared.models import ScriptChapter
 
 logging.basicConfig(
     level=logging.INFO,

@@ -14,7 +14,7 @@ import logging
 import re
 import shutil
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -22,26 +22,30 @@ from zoneinfo import ZoneInfo
 
 import yaml
 
-from brain.director.character_analyzer import (
-    CHARACTER_ANALYSIS_REVISION,
-    CharacterAnalyzer,
-    _SYSTEM_PROMPT as CHARACTER_SYSTEM_PROMPT,
-)
-from brain.director.ollama_client import OllamaClient
 from brain.director.attribution_audit import (
     audit_book_attribution,
     queue_attribution_audit_issues,
     repair_deterministic_named_attribution,
 )
+from brain.director.character_analyzer import (
+    _SYSTEM_PROMPT as CHARACTER_SYSTEM_PROMPT,
+)
+from brain.director.character_analyzer import (
+    CHARACTER_ANALYSIS_REVISION,
+    CharacterAnalyzer,
+)
+from brain.director.ollama_client import OllamaClient
 from brain.director.script_generator import ScriptGenerator
 from brain.extractor.epub_parser import EpubParser
+from brain.orchestrator.audio_candidates import preserve_candidate
 from brain.orchestrator.delivery_manager import DeliveryManager
 from brain.orchestrator.job_queue import JobQueue
+from brain.orchestrator.notifier import notifier
 from brain.orchestrator.review_gate import collect_review_gate, write_release_report
-from brain.orchestrator.audio_candidates import preserve_candidate
 from brain.orchestrator.stage_runner import PipelineResumePlan
 from brain.orchestrator.voice_client import VoiceClient
 from brain.validators.gemini_validation import GeminiValidationService
+from shared import paths as shared_paths
 from shared.artifacts import (
     atomic_write_json,
     atomic_write_text,
@@ -53,11 +57,18 @@ from shared.artifacts import (
     manifest_path,
     master_manifest_path,
 )
-from shared.constants import MASTERING_SCHEMA_VERSION, PipelineStage
+from shared.config_validation import validate_brain_config
+from shared.constants import (
+    DEFAULT_OLLAMA_MODEL,
+    MASTERING_SCHEMA_VERSION,
+    GenerationCancelled,
+    PipelineStage,
+)
+from shared.logging_utils import rotate_file
 from shared.models import (
     AudiobookMetadata,
-    BootstrapVoicesRequest,
     BookScript,
+    BootstrapVoicesRequest,
     ExportChapterInfo,
     ExportM4BRequest,
     GenerateChapterRequest,
@@ -65,21 +76,18 @@ from shared.models import (
     MasterSegmentInfo,
     ProjectStatus,
 )
-from shared.voice_casting import (
-    build_voice_cast,
-    required_voice_character_ids,
-    speaking_character_ids,
-)
+from shared.progress import ProgressEstimator
 from shared.pronunciation import (
     apply_pronunciations,
     build_pronunciation_inventory,
     load_pronunciation_dictionary,
 )
-from shared.single_instance import SingleInstanceLock
-from shared.progress import ProgressEstimator
-from shared.logging_utils import rotate_file
 from shared.reference_selection import select_reference_text
-from shared.config_validation import validate_brain_config
+from shared.single_instance import SingleInstanceLock
+from shared.voice_casting import (
+    build_voice_cast,
+    required_voice_character_ids,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -118,11 +126,21 @@ class Pipeline:
 
     def __init__(
         self,
-        config_path: str | Path = "brain/config.yaml",
-        projects_dir: str | Path = "brain/projects",
+        config_path: str | Path = shared_paths.BRAIN_CONFIG_PATH,
+        projects_dir: str | Path = shared_paths.PROJECTS_DIR,
+        workspace_dir: str | Path | None = None,
     ):
         self.config_path = Path(config_path)
         self.projects_dir = Path(projects_dir)
+        # Audio intermediates root. Injectable so it is not a hidden global:
+        # tests and alternate layouts can point it elsewhere, and production
+        # resolves it from the repository root rather than the working
+        # directory.
+        self.workspace_dir = Path(
+            workspace_dir
+            if workspace_dir is not None
+            else shared_paths.WORKSPACE_DIR
+        )
         self.projects_dir.mkdir(parents=True, exist_ok=True)
 
         self.config = self._load_config()
@@ -134,7 +152,7 @@ class Pipeline:
         ollama_cfg = self.config.get("ollama", {})
         self.ollama = OllamaClient(
             host=ollama_cfg.get("host", "http://localhost:11434"),
-            model=ollama_cfg.get("model", "qwen3:32b"),
+            model=ollama_cfg.get("model", DEFAULT_OLLAMA_MODEL),
             fallback_models=ollama_cfg.get("fallback_models", []),
             timeout=ollama_cfg.get("timeout", 120),
             max_retries=ollama_cfg.get("max_retries", 3),
@@ -306,7 +324,7 @@ class Pipeline:
     def _load_config(self) -> dict[str, Any]:
         """Load pipeline configuration from YAML."""
         if self.config_path.exists():
-            with open(self.config_path, "r", encoding="utf-8") as f:
+            with open(self.config_path, encoding="utf-8") as f:
                 return validate_brain_config(yaml.safe_load(f) or {})
         logger.warning("Config file not found: %s — using defaults", self.config_path)
         return {}
@@ -369,13 +387,64 @@ class Pipeline:
 
         env = os.environ.copy()
         env["OLLAMA_HOST"] = parsed_host.netloc
+
+        # --- GPU selection ------------------------------------------------
+        # `GGML_VK_VISIBLE_DEVICES` selects the Vulkan backend. `HIP_VISIBLE_DEVICES`
+        # selects ROCm/hipBLAS, which on RDNA3 is usually markedly faster for
+        # *prompt processing* (prefill) and is where flash attention is actually
+        # implemented. Both achieve the same device isolation; the backend is
+        # now an explicit choice rather than an implicit consequence of which
+        # variable happens to be set.
+        backend = str(ollama_cfg.get("gpu_backend", "vulkan")).strip().lower()
         visible_devices = str(
-            ollama_cfg.get("vulkan_visible_devices", "")
+            ollama_cfg.get(
+                "visible_devices",
+                ollama_cfg.get("vulkan_visible_devices", ""),
+            )
         ).strip()
         if visible_devices:
-            env["GGML_VK_VISIBLE_DEVICES"] = visible_devices
+            if backend == "rocm":
+                env["HIP_VISIBLE_DEVICES"] = visible_devices
+                env["ROCR_VISIBLE_DEVICES"] = visible_devices
+            else:
+                env["GGML_VK_VISIBLE_DEVICES"] = visible_devices
+
         if ollama_cfg.get("flash_attention", True):
             env["OLLAMA_FLASH_ATTENTION"] = "1"
+
+        # --- Slot count and KV cache --------------------------------------
+        # This was previously left to Ollama's autodetection, which commonly
+        # chooses 4. Two costs follow from that:
+        #
+        #  1. KV cache is reserved *per slot*, so `num_ctx: 16384` with 4 slots
+        #     reserves up to 65,536 tokens of cache. On a 27B model that can
+        #     force layers off the GPU despite `"num_gpu": 99`.
+        #  2. Sequential chunk requests can land on different slots, which
+        #     defeats prefix-cache reuse of the system prompt. That prompt is
+        #     byte-identical across every chunk of a chapter (see
+        #     `ScriptGenerator._process_fragments`), so re-evaluating it is
+        #     pure waste -- and measured `prompt_eval_duration` has been ~33%
+        #     of a request's working time.
+        #
+        # One slot is correct here: the pipeline serializes GPU work anyway.
+        env["OLLAMA_NUM_PARALLEL"] = str(
+            int(ollama_cfg.get("num_parallel", 1))
+        )
+
+        kv_cache_type = str(ollama_cfg.get("kv_cache_type", "")).strip()
+        if kv_cache_type:
+            # Requires flash attention. Quantizing the KV cache cuts its VRAM
+            # substantially, which helps keep a 27B model fully offloaded at a
+            # 16k context.
+            env["OLLAMA_KV_CACHE_TYPE"] = kv_cache_type
+
+        keep_alive = str(ollama_cfg.get("keep_alive", "")).strip()
+        if keep_alive:
+            # The pipeline unloads explicitly at stage boundaries, so the
+            # default 5-minute idle unload only risks paying an unnecessary
+            # ~45s model reload if a stage stalls mid-run.
+            env["OLLAMA_KEEP_ALIVE"] = keep_alive
+
         models_dir = str(ollama_cfg.get("models_dir", "")).strip()
         if models_dir:
             env["OLLAMA_MODELS"] = models_dir
@@ -402,9 +471,13 @@ class Pipeline:
         kwargs["stdout"] = self._ollama_server_log_handle
         kwargs["stderr"] = subprocess.STDOUT
         logger.info(
-            "Starting managed Ollama at %s (Vulkan devices=%s, models=%s, log=%s)",
+            "Starting managed Ollama at %s (backend=%s, devices=%s, "
+            "num_parallel=%s, kv_cache=%s, models=%s, log=%s)",
             self.ollama.host,
+            backend,
             visible_devices or "server default",
+            env.get("OLLAMA_NUM_PARALLEL"),
+            kv_cache_type or "default",
             models_dir or "Ollama default",
             log_path,
         )
@@ -805,7 +878,7 @@ class Pipeline:
             )
         book = self.parser.parse(epub_path)
         project_id = self._make_project_id(book.metadata.title)
-        
+
         base_id = project_id
         counter = 1
         while True:
@@ -846,7 +919,7 @@ class Pipeline:
             status=PipelineStage.CREATED,
             total_chapters=book.metadata.total_chapters,
             total_lines=0,
-            started_at=datetime.now(timezone.utc),
+            started_at=datetime.now(UTC),
         )
 
         initial_state = status.model_dump()
@@ -984,7 +1057,7 @@ class Pipeline:
             {
                 "active_generation_chapter_selection": active_selection,
                 "resume_after_restart": False,
-                "last_run_started_at": datetime.now(timezone.utc).isoformat(),
+                "last_run_started_at": datetime.now(UTC).isoformat(),
                 "elapsed_seconds": prev_elapsed,
                 "error_message": None,
             },
@@ -1202,7 +1275,6 @@ class Pipeline:
                 },
             )
             try:
-                from brain.orchestrator.notifier import notifier
                 job_info = self.job_queue.get_job(project_id) or {}
                 p_title = job_info.get("title") or project_id
                 char_count = len(review_pause.item_ids or [])
@@ -1229,7 +1301,6 @@ class Pipeline:
                 elapsed_seconds=elapsed,
             )
             try:
-                from brain.orchestrator.notifier import notifier
                 job_info = self.job_queue.get_job(project_id) or {}
                 p_title = job_info.get("title") or project_id
                 notifier.notify_paused_after_delivery(project_id, p_title, completed_part=str(_gdp))
@@ -1246,7 +1317,6 @@ class Pipeline:
                 elapsed_seconds=elapsed,
             )
             try:
-                from brain.orchestrator.notifier import notifier
                 job_info = self.job_queue.get_job(project_id) or {}
                 p_title = job_info.get("title") or project_id
                 curr_ch = job_info.get("current_chapter")
@@ -1254,7 +1324,12 @@ class Pipeline:
             except Exception as notif_exc:
                 logger.debug("Notification error: %s", notif_exc)
             raise
-        except KeyboardInterrupt:
+        except (GenerationCancelled, KeyboardInterrupt):
+            # `GenerationCancelled` is an operator pause propagated from the
+            # Ollama client; `KeyboardInterrupt` is a real Ctrl-C. Both mean
+            # "park this run and keep the completed checkpoints", and both are
+            # BaseException subclasses so they tunnel past the broad
+            # `except Exception` handlers above.
             elapsed = time.time() - start_time
             logger.info("Pipeline paused for '%s' (interrupted)", project_id)
             self._update_stage(
@@ -1455,18 +1530,29 @@ class Pipeline:
             except Exception:
                 reuse_characters = False
 
-        if hasattr(self.job_queue, "emit_progress"):
-            self.job_queue.emit_progress(
-                project_id,
-                ProgressEvent(
-                    stage="scripting",
-                    phase="character_discovery" if not reuse_characters else "fragment_annotation",
-                    message="Pass 1: Discovering characters and voice profiles..." if not reuse_characters else "Preparing chapter scripting...",
-                    chapter=1,
-                    chapter_total=len(book.chapters),
-                    percent=0.0,
+        self._progress_estimator.reset(f"{project_id}:character_analysis")
+        self.job_queue.update_progress(
+            project_id,
+            self._progress_estimator.snapshot(
+                f"{project_id}:character_analysis",
+                stage=PipelineStage.SCRIPTING.value,
+                phase=(
+                    "fragment_annotation"
+                    if reuse_characters
+                    else "character_discovery"
                 ),
-            )
+                message=(
+                    "Preparing chapter scripting..."
+                    if reuse_characters
+                    else "Pass 1: Discovering characters and voice profiles..."
+                ),
+                completed_units=0,
+                total_units=len(book.chapters),
+                chapter=1,
+                chapter_position=1,
+                chapter_total=len(book.chapters),
+            ),
+        )
 
         joint_discovery = self._joint_script_analysis_enabled()
         joint_checkpoint_path = project_dir / "characters.joint.checkpoint.json"
@@ -1524,21 +1610,32 @@ class Pipeline:
                 registry = CharacterRegistry.model_validate_json(chars_path.read_text(encoding="utf-8"))
             else:
                 chars_ckpt_path = project_dir / "characters.checkpoint.json"
+                analysis_tick = time.perf_counter()
+
                 def _analyzer_progress(percent: float, message: str, ch_num: int, unit_idx: int, total_units: int) -> None:
-                    if hasattr(self.job_queue, "emit_progress"):
-                        self.job_queue.emit_progress(
-                            project_id,
-                            ProgressEvent(
-                                stage="scripting",
-                                phase="character_discovery",
-                                message=message,
-                                chapter=ch_num,
-                                chapter_total=len(book.chapters),
-                                percent=percent,
-                                line_position=unit_idx,
-                                line_total=total_units,
-                            ),
-                        )
+                    """Publish character-discovery progress via the canonical snapshot."""
+                    nonlocal analysis_tick
+                    key = f"{project_id}:character_analysis"
+                    now = time.perf_counter()
+                    if unit_idx > 1:
+                        self._progress_estimator.observe(key, 1.0, now - analysis_tick)
+                    analysis_tick = now
+                    self.job_queue.update_progress(
+                        project_id,
+                        self._progress_estimator.snapshot(
+                            key,
+                            stage=PipelineStage.SCRIPTING.value,
+                            phase="character_discovery",
+                            message=message,
+                            completed_units=max(0, unit_idx),
+                            total_units=max(1, total_units),
+                            chapter=ch_num,
+                            chapter_position=ch_num,
+                            chapter_total=len(book.chapters),
+                            line_position=unit_idx,
+                            line_total=total_units,
+                        ),
+                    )
 
                 registry = self.character_analyzer.analyze(
                     book,
@@ -1877,7 +1974,7 @@ class Pipeline:
         )
         atomic_write_json(
             project_dir / "pronunciation_candidates.json",
-            build_pronunciation_inventory(project_dir),
+            build_pronunciation_inventory(project_dir, client=self.ollama),
         )
 
         total_elapsed = time.time() - t0
@@ -1924,8 +2021,8 @@ class Pipeline:
         # named non-speaking entities. Only bootstrap reference voices that are
         # actually used by a completed script, following any shared voice_id
         # assignment made by the analyzer.
-        from shared.models import ScriptChapter
         from shared.constants import Gender
+        from shared.models import ScriptChapter
 
         script_chapters: list[ScriptChapter] = []
         for script_path in self._script_files(project_dir / "script"):
@@ -1936,12 +2033,7 @@ class Pipeline:
             )
         speaking_ids = required_voice_character_ids(script_chapters, registry)
 
-        voice_config_path = Path("voice/config.yaml")
-        voice_config = (
-            yaml.safe_load(voice_config_path.read_text(encoding="utf-8")) or {}
-            if voice_config_path.exists()
-            else {}
-        )
+        voice_config = shared_paths.voice_config()
         tts_config = voice_config.get("tts", {})
         design_model = tts_config.get(
             "voice_design_model",
@@ -1973,7 +2065,7 @@ class Pipeline:
         for voice_id, profile in cast["voices"].items():
             owner_id = profile.get("owner_character_id", voice_id)
             base_char = registry.characters[owner_id]
-            
+
             real_lines = list(character_script_lines.get(voice_id, []))
             if not real_lines:
                 for speaker_id in profile.get("assigned_characters", []):
@@ -1987,7 +2079,7 @@ class Pipeline:
                 maximum_words=38,
             )
             ts = reference_selection.text
-                    
+
             dialogue_turns = sum(
                 len(speaker_script_lines.get(speaker_id, []))
                 for speaker_id in profile.get("assigned_characters", [])
@@ -2338,8 +2430,7 @@ class Pipeline:
                 except Exception as nas_exc:
                     logger.warning("NAS sync for delivery %s failed: %s", batch.delivery_id, nas_exc)
                 try:
-                    from brain.orchestrator.notifier import notifier
-                    notifier.notify_delivery_published(
+                        notifier.notify_delivery_published(
                         project_id=project_id,
                         project_title=title,
                         part_title=f"Part {batch.ordinal:02d}",
@@ -3181,7 +3272,6 @@ class Pipeline:
                         prune_parts=True,
                     )
                 try:
-                    from brain.orchestrator.notifier import notifier
                     job_info = self.job_queue.get_job(project_id) or {}
                     p_title = job_info.get("title") or project_id
                     notifier.notify_full_book_ready(
@@ -3308,9 +3398,7 @@ class Pipeline:
         reference_manager = None
         try:
             from voice.tts_server.voice_library import VoiceLibraryManager
-            voice_config = yaml.safe_load(
-                Path("voice/config.yaml").read_text(encoding="utf-8")
-            ) or {}
+            voice_config = shared_paths.voice_config()
             reference_manager = VoiceLibraryManager(
                 Path(
                     voice_config.get("storage", {}).get(
@@ -3371,7 +3459,6 @@ class Pipeline:
         project_dir: Path,
     ) -> list[Any]:
         """Apply deterministic pronunciation and character-voice inputs."""
-        import re
         from shared.models import VoiceFXSettings
 
         lines = [line.model_copy(deep=True) for line in chapter.lines]
@@ -3497,7 +3584,7 @@ class Pipeline:
         try:
             metric = {
                 "schema_version": 2,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
                 **payload,
             }
             metrics_path = project_dir / "performance_metrics.jsonl"
@@ -3521,7 +3608,7 @@ class Pipeline:
 
         generated: list[int] = []
         mastered: list[int] = []
-        workspace = Path("workspace") / project_id
+        workspace = self.workspace_dir / project_id
         narrator_voice_id = self._selected_narrator_voice_id(project_dir)
 
         for script_file in script_files:
@@ -3581,7 +3668,7 @@ class Pipeline:
 
             stored_segments = stored_manifest.get("segments", [])
             segment_paths = [
-                Path("workspace") / item["file"]
+                self.workspace_dir / item["file"]
                 for item in stored_segments
             ]
             if not segment_paths or not all(
@@ -3665,10 +3752,9 @@ class Pipeline:
     @staticmethod
     def _voice_generation_config(project_id: str | None = None) -> dict[str, Any]:
         """Return Voice settings that can change generated segment bytes."""
-        config_path = Path("voice/config.yaml")
-        if not config_path.exists():
+        config = shared_paths.voice_config()
+        if not config:
             return {}
-        config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
         result = {
             "tts": config.get("tts", {}),
             "validation": config.get("validation", {}),
@@ -3695,12 +3781,7 @@ class Pipeline:
         request: MasterChapterRequest,
     ) -> str:
         """Fingerprint every local input that can change a mastered chapter."""
-        voice_config: dict[str, Any] = {}
-        voice_config_path = Path("voice/config.yaml")
-        if voice_config_path.exists():
-            voice_config = yaml.safe_load(
-                voice_config_path.read_text(encoding="utf-8")
-            ) or {}
+        voice_config: dict[str, Any] = shared_paths.voice_config()
         from voice.tts_server.voice_library import VoiceLibraryManager
 
         narrator_reference = VoiceLibraryManager(

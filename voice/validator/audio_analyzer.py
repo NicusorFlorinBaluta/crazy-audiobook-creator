@@ -150,31 +150,31 @@ class AudioAnalyzer:
         """Measure median pitch (F0) using autocorrelation."""
         if len(audio) == 0:
             return 0.0
-            
+
         frame_size = int(sample_rate * 0.05)  # 50ms frames
         if len(audio) < frame_size:
             return 0.0
-            
+
         pitches = []
         # Search range for 50Hz to 400Hz
         min_lag = int(sample_rate / 400.0)
         max_lag = int(sample_rate / 50.0)
-        
+
         for i in range(0, len(audio) - frame_size, frame_size):
             frame = audio[i:i + frame_size]
             # Autocorrelation
             result = np.correlate(frame, frame, mode='full')
             result = result[len(result) // 2:]
-            
+
             if max_lag < len(result):
                 peak_idx = min_lag + np.argmax(result[min_lag:max_lag])
                 if result[peak_idx] > 0.2 * result[0]:  # Threshold for voiced frame
                     pitch = sample_rate / peak_idx
                     pitches.append(pitch)
-                    
+
         if not pitches:
             return 0.0
-            
+
         return float(np.median(pitches))
 
     @staticmethod

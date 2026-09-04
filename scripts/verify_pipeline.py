@@ -12,14 +12,13 @@ import hashlib
 import json
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from shared.runtime_preflight import collect_runtime_report
-
 
 MODEL_TIERS = {"gpu-smoke", "chapter", "full"}
 
@@ -99,7 +98,7 @@ def main() -> int:
 
     report: dict[str, Any] = {
         "schema_version": 1,
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
         "tier": args.tier,
         "source_control": _source_control_state(root),
         "runtime": collect_runtime_report(),

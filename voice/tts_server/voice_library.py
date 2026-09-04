@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -105,7 +105,7 @@ class VoiceLibraryManager:
         previous_path = Path(previous["file"]).resolve() if previous.get("file") else None
 
         registry["project_id"] = project_id
-        registry.setdefault("created_at", datetime.now(timezone.utc).isoformat())
+        registry.setdefault("created_at", datetime.now(UTC).isoformat())
         registry.setdefault("voices", {})
 
         registry["voices"][character_id] = {
@@ -119,7 +119,7 @@ class VoiceLibraryManager:
             "design_fingerprint": design_fingerprint,
             "source_type": source_type,
             "source_filename": source_filename,
-            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "generated_at": datetime.now(UTC).isoformat(),
         }
 
         self._save_registry(project_id, registry)
@@ -209,7 +209,7 @@ class VoiceLibraryManager:
 
         registry_path = self._project_dir(project_id) / "voices.json"
         if registry_path.exists():
-            with open(registry_path, "r", encoding="utf-8") as f:
+            with open(registry_path, encoding="utf-8") as f:
                 data = json.load(f)
                 self._registry_cache[project_id] = data
                 return data

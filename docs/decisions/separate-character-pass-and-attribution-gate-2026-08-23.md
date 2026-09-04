@@ -1,5 +1,7 @@
 # Separate character pass and early attribution gate — 2026-08-23
 
+**Status:** Current
+
 ## Decision
 
 Production uses a dedicated book-wide character extraction pass before

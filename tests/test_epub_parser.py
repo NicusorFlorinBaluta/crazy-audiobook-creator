@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-import unittest
 import tempfile
+import unittest
 from pathlib import Path
+
 from bs4 import BeautifulSoup
 from ebooklib import epub
 
-from brain.extractor.epub_parser import EpubParser, SKIP_TITLE_PATTERNS, PREFACE_TITLE_PATTERNS
+from brain.extractor.epub_parser import EpubParser
 from brain.extractor.text_cleaner import TextCleaner
 
 

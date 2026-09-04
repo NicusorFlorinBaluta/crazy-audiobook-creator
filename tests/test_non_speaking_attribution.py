@@ -5,7 +5,6 @@ import unittest
 
 from brain.director.attribution_audit import (
     audit_book_attribution,
-    queue_attribution_audit_issues,
     repair_deterministic_named_attribution,
 )
 from brain.director.script_generator import ScriptGenerator
@@ -151,13 +150,13 @@ class NonSpeakingAttributionTests(unittest.TestCase):
         )
         # Fragment 1 is "Cakoban did it.", fragment 2 is "Oh,", fragment 4 is "You think that too..."
         book, scripts = self._make_book_and_script(source, {1: "dusk", 2: "sak", 4: "sak"})
-        
+
         report = audit_book_attribution(book, self.registry, scripts)
         self.assertFalse(report["passed"])
-        
+
         repair = repair_deterministic_named_attribution(book, self.registry, scripts)
         self.assertEqual(len(repair["repaired"]), 2)
-        
+
         lines = {l.source_fragment_id: l for l in scripts[0].lines}
         self.assertEqual(lines[2].speaker, "ruen")
         self.assertEqual(lines[4].speaker, "ruen")
@@ -171,13 +170,13 @@ class NonSpeakingAttributionTests(unittest.TestCase):
         )
         # Fragment 1 is "What are you doing?", fragment 2 is "I will go...", fragment 4 is "You will need..."
         book, scripts = self._make_book_and_script(source, {1: "vathi", 2: "kokerlii", 4: "dusk"})
-        
+
         report = audit_book_attribution(book, self.registry, scripts)
         self.assertFalse(report["passed"])
-        
+
         repair = repair_deterministic_named_attribution(book, self.registry, scripts)
         self.assertEqual(len(repair["repaired"]), 1)
-        
+
         lines = {l.source_fragment_id: l for l in scripts[0].lines}
         self.assertEqual(lines[2].speaker, "dusk")
 
@@ -190,13 +189,13 @@ class NonSpeakingAttributionTests(unittest.TestCase):
         )
         # Fragment 0 is "Look over there,", fragment 2 is "But it's so beautiful!", fragment 4 is "Can you believe..."
         book, scripts = self._make_book_and_script(source, {0: "starling", 2: "starling", 4: "starling"})
-        
+
         report = audit_book_attribution(book, self.registry, scripts)
         self.assertFalse(report["passed"])
-        
+
         repair = repair_deterministic_named_attribution(book, self.registry, scripts)
         self.assertEqual(len(repair["repaired"]), 2)
-        
+
         lines = {l.source_fragment_id: l for l in scripts[0].lines}
         self.assertEqual(lines[2].speaker, "ed")
         self.assertEqual(lines[4].speaker, "ed")
@@ -209,7 +208,7 @@ class NonSpeakingAttributionTests(unittest.TestCase):
             '"Goodbye," Dusk said.'
         )
         book, scripts = self._make_book_and_script(source, {0: "dusk", 2: "vathi", 4: "dusk"})
-        
+
         ScriptGenerator.sync_dialogue_counts(scripts, self.registry)
         self.assertEqual(self.registry.characters["dusk"].dialogue_count, 2)
         self.assertEqual(self.registry.characters["vathi"].dialogue_count, 1)

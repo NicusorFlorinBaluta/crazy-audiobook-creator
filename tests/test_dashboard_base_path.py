@@ -1,7 +1,6 @@
-import unittest
 import re
+import unittest
 from pathlib import Path
-
 
 FRONTEND = Path("brain/dashboard/frontend")
 
@@ -39,14 +38,58 @@ class DashboardBasePathTests(unittest.TestCase):
         self.assertIn("new URL('ws/updates', window.location.href)", app_js)
 
     def test_frontend_assets_share_one_cache_revision(self):
+        """Every referenced asset must carry the same revision.
+
+        A stale revision on one asset lets a browser serve old CSS with new JS,
+        which is exactly the mixing the query revisions exist to prevent. The
+        expected count is derived from the files on disk rather than hardcoded,
+        so adding a script cannot leave this assertion silently weaker.
+        """
         index = (FRONTEND / "index.html").read_text(encoding="utf-8")
-        revisions = re.findall(
-            r'(?:styles\.css|(?:app|pipeline|script-viewer|log-console)\.js)'
-            r'\?v=([^"\']+)',
-            index,
+        referenced = re.findall(r'static/((?:js|css)/[\w.-]+)\?v=([0-9.]+)', index)
+        self.assertTrue(referenced, "no revisioned assets found in index.html")
+
+        for relative, _ in referenced:
+            self.assertTrue(
+                (FRONTEND / relative).is_file(),
+                f"index.html references a missing asset: {relative}",
+            )
+
+        local_scripts = {path.name for path in (FRONTEND / "js").glob("*.js")}
+        self.assertEqual(
+            {Path(relative).name for relative, _ in referenced if relative.endswith(".js")},
+            local_scripts,
+            "every js/ file must be referenced by index.html, and vice versa",
         )
-        self.assertEqual(len(revisions), 5)
-        self.assertEqual(len(set(revisions)), 1)
+
+        self.assertEqual(len({revision for _, revision in referenced}), 1)
+
+    def test_frontend_build_header_matches_the_asset_revision(self):
+        """Keep the served UI-version header aligned with the asset revision.
+
+        These are maintained by hand in two files. When they drift, the
+        ``X-Crazy-Audiobook-UI-Version`` header reports a build that does not
+        correspond to the assets actually referenced by ``index.html``, which
+        makes "did the client get the new UI?" unanswerable from a response.
+        """
+        index = (FRONTEND / "index.html").read_text(encoding="utf-8")
+        revisions = set(re.findall(r'\.(?:css|js)\?v=([0-9.]+)', index))
+        self.assertEqual(len(revisions), 1, f"assets disagree: {revisions}")
+        asset_revision = revisions.pop()
+
+        api_source = Path("brain/dashboard/api/main.py").read_text(
+            encoding="utf-8"
+        )
+        match = re.search(r'FRONTEND_BUILD = "([0-9.]+)"', api_source)
+        self.assertIsNotNone(match, "FRONTEND_BUILD not found")
+
+        # "2026.09.02.1" (header) and "20260902.1" (asset query) are the same
+        # revision written in two formats; compare them digit-wise.
+        self.assertEqual(
+            match.group(1).replace(".", ""),
+            asset_revision.replace(".", ""),
+            "FRONTEND_BUILD and the index.html asset revision have drifted",
+        )
 
     def test_embedded_frontend_disables_stale_browser_caching(self):
         api_source = Path("brain/dashboard/api/main.py").read_text(

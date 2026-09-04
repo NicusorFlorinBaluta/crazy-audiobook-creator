@@ -1,7 +1,24 @@
 # Direct runtime versions observed in the successful 2026-08-09 Windows AMD
 # full-book run. Install the machine-specific PyTorch/ROCm build separately;
 # it is intentionally not constrained to a public CUDA/CPU wheel here.
+#
+# Use this file when installing, so a reinstall cannot silently change the
+# audio stack:
+#
+#   python -m pip install -r voice/requirements.txt \
+#       -c voice/constraints-windows-rocm-tested.txt
+#
+# `shared/runtime_preflight.py` compares the installed versions of every
+# audio-critical package against this file and reports anything unpinned or
+# drifting. Keep it in sync when a release is validated.
 transformers==4.57.3
 faster-whisper==1.2.1
 silero-vad==6.2.1
 openai-whisper==20250625
+
+# TODO(workstation): `qwen-tts` is the package that produces the audio and is
+# currently unpinned, so it is the one gap in this file. Run
+# `python scripts/runtime_preflight.py` on the tested workstation, take the
+# reported `packages["qwen-tts"]` value, and add it here as
+# `qwen-tts==<version>`. Until then the preflight reports it as a warning and
+# generated audio is not reproducible across a reinstall.

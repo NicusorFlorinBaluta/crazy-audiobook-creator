@@ -11,8 +11,8 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import tempfile
+import time
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -48,6 +48,53 @@ def hash_file(path: str | Path) -> str:
     return digest.hexdigest()
 
 
+# On Windows an antivirus scanner or the search indexer can briefly hold an open
+# handle to the destination, making `os.replace` raise PermissionError even
+# though the operation is legitimate. Retrying is the correct response; falling
+# back to a plain copy is not, because `shutil.copyfile` truncates the
+# destination first and a crash mid-copy leaves a partially written state file.
+_REPLACE_ATTEMPTS = 6
+_REPLACE_INITIAL_DELAY_SECONDS = 0.05
+
+
+def _atomic_replace(temporary: Path, destination: Path) -> None:
+    """Replace `destination` with `temporary`, retrying transient lock errors.
+
+    Raises the final `PermissionError` rather than degrading to a non-atomic
+    copy. A loud failure is preferable to a truncated `pipeline_state`,
+    `voice_cast.json`, or chapter manifest, which the artifact model treats as
+    authoritative evidence of completion.
+    """
+    delay = _REPLACE_INITIAL_DELAY_SECONDS
+    for attempt in range(1, _REPLACE_ATTEMPTS + 1):
+        try:
+            os.replace(temporary, destination)
+            return
+        except PermissionError:
+            if attempt == _REPLACE_ATTEMPTS:
+                raise
+            time.sleep(delay)
+            delay *= 2
+
+
+def _fsync_directory(directory: Path) -> None:
+    """Flush the directory entry so a completed rename survives power loss.
+
+    Not supported on Windows, where opening a directory handle this way fails;
+    the rename is still atomic there, only its durability window is wider.
+    """
+    try:
+        dir_fd = os.open(str(directory), os.O_RDONLY)
+    except (OSError, AttributeError):
+        return
+    try:
+        os.fsync(dir_fd)
+    except OSError:
+        pass
+    finally:
+        os.close(dir_fd)
+
+
 def atomic_write_text(path: str | Path, text: str) -> None:
     """Replace a UTF-8 text file atomically within its destination directory."""
     destination = Path(path)
@@ -63,10 +110,8 @@ def atomic_write_text(path: str | Path, text: str) -> None:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
-        try:
-            os.replace(temporary, destination)
-        except PermissionError:
-            shutil.copyfile(temporary, destination)
+        _atomic_replace(temporary, destination)
+        _fsync_directory(destination.parent)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -86,15 +131,21 @@ def atomic_write_bytes(path: str | Path, content: bytes) -> None:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
-        try:
-            os.replace(temporary, destination)
-        except PermissionError:
-            shutil.copyfile(temporary, destination)
+        _atomic_replace(temporary, destination)
+        _fsync_directory(destination.parent)
     finally:
         temporary.unlink(missing_ok=True)
 
 
 def atomic_write_json(path: str | Path, value: Any) -> None:
+    """Serialize `value` as JSON and replace `path` atomically.
+
+    `default=str` is deliberate: several callers persist `Path` and `datetime`
+    values directly, and coercing them is preferable to failing a checkpoint
+    write mid-pipeline. It does mean an unexpected object type is silently
+    stringified rather than raising, so prefer passing
+    `model_dump(mode="json")` output for Pydantic models.
+    """
     atomic_write_text(path, json.dumps(value, ensure_ascii=False, indent=2, default=str))
 
 

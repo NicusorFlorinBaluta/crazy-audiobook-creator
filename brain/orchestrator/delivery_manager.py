@@ -9,15 +9,16 @@ import os
 import re
 import shutil
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterator, Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from shared.single_instance import SingleInstanceLock
 from shared.artifacts import atomic_write_text
+from shared.single_instance import SingleInstanceLock
 
 logger = logging.getLogger(__name__)
 
@@ -148,7 +149,7 @@ class DeliveryManager:
         except Exception as exc:
             logger.error("Failed to load delivery index %s: %s", self.index_path, exc)
             corrupt_path = self.index_path.with_name(
-                f"index.json.corrupt-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+                f"index.json.corrupt-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}"
             )
             try:
                 shutil.copy2(self.index_path, corrupt_path)
@@ -437,7 +438,7 @@ class DeliveryManager:
             chapter_numbers=list(batch.chapter_numbers),
             artifact=filename,
             status="published",
-            published_at=datetime.now(timezone.utc).isoformat(),
+            published_at=datetime.now(UTC).isoformat(),
             sha256=sha256,
             bytes=file_bytes,
             duration_seconds=max(0.0, float(duration_seconds)),

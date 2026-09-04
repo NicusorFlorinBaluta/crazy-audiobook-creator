@@ -1,10 +1,11 @@
 """Unit tests for Tiered Attribution Detector and Adjudicator Guardrails."""
 
 import pytest
+
 from brain.director.attribution_detector import (
-    SuspiciousTurn,
     detect_suspicious_turns,
 )
+from brain.director.script_generator import ScriptGenerator
 from brain.validators.tiered_adjudicator import (
     AdjudicationResult,
     TieredAttributionAdjudicator,
@@ -15,7 +16,6 @@ from brain.validators.tiered_adjudicator import (
 )
 from shared.constants import Gender
 from shared.models import Character, CharacterRegistry, ScriptChapter, ScriptLine
-from brain.director.script_generator import ScriptGenerator
 
 
 @pytest.fixture

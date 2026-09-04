@@ -3,21 +3,25 @@ Lightweight post-processing utilities for TTS-Story audio output.
 """
 from __future__ import annotations
 
-import math
-from dataclasses import dataclass
 import logging
+import math
 import os
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Dict, Optional
 
 import numpy as np
 import soundfile as sf
 
-import shutil
+# Every external audio tool here runs inside `gpu_job()`, which holds
+# `gpu_job_lock` for the whole call. An ffmpeg or SoX process that never exits
+# would therefore wedge the Voice server permanently: no further generation,
+# and no way to unload models. Bound each invocation instead.
+EXTERNAL_TOOL_TIMEOUT_SECONDS = 120
 
-def find_system_tool(name: str) -> Optional[Path]:
+
+def find_system_tool(name: str) -> Path | None:
     p = shutil.which(name)
     return Path(p) if p else None
 
@@ -41,47 +45,47 @@ from shared.models import VoiceFXSettings
 
 logger = logging.getLogger(__name__)
 
-def convert_mp3_to_wav_if_needed(prompt_path: str) -> tuple[str, Optional[Path]]:
+def convert_mp3_to_wav_if_needed(prompt_path: str) -> tuple[str, Path | None]:
     """
     Convert MP3 voice prompts to WAV to prevent artifacts from lossy compression.
-    
+
     Returns:
         tuple: (prompt_path_to_use, temp_file_to_cleanup)
         If conversion is not needed or fails, returns (original_path, None)
     """
     if not prompt_path:
         return prompt_path, None
-    
+
     prompt_ext = Path(prompt_path).suffix.lower()
     if prompt_ext != ".mp3":
         return prompt_path, None
-    
+
     try:
         # Find FFmpeg in local tools folder
         script_dir = Path(__file__).resolve().parent.parent  # src/ -> TTS-Story root
         ffmpeg_path = script_dir / "tools" / "ffmpeg" / "ffmpeg.exe"
-        
+
         if not ffmpeg_path.exists():
             # Try relative path calculation
             ffmpeg_path = Path(__file__).resolve().parents[2] / "tools" / "ffmpeg" / "ffmpeg.exe"
-        
+
         if ffmpeg_path.exists():
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_out:
                 temp_mp3_conv = Path(temp_out.name)
-            
+
             result = subprocess.run(
                 [str(ffmpeg_path), "-y", "-i", str(prompt_path), str(temp_mp3_conv)],
                 capture_output=True,
-                text=True
+                text=True,
+                timeout=EXTERNAL_TOOL_TIMEOUT_SECONDS,
             )
             if result.returncode == 0:
                 logger.info("Converted MP3 voice prompt to WAV for better quality: %s", Path(prompt_path).name)
                 return str(temp_mp3_conv), temp_mp3_conv
-            else:
-                temp_mp3_conv.unlink(missing_ok=True)
+            temp_mp3_conv.unlink(missing_ok=True)
     except Exception as e:
         logger.warning("Failed to convert MP3 voice prompt to WAV: %s", e)
-    
+
     return prompt_path, None
 
 
@@ -96,7 +100,7 @@ class AudioPostProcessor:
         self._unsafe_fallback_warning_emitted = False
 
     @staticmethod
-    def _find_sox() -> Optional[Path]:
+    def _find_sox() -> Path | None:
         """Find a platform-appropriate SoX executable."""
 
         return find_system_tool("sox")
@@ -138,7 +142,12 @@ class AudioPostProcessor:
                 command += ["gain", "-n"]
             if fade_seconds and fade_seconds > 0:
                 command += ["fade", f"{fade_seconds:.2f}"]
-            result = subprocess.run(command, capture_output=True, text=True)
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=EXTERNAL_TOOL_TIMEOUT_SECONDS,
+            )
             if result.returncode != 0:
                 raise RuntimeError(result.stderr.strip() or "SoX post-processing failed")
             processed, _ = sf.read(str(output_path), dtype="float32")
@@ -152,10 +161,10 @@ class AudioPostProcessor:
             if output_path:
                 output_path.unlink(missing_ok=True)
 
-    def apply(self, audio: np.ndarray, sample_rate: int, fx: Optional[VoiceFXSettings], blend_override: Optional[float] = None) -> np.ndarray:
+    def apply(self, audio: np.ndarray, sample_rate: int, fx: VoiceFXSettings | None, blend_override: float | None = None) -> np.ndarray:
         """
         Apply audio effects to the input audio.
-        
+
         Args:
             audio: Input audio array
             sample_rate: Sample rate of the audio
@@ -206,7 +215,7 @@ class AudioPostProcessor:
             blend_mix = blend_override
         else:
             blend_mix = self._compute_blend_mix(fx)
-        
+
         if blend_mix > 0.0:
             processed = self._blend_with_original(base_audio, processed, mix=blend_mix)
 
@@ -216,11 +225,11 @@ class AudioPostProcessor:
         self,
         audio: np.ndarray,
         sample_rate: int,
-        fx: Optional[VoiceFXSettings],
+        fx: VoiceFXSettings | None,
         *,
         normalize: bool = True,
         fade_seconds: float = 0.01,
-        blend_override: Optional[float] = None,
+        blend_override: float | None = None,
     ) -> np.ndarray:
         """Apply optional VFX first, then SoX post-processing."""
         processed = audio
@@ -233,7 +242,7 @@ class AudioPostProcessor:
             fade_seconds=fade_seconds,
         )
 
-    def prepare_prompt_audio(self, prompt_path: str, fx: Optional[VoiceFXSettings]) -> Optional[Path]:
+    def prepare_prompt_audio(self, prompt_path: str, fx: VoiceFXSettings | None) -> Path | None:
         """Apply pitch/speed FX to a prompt audio file and return a temp WAV path."""
         if fx is None:
             return None
@@ -251,7 +260,12 @@ class AudioPostProcessor:
                     command += ["pitch", f"{fx.pitch_semitones * 100:.2f}"]
                 if abs(fx.speed - 1.0) > 1e-3:
                     command += ["tempo", "-s", f"{fx.speed:.3f}"]
-                result = subprocess.run(command, capture_output=True, text=True)
+                result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=EXTERNAL_TOOL_TIMEOUT_SECONDS,
+            )
                 if result.returncode != 0:
                     raise RuntimeError(result.stderr.strip() or "SoX failed")
             else:
@@ -293,16 +307,16 @@ class AudioPostProcessor:
         # Default librosa uses n_fft=2048, hop_length=512 which can sound robotic
         n_fft = 4096
         hop_length = 1024
-        
+
         # Compute STFT with better parameters
         stft = librosa.stft(audio, n_fft=n_fft, hop_length=hop_length)
-        
+
         # Apply phase vocoder time stretch
         stft_stretched = librosa.phase_vocoder(stft, rate=speed, hop_length=hop_length)
-        
+
         # Reconstruct audio
         stretched = librosa.istft(stft_stretched, hop_length=hop_length)
-        
+
         return stretched.astype(np.float32, copy=False)
 
     @staticmethod
@@ -319,7 +333,7 @@ class AudioPostProcessor:
         # Using larger values reduces metallic/robotic artifacts
         n_fft = 4096
         hop_length = 1024
-        
+
         # Try high-quality resampling, fall back to kaiser_best if soxr not available
         try:
             shifted = librosa.effects.pitch_shift(
@@ -339,7 +353,7 @@ class AudioPostProcessor:
                 hop_length=hop_length,
                 res_type='kaiser_best'
             )
-        
+
         return shifted.astype(np.float32, copy=False)
 
     @staticmethod
@@ -383,7 +397,12 @@ class AudioPostProcessor:
                 command += ["pitch", f"{pitch_semitones * 100:.2f}"]
             if abs(speed - 1.0) > 1e-3:
                 command += ["tempo", "-s", f"{speed:.3f}"]
-            result = subprocess.run(command, capture_output=True, text=True)
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=EXTERNAL_TOOL_TIMEOUT_SECONDS,
+            )
             if result.returncode != 0:
                 raise RuntimeError(result.stderr.strip() or "SoX failed")
             processed, _ = sf.read(str(output_path), dtype='float32')

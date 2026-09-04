@@ -10,7 +10,7 @@ import json
 import logging
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -149,7 +149,7 @@ class JobQueue:
         state.setdefault("voice_review_approved", False)
         state.setdefault("voice_review_approved_at", None)
         state.setdefault("voice_review_approved_revision", None)
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         with self._connect() as conn:
             conn.execute(
                 """
@@ -188,7 +188,7 @@ class JobQueue:
                 raise KeyError(f"Job not found: {project_id}")
             current = json.loads(row[0])
             current.update(updates)
-            now = datetime.now(timezone.utc).isoformat()
+            now = datetime.now(UTC).isoformat()
             conn.execute(
                 "UPDATE jobs SET state = ?, updated_at = ? WHERE project_id = ?",
                 (json.dumps(current, default=str), now, project_id),
@@ -267,7 +267,7 @@ class JobQueue:
         note: str = "",
     ) -> dict[str, Any]:
         """Create or replace a non-destructive human review disposition."""
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         with self._connect() as conn:
             conn.execute(
                 """
@@ -297,7 +297,7 @@ class JobQueue:
         latency_ms: int | None = None, details: dict[str, Any] | None = None,
     ) -> int:
         """Append one immutable machine-decision event."""
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         with self._connect() as conn:
             cursor = conn.execute(
                 """INSERT INTO external_validation_events
@@ -314,7 +314,7 @@ class JobQueue:
         human_disposition: str, human_value: str = "",
     ) -> None:
         """Attach a human outcome to all prior machine decisions for an item."""
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         with self._connect() as conn:
             conn.execute(
                 """UPDATE external_validation_events
@@ -541,7 +541,7 @@ class JobQueue:
         details: dict[str, Any] | None = None,
     ) -> None:
         """Log a quality validation result."""
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         with self._connect() as conn:
             conn.execute(
                 """
@@ -690,7 +690,7 @@ class JobQueue:
         is_completed: bool = False,
     ) -> dict[str, Any]:
         """Save playback progress for a project."""
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         with self._connect() as conn:
             conn.execute(
                 """

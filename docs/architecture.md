@@ -119,9 +119,17 @@ silently undo an operator decision. A correction invalidates only chapters in
 which that character speaks and requires renewed voice approval; changing the
 owner of a generated design also marks its preview for regeneration.
 
-It assigns a unique voice to the most important speakers up to `script.max_unique_voices`.
-Less prominent speakers deterministically share a compatible major-character voice
-or the narrator; the character remains distinct in script and metadata through its `voice_id`.
+It assigns a unique voice to the most important speakers up to
+`script.max_unique_voices`. The checked-in default is `0` (unlimited), so on
+the supported configuration every named speaker receives its own voice and the
+overflow path below does not execute.
+
+When a cap is set, less prominent speakers deterministically share the
+dedicated `minor_female` / `minor_male` archetype voices, falling back to the
+narrator when an archetype is absent. (An earlier design shared a *compatible
+major-character* voice instead; that mapping was computed but never read, and
+the archetype fallback is what ships.) The character remains distinct in script
+and metadata through its `voice_id`.
 User-uploaded custom voice samples are strictly preserved during casting and re-synthesis.
 
 A character-analysis fingerprint includes the full extracted book, model, prompt, and voice cap. A change invalidates scripts and voice bootstrap. Voice reference hashes are included in generation fingerprints, so regenerated references invalidate dependent line audio.
@@ -138,9 +146,24 @@ File existence is never sufficient evidence of completion.
 
 At run start, generated and mastered chapter sets are independently reconstructed from these artifacts. A valid generated chapter does not imply a valid master, and a master is not trusted without its own matching manifest.
 
-Atomic replacement is used for JSON state and final audio writes. A valid WAV
-gets a synthesis fingerprint immediately, while validation acceptance is a
-separate hash-bound checkpoint. This lets an interrupted run reuse synthesis
+Atomic replacement is used for JSON state and final audio writes. On Windows an
+antivirus scanner or the search indexer can briefly hold the destination open,
+making `os.replace` raise `PermissionError`; that is retried with bounded
+backoff and then raised. It is deliberately **not** downgraded to a plain copy,
+because `shutil.copyfile` truncates the destination first and a crash mid-copy
+would leave a partially written manifest that the artifact model would treat as
+authoritative evidence of completion.
+
+Synthesis is deterministic. Each line is generated with a seed derived from its
+project, line ID, synthesis text, voice and attempt number, so the same line
+regenerated after a cache purge reproduces byte-identical audio, and a single
+repaired line does not land beside its neighbours as an independently sampled
+take. The attempt number participates in the seed on purpose: a validation
+retry exists because the previous take failed, so reusing its seed would
+reproduce that exact failure.
+
+A valid WAV gets a synthesis fingerprint immediately, while validation
+acceptance is a separate hash-bound checkpoint. This lets an interrupted run reuse synthesis
 without falsely treating unvalidated audio as accepted. The chapter manifest
 remains the completeness boundary.
 
@@ -170,8 +193,15 @@ profile state separately. Production requests reuse one saved conversation per
 validation purpose until its configured turn limit; API triage/adjudication
 remain earlier, cheaper steps in the ladder.
 
-Performance JSONL records use schema version 2 and are summarized by selecting
-the latest successful record for each chapter. TTS segment measurements include
+Performance JSONL records are summarized by selecting the latest successful
+record for each chapter. Summary schema version 4 adds `script_director_llm`:
+prompt/generated token totals, prefill and decode throughput derived from
+Ollama's own `prompt_eval_duration` and `eval_duration`, and a prefix-cache
+health signal comparing mean `prompt_eval_count` for the first request of a
+chapter against later requests in the same chapter. Because the system prompt
+is byte-identical across a chapter's chunks, a ratio near 1.0 means the shared
+prefix is being re-evaluated every chunk -- the condition `ollama.num_parallel`
+and `ollama.gpu_backend` exist to address. TTS segment measurements include
 model load, reference-prompt/cache work, autoregressive generation, decoding,
 concatenation, post-processing, WAV writing, and total time. Summaries expose
 p50/p90/p95 synthesis latency and real-time factor by cache state, text length,
@@ -224,7 +254,19 @@ The SQLite job queue performs atomic read-modify-write transactions and closes c
 
 - User pause immediately closes an active Ollama stream, requests Voice
   cancellation, and terminates app-owned model services. In-flight work may be
-  lost; completed checkpoints remain reusable.
+  lost; completed checkpoints remain reusable. Cancellation is raised as
+  `shared.constants.GenerationCancelled`, a `BaseException` subclass, so it
+  tunnels past the broad `except Exception` handlers between the LLM client and
+  the stage runner instead of being absorbed as a recoverable failure.
+- The Voice service's control endpoints never block on the GPU lock. `/unload`
+  is synchronous and acquires the lock non-blockingly, returning `409` while a
+  job is active; `/cancel` and `/health` only take short-lived locks. A
+  blocking `async` handler there would park the uvicorn event loop for the
+  duration of a chapter and freeze the very endpoints needed to release it.
+- A chapter request for a project that is already generating signals the
+  incumbent run and waits a bounded period for it to release the run slot,
+  then returns `503` rather than silently queueing behind a job that will not
+  stop.
 - Generation checks cancellation at safe segment boundaries.
 - Scheduled and deployment pauses park a live worker at chapter boundaries and preserve `active_stage`.
 - Models unload only after the active operation releases the model lock, or after true idle time.
@@ -284,7 +326,9 @@ preserves EPUB identity and cover.
 When modifying or introducing new pipeline features, developers and AI agents MUST observe the following cross-system impact guidelines:
 
 1. **Progress & Status Alignment**:
-   - Every status/stage change must stay synchronized across the SQLite job queue (`pipeline_state.db`), API endpoints (`/status`, `/voices`), and UI components (`app.js`, `pipeline.js`, `script-viewer.js`).
+   - Every status/stage change must stay synchronized across the SQLite job queue (`pipeline_state.db`), API endpoints (`/status`, `/voices`), and UI components (`app.js`, `pipeline.js`, `script-viewer.js`, `log-console.js`).
+   - Shared DOM helpers live in `js/dom-utils.js`, which must load first. `escapeHtml` is defined there once; do not add a local copy. Four divergent copies previously existed, one of which threw on a numeric argument.
+   - A new frontend file must be referenced from `index.html` with the **same** `?v=` revision as every other asset, and `FRONTEND_BUILD` in `main.py` must match. A stale revision on one asset lets a browser mix old CSS with new JS. `tests/test_dashboard_base_path.py` enforces both.
    - If a stage pauses execution (like `voice_review`), `GET /api/projects/{id}/voices` MUST return `review.required = True` so the UI action banner is rendered.
 
 2. **Stage Reset Endpoint Maintenance (`POST /api/projects/{id}/reset`)**:
@@ -301,7 +345,20 @@ When modifying or introducing new pipeline features, developers and AI agents MU
    - Voice prompt similarity MUST filter out template boilerplate words (`"clearly adult speaker"`, `"maintain vocal identity..."`) to prevent false similarity warnings. Acoustic evaluation uses the Qwen speaker encoder plus the model-independent normalized log-spectrogram diagnostic in `compute_audio_similarity`.
 
 5. **Verification Protocol**:
-   - Always run unit test discovery (`python -m unittest discover -s tests -p "test_*.py"`) and verify project reset/progress flows after making backend schema or stage changes.
+   - Run `ruff check .` first. It is configured in `pyproject.toml` and the
+     Pyflakes (`F`) rules must stay at zero. They exist because this exact
+     failure class reached production here: `F811` caught three duplicate
+     method definitions in `ScriptGenerator` (one pair with *incompatible*
+     contracts), and `F821` caught calls to a `ProgressEvent` class that was
+     never written. Manual audits missed both, repeatedly.
+   - Then run unit test discovery (`python -m unittest discover -s tests -p "test_*.py"`) and verify project reset/progress flows after making backend schema or stage changes.
+   - `pre-commit install` runs the same lint gate locally. `ruff format` is
+     intentionally not enforced yet; adopt it in a dedicated commit.
+   - Paths must resolve through `shared/paths.py`, not bare relative literals.
+     A working-directory-relative `voice/config.yaml` read previously returned
+     `{}` when launched from elsewhere, silently dropping the TTS and
+     validation settings out of the generation fingerprint — so a dtype or
+     threshold change did not invalidate cached audio.
 
 6. **Voice Cast vs Character Registry Split**:
    - `voice_cast.json` (in `brain/projects/<id>/`) is the **authoritative speaker → voice mapping** during generation. The narrator's approved candidate (e.g. `narrator_male`) is stored there under `assigned_characters` and is **not** written back to `characters.json`.

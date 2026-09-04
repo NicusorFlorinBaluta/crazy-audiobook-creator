@@ -10,9 +10,6 @@ import logging
 import re
 import unicodedata
 from difflib import SequenceMatcher
-from typing import Any
-
-import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -77,8 +74,8 @@ class WhisperValidator:
             except ImportError:
                 if self.backend == "faster_whisper":
                     raise
-                import whisper
                 import torch
+                import whisper
 
                 device = self.device
                 if device == "auto":
@@ -131,18 +128,20 @@ class WhisperValidator:
                     return result.get("text", "").strip()
 
                 import tempfile
+
                 import soundfile as sf
                 import torch
-                from silero_vad import load_silero_vad, get_speech_timestamps, collect_chunks
-                
+                from silero_vad import collect_chunks, get_speech_timestamps, load_silero_vad
+
                 vad_model = load_silero_vad()
                 audio_np, sr = sf.read(audio_file, dtype="float32")
                 if audio_np.ndim > 1:
                     audio_np = audio_np.mean(axis=1)
                 wav = torch.from_numpy(audio_np)  # VAD expects 1D
-                
+
                 if sr != 16000:
                     import math
+
                     from scipy.signal import resample_poly
 
                     divisor = math.gcd(sr, 16000)
@@ -153,7 +152,7 @@ class WhisperValidator:
                     ).astype("float32", copy=False)
                     wav = torch.from_numpy(audio_np)
                     sr = 16000
-                
+
                 speech_timestamps = get_speech_timestamps(wav, vad_model, return_seconds=False)
                 if not speech_timestamps:
                     # Silero can reject valid very short, high-pitched, or
@@ -162,12 +161,12 @@ class WhisperValidator:
                     # guaranteed transcription failure.
                     result = self._model.transcribe(audio_file, **kwargs)
                     return result.get("text", "").strip()
-                    
+
                 wav_speech = collect_chunks(speech_timestamps, wav)
-                
+
                 with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
                     tmp_path = f.name
-                
+
                 try:
                     sf.write(tmp_path, wav_speech.numpy(), 16000)
                     result = self._model.transcribe(tmp_path, **kwargs)
@@ -341,7 +340,7 @@ class WhisperValidator:
             import num2words
 
             def replace_ordinal(match):
-                num_str, suffix = match.group(1), match.group(2)
+                num_str = match.group(1)
                 try:
                     return " " + num2words.num2words(int(num_str), to="ordinal") + " "
                 except Exception:

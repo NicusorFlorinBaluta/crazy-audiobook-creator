@@ -14,6 +14,7 @@ from brain.director.ollama_client import (
     OllamaGenerationLimitError,
 )
 from brain.orchestrator.pipeline import Pipeline
+from shared.constants import GenerationCancelled
 
 
 class _FakeStreamResponse:
@@ -235,8 +236,32 @@ class OllamaLifecycleTests(unittest.TestCase):
         client._client.close()
         client._client = _FakeHttpClient(client)
 
-        with self.assertRaisesRegex(KeyboardInterrupt, "cancelled"):
+        with self.assertRaisesRegex(GenerationCancelled, "cancelled"):
             client.generate("test")
+
+    def test_cancellation_tunnels_through_broad_exception_handlers(self) -> None:
+        """A pause must not be absorbed by an `except Exception` block.
+
+        The pipeline has well over a hundred broad handlers. Cancellation
+        therefore derives from `BaseException` -- previously by reusing
+        `KeyboardInterrupt`, now via an explicitly named type that does not
+        conflate an operator pause with a terminal Ctrl-C.
+        """
+        self.assertTrue(issubclass(GenerationCancelled, BaseException))
+        self.assertFalse(issubclass(GenerationCancelled, Exception))
+
+        client = OllamaClient(max_retries=1)
+        client._client.close()
+        client._client = _FakeHttpClient(client)
+
+        def swallow_everything() -> str:
+            try:
+                return client.generate("test")
+            except Exception:  # noqa: BLE001 - deliberately broad for this test
+                return "swallowed"
+
+        with self.assertRaises(GenerationCancelled):
+            swallow_everything()
 
     def test_json_generation_enables_json_mode_and_bounded_output(self) -> None:
         client = OllamaClient(

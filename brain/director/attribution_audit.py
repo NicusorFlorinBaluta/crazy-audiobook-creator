@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import re
+from datetime import UTC, datetime
 from typing import Any
 
 from brain.director.script_generator import ScriptGenerator
 from shared.constants import Gender
 from shared.models import CharacterRegistry, ExtractedBook, ScriptChapter, ScriptLine
-
 
 AUDIT_VERSION = "speaker-attribution-v5"
 
@@ -356,7 +355,7 @@ def audit_book_attribution(
 
     return {
         "audit_version": AUDIT_VERSION,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": datetime.now(UTC).isoformat(),
         "passed": not issues,
         "summary": {
             "chapters": len(book.chapters),

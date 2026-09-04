@@ -13,9 +13,11 @@ import time
 from pathlib import Path
 from typing import Any
 
+from shared.paths import REPO_ROOT
+
 logger = logging.getLogger(__name__)
 
-_DEFAULT_DB_PATH = Path("brain/cache.db")
+_DEFAULT_DB_PATH = REPO_ROOT / "brain" / "cache.db"
 
 
 class CacheService:

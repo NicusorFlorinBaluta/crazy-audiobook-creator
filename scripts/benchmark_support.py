@@ -38,6 +38,8 @@ def git_identity(repo_root: Path) -> dict[str, Any]:
             capture_output=True,
             text=True,
             check=False,
+            # Provenance metadata must never stall a benchmark run.
+            timeout=30,
         )
         return result.stdout.strip() if result.returncode == 0 else None
 

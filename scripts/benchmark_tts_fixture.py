@@ -9,7 +9,7 @@ import json
 import re
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -20,8 +20,6 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from shared.artifacts import atomic_write_json
-from shared.live_test_guard import add_model_opt_in
 from scripts.benchmark_support import (
     balanced_order,
     dependency_versions,
@@ -30,10 +28,11 @@ from scripts.benchmark_support import (
     sha256_file,
     summarize_tts_runs,
 )
+from shared.artifacts import atomic_write_json
+from shared.live_test_guard import add_model_opt_in
 from voice.tts_server.qwen3_engine import Qwen3TTSEngine
 from voice.tts_server.voice_library import VoiceLibraryManager
 from voice.validator.whisper_validator import WhisperValidator
-
 
 FIXTURES = {
     "short_emphasis": "Wait--listen carefully before you open that door.",
@@ -149,7 +148,7 @@ def main() -> int:
     args.output_json.parent.mkdir(parents=True, exist_ok=True)
     report: dict[str, Any] = {
         "schema_version": 2,
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
         "project": args.project,
         "source_control": git_identity(ROOT),
         "dependencies": dependency_versions(),

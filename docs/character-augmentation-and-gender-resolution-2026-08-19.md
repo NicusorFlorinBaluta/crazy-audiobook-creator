@@ -55,14 +55,14 @@ To resolve this reliably, quickly, and affordably, a **Whole-Book Evidence-Augme
 ## Key Technical Components
 
 ### 1. Whole-Book Evidence Collector (`_build_character_evidence_dossier`)
-Located in [`brain/director/character_analyzer.py`](file:///e:/Projects/crazy-audiobook-creator/brain/director/character_analyzer.py):
+Located in [`brain/director/character_analyzer.py`](../brain/director/character_analyzer.py):
 - Gathers whole-book context for each registered character.
 - Searches for mentions across the character's **display name, snake_case ID, and all derived aliases** (`Sixth of the Dusk`, `Dusk`, `Trapper`).
 - Analyzes surrounding sentences (±150 characters) to compute statistical pronoun ratios (`he/him/his/himself/man` vs `she/her/hers/herself/woman`).
 - Captures up to 4 representative scene descriptions and dialogue excerpts.
 
 ### 2. Gemini Character Augmenter (`_augment_characters_with_gemini`)
-Located in [`brain/director/character_analyzer.py`](file:///e:/Projects/crazy-audiobook-creator/brain/director/character_analyzer.py):
+Located in [`brain/director/character_analyzer.py`](../brain/director/character_analyzer.py):
 - Sends the structured dossier to Google Gemini (`gemini-3.5-flash`) with an explicit JSON response schema.
 - **Strict Canonical Identity Constraint**: Gemini is only permitted to update attributes on the pre-existing, deduplicated character IDs. It cannot create, delete, or split characters.
 - Generates 12-dimensional vocal prompts:
@@ -73,8 +73,8 @@ Located in [`brain/director/character_analyzer.py`](file:///e:/Projects/crazy-au
   - **Test Sentences**: 15–25 word in-character lines grounded in the novel's lore.
 
 ### 3. Prompt-Level Guardrails
-- Updated [`character_extraction.md`](file:///e:/Projects/crazy-audiobook-creator/brain/director/prompts/character_extraction.md) and [`_SYSTEM_PROMPT`](file:///e:/Projects/crazy-audiobook-creator/brain/director/character_analyzer.py): Instructs local Qwen to inspect surrounding narrative pronouns and forbids defaulting to `"other"` when gendered pronouns exist.
-- Updated [`script_generator.py`](file:///e:/Projects/crazy-audiobook-creator/brain/director/script_generator.py): In joint mode, allows upgrading `existing.gender` from `Gender.OTHER` when later chapters encounter explicit gender evidence.
+- Updated [`character_extraction.md`](../brain/director/prompts/character_extraction.md) and [`_SYSTEM_PROMPT`](../brain/director/character_analyzer.py): Instructs local Qwen to inspect surrounding narrative pronouns and forbids defaulting to `"other"` when gendered pronouns exist.
+- Updated [`script_generator.py`](../brain/director/script_generator.py): In joint mode, allows upgrading `existing.gender` from `Gender.OTHER` when later chapters encounter explicit gender evidence.
 
 ### 4. Preservation of Custom User Voices
 - When voice casting compiles (`build_voice_cast`), any voice entry with `source_type == "uploaded"` (or present in `voices.json` as an uploaded reference) is strictly preserved.
@@ -95,7 +95,7 @@ A critical requirement was ensuring this change does not harm character deduplic
 
 ## Configuration & Model Endpoints
 
-Updated in [`brain/config.yaml`](file:///e:/Projects/crazy-audiobook-creator/brain/config.yaml) and [`brain/validators/gemini_validation.py`](file:///e:/Projects/crazy-audiobook-creator/brain/validators/gemini_validation.py):
+Updated in [`brain/config.yaml`](../brain/config.yaml) and [`brain/validators/gemini_validation.py`](../brain/validators/gemini_validation.py):
 - `triage_model`: `gemini-3.5-flash-lite`
 - `adjudication_model`: `gemini-3.5-flash`
 - Daily request budgets and circuit-breaker telemetry are maintained with automatic fallback.

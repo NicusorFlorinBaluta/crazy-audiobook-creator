@@ -15,7 +15,7 @@ import json
 import logging
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -208,7 +208,7 @@ class EmbeddingStore:
         torch.save(embedding, buffer)
         blob = buffer.getvalue()
         shape_str = str(list(embedding.shape))
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
 
         with self._connect() as conn:
             conn.execute(
@@ -274,7 +274,7 @@ class EmbeddingStore:
             return
 
         fx_hash = self.hash_text(json.dumps(fx_settings_dict, sort_keys=True))
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
 
         with self._connect() as conn:
             conn.execute(
@@ -333,7 +333,7 @@ class EmbeddingStore:
         ref_text_hash = self.hash_text(ref_text or "")
         buffer = io.BytesIO()
         torch.save(items, buffer)
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         with self._connect() as conn:
             conn.execute(
                 """
@@ -510,7 +510,7 @@ class EmbeddingStore:
             generation_context=generation_context,
         )
         output_hash = self.hash_file(output_path)
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
 
         with self._connect() as conn:
             conn.execute(
@@ -601,7 +601,7 @@ class EmbeddingStore:
             expected_text=expected_text,
             validation_context=validation_context,
         )
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         with self._connect() as conn:
             conn.execute(
                 """

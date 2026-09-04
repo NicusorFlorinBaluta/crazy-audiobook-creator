@@ -10,7 +10,7 @@ import json
 import logging
 import re
 import wave
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 
 from brain.orchestrator.delivery_manager import DeliveryManager
 from brain.orchestrator.job_queue import JobQueue
+from shared import paths as shared_paths
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +59,7 @@ def _get_job_queue(request: Request) -> JobQueue:
 
 
 def _project_dir(project_id: str) -> Path:
-    root = Path("brain/projects").resolve()
+    root = shared_paths.PROJECTS_DIR.resolve()
     candidate = (root / project_id).resolve()
     if not candidate.is_relative_to(root) or candidate == root:
         raise HTTPException(status_code=400, detail="Invalid project ID")
@@ -66,7 +67,7 @@ def _project_dir(project_id: str) -> Path:
 
 
 def _workspace_project_dir(project_id: str) -> Path:
-    root = Path("workspace").resolve()
+    root = shared_paths.WORKSPACE_DIR.resolve()
     candidate = (root / project_id).resolve()
     if not candidate.is_relative_to(root) or candidate == root:
         raise HTTPException(status_code=400, detail="Invalid project ID")
@@ -156,7 +157,7 @@ async def get_catalog(
 ) -> dict[str, Any]:
     """Return a clean catalog feed of audiobooks ready for streaming or download."""
     job_queue = _get_job_queue(request)
-    projects_root = Path("brain/projects").resolve()
+    projects_root = shared_paths.PROJECTS_DIR.resolve()
     if not projects_root.is_dir():
         return {"books": []}
 
@@ -285,7 +286,7 @@ async def get_catalog(
             pass
 
         updated_at = job_state.get("updated_at") or datetime.fromtimestamp(
-            project_dir.stat().st_mtime, tz=timezone.utc
+            project_dir.stat().st_mtime, tz=UTC
         ).isoformat()
 
         books.append({
@@ -846,7 +847,7 @@ async def download_book_epub(project_id: str, request: Request):
     epub_path = project_dir / "source.epub"
     if not epub_path.is_file():
         # Check workspace or root
-        candidate = Path("workspace") / project_id / "source.epub"
+        candidate = shared_paths.WORKSPACE_DIR / project_id / "source.epub"
         if candidate.is_file():
             epub_path = candidate
 

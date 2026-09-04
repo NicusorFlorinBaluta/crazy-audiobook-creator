@@ -8,16 +8,15 @@ from unittest.mock import patch
 
 import yaml
 
+from brain.orchestrator.pipeline import Pipeline
+from scripts.benchmark_script_chunks import _parse_configs
+from scripts.benchmark_support import balanced_order, summarize_tts_runs
+from scripts.benchmark_tts_fixture import _deep_update
 from shared.config_validation import validate_brain_config, validate_voice_config
+from shared.logging_utils import rotate_file
 from shared.performance import read_metrics, summarize_metrics
 from shared.progress import ProgressEstimator
 from shared.reference_selection import reference_line_score, select_reference_text
-from shared.logging_utils import rotate_file
-from brain.orchestrator.pipeline import Pipeline
-from scripts.benchmark_support import balanced_order, summarize_tts_runs
-from scripts.benchmark_tts_fixture import _deep_update
-from scripts.benchmark_script_chunks import _parse_configs
-
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -338,3 +337,76 @@ class LogRotationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ScriptDirectorLlmSummaryTests(unittest.TestCase):
+    """The LLM half of the pipeline must be measurable, not just timed.
+
+    `OllamaClient` records prompt/eval token counts and durations, and
+    `ScriptGenerator` forwards them into `call_metrics`, but nothing summarized
+    them -- so prefill cost and prefix-cache health were invisible even though
+    scripting is roughly half of total book wall time.
+    """
+
+    # Values measured on 2026-08-23 (docs/benchmarks/candidate-qwen38-27b-8k-
+    # nonthinking-f40-ch07-offset0-2026-08-23.json).
+    MEASURED = {
+        "prompt_eval_count": 3635,
+        "eval_count": 1527,
+        "prompt_eval_duration_ns": 25_409_571_000,
+        "eval_duration_ns": 51_320_000_000,
+        "load_duration_ns": 45_240_959_300,
+    }
+
+    def _summary(self, calls):
+        return summarize_metrics(
+            [{"event": "script_generation", "calls": calls}]
+        )["script_director_llm"]
+
+    def test_no_llm_calls_is_reported_rather_than_crashing(self) -> None:
+        self.assertEqual(summarize_metrics([])["script_director_llm"], {"calls": 0})
+
+    def test_throughput_is_derived_from_recorded_durations(self) -> None:
+        summary = self._summary([{"chapter_number": 7, "ollama": self.MEASURED}])
+        # 3635 tokens / 25.41s and 1527 tokens / 51.32s
+        self.assertAlmostEqual(summary["prefill_tokens_per_second"], 143.06, places=1)
+        self.assertAlmostEqual(summary["decode_tokens_per_second"], 29.75, places=1)
+        self.assertAlmostEqual(summary["prefill_share_of_compute"], 0.3312, places=3)
+        self.assertEqual(summary["prompt_tokens"], 3635)
+        self.assertEqual(summary["generated_tokens"], 1527)
+
+    def test_repeated_full_prefix_evaluation_is_reported_as_no_reuse(self) -> None:
+        """The condition worth acting on: every chunk re-evaluates the prefix."""
+        summary = self._summary([
+            {"chapter_number": 7, "ollama": self.MEASURED},
+            {"chapter_number": 7, "ollama": {**self.MEASURED, "prompt_eval_count": 3590}},
+        ])
+        cache = summary["prefix_cache"]
+        self.assertGreater(cache["later_to_first_ratio"], 0.9)
+        self.assertFalse(cache["reuse_detected"])
+
+    def test_a_small_later_prompt_is_reported_as_reuse(self) -> None:
+        summary = self._summary([
+            {"chapter_number": 7, "ollama": self.MEASURED},
+            {"chapter_number": 7, "ollama": {**self.MEASURED, "prompt_eval_count": 1100}},
+        ])
+        cache = summary["prefix_cache"]
+        self.assertLess(cache["later_to_first_ratio"], 0.5)
+        self.assertTrue(cache["reuse_detected"])
+
+    def test_reuse_is_unknown_when_every_chapter_had_one_request(self) -> None:
+        summary = self._summary([
+            {"chapter_number": 7, "ollama": self.MEASURED},
+            {"chapter_number": 8, "ollama": self.MEASURED},
+        ])
+        cache = summary["prefix_cache"]
+        self.assertEqual(cache["chapters_observed"], 2)
+        self.assertIsNone(cache["reuse_detected"])
+
+    def test_calls_without_ollama_telemetry_are_ignored(self) -> None:
+        summary = self._summary([
+            {"chapter_number": 7, "ollama": self.MEASURED},
+            {"chapter_number": 7},
+            {"chapter_number": 7, "ollama": "not-a-dict"},
+        ])
+        self.assertEqual(summary["calls"], 1)

@@ -2,17 +2,17 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 import numpy as np
 import scipy.signal as signal
 import soundfile as sf
 
 from shared.artifacts import fingerprint
-from shared.constants import Gender, VOICE_CAST_SCHEMA_VERSION
+from shared.constants import VOICE_CAST_SCHEMA_VERSION, Gender
 from shared.models import CharacterRegistry
-
 
 _CONTRAST_CLAUSES = (
     "Dry, lightly textured resonance with crisp consonants and restrained energy.",
@@ -228,7 +228,7 @@ _PROMPT_BOILERPLATE = {
     "a", "an", "clearly", "speaker", "speaking", "style", "maintain", "this",
     "vocal", "identity", "consistently", "and", "prioritize", "intelligible",
     "natural", "audiobook", "speech", "distinguishing", "direction", "adult",
-    "speaker", "with", "a", "hint", "of", "emotional", "baseline"
+    "with", "hint", "of", "emotional", "baseline"
 }
 
 
@@ -244,6 +244,7 @@ _AUDIO_SIMILARITY_THRESHOLD = 0.88
 
 
 import functools
+
 
 @functools.lru_cache(maxsize=128)
 def extract_acoustic_embedding(audio_path: str | Path) -> np.ndarray | None:
@@ -319,16 +320,16 @@ def build_voice_cast(
         if speaker_id == "narrator":
             if owner_id not in {"narrator_male", "narrator_female"}:
                 owner_id = "narrator_male"
-                
+
             owner_character_ids["narrator_male"] = "narrator"
             owner_character_ids["narrator_female"] = "narrator"
-            
+
             owner_to_speakers.setdefault("narrator_male", [])
             owner_to_speakers.setdefault("narrator_female", [])
-            
+
             owner_to_speakers[owner_id].append(speaker_id)
             continue
-        
+
         # Ensure owner_id points to a valid character in the registry
         if owner_id not in registry.characters:
             # Check if speaker_id matches any registered character's explicit aliases

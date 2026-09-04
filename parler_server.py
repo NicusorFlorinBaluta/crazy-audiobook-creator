@@ -1,13 +1,13 @@
-import os
-import torch
+import logging
+from pathlib import Path
+
 import numpy as np
 import soundfile as sf
+import torch
 from fastapi import FastAPI, HTTPException
+from parler_tts import ParlerTTSConfig, ParlerTTSForConditionalGeneration
 from pydantic import BaseModel
-from pathlib import Path
 from transformers import AutoTokenizer
-from parler_tts import ParlerTTSForConditionalGeneration, ParlerTTSConfig
-import logging
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("parler_server")
@@ -128,17 +128,17 @@ def load_model():
         model_name = "parler-tts/parler-tts-large-v1"
         dtype = torch.float16 if device == "cuda" else torch.float32
         model = ParlerTTSForConditionalGeneration.from_pretrained(model_name, torch_dtype=dtype).to(device)
-        
+
         from transformers import GenerationConfig
         GenerationConfig.disable_compile = True
         GenerationConfig._pad_token_tensor = property(lambda self: torch.tensor(1024, device=get_device()))
         GenerationConfig._eos_token_tensor = property(lambda self: torch.tensor(1024, device=get_device()))
         GenerationConfig._bos_token_tensor = property(lambda self: torch.tensor(1025, device=get_device()))
         GenerationConfig._decoder_start_token_tensor = property(lambda self: torch.tensor(1025, device=get_device()))
-        
+
         model.generation_config = GenerationConfig.from_model_config(model.config.decoder)
         model.generation_config.disable_compile = True
-        
+
         orig_prep_gen = ParlerTTSForConditionalGeneration.prepare_inputs_for_generation
         def prepare_inputs_for_generation(self, *args, **kwargs):
             try:
@@ -168,7 +168,7 @@ def design_voice(request: VoiceDesignRequest):
 
     device = get_device()
     logger.info(f"Designing voice: {request.prompt[:50]}...")
-    
+
     try:
         description_inputs = tokenizer(
             request.prompt,
@@ -178,7 +178,7 @@ def design_voice(request: VoiceDesignRequest):
             request.text,
             return_tensors="pt",
         ).to(device)
-        
+
         # Parler produces about 86 audio-code tokens per second.  Bound the
         # generation to the configured reference duration instead of using a
         # long, fixed token budget that can create repeated speech/silence.
@@ -191,12 +191,12 @@ def design_voice(request: VoiceDesignRequest):
             max_new_tokens=max_new_tokens,
         )
         audio_arr = generation.cpu().numpy().squeeze().astype(np.float32)
-        
+
         # Save audio
         out_path = Path(request.output_path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         sf.write(str(out_path), audio_arr, model.config.sampling_rate)
-        
+
         logger.info(f"Saved designed voice to {out_path}")
         return {"status": "success", "file": str(out_path)}
     except Exception as e:

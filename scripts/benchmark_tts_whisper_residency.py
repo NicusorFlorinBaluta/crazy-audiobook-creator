@@ -22,10 +22,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from shared.live_test_guard import add_model_opt_in
 from voice.tts_server.qwen3_engine import Qwen3TTSEngine
 from voice.tts_server.voice_library import VoiceLibraryManager
 from voice.validator.whisper_validator import WhisperValidator
-from shared.live_test_guard import add_model_opt_in
 
 
 def _gpu_snapshot(label: str) -> dict[str, float | str]:

@@ -8,7 +8,7 @@ import json
 import statistics
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -293,7 +293,7 @@ def main() -> int:
 
     report: dict[str, Any] = {
         "schema_version": 2,
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
         "project": args.project,
         "chapter": args.chapter,
         "source_control": git_identity(ROOT),

@@ -11,22 +11,21 @@ Orchestrates multi-tier attribution resolution:
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
 import difflib
 import json
 import logging
-from pathlib import Path
 import re
+from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any
 
 from brain.director.attribution_detector import SuspiciousTurn
 from brain.director.ollama_client import OllamaClient
-from brain.director.script_generator import ScriptGenerator
-from brain.director.script_generator import _GENERIC_ROLE_DESCRIPTORS
+from brain.director.script_generator import _GENERIC_ROLE_DESCRIPTORS, ScriptGenerator
 from brain.validators.gemini_validation import GeminiValidationService
-from shared.constants import Gender
-from shared.models import CharacterRegistry, ScriptChapter, ScriptLine
 from shared.artifacts import atomic_write_json
+from shared.constants import DEFAULT_OLLAMA_MODEL
+from shared.models import CharacterRegistry, ScriptChapter, ScriptLine
 
 logger = logging.getLogger(__name__)
 
@@ -294,7 +293,7 @@ class TieredAttributionAdjudicator:
                     line.attribution_review_reason = ""
                     line.attribution_confidence_history.append({
                         "resolver": "local_qwen_micro",
-                        "model": getattr(self.ollama, "model", "qwen3.8:27b"),
+                        "model": getattr(self.ollama, "model", DEFAULT_OLLAMA_MODEL),
                         "decision": "resolved",
                         "speaker_id": res.resolved_speaker,
                         "confidence": res.confidence,
@@ -319,7 +318,7 @@ class TieredAttributionAdjudicator:
                     )[:4000]
                     line.attribution_confidence_history.append({
                         "resolver": "local_qwen_micro",
-                        "model": getattr(self.ollama, "model", "qwen3.8:27b"),
+                        "model": getattr(self.ollama, "model", DEFAULT_OLLAMA_MODEL),
                         "decision": "abstain",
                         "speaker_id": res.resolved_speaker,
                         "confidence": res.confidence,
@@ -480,30 +479,29 @@ class TieredAttributionAdjudicator:
                 evidence_quote=evidence_quote,
                 guardrail_results=guardrail_status,
             )
-        else:
-            escalate_reasons = []
-            if not alias_passed:
-                escalate_reasons.append(alias_detail)
-            if not gender_passed:
-                escalate_reasons.append(gender_detail)
-            if confidence < self.local_auto_accept:
-                escalate_reasons.append(
-                    f"Confidence {confidence:.2f} < threshold {self.local_auto_accept:.2f}"
-                )
-            full_reason = "; ".join(escalate_reasons) or reason
-
-            return AdjudicationResult(
-                line_id=turn.line_id,
-                chapter_number=turn.chapter_number,
-                text=turn.text,
-                original_speaker=turn.current_speaker,
-                resolved_speaker=resolved_speaker,
-                resolver_tier="gemini_api",
-                confidence=confidence,
-                reason=full_reason,
-                evidence_quote=evidence_quote,
-                guardrail_results=guardrail_status,
+        escalate_reasons = []
+        if not alias_passed:
+            escalate_reasons.append(alias_detail)
+        if not gender_passed:
+            escalate_reasons.append(gender_detail)
+        if confidence < self.local_auto_accept:
+            escalate_reasons.append(
+                f"Confidence {confidence:.2f} < threshold {self.local_auto_accept:.2f}"
             )
+        full_reason = "; ".join(escalate_reasons) or reason
+
+        return AdjudicationResult(
+            line_id=turn.line_id,
+            chapter_number=turn.chapter_number,
+            text=turn.text,
+            original_speaker=turn.current_speaker,
+            resolved_speaker=resolved_speaker,
+            resolver_tier="gemini_api",
+            confidence=confidence,
+            reason=full_reason,
+            evidence_quote=evidence_quote,
+            guardrail_results=guardrail_status,
+        )
 
     def _apply_reciprocal_turn_guardrail(
         self,

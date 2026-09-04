@@ -29,7 +29,9 @@ Install the GPU-enabled PyTorch build separately according to the selected runti
 ```powershell
 $python = "E:\PyTorch env\my_venv\Scripts\python.exe"
 & $python -m pip install -r brain\requirements.txt
-& $python -m pip install -r voice\requirements.txt
+# Always install the voice stack through the tested constraints file. Without
+# `-c`, a reinstall can silently change the packages that produce the audio.
+& $python -m pip install -r voice\requirements.txt -c voice\constraints-windows-rocm-tested.txt
 .\scripts\setup-voice-server.ps1 -VenvPath "E:\PyTorch env\my_venv"
 ```
 
@@ -63,11 +65,27 @@ ollama list
 If using another model, update `ollama.model`. Character and script fingerprints include the model name, so changing it correctly invalidates dependent scripts.
 
 The checked-in configuration starts a second, app-owned Ollama endpoint on
-`127.0.0.1:11435` and reuses `E:\.ollama\models`. It sets
-`GGML_VK_VISIBLE_DEVICES=0` for that process because Vulkan device 0 is the RX
-7900 XTX on the configured workstation. If hardware enumeration changes, use
-`ollama ps`/the Ollama server log to identify the discrete index and update
-`ollama.vulkan_visible_devices`.
+`127.0.0.1:11435` and reuses `E:\.ollama\models`. It exposes only
+device 0 to that process, because device 0 is the RX 7900 XTX on the configured
+workstation. If hardware enumeration changes, use `ollama ps` / the Ollama
+server log to identify the discrete index and update `ollama.visible_devices`.
+
+The backend is selected explicitly by `ollama.gpu_backend`:
+
+- `vulkan` sets `GGML_VK_VISIBLE_DEVICES` (the current default).
+- `rocm` sets `HIP_VISIBLE_DEVICES` and `ROCR_VISIBLE_DEVICES`.
+
+Both isolate the discrete GPU. They differ in throughput: on RDNA3 the
+ROCm/hipBLAS backend is usually markedly faster at *prompt processing*, and
+`OLLAMA_FLASH_ATTENTION` only takes effect there. Screen a backend change with
+`scripts/benchmark_script_chunks.py` and compare prefill tokens/second from
+`prompt_eval_duration_ns` before promoting it.
+
+`ollama.num_parallel` is pinned to `1`. Ollama otherwise autodetects (commonly
+4), which reserves KV cache *per slot* — 4 x 16384 tokens on a 27B model can
+push layers off the GPU despite `num_gpu=99` — and lets sequential chunk
+requests land on different slots, defeating prefix-cache reuse of a system
+prompt that is byte-identical across every chunk of a chapter.
 
 ## 4. Review local configuration
 
@@ -80,7 +98,11 @@ ollama:
   model: "qwen3.8:27b"
   auto_start: true
   models_dir: "E:\\.ollama\\models"
-  vulkan_visible_devices: "0"
+  gpu_backend: "vulkan"      # or "rocm"
+  visible_devices: "0"
+  num_parallel: 1            # keep at 1; see section 3
+  flash_attention: true
+  keep_alive: "30m"
 
 voice_server:
   host: "http://127.0.0.1:8100"
@@ -90,7 +112,20 @@ voice_server:
 dashboard:
   host: "127.0.0.1"
   port: 8000
+  # Required when host is not loopback: either this or an application token.
+  # Omitting it falls back to every RFC1918 range plus the Tailscale CGNAT
+  # range, which is almost always wider than intended.
+  trusted_lan_cidrs:
+    - "192.168.50.0/24"
+  cors_origins:
+    - "http://127.0.0.1:8000"
 ```
+
+Binding the dashboard to a non-loopback host is refused at startup unless
+either `dashboard.trusted_lan_cidrs` or a token
+(`CRAZY_AUDIOBOOK_DASHBOARD_TOKEN`, or `dashboard.api_token`) is configured.
+That check runs however the process is started, including
+`uvicorn brain.dashboard.api.main:app`.
 
 And:
 
@@ -104,6 +139,11 @@ server:
   host: "127.0.0.1"
   port: 8100
   workers: 1
+  # Leave empty for the supported loopback setup. The service also accepts
+  # CRAZY_AUDIOBOOK_VOICE_TOKEN from the environment, so the secret need not be
+  # committed here; set the same value in `voice_server.api_token` on the Brain
+  # side if you use it. Binding beyond loopback without a token is refused.
+  api_token: ""
 ```
 
 Keep Ollama and Voice on loopback. If the dashboard binds to the LAN, restrict
@@ -111,11 +151,23 @@ Windows Firewall and `dashboard.trusted_lan_cidrs` to the intended subnet and
 configure explicit CORS origins. A dashboard token remains available for peers
 outside the trusted LAN.
 
+**A reverse proxy connects from its own address.** If nginx on this LAN proxies
+the dashboard to the public internet, the proxy's address is inside
+`trusted_lan_cidrs`, so every request arriving through it is authorized as a
+trusted LAN peer and this application performs no authentication of its own.
+Set `CRAZY_AUDIOBOOK_DASHBOARD_TOKEN` and have the proxy inject `X-API-Token`
+if the public endpoint must be authenticated by the application rather than
+only by the proxy.
+
 ## 5. Run tests
 
 ```powershell
-& $python -m compileall shared brain voice tests parler_server.py start_app.pyw
+& $python -m compileall brain voice shared scripts tools .
 & $python -m unittest discover -s tests -v
+
+# Static analysis, matching the CI `lint` job:
+& $python -m pip install ruff
+& $python -m ruff check .
 ```
 
 These tests verify state/artifact/source/validation logic with fake engines. They do not download or run production models.
@@ -136,7 +188,7 @@ To make external LAN connections immune to physical interface/router resets, opt
 powershell.exe -ExecutionPolicy Bypass -File .\scripts\setup_portproxy.ps1
 ```
 
-For more details, see [Socket Resilience & Supervision](file:///e:/Projects/crazy-audiobook-creator/docs/socket-resilience-and-supervision.md).
+For more details, see [Socket Resilience & Supervision](../docs/socket-resilience-and-supervision.md).
 
 After installing the `Crazy Audiobook Dashboard` scheduled task, reload code on
 port 8000 with the controlled restart helper:

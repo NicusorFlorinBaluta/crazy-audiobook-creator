@@ -182,8 +182,8 @@ The Brain normally calls these routes. Direct callers must use project-relative 
 | Method | Route | Purpose |
 |---|---|---|
 | `GET` | `/health` | Service/model/GPU health |
-| `POST` | `/cancel/{project_id}` | Mark active project generation cancelled |
-| `POST` | `/unload` | Unload models after the active GPU operation |
+| `POST` | `/cancel/{project_id}` | Mark active project generation cancelled. Never blocks on the GPU lock, so it remains answerable while a chapter is running |
+| `POST` | `/unload` | Unload models. Returns `409` immediately while a GPU job is active rather than waiting: a chapter holds the GPU lock for minutes, and a blocking wait here would freeze `/cancel`, `/health` and `/ws/progress` — the endpoints needed to release it. Cancel first, then unload |
 | `WS` | `/ws/progress` | Generation progress stream |
 
 ### Voice references
@@ -235,7 +235,13 @@ Chapter generation accepts:
 }
 ```
 
-`POST /generate/chapter` returns `application/x-ndjson`. Each line is an object with `type = progress`, `result`, or `error`. Progress data includes `phase` (`synthesis` or `validation`), `line_id`, `completed`, `total`, `percent`, `cache_hit`, and `attempt`. A client disconnect cooperatively cancels the run; a second overlapping request for the same project returns `409`.
+`POST /generate/chapter` returns `application/x-ndjson`. Each line is an object with `type = progress`, `result`, or `error`. Progress data includes `phase` (`synthesis` or `validation`), `line_id`, `completed`, `total`, `percent`, `cache_hit`, and `attempt`. A client disconnect cooperatively cancels the run.
+
+A second overlapping request for the same project first polls briefly for the
+run slot, then signals the in-flight run to cancel and waits a bounded period
+for it to release. If the incumbent has not released by then the request
+returns `503` with the reason, rather than silently queueing behind a job that
+may not stop. Retry once the incumbent finishes.
 
 `POST /voices/bootstrap/stream` uses the same NDJSON envelope for long-running
 voice preparation. Its privacy-safe progress data contains only `phase`,
@@ -264,7 +270,7 @@ Mastering fails on any missing, empty, or unreadable expected segment. Export fa
 - `404`: project or artifact not found
 - `409`: already running, cancellation, or conflicting GPU lifecycle action
 - `500`: generation, validation, mastering, or export failure
-- `503`: service/model unavailable
+- `503`: service/model unavailable, or a generation run for the project has not yet released its slot
 
 Clients should treat only an explicit success response with complete artifact IDs as completion; HTTP success plus a partial line set is not sufficient.
 

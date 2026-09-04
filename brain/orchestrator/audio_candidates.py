@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import shutil
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -48,7 +48,7 @@ def preserve_candidate(
         return None
     destination = project_dir / "review_candidates" / result.line_id
     destination.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
     stem = f"{stamp}-attempt-{int(result.attempt)}"
     saved_audio = destination / f"{stem}.wav"
     saved_meta = destination / f"{stem}.json"
@@ -61,7 +61,7 @@ def preserve_candidate(
         "schema": 1,
         "line_id": result.line_id,
         "score": score,
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
         "quality": result.model_dump(mode="json"),
     })
     wavs = sorted(destination.glob("*.wav"), key=lambda path: path.stat().st_mtime, reverse=True)

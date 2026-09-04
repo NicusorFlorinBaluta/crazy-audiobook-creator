@@ -1,5 +1,6 @@
-import sqlite3
 import json
+import sqlite3
+
 
 def fix():
     conn = sqlite3.connect('brain/projects/pipeline_state.db')

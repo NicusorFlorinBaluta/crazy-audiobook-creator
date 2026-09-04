@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import re
 import time
 import unicodedata
+from collections.abc import Callable
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 import soundfile as sf
@@ -39,7 +41,19 @@ logger = logging.getLogger(__name__)
 
 
 class GenerationCancelled(RuntimeError):
-    """Raised when a project cancellation is observed between segments."""
+    """Raised when a project cancellation is observed between segments.
+
+    Deliberately an ``Exception`` subclass, unlike the same-named
+    ``shared.constants.GenerationCancelled``. The two are not interchangeable:
+
+    * This one is in-process control flow. ``generate_chapter``'s worker
+      catches it directly and reports ``{"error": "cancelled"}`` on the
+      progress stream, so it must remain catchable by the surrounding
+      ``except Exception`` cleanup that releases audio artifacts.
+    * The shared one derives from ``BaseException`` because it has to tunnel
+      through the Brain pipeline's many broad ``except Exception`` handlers to
+      reach the stage runner.
+    """
 
 
 class ValidationLoop:
@@ -147,7 +161,7 @@ class ValidationLoop:
             output_path = segments_dir / f"{line.line_id}.wav"
             tts_substage_metrics: dict[str, Any] = {}
             voice_ref, ref_text = self._resolve_reference(project_id, line)
-            
+
             # Cache reference pitch for validation
             if line.line_id not in reference_pitch_map:
                 if not hasattr(self, "_ref_pitch_cache"):
@@ -223,6 +237,13 @@ class ValidationLoop:
                                 speed=synthesis_speed,
                                 voice_fx=synthesis_fx,
                                 output_path=output_path,
+                                seed=self._line_seed(
+                                    project_id,
+                                    line.line_id,
+                                    synthesis_text,
+                                    line.voice_id or line.speaker,
+                                    generation_attempt,
+                                ),
                             )
                         finally:
                             attempt_elapsed = (
@@ -566,6 +587,13 @@ class ValidationLoop:
                                 speed=retry_speed,
                                 voice_fx=retry_fx,
                                 output_path=attempt_path,
+                                seed=self._line_seed(
+                                    project_id,
+                                    line.line_id,
+                                    retry_text,
+                                    line.voice_id or line.speaker,
+                                    attempt,
+                                ),
                             )
                         finally:
                             retry_elapsed = (
@@ -817,6 +845,43 @@ class ValidationLoop:
         # transcript. An empty transcript intentionally selects x-vector mode.
         return voice_ref, ref_text or ""
 
+    @staticmethod
+    def _line_seed(
+        project_id: str,
+        line_id: str,
+        synthesis_text: str,
+        voice: str,
+        attempt: int,
+    ) -> str:
+        """Return a stable per-line, per-attempt TTS sampling seed.
+
+        The engine samples with `do_sample: true` at `temperature: 0.9`, so
+        without a seed each synthesis is an independent draw. Two consequences
+        motivated this:
+
+        * "Same fingerprint implies same audio" held only because the WAV was
+          cached, not because generation was deterministic. After a cache purge
+          the same script produced a different audiobook.
+        * A single repaired line regenerated among untouched neighbours landed
+          as a fresh draw with independently sampled prosody -- a plausible
+          audible seam that WER and speaker similarity both pass.
+
+        `attempt` is part of the seed on purpose. A validation retry exists
+        because the previous take failed; reusing the identical seed would
+        reproduce that exact take and the retry could never succeed. Including
+        the attempt keeps every take reproducible while letting retries differ.
+        """
+        material = "\x1f".join(
+            (
+                project_id,
+                line_id,
+                synthesis_text,
+                voice,
+                str(int(attempt)),
+            )
+        )
+        return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
+
     def _generation_context(
         self,
         voice_ref: Path,
@@ -1023,7 +1088,7 @@ class ValidationLoop:
                 + time.perf_counter()
                 - analysis_started
             )
-            
+
         word_count = len(self.whisper._normalize_text(validation_text).split())
         semantic_text_mismatch = self._has_disallowed_semantic_substitution(
             validation_text,
@@ -1077,7 +1142,7 @@ class ValidationLoop:
             + analysis["duration_score"] * QUALITY_WEIGHT_DURATION
         )
         estimated_word_errors = reported_wer * max(word_count, 1)
-        
+
         # On short lines (<= 3 words), allow clean acoustic takes with verified glossary match or high text similarity without substitution
         short_line_phonetic_acceptable = (
             word_count <= 3
@@ -1191,7 +1256,7 @@ class ValidationLoop:
             warnings=[],
             passed_hard_gates=not hard_audio_failure and not length_sensitive_wer_failure,
         )
-        
+
         # Phase 5.1/5.2 Report-only drift and join checks
         if reference_pitch_median > 0 and analysis.get("pitch_median", 0.0) > 0:
             pitch_delta = abs(analysis.get("pitch_median", 0.0) - reference_pitch_median) / reference_pitch_median
@@ -1199,7 +1264,7 @@ class ValidationLoop:
                 res.warnings.append("Drift check (report-only): Pitch significantly deviated from reference bounds.")
         if analysis.get("rms_dbfs", 0.0) < -30:
             res.warnings.append("Join check (report-only): Abrupt loudness drop suspected.")
-            
+
         return res
 
     def _glossary_adjusted_wer(

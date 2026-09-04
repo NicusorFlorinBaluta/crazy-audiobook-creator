@@ -80,7 +80,7 @@ Several OS-level and pipeline edge cases were resolved to ensure seamless execut
 ### F. Generic Role Descriptor Scoping & Alias Guardrail
 - **Issue**: Single bare common nouns (`"stranger"`, `"alien"`, `"guard"`, `"soldier"`, `"officer"`) extracted during Pass 1 were registered as standalone global character aliases and pulled unrelated characters into scenes across the book (e.g., Singer representative `armored_alien` from Chapter 8 had alias `"Stranger"`, which pulled him into Chapter 42 where Sixth of the Dusk was called `"the stranger with two birds"`).
 - **Fix**:
-  - Defined `_GENERIC_ROLE_DESCRIPTORS` in [`character_analyzer.py`](file:///e:/Projects/crazy-audiobook-creator/brain/director/character_analyzer.py), [`script_generator.py`](file:///e:/Projects/crazy-audiobook-creator/brain/director/script_generator.py), and [`tiered_adjudicator.py`](file:///e:/Projects/crazy-audiobook-creator/brain/validators/tiered_adjudicator.py).
+  - Defined `_GENERIC_ROLE_DESCRIPTORS` in [`character_analyzer.py`](../brain/director/character_analyzer.py), [`script_generator.py`](../brain/director/script_generator.py), and [`tiered_adjudicator.py`](../brain/validators/tiered_adjudicator.py).
   - Merged generic role descriptors into `_UNSAFE_CHARACTER_ALIASES` so bare generic nouns are rejected as standalone global aliases.
   - Updated `_get_chapter_scoped_speakers` so single generic words in `id_parts`, `name_parts`, and single-word `aliases` never activate characters in unrelated chapters.
 
