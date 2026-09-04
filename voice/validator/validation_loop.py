@@ -79,15 +79,9 @@ class ValidationLoop:
         prosody_config = prosody_config or {}
         self.prosody_scorer = ProsodyScorer(
             enabled=bool(prosody_config.get("enabled", True)),
-            min_duration_seconds=float(
-                prosody_config.get("min_duration_seconds", 1.0)
-            ),
-            pitch_cv_threshold=float(
-                prosody_config.get("pitch_cv_threshold", 0.06)
-            ),
-            dynamic_range_threshold=float(
-                prosody_config.get("dynamic_range_threshold", 4.0)
-            ),
+            min_duration_seconds=float(prosody_config.get("min_duration_seconds", 1.0)),
+            pitch_cv_threshold=float(prosody_config.get("pitch_cv_threshold", 0.06)),
+            dynamic_range_threshold=float(prosody_config.get("dynamic_range_threshold", 4.0)),
         )
         self.engine = engine
         self.library = library
@@ -120,9 +114,7 @@ class ValidationLoop:
         timings: dict[str, float] = {}
 
         def record_timing(name: str, started: float) -> None:
-            timings[name] = timings.get(name, 0.0) + (
-                time.perf_counter() - started
-            )
+            timings[name] = timings.get(name, 0.0) + (time.perf_counter() - started)
 
         segments_dir = workspace / project_id / "segments"
         segments_dir.mkdir(parents=True, exist_ok=True)
@@ -132,9 +124,7 @@ class ValidationLoop:
             raise ValueError(f"Chapter {chapter_number} contains duplicate line IDs")
 
         total_lines = len(lines)
-        expected_text_by_id = {
-            line.line_id: line.spoken_text or line.text for line in lines
-        }
+        expected_text_by_id = {line.line_id: line.spoken_text or line.text for line in lines}
         generated_ids: list[str] = []
         generation_errors: dict[str, str] = {}
         synthesis_cache_hits = 0
@@ -167,7 +157,9 @@ class ValidationLoop:
                 if not hasattr(self, "_ref_pitch_cache"):
                     self._ref_pitch_cache = {}
                 if str(voice_ref) not in self._ref_pitch_cache:
-                    self._ref_pitch_cache[str(voice_ref)] = self.analyzer.analyze(str(voice_ref), "", 1.0).get("pitch_median", 0.0)
+                    self._ref_pitch_cache[str(voice_ref)] = self.analyzer.analyze(str(voice_ref), "", 1.0).get(
+                        "pitch_median", 0.0
+                    )
                 reference_pitch_map[line.line_id] = self._ref_pitch_cache[str(voice_ref)]
 
             (
@@ -182,19 +174,13 @@ class ValidationLoop:
             context = self._generation_context(
                 voice_ref,
                 ref_text,
-                synthesis_text=(
-                    synthesis_text if synthesis_text != line.text else None
-                ),
+                synthesis_text=(synthesis_text if synthesis_text != line.text else None),
                 delivery_override=(
                     {
                         "reason": risk_reason,
                         "emotion": synthesis_emotion,
                         "speed": synthesis_speed,
-                        "voice_fx": (
-                            synthesis_fx.model_dump()
-                            if synthesis_fx is not None
-                            else None
-                        ),
+                        "voice_fx": (synthesis_fx.model_dump() if synthesis_fx is not None else None),
                     }
                     if risk_reason
                     else None
@@ -246,13 +232,8 @@ class ValidationLoop:
                                 ),
                             )
                         finally:
-                            attempt_elapsed = (
-                                time.perf_counter() - operation_started
-                            )
-                            timings["tts_synthesis"] = (
-                                timings.get("tts_synthesis", 0.0)
-                                + attempt_elapsed
-                            )
+                            attempt_elapsed = time.perf_counter() - operation_started
+                            timings["tts_synthesis"] = timings.get("tts_synthesis", 0.0) + attempt_elapsed
                             synthesis_elapsed += attempt_elapsed
                             self._merge_engine_generation_metrics(
                                 tts_substage_metrics,
@@ -280,16 +261,10 @@ class ValidationLoop:
                     generation_errors[line.line_id] = str(last_error)
                     segment_metrics[line.line_id] = {
                         "line_id": line.line_id,
-                        "speaker_role": (
-                            "narrator"
-                            if line.speaker == "narrator"
-                            else "character"
-                        ),
+                        "speaker_role": ("narrator" if line.speaker == "narrator" else "character"),
                         "voice_profile_id": line.voice_id or line.speaker,
                         "text_characters": len(line.spoken_text or line.text),
-                        "text_words": len(
-                            (line.spoken_text or line.text).split()
-                        ),
+                        "text_words": len((line.spoken_text or line.text).split()),
                         "synthesis_seconds": round(synthesis_elapsed, 6),
                         "synthesis_cache_hit": False,
                         "generation_failed": True,
@@ -314,9 +289,7 @@ class ValidationLoop:
                     speaker=line.voice_id or line.speaker,
                     emotion=line.emotion or "",
                     speed=line.speed,
-                    fx_dict=(
-                        line.voice_fx.model_dump() if line.voice_fx else None
-                    ),
+                    fx_dict=(line.voice_fx.model_dump() if line.voice_fx else None),
                     output_path=output_path,
                     duration_seconds=info.duration,
                     generation_context=context,
@@ -324,9 +297,7 @@ class ValidationLoop:
                 record_timing("synthesis_checkpoint_write", operation_started)
             segment_metrics[line.line_id] = {
                 "line_id": line.line_id,
-                "speaker_role": (
-                    "narrator" if line.speaker == "narrator" else "character"
-                ),
+                "speaker_role": ("narrator" if line.speaker == "narrator" else "character"),
                 "voice_profile_id": line.voice_id or line.speaker,
                 "text_characters": len(line.spoken_text or line.text),
                 "text_words": len((line.spoken_text or line.text).split()),
@@ -334,9 +305,7 @@ class ValidationLoop:
                 "synthesis_seconds": round(synthesis_elapsed, 6),
                 "synthesis_cache_hit": not needs_regeneration,
                 "synthesis_audio_rtf": (
-                    round(synthesis_elapsed / info.duration, 6)
-                    if synthesis_elapsed > 0 and info.duration > 0
-                    else 0.0
+                    round(synthesis_elapsed / info.duration, 6) if synthesis_elapsed > 0 and info.duration > 0 else 0.0
                 ),
             }
             self._write_engine_generation_metrics(
@@ -426,9 +395,7 @@ class ValidationLoop:
                 )
                 record_timing("validation_cache_lookup", operation_started)
             if cached_result:
-                quality_by_id[line.line_id] = QualityResult(
-                    **cached_result
-                ).model_copy(update={"attempt": 1})
+                quality_by_id[line.line_id] = QualityResult(**cached_result).model_copy(update={"attempt": 1})
                 self._send_progress(
                     progress_callback,
                     ws_connections,
@@ -488,9 +455,7 @@ class ValidationLoop:
                     emotion_adjusted=self._is_emotion_adjusted(line.emotion),
                     language=language,
                 )
-                segment_metrics[line.line_id]["validation_seconds"] = round(
-                    time.perf_counter() - validation_started, 6
-                )
+                segment_metrics[line.line_id]["validation_seconds"] = round(time.perf_counter() - validation_started, 6)
                 quality_by_id[line.line_id] = result
                 self._checkpoint_accepted_result(
                     project_id=project_id,
@@ -515,9 +480,7 @@ class ValidationLoop:
                     attempt=result.attempt,
                 )
 
-        quality_attempts: list[QualityResult] = [
-            quality_by_id[line.line_id] for line in lines
-        ]
+        quality_attempts: list[QualityResult] = [quality_by_id[line.line_id] for line in lines]
         validation_cache_hits = total_lines - len(uncached_lines)
         validation_cache_misses = len(uncached_lines)
         logger.info(
@@ -529,11 +492,7 @@ class ValidationLoop:
 
         # Phase 3: retry both FAIL and FLAGGED results. Each retry is written to
         # a side file and replaces the current artifact only if it is better.
-        candidates = [
-            line
-            for line in lines
-            if not self._is_accepted(quality_by_id[line.line_id].status)
-        ]
+        candidates = [line for line in lines if not self._is_accepted(quality_by_id[line.line_id].status)]
         retried = 0
         if auto_retry:
             for attempt in range(2, retry_limit + 1):
@@ -554,13 +513,9 @@ class ValidationLoop:
                 for line in candidates:
                     self._raise_if_cancelled(cancel_check)
                     voice_ref, ref_text, _ = reference_context[line.line_id]
-                    attempt_path = (
-                        segments_dir / f".{line.line_id}.attempt-{attempt}.wav"
-                    )
+                    attempt_path = segments_dir / f".{line.line_id}.attempt-{attempt}.wav"
                     self._unlink_audio_artifacts(attempt_path)
-                    retry_emotion, retry_speed, retry_fx = (
-                        self._retry_delivery(line, attempt)
-                    )
+                    retry_emotion, retry_speed, retry_fx = self._retry_delivery(line, attempt)
                     retry_text = self._retry_synthesis_text(line, attempt)
                     try:
                         logger.info(
@@ -571,11 +526,7 @@ class ValidationLoop:
                             retry_speed,
                             retry_emotion,
                             "preserved" if retry_fx is not None else "disabled",
-                            (
-                                "plain-normalized"
-                                if retry_text != line.text
-                                else "original"
-                            ),
+                            ("plain-normalized" if retry_text != line.text else "original"),
                         )
                         operation_started = time.perf_counter()
                         try:
@@ -596,9 +547,7 @@ class ValidationLoop:
                                 ),
                             )
                         finally:
-                            retry_elapsed = (
-                                time.perf_counter() - operation_started
-                            )
+                            retry_elapsed = time.perf_counter() - operation_started
                             retry_substages: dict[str, Any] = {}
                             self._merge_engine_generation_metrics(
                                 retry_substages,
@@ -613,17 +562,9 @@ class ValidationLoop:
                                 retry_substages,
                                 prefix="retry_tts_",
                             )
-                            timings["retry_tts_synthesis"] = (
-                                timings.get("retry_tts_synthesis", 0.0)
-                                + retry_elapsed
-                            )
-                            segment_metrics[line.line_id][
-                                "retry_synthesis_seconds"
-                            ] = round(
-                                segment_metrics[line.line_id].get(
-                                    "retry_synthesis_seconds", 0.0
-                                )
-                                + retry_elapsed,
+                            timings["retry_tts_synthesis"] = timings.get("retry_tts_synthesis", 0.0) + retry_elapsed
+                            segment_metrics[line.line_id]["retry_synthesis_seconds"] = round(
+                                segment_metrics[line.line_id].get("retry_synthesis_seconds", 0.0) + retry_elapsed,
                                 6,
                             )
                         if not self._valid_audio(attempt_path):
@@ -632,11 +573,9 @@ class ValidationLoop:
                         attempt_speeds[line.line_id] = retry_speed
                         try:
                             operation_started = time.perf_counter()
-                            attempt_similarity[line.line_id] = (
-                                self.engine.speaker_similarity(
-                                    attempt_path,
-                                    voice_ref,
-                                )
+                            attempt_similarity[line.line_id] = self.engine.speaker_similarity(
+                                attempt_path,
+                                voice_ref,
                             )
                             record_timing(
                                 "retry_speaker_similarity",
@@ -684,9 +623,7 @@ class ValidationLoop:
                         language=language,
                     )
                     segment_metrics[line.line_id]["retry_validation_seconds"] = round(
-                        segment_metrics[line.line_id].get(
-                            "retry_validation_seconds", 0.0
-                        )
+                        segment_metrics[line.line_id].get("retry_validation_seconds", 0.0)
                         + time.perf_counter()
                         - retry_validation_started,
                         6,
@@ -728,69 +665,40 @@ class ValidationLoop:
         record_timing("whisper_unload", operation_started)
 
         quality_results = [quality_by_id[line.line_id] for line in lines]
-        selected_attempts = {
-            line_id: result.attempt for line_id, result in quality_by_id.items()
-        }
+        selected_attempts = {line_id: result.attempt for line_id, result in quality_by_id.items()}
         quality_attempts = [
-            result.model_copy(
-                update={
-                    "selected": selected_attempts.get(result.line_id)
-                    == result.attempt
-                }
-            )
+            result.model_copy(update={"selected": selected_attempts.get(result.line_id) == result.attempt})
             for result in quality_attempts
         ]
-        failed_ids = [
-            result.line_id
-            for result in quality_results
-            if result.status == ValidationStatus.FAIL
-        ]
-        flagged_ids = [
-            result.line_id
-            for result in quality_results
-            if result.status == ValidationStatus.FLAGGED
-        ]
+        failed_ids = [result.line_id for result in quality_results if result.status == ValidationStatus.FAIL]
+        flagged_ids = [result.line_id for result in quality_results if result.status == ValidationStatus.FLAGGED]
         warning_ids = [
-            result.line_id
-            for result in quality_results
-            if result.status == ValidationStatus.ACCEPTED_WITH_WARNING
+            result.line_id for result in quality_results if result.status == ValidationStatus.ACCEPTED_WITH_WARNING
         ]
 
-        unaccepted_ids = [
-            result.line_id
-            for result in quality_results
-            if not self._is_accepted(result.status)
-        ]
+        unaccepted_ids = [result.line_id for result in quality_results if not self._is_accepted(result.status)]
 
         wer_values = [result.wer for result in quality_results]
         quality_report = ChapterQualityReport(
             chapter_number=chapter_number,
             total_segments=total_lines,
-            passed=sum(
-                result.status == ValidationStatus.PASS for result in quality_results
-            ),
+            passed=sum(result.status == ValidationStatus.PASS for result in quality_results),
             accepted_with_warning=len(warning_ids),
             failed=len(failed_ids),
             flagged=len(flagged_ids),
             total_retries=retried,
             average_wer=float(np.mean(wer_values)) if wer_values else 0.0,
             worst_wer=max(wer_values, default=0.0),
-            average_quality_score=float(
-                np.mean([result.quality_score for result in quality_results])
-            )
+            average_quality_score=float(np.mean([result.quality_score for result in quality_results]))
             if quality_results
             else 0.0,
             flagged_lines=flagged_ids,
             warning_lines=warning_ids,
-            artifact_detections=sum(
-                result.clipping_detected for result in quality_results
-            ),
+            artifact_detections=sum(result.clipping_detected for result in quality_results),
         )
 
         timings["total"] = time.perf_counter() - request_started
-        rounded_timings = {
-            key: round(value, 6) for key, value in timings.items()
-        }
+        rounded_timings = {key: round(value, 6) for key, value in timings.items()}
         logger.info(
             "[ChapterTiming] chapter=%d timings=%s",
             chapter_number,
@@ -824,9 +732,7 @@ class ValidationLoop:
             self.whisper.load()
         return self._validate_segment(audio_file, expected_text, "manual", 1.0)
 
-    def _resolve_reference(
-        self, project_id: str, line: ScriptLine
-    ) -> tuple[Path, str]:
+    def _resolve_reference(self, project_id: str, line: ScriptLine) -> tuple[Path, str]:
         voice_id = line.voice_id or line.speaker
         voice_ref = self.library.get_voice_path(project_id, voice_id)
         ref_text = self.library.get_voice_ref_text(project_id, voice_id)
@@ -838,9 +744,7 @@ class ValidationLoop:
             voice_ref = self.library.get_voice_path(project_id, "narrator")
             ref_text = self.library.get_voice_ref_text(project_id, "narrator")
         if not voice_ref.exists():
-            raise FileNotFoundError(
-                f"No voice reference for voice '{voice_id}' or narrator"
-            )
+            raise FileNotFoundError(f"No voice reference for voice '{voice_id}' or narrator")
         # Never combine one character's audio with another character's
         # transcript. An empty transcript intentionally selects x-vector mode.
         return voice_ref, ref_text or ""
@@ -889,16 +793,8 @@ class ValidationLoop:
         synthesis_text: str | None = None,
         delivery_override: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        hash_file = (
-            self.embedding_store.hash_file
-            if self.embedding_store
-            else lambda path: ""
-        )
-        hash_text = (
-            self.embedding_store.hash_text
-            if self.embedding_store
-            else lambda value: ""
-        )
+        hash_file = self.embedding_store.hash_file if self.embedding_store else lambda path: ""
+        hash_text = self.embedding_store.hash_text if self.embedding_store else lambda value: ""
         post_processing_context = getattr(
             self.engine,
             "post_processing_context",
@@ -911,9 +807,7 @@ class ValidationLoop:
             "language": getattr(self.engine, "language", "auto"),
             "generation": getattr(self.engine, "generation_config", {}),
             "post_processing": (
-                post_processing_context()
-                if callable(post_processing_context)
-                else {"revision": "legacy-unknown"}
+                post_processing_context() if callable(post_processing_context) else {"revision": "legacy-unknown"}
             ),
             # Frozen compatibility marker from generation fingerprint v1.
             # It is intentionally no longer tied to VALIDATION_SCHEMA_VERSION;
@@ -932,9 +826,7 @@ class ValidationLoop:
         validation_terms: set[str],
     ) -> tuple[str, str | None, float, Any | None, str | None]:
         """Apply conservative first-attempt clarity controls to risky text."""
-        synthesis_text = self._prepare_synthesis_text(
-            line.spoken_text or line.text
-        )
+        synthesis_text = self._prepare_synthesis_text(line.spoken_text or line.text)
         if not self.risk_aware_first_attempt:
             return (
                 synthesis_text,
@@ -947,11 +839,7 @@ class ValidationLoop:
         normalized = self.whisper._normalize_text(synthesis_text)
         words = normalized.split()
         letters = "".join(char for char in line.text if char.isalpha())
-        expressive_short = (
-            len(words) <= 3
-            and bool(letters)
-            and (letters.isupper() or "!" in line.text)
-        )
+        expressive_short = len(words) <= 3 and bool(letters) and (letters.isupper() or "!" in line.text)
         if expressive_short:
             return (
                 self._plain_synthesis_text(synthesis_text),
@@ -972,44 +860,26 @@ class ValidationLoop:
         language: str | None = None,
     ) -> dict[str, Any]:
         """Return only inputs that can change validation acceptance."""
-        hash_file = (
-            self.embedding_store.hash_file
-            if self.embedding_store
-            else lambda path: ""
-        )
+        hash_file = self.embedding_store.hash_file if self.embedding_store else lambda path: ""
         return {
             "validation_schema": VALIDATION_SCHEMA_VERSION,
             "validation_revision": validation_revision,
             "language": language or "auto",
             "whisper_model": getattr(self.whisper, "model_name", "unknown"),
             "whisper_backend": getattr(self.whisper, "backend", "auto"),
-            "whisper_vad_filter": bool(
-                getattr(self.whisper, "vad_filter", False)
-            ),
+            "whisper_vad_filter": bool(getattr(self.whisper, "vad_filter", False)),
             "wer_threshold": self.wer_threshold,
             "speaker_similarity_threshold": self.speaker_similarity_threshold,
             "voice_reference_hash": hash_file(voice_ref),
             "speed": round(float(speed), 6),
             "validation_terms": sorted(
-                {
-                    self.whisper._normalize_text(term)
-                    for term in validation_terms
-                    if self.whisper._normalize_text(term)
-                }
+                {self.whisper._normalize_text(term) for term in validation_terms if self.whisper._normalize_text(term)}
             ),
             "analyzer": {
-                "noise_threshold": getattr(
-                    self.analyzer, "noise_threshold", -50.0
-                ),
-                "clipping_threshold": getattr(
-                    self.analyzer, "clipping_threshold", -0.5
-                ),
-                "max_silence_seconds": getattr(
-                    self.analyzer, "max_silence_seconds", 3.0
-                ),
-                "duration_tolerance": getattr(
-                    self.analyzer, "duration_tolerance", 0.3
-                ),
+                "noise_threshold": getattr(self.analyzer, "noise_threshold", -50.0),
+                "clipping_threshold": getattr(self.analyzer, "clipping_threshold", -0.5),
+                "max_silence_seconds": getattr(self.analyzer, "max_silence_seconds", 3.0),
+                "duration_tolerance": getattr(self.analyzer, "duration_tolerance", 0.3),
             },
             "prosody": {
                 "enabled": self.prosody_scorer.enabled,
@@ -1039,9 +909,7 @@ class ValidationLoop:
         # A nonzero, explicitly configured allowance may compensate for a
         # benchmark-proven post-FX ASR penalty.  The production default is zero.
         effective_wer_threshold = (
-            self.wer_threshold + self.emotion_wer_allowance
-            if emotion_adjusted
-            else self.wer_threshold
+            self.wer_threshold + self.emotion_wer_allowance if emotion_adjusted else self.wer_threshold
         )
         if emotion_adjusted:
             logger.debug(
@@ -1052,15 +920,11 @@ class ValidationLoop:
 
         transcription_started = time.perf_counter()
         transcribed = (
-            self.whisper.transcribe(audio_file, language=language)
-            if language
-            else self.whisper.transcribe(audio_file)
+            self.whisper.transcribe(audio_file, language=language) if language else self.whisper.transcribe(audio_file)
         )
         if timing_accumulator is not None:
             timing_accumulator["whisper_transcription"] = (
-                timing_accumulator.get("whisper_transcription", 0.0)
-                + time.perf_counter()
-                - transcription_started
+                timing_accumulator.get("whisper_transcription", 0.0) + time.perf_counter() - transcription_started
             )
         # Validate against the deterministic spoken form used for synthesis.
         # The authored source remains unchanged, while fused expressive text
@@ -1072,11 +936,9 @@ class ValidationLoop:
             validation_text,
             transcribed,
         )
-        orthographic_segmentation_match = (
-            self.whisper.is_orthographic_segmentation_match(
-                validation_text,
-                transcribed,
-            )
+        orthographic_segmentation_match = self.whisper.is_orthographic_segmentation_match(
+            validation_text,
+            transcribed,
         )
         compact_error_rate = 1.0 - text_similarity
         analysis_started = time.perf_counter()
@@ -1084,9 +946,7 @@ class ValidationLoop:
         prosody = self.prosody_scorer.analyze(audio_file, validation_text)
         if timing_accumulator is not None:
             timing_accumulator["audio_analysis"] = (
-                timing_accumulator.get("audio_analysis", 0.0)
-                + time.perf_counter()
-                - analysis_started
+                timing_accumulator.get("audio_analysis", 0.0) + time.perf_counter() - analysis_started
             )
 
         word_count = len(self.whisper._normalize_text(validation_text).split())
@@ -1094,25 +954,15 @@ class ValidationLoop:
             validation_text,
             transcribed,
         )
-        semantic_error_rate = (
-            1.0 / max(word_count, 1) if semantic_text_mismatch else 0.0
-        )
+        semantic_error_rate = 1.0 / max(word_count, 1) if semantic_text_mismatch else 0.0
         reported_wer = max(wer, semantic_error_rate)
         normalized_expected = self.whisper._normalize_text(validation_text)
         eligible_glossary_match = any(
-            normalized_term
-            and normalized_term in normalized_expected
-            for normalized_term in (
-                self.whisper._normalize_text(term)
-                for term in (validation_terms or set())
-            )
+            normalized_term and normalized_term in normalized_expected
+            for normalized_term in (self.whisper._normalize_text(term) for term in (validation_terms or set()))
         )
-        spelling_variant_match = (
-            eligible_glossary_match
-            and (
-                (2 <= word_count <= 3 and text_similarity >= 0.75)
-                or (word_count > 3 and text_similarity >= 0.90)
-            )
+        spelling_variant_match = eligible_glossary_match and (
+            (2 <= word_count <= 3 and text_similarity >= 0.75) or (word_count > 3 and text_similarity >= 0.90)
         )
         glossary_adjusted_wer = self._glossary_adjusted_wer(
             normalized_expected,
@@ -1120,9 +970,7 @@ class ValidationLoop:
             validation_terms or set(),
         )
         glossary_phonetic_match = (
-            eligible_glossary_match
-            and glossary_adjusted_wer < wer
-            and glossary_adjusted_wer <= effective_wer_threshold
+            eligible_glossary_match and glossary_adjusted_wer < wer and glossary_adjusted_wer <= effective_wer_threshold
         )
         effective_text_error = max(
             semantic_error_rate,
@@ -1160,14 +1008,9 @@ class ValidationLoop:
         length_sensitive_wer_failure = semantic_text_mismatch or (
             not short_line_phonetic_acceptable
             and (
-                (word_count <= 2 and estimated_word_errors > 0.05)
-                or (word_count > 2 and wer > effective_wer_threshold)
+                (word_count <= 2 and estimated_word_errors > 0.05) or (word_count > 2 and wer > effective_wer_threshold)
             )
-            and not (
-                spelling_variant_match
-                or glossary_phonetic_match
-                or orthographic_segmentation_match
-            )
+            and not (spelling_variant_match or glossary_phonetic_match or orthographic_segmentation_match)
         )
 
         hard_audio_failure = (
@@ -1176,10 +1019,7 @@ class ValidationLoop:
             or analysis["pacing_anomaly"]
             or (
                 require_speaker_similarity
-                and (
-                    speaker_similarity is None
-                    or speaker_similarity < self.speaker_similarity_threshold
-                )
+                and (speaker_similarity is None or speaker_similarity < self.speaker_similarity_threshold)
             )
         )
         if length_sensitive_wer_failure or hard_audio_failure:
@@ -1208,9 +1048,7 @@ class ValidationLoop:
                 if orthographic_segmentation_match and wer > 0
                 else (
                     "approved_glossary_spelling_variant"
-                    if (
-                        spelling_variant_match or glossary_phonetic_match
-                    ) and wer > effective_wer_threshold
+                    if (spelling_variant_match or glossary_phonetic_match) and wer > effective_wer_threshold
                     else (
                         "wer_emotion_adjusted"
                         if emotion_adjusted and wer > self.wer_threshold
@@ -1220,8 +1058,7 @@ class ValidationLoop:
             )
 
         logger.info(
-            "[Validator] %s attempt=%d status=%s WER=%.3f "
-            "text_similarity=%.3f score=%.2f",
+            "[Validator] %s attempt=%d status=%s WER=%.3f text_similarity=%.3f score=%.2f",
             line_id,
             attempt,
             status.value,
@@ -1287,10 +1124,7 @@ class ValidationLoop:
             return 0.0 if not hypothesis_words else 1.0
 
         glossary_words = {
-            word
-            for term in validation_terms
-            for word in self.whisper._normalize_text(term).split()
-            if len(word) >= 3
+            word for term in validation_terms for word in self.whisper._normalize_text(term).split() if len(word) >= 3
         }
         if not glossary_words:
             return 1.0
@@ -1310,13 +1144,8 @@ class ValidationLoop:
                 equivalent = expected == observed
                 if not equivalent and expected in glossary_words:
                     sim_ratio = SequenceMatcher(None, expected, observed).ratio()
-                    equivalent = (
-                        len(observed) >= 3
-                        and (
-                            sim_ratio >= 0.45
-                            or expected.startswith(observed[:3])
-                            or observed.startswith(expected[:3])
-                        )
+                    equivalent = len(observed) >= 3 and (
+                        sim_ratio >= 0.45 or expected.startswith(observed[:3]) or observed.startswith(expected[:3])
                     )
                 substitution_cost = 0.0 if equivalent else 1.0
                 distance[row][column] = min(
@@ -1380,9 +1209,7 @@ class ValidationLoop:
         authored delivery; only the final retry removes those presentation
         cues. Validation continues to compare against the original text.
         """
-        synthesis_text = self._prepare_synthesis_text(
-            line.spoken_text or line.text
-        )
+        synthesis_text = self._prepare_synthesis_text(line.spoken_text or line.text)
         if attempt <= 2:
             return synthesis_text
         return self._plain_synthesis_text(synthesis_text)
@@ -1454,19 +1281,14 @@ class ValidationLoop:
                     unit,
                     token[:unit_length],
                 )
-                return ", ".join(
-                    [displayed_unit]
-                    + [displayed_unit.lower()] * (repeat_count - 1)
-                )
+                return ", ".join([displayed_unit] + [displayed_unit.lower()] * (repeat_count - 1))
             return token
 
         return re.sub(r"[^\W_]+", expand_repetition, text, flags=re.UNICODE)
 
     def _is_emotion_adjusted(self, emotion: str | None) -> bool:
         """Return True when the TTS engine applies a non-neutral mood tier."""
-        return bool(getattr(self.engine, "post_processing_enabled", False)) and (
-            mood_tier_for(emotion) != "neutral"
-        )
+        return bool(getattr(self.engine, "post_processing_enabled", False)) and (mood_tier_for(emotion) != "neutral")
 
     @staticmethod
     def _unlink_audio_artifacts(audio_path: Path) -> None:
@@ -1487,6 +1309,7 @@ class ValidationLoop:
             os.replace(source, destination)
         except OSError:
             import shutil
+
             with open(destination, "wb") as dst, open(source, "rb") as src:
                 shutil.copyfileobj(src, dst)
             source.unlink(missing_ok=True)
@@ -1497,6 +1320,7 @@ class ValidationLoop:
                 os.replace(source_embedding, destination_embedding)
             except OSError:
                 import shutil
+
                 with open(destination_embedding, "wb") as dst, open(source_embedding, "rb") as src:
                     shutil.copyfileobj(src, dst)
                 source_embedding.unlink(missing_ok=True)
@@ -1542,13 +1366,9 @@ class ValidationLoop:
                 continue
             target[key] = int(target.get(key, 0) or 0) + value
         if source.get("cold_model_load") is True:
-            target["cold_model_loads"] = int(
-                target.get("cold_model_loads", 0) or 0
-            ) + 1
+            target["cold_model_loads"] = int(target.get("cold_model_loads", 0) or 0) + 1
         if source.get("attention_implementation"):
-            target["attention_implementation"] = str(
-                source["attention_implementation"]
-            )
+            target["attention_implementation"] = str(source["attention_implementation"])
         try:
             schema_version = int(source.get("schema_version", 0) or 0)
         except (TypeError, ValueError):
@@ -1575,9 +1395,7 @@ class ValidationLoop:
                     6,
                 )
             elif isinstance(value, int):
-                segment_metric[output_key] = int(
-                    segment_metric.get(output_key, 0) or 0
-                ) + value
+                segment_metric[output_key] = int(segment_metric.get(output_key, 0) or 0) + value
             else:
                 segment_metric[output_key] = value
 
@@ -1616,9 +1434,7 @@ class ValidationLoop:
             result=result.model_dump(mode="json"),
         )
         timings["validation_cache_write"] = (
-            timings.get("validation_cache_write", 0.0)
-            + time.perf_counter()
-            - operation_started
+            timings.get("validation_cache_write", 0.0) + time.perf_counter() - operation_started
         )
         operation_started = time.perf_counter()
         self.embedding_store.save_generation_fingerprint(
@@ -1637,9 +1453,7 @@ class ValidationLoop:
             generation_context=generation_context,
         )
         timings["generation_fingerprint_write"] = (
-            timings.get("generation_fingerprint_write", 0.0)
-            + time.perf_counter()
-            - operation_started
+            timings.get("generation_fingerprint_write", 0.0) + time.perf_counter() - operation_started
         )
 
     @staticmethod

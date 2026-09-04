@@ -3,7 +3,11 @@
 # This project has no build/packaging step; the file exists so that `ruff` has a
 # single checked-in configuration shared by CI, pre-commit, and local runs.
 #
-# Policy: the Pyflakes (`F`) rules are non-negotiable and must stay at zero.
+# Policy: `ruff format` is enforced (CI and pre-commit). The repository was
+# reformatted in one isolated commit on 2026-09-04 -- 113 of 188 files -- so
+# that the gate never mixes formatting churn into a behavioural diff.
+#
+# The Pyflakes (`F`) rules are non-negotiable and must stay at zero.
 # They are what catch undefined names and duplicate definitions, which is the
 # failure class that previously reached production in this repository:
 #   - `F811` duplicate method definitions in `ScriptGenerator`

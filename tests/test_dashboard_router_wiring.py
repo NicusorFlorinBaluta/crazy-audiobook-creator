@@ -68,9 +68,7 @@ class RouterWiringTests(unittest.TestCase):
 
         offenders = []
         for module in pkgutil.iter_modules(routers_pkg.__path__):
-            source = (
-                Path(routers_pkg.__path__[0]) / f"{module.name}.py"
-            ).read_text(encoding="utf-8")
+            source = (Path(routers_pkg.__path__[0]) / f"{module.name}.py").read_text(encoding="utf-8")
             if "api.main" in source or "from .main" in source:
                 offenders.append(module.name)
         self.assertEqual(offenders, [], "routers must not import main")

@@ -98,15 +98,9 @@ def summarize_tts_runs(runs: list[dict[str, Any]]) -> dict[str, Any]:
     rtfs = [float(run["realtime_factor"]) for run in runs]
     walls = [float(run["wall_seconds"]) for run in runs]
     similarities = [
-        float(run["speaker_similarity"])
-        for run in runs
-        if isinstance(run.get("speaker_similarity"), (int, float))
+        float(run["speaker_similarity"]) for run in runs if isinstance(run.get("speaker_similarity"), (int, float))
     ]
-    wers = [
-        float(run["wer"])
-        for run in runs
-        if isinstance(run.get("wer"), (int, float))
-    ]
+    wers = [float(run["wer"]) for run in runs if isinstance(run.get("wer"), (int, float))]
     return {
         "runs": len(runs),
         "rtf_p50": percentile(rtfs, 0.50),
@@ -116,8 +110,6 @@ def summarize_tts_runs(runs: list[dict[str, Any]]) -> dict[str, Any]:
         "wall_seconds_p95": percentile(walls, 0.95),
         "average_wer": statistics.fmean(wers) if wers else None,
         "maximum_wer": max(wers) if wers else None,
-        "average_speaker_similarity": (
-            statistics.fmean(similarities) if similarities else None
-        ),
+        "average_speaker_similarity": (statistics.fmean(similarities) if similarities else None),
         "minimum_speaker_similarity": min(similarities) if similarities else None,
     }

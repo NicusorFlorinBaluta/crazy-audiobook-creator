@@ -1,6 +1,7 @@
 """
 Lightweight post-processing utilities for TTS-Story audio output.
 """
+
 from __future__ import annotations
 
 import logging
@@ -25,6 +26,7 @@ def find_system_tool(name: str) -> Path | None:
     p = shutil.which(name)
     return Path(p) if p else None
 
+
 try:
     import librosa
     from librosa import util as librosa_util
@@ -44,6 +46,7 @@ except ImportError:
 from shared.models import VoiceFXSettings
 
 logger = logging.getLogger(__name__)
+
 
 def convert_mp3_to_wav_if_needed(prompt_path: str) -> tuple[str, Path | None]:
     """
@@ -161,7 +164,9 @@ class AudioPostProcessor:
             if output_path:
                 output_path.unlink(missing_ok=True)
 
-    def apply(self, audio: np.ndarray, sample_rate: int, fx: VoiceFXSettings | None, blend_override: float | None = None) -> np.ndarray:
+    def apply(
+        self, audio: np.ndarray, sample_rate: int, fx: VoiceFXSettings | None, blend_override: float | None = None
+    ) -> np.ndarray:
         """
         Apply audio effects to the input audio.
 
@@ -183,18 +188,13 @@ class AudioPostProcessor:
         base_audio = audio.astype(np.float32, copy=False)
         processed = base_audio.copy()
 
-        has_timing_or_pitch = (
-            abs(float(fx.speed) - 1.0) > 1e-3
-            or abs(float(fx.pitch_semitones)) > 1e-3
-        )
+        has_timing_or_pitch = abs(float(fx.speed) - 1.0) > 1e-3 or abs(float(fx.pitch_semitones)) > 1e-3
         if self._can_use_sox(fx):
             try:
                 processed = self._apply_speed_pitch_sox(processed, sample_rate, fx.speed, fx.pitch_semitones)
             except Exception as exc:  # pragma: no cover - fallback for local installs
                 if not self.allow_phase_vocoder_fallback:
-                    raise RuntimeError(
-                        "SoX voice FX failed and the phase-vocoder fallback is disabled"
-                    ) from exc
+                    raise RuntimeError("SoX voice FX failed and the phase-vocoder fallback is disabled") from exc
                 logger.warning("SoX FX failed (%s); using opted-in librosa fallback.", exc)
                 processed = self._apply_speed_pitch_librosa(processed, sample_rate, fx)
         elif has_timing_or_pitch and self.allow_phase_vocoder_fallback:
@@ -261,15 +261,15 @@ class AudioPostProcessor:
                 if abs(fx.speed - 1.0) > 1e-3:
                     command += ["tempo", "-s", f"{fx.speed:.3f}"]
                 result = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                timeout=EXTERNAL_TOOL_TIMEOUT_SECONDS,
-            )
+                    command,
+                    capture_output=True,
+                    text=True,
+                    timeout=EXTERNAL_TOOL_TIMEOUT_SECONDS,
+                )
                 if result.returncode != 0:
                     raise RuntimeError(result.stderr.strip() or "SoX failed")
             else:
-                audio, sr = sf.read(str(prompt), dtype='float32')
+                audio, sr = sf.read(str(prompt), dtype="float32")
                 processed = self._apply_speed_pitch_librosa(audio, sr, fx)
                 sf.write(str(output_path), processed, sr)
             return output_path
@@ -337,21 +337,11 @@ class AudioPostProcessor:
         # Try high-quality resampling, fall back to kaiser_best if soxr not available
         try:
             shifted = librosa.effects.pitch_shift(
-                audio,
-                sr=sample_rate,
-                n_steps=semitones,
-                n_fft=n_fft,
-                hop_length=hop_length,
-                res_type='soxr_hq'
+                audio, sr=sample_rate, n_steps=semitones, n_fft=n_fft, hop_length=hop_length, res_type="soxr_hq"
             )
         except Exception:
             shifted = librosa.effects.pitch_shift(
-                audio,
-                sr=sample_rate,
-                n_steps=semitones,
-                n_fft=n_fft,
-                hop_length=hop_length,
-                res_type='kaiser_best'
+                audio, sr=sample_rate, n_steps=semitones, n_fft=n_fft, hop_length=hop_length, res_type="kaiser_best"
             )
 
         return shifted.astype(np.float32, copy=False)
@@ -405,7 +395,7 @@ class AudioPostProcessor:
             )
             if result.returncode != 0:
                 raise RuntimeError(result.stderr.strip() or "SoX failed")
-            processed, _ = sf.read(str(output_path), dtype='float32')
+            processed, _ = sf.read(str(output_path), dtype="float32")
         finally:
             input_path.unlink(missing_ok=True)
             output_path.unlink(missing_ok=True)
@@ -453,7 +443,7 @@ class AudioPostProcessor:
                 original = np.interp(
                     np.linspace(0, 1, num=processed.shape[0], endpoint=False),
                     np.linspace(0, 1, num=original.shape[0], endpoint=False),
-                    original
+                    original,
                 ).astype(np.float32)
         mix = max(0.0, min(mix, 0.4))
         return (1.0 - mix) * processed + mix * original

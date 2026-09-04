@@ -625,10 +625,9 @@ Update the Parler server to:
 
 Update the subprocess launch command to use the AMD venv Python:
 ```python
-subprocess.Popen([
-    r"E:\PyTorch env\my_venv\Scripts\python.exe",
-    str(Path(__file__).parent.parent.parent / "parler_server.py")
-], ...)
+subprocess.Popen(
+    [r"E:\PyTorch env\my_venv\Scripts\python.exe", str(Path(__file__).parent.parent.parent / "parler_server.py")], ...
+)
 ```
 
 Update the log file path from the hardcoded Ubuntu path to a Windows path under the

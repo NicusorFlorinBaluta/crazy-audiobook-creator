@@ -65,9 +65,7 @@ class AttributionGuardrailsEnhancedTests(unittest.TestCase):
             SourceFragment('"There is no new life without death."', 35, 72),
         ]
         # "he said." establishes Gender.MALE in paragraph
-        dialogue_map, tag_map = ScriptGenerator._paragraph_attribution_maps(
-            fragments, self.registry
-        )
+        dialogue_map, tag_map = ScriptGenerator._paragraph_attribution_maps(fragments, self.registry)
         self.assertIn(0, tag_map)
         self.assertIn(2, tag_map)
         _, _, g0 = tag_map[0]
@@ -87,23 +85,17 @@ class AttributionGuardrailsEnhancedTests(unittest.TestCase):
 
     def test_dialogue_tag_evidence_expanded_verbs_and_bidirectional(self) -> None:
         # Tag with descriptive alias and verb: "the armored alien said,"
-        exact, kind, _ = ScriptGenerator._dialogue_tag_evidence(
-            "the armored alien said,", self.registry
-        )
+        exact, kind, _ = ScriptGenerator._dialogue_tag_evidence("the armored alien said,", self.registry)
         self.assertEqual(exact, "drominadian")
         self.assertEqual(kind, "named_tag")
 
         # Tag with verb-subject order: "said the stranger"
-        exact_rev, kind_rev, _ = ScriptGenerator._dialogue_tag_evidence(
-            "said the stranger", self.registry
-        )
+        exact_rev, kind_rev, _ = ScriptGenerator._dialogue_tag_evidence("said the stranger", self.registry)
         self.assertEqual(exact_rev, "drominadian")
         self.assertEqual(kind_rev, "named_tag")
 
         # Tag with newly added speech verb: "Saplings snapped,"
-        exact_snap, kind_snap, _ = ScriptGenerator._dialogue_tag_evidence(
-            "Saplings snapped,", self.registry
-        )
+        exact_snap, kind_snap, _ = ScriptGenerator._dialogue_tag_evidence("Saplings snapped,", self.registry)
         self.assertEqual(exact_snap, "second_of_saplings")
         self.assertEqual(kind_snap, "named_tag")
 
@@ -150,9 +142,7 @@ class AttributionGuardrailsEnhancedTests(unittest.TestCase):
         source = '"First half," Vathi said. "Second half."\n\n"New turn," Soil said.'
         fragments = ScriptGenerator._split_into_fragment_spans(source)
         dialogue_indexes = [
-            index
-            for index, fragment in enumerate(fragments)
-            if ScriptGenerator._is_dialogue_fragment(fragment.text)
+            index for index, fragment in enumerate(fragments) if ScriptGenerator._is_dialogue_fragment(fragment.text)
         ]
         raw_metadata = {
             "lines": [

@@ -42,9 +42,7 @@ class IncrementalDeliveryPipelineTests(unittest.TestCase):
                 chapter_title=f"Chapter {ch_num}",
                 lines=[],
             )
-            (self.scripts_dir / f"chapter_{ch_num:03d}.json").write_text(
-                ch_data.model_dump_json(), encoding="utf-8"
-            )
+            (self.scripts_dir / f"chapter_{ch_num:03d}.json").write_text(ch_data.model_dump_json(), encoding="utf-8")
 
         # Create book.json
         (self.project_dir / "book.json").write_text(
@@ -91,10 +89,12 @@ class IncrementalDeliveryPipelineTests(unittest.TestCase):
         def mock_export(proj_id, pdir, partial=False, chapter_selection=None, temp_output=None, **kwargs):
             nonlocal full_export_called
             if partial and temp_output:
-                exported_partials.append({
-                    "chapters": chapter_selection,
-                    "temp_output": temp_output,
-                })
+                exported_partials.append(
+                    {
+                        "chapters": chapter_selection,
+                        "temp_output": temp_output,
+                    }
+                )
                 # Simulate export output
                 temp_output.write_bytes(b"dummy partial audio content")
                 return {"duration_seconds": 120.0}
@@ -111,9 +111,7 @@ class IncrementalDeliveryPipelineTests(unittest.TestCase):
             {"incremental_delivery": {"enabled": True, "batch_size": 4}},
         )
 
-        self.pipeline._run_incremental_delivery(
-            self.project_id, self.project_dir, PipelineStage.GENERATING
-        )
+        self.pipeline._run_incremental_delivery(self.project_id, self.project_dir, PipelineStage.GENERATING)
 
         # 2 batches planned
         self.assertEqual(generated_batches, [{1, 2, 3, 4}, {5, 6}])
@@ -156,11 +154,13 @@ class IncrementalDeliveryPipelineTests(unittest.TestCase):
             temp_output=None,
             **kwargs,
         ):
-            exports.append({
-                "partial": partial,
-                "chapters": chapter_selection,
-                "temporary": temp_output is not None,
-            })
+            exports.append(
+                {
+                    "partial": partial,
+                    "chapters": chapter_selection,
+                    "temporary": temp_output is not None,
+                }
+            )
             if temp_output is not None:
                 temp_output.write_bytes(b"selected incremental part")
             return {"duration_seconds": 60.0}
@@ -176,17 +176,18 @@ class IncrementalDeliveryPipelineTests(unittest.TestCase):
             },
         )
 
-        self.pipeline._run_incremental_delivery(
-            self.project_id, self.project_dir, PipelineStage.GENERATING
-        )
+        self.pipeline._run_incremental_delivery(self.project_id, self.project_dir, PipelineStage.GENERATING)
 
         self.assertEqual(generated_batches, [{2, 4}, {5}])
         self.assertEqual(mastered_batches, [{2, 4}, {5}])
-        self.assertEqual(exports[-1], {
-            "partial": True,
-            "chapters": {2, 4, 5},
-            "temporary": False,
-        })
+        self.assertEqual(
+            exports[-1],
+            {
+                "partial": True,
+                "chapters": {2, 4, 5},
+                "temporary": False,
+            },
+        )
         index = DeliveryManager(self.project_dir).load_index()
         self.assertEqual(index.chapter_numbers, [2, 4, 5])
         self.assertEqual(
@@ -198,12 +199,7 @@ class IncrementalDeliveryPipelineTests(unittest.TestCase):
         dm = DeliveryManager(self.project_dir)
         self._write_master_manifests({1, 2, 3, 4})
         script_files = sorted(self.scripts_dir.glob("chapter_*.json"))
-        script_dependency = fingerprint(
-            {
-                str(number): hash_file(path)
-                for number, path in enumerate(script_files, 1)
-            }
-        )
+        script_dependency = fingerprint({str(number): hash_file(path) for number, path in enumerate(script_files, 1)})
         index, batches = dm.ensure_plan(
             [1, 2, 3, 4, 5, 6],
             4,
@@ -212,9 +208,7 @@ class IncrementalDeliveryPipelineTests(unittest.TestCase):
         temp_art = self.project_dir / "temp1.m4b"
         temp_art.write_bytes(b"batch 1 audio")
         master_hashes = {
-            str(number): hash_file(
-                self.project_dir / "manifests" / f"chapter_{number:03d}.master.json"
-            )
+            str(number): hash_file(self.project_dir / "manifests" / f"chapter_{number:03d}.master.json")
             for number in [1, 2, 3, 4]
         }
         dm.publish_delivery(
@@ -255,9 +249,7 @@ class IncrementalDeliveryPipelineTests(unittest.TestCase):
             {"incremental_delivery": {"enabled": True, "batch_size": 4}},
         )
 
-        self.pipeline._run_incremental_delivery(
-            self.project_id, self.project_dir, PipelineStage.GENERATING
-        )
+        self.pipeline._run_incremental_delivery(self.project_id, self.project_dir, PipelineStage.GENERATING)
 
         # Batch 1 was already valid, so only Batch 2 ({5, 6}) was generated
         self.assertEqual(generated_batches, [{5, 6}])
@@ -289,9 +281,7 @@ class IncrementalDeliveryPipelineTests(unittest.TestCase):
         )
 
         with self.assertRaises(_GracefulDeliveryPause):
-            self.pipeline._run_incremental_delivery(
-                self.project_id, self.project_dir, PipelineStage.GENERATING
-            )
+            self.pipeline._run_incremental_delivery(self.project_id, self.project_dir, PipelineStage.GENERATING)
 
         state = self.job_queue.get_job(self.project_id)
         self.assertEqual(state.get("status"), PipelineStage.PAUSED.value)
@@ -318,9 +308,7 @@ class IncrementalDeliveryPipelineTests(unittest.TestCase):
         )
 
     def test_partial_export_scopes_attribution_gate_to_selected_chapters(self) -> None:
-        self.pipeline._assert_attribution_audit = MagicMock(
-            side_effect=RuntimeError("stop after audit")
-        )
+        self.pipeline._assert_attribution_audit = MagicMock(side_effect=RuntimeError("stop after audit"))
 
         with self.assertRaisesRegex(RuntimeError, "stop after audit"):
             self.pipeline._run_export(
@@ -337,9 +325,7 @@ class IncrementalDeliveryPipelineTests(unittest.TestCase):
         )
 
     def test_full_export_keeps_book_wide_attribution_gate(self) -> None:
-        self.pipeline._assert_attribution_audit = MagicMock(
-            side_effect=RuntimeError("stop after audit")
-        )
+        self.pipeline._assert_attribution_audit = MagicMock(side_effect=RuntimeError("stop after audit"))
 
         with self.assertRaisesRegex(RuntimeError, "stop after audit"):
             self.pipeline._run_export(
@@ -367,11 +353,15 @@ class IncrementalDeliveryPipelineTests(unittest.TestCase):
         def mock_gen(proj_id, pdir, ch_nums=None):
             generated_batches.append(ch_nums)
             # Chapter 1 produces a review item
-            self.job_queue.set_review_item(
-                proj_id, "segment", "ch01_0001", "unreviewed", "WER warning"
-            )
+            self.job_queue.set_review_item(proj_id, "segment", "ch01_0001", "unreviewed", "WER warning")
             self.job_queue.log_quality(
-                proj_id, "ch01_0001", 1, 1, 0.25, 0.6, "flagged",
+                proj_id,
+                "ch01_0001",
+                1,
+                1,
+                0.25,
+                0.6,
+                "flagged",
                 details={"selected": True, "manual_review_reason": "WER warning"},
             )
 
@@ -382,9 +372,7 @@ class IncrementalDeliveryPipelineTests(unittest.TestCase):
         self.pipeline._run_mastering = mock_master
 
         with self.assertRaises(_WaitingForReview) as raised:
-            self.pipeline._run_incremental_delivery(
-                self.project_id, self.project_dir, PipelineStage.GENERATING
-            )
+            self.pipeline._run_incremental_delivery(self.project_id, self.project_dir, PipelineStage.GENERATING)
 
         # Batch 1 (chapters 1, 2, 3) generated as a whole batch before pausing
         self.assertEqual(generated_batches, [{1, 2, 3}])
@@ -430,17 +418,13 @@ class IncrementalDeliveryApiTests(unittest.IsolatedAsyncioTestCase):
             return_value=self.project_dir,
         )
         self.project_dir_patcher.start()
-        self.runtime_dir_patcher = patch.object(
-            dashboard_runtime, "project_dir", return_value=self.project_dir
-        )
+        self.runtime_dir_patcher = patch.object(dashboard_runtime, "project_dir", return_value=self.project_dir)
         self.runtime_dir_patcher.start()
 
     async def asyncTearDown(self) -> None:
         dashboard_main.job_queue = self.prev_job_queue
         dashboard_main.pipeline = self.prev_pipeline
-        dashboard_runtime.bind(
-            pipeline_obj=self.prev_runtime[0], job_queue_obj=self.prev_runtime[1]
-        )
+        dashboard_runtime.bind(pipeline_obj=self.prev_runtime[0], job_queue_obj=self.prev_runtime[1])
         self.runtime_dir_patcher.stop()
         self.project_dir_patcher.stop()
         self.temp_dir.cleanup()
@@ -564,6 +548,7 @@ class IncrementalDeliveryApiTests(unittest.IsolatedAsyncioTestCase):
             PronunciationRequest,
             update_pronunciation,
         )
+
         dashboard_main.projects_dir = self.project_dir.parent
 
         scripts_dir = self.project_dir / "script"
@@ -581,9 +566,7 @@ class IncrementalDeliveryApiTests(unittest.IsolatedAsyncioTestCase):
                 )
             ],
         )
-        (scripts_dir / "chapter_001.json").write_text(
-            ch1.model_dump_json(), encoding="utf-8"
-        )
+        (scripts_dir / "chapter_001.json").write_text(ch1.model_dump_json(), encoding="utf-8")
 
         res = await update_pronunciation(
             self.project_id,
@@ -604,4 +587,3 @@ class IncrementalDeliveryApiTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

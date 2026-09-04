@@ -33,17 +33,10 @@ def main() -> int:
     project_dir = pipeline.projects_dir / args.project_id
     if not project_dir.is_dir():
         raise SystemExit(f"Project not found: {project_dir}")
-    book = ExtractedBook.model_validate_json(
-        (project_dir / "book.json").read_text(encoding="utf-8")
-    )
-    registry = CharacterRegistry.model_validate_json(
-        (project_dir / "characters.json").read_text(encoding="utf-8")
-    )
+    book = ExtractedBook.model_validate_json((project_dir / "book.json").read_text(encoding="utf-8"))
+    registry = CharacterRegistry.model_validate_json((project_dir / "characters.json").read_text(encoding="utf-8"))
     script_paths = pipeline._script_files(project_dir / "script")
-    scripts = [
-        ScriptChapter.model_validate_json(path.read_text(encoding="utf-8"))
-        for path in script_paths
-    ]
+    scripts = [ScriptChapter.model_validate_json(path.read_text(encoding="utf-8")) for path in script_paths]
     initial_report = audit_book_attribution(book, registry, scripts)
     if not args.apply:
         print(json.dumps(initial_report, indent=2))
@@ -53,9 +46,7 @@ def main() -> int:
         return 0
 
     suspect_chapters = {
-        int(issue["chapter_number"])
-        for issue in initial_report["issues"]
-        if issue.get("chapter_number") is not None
+        int(issue["chapter_number"]) for issue in initial_report["issues"] if issue.get("chapter_number") is not None
     }
     chapters = {chapter.number: chapter for chapter in book.chapters}
     candidate_scripts: list[ScriptChapter] = []
@@ -74,9 +65,7 @@ def main() -> int:
             if cache_script.is_file() and cache_meta.is_file():
                 try:
                     metadata = json.loads(cache_meta.read_text(encoding="utf-8"))
-                    cached = ScriptChapter.model_validate_json(
-                        cache_script.read_text(encoding="utf-8")
-                    )
+                    cached = ScriptChapter.model_validate_json(cache_script.read_text(encoding="utf-8"))
                     chapter_report = audit_book_attribution(
                         book.model_copy(update={"chapters": [chapters[script.chapter_number]]}),
                         registry,
@@ -116,8 +105,7 @@ def main() -> int:
     if not final_report["passed"]:
         raise RuntimeError(
             "Candidate repair did not pass attribution audit; no project "
-            "artifacts were changed. Remaining issues: "
-            + json.dumps(final_report["issues"], ensure_ascii=False)
+            "artifacts were changed. Remaining issues: " + json.dumps(final_report["issues"], ensure_ascii=False)
         )
 
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
@@ -129,25 +117,15 @@ def main() -> int:
         if source.is_file():
             shutil.copy2(source, backup_dir / name)
 
-    candidate_by_number = {
-        script.chapter_number: script for script in candidate_scripts
-    }
-    changed_chapters = sorted(
-        metric["chapter_number"]
-        for metric in repair_metrics
-        if metric["changed_fragments"]
-    )
+    candidate_by_number = {script.chapter_number: script for script in candidate_scripts}
+    changed_chapters = sorted(metric["chapter_number"] for metric in repair_metrics if metric["changed_fragments"])
     for path in script_paths:
         chapter_number = int(path.stem.split("_")[-1])
         script = candidate_by_number[chapter_number]
         atomic_write_text(path, script.model_dump_json(indent=2))
         atomic_write_json(
             path.with_name(f"chapter_{chapter_number:03d}.meta.json"),
-            {
-                "fingerprint": pipeline.script_generator.chapter_fingerprint(
-                    chapters[chapter_number], registry
-                )
-            },
+            {"fingerprint": pipeline.script_generator.chapter_fingerprint(chapters[chapter_number], registry)},
         )
 
     book_script = BookScript(

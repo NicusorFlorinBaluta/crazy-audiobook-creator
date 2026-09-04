@@ -84,18 +84,11 @@ class AudioAssembler:
 
         for i, segment in enumerate(segments):
             utterance_group_id = getattr(segment, "utterance_group_id", None)
-            same_utterance_group = (
-                utterance_group_id is not None
-                and utterance_group_id == previous_utterance_group_id
-            )
+            same_utterance_group = utterance_group_id is not None and utterance_group_id == previous_utterance_group_id
             # One timing owner: adjacent pause directives are combined with
             # max(), never added together. Chapter edges are owned here.
             pause_before = getattr(segment, "pause_before_ms", 0)
-            gap_before = (
-                0
-                if i == 0 or same_utterance_group
-                else max(previous_pause_after, pause_before)
-            )
+            gap_before = 0 if i == 0 or same_utterance_group else max(previous_pause_after, pause_before)
             if gap_before > 0:
                 silence_part = self._silence(gap_before)
                 parts.append(silence_part)
@@ -120,6 +113,7 @@ class AudioAssembler:
             if sr != self.sample_rate:
                 try:
                     import librosa
+
                     audio = librosa.resample(audio, orig_sr=sr, target_sr=self.sample_rate)
                 except ImportError:
                     logger.warning("librosa not available for resampling")
@@ -136,9 +130,7 @@ class AudioAssembler:
                 )
                 diagnostic["utterance_group_id"] = utterance_group_id
                 diagnostic["crossfade_applied"] = bool(
-                    self.crossfade_ms > 0
-                    and previous_was_audio
-                    and not same_utterance_group
+                    self.crossfade_ms > 0 and previous_was_audio and not same_utterance_group
                 )
                 join_diagnostics.append(diagnostic)
 
@@ -165,11 +157,13 @@ class AudioAssembler:
             total_samples += len(audio)
             end_sample = total_samples
 
-            timeline.append({
-                "line_id": current_line_id,
-                "start_ms": int(round((start_sample / self.sample_rate) * 1000)),
-                "end_ms": int(round((end_sample / self.sample_rate) * 1000)),
-            })
+            timeline.append(
+                {
+                    "line_id": current_line_id,
+                    "start_ms": int(round((start_sample / self.sample_rate) * 1000)),
+                    "end_ms": int(round((end_sample / self.sample_rate) * 1000)),
+                }
+            )
 
             previous_was_audio = True
             previous_pause_after = getattr(segment, "pause_after_ms", 500)
@@ -193,9 +187,7 @@ class AudioAssembler:
             "audio": assembled,
             "sample_rate": self.sample_rate,
             "join_diagnostics": join_diagnostics,
-            "join_warnings": sum(
-                item["status"] == "warning" for item in join_diagnostics
-            ),
+            "join_warnings": sum(item["status"] == "warning" for item in join_diagnostics),
             "timeline": timeline,
         }
 
@@ -209,6 +201,7 @@ class AudioAssembler:
         gap_ms: int,
     ) -> dict[str, Any]:
         """Measure one boundary without changing or rejecting the audio."""
+
         def rms_dbfs(audio: np.ndarray) -> float:
             if audio.size == 0:
                 return -100.0
@@ -219,9 +212,7 @@ class AudioAssembler:
         current_rms = rms_dbfs(current)
         loudness_delta = abs(previous_rms - current_rms)
         boundary_jump = (
-            abs(float(current[0]) - float(previous[-1]))
-            if previous.size and current.size and gap_ms == 0
-            else 0.0
+            abs(float(current[0]) - float(previous[-1])) if previous.size and current.size and gap_ms == 0 else 0.0
         )
         reasons: list[str] = []
         if loudness_delta > 8.0:

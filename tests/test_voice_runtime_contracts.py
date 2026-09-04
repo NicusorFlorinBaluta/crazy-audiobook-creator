@@ -65,8 +65,9 @@ class VoiceModelResidencyTests(unittest.TestCase):
             )
             response = SimpleNamespace(status_code=200, text="")
 
-            with patch("requests.post", return_value=response), patch(
-                "soundfile.read", return_value=(np.zeros(24000), 24000)
+            with (
+                patch("requests.post", return_value=response),
+                patch("soundfile.read", return_value=(np.zeros(24000), 24000)),
             ):
                 result = designer._generate_voice("project", "speaker", character)
 
@@ -127,19 +128,40 @@ class VoiceModelResidencyTests(unittest.TestCase):
     def test_elevated_wer_is_retained_with_warning_and_does_not_crash(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             engine = Mock(speaker_embedding=Mock(return_value=[0.1, 0.2]), embedding_similarity=Mock(return_value=0.5))
-            library = Mock(voice_exists=Mock(return_value=False), get_voice_path=Mock(return_value=Path(directory) / "speaker.wav"))
-            validator = Mock(transcribe=Mock(return_value="transcribed words"), calculate_wer=Mock(return_value=0.45), is_loaded=False, unload=Mock())
+            library = Mock(
+                voice_exists=Mock(return_value=False), get_voice_path=Mock(return_value=Path(directory) / "speaker.wav")
+            )
+            validator = Mock(
+                transcribe=Mock(return_value="transcribed words"),
+                calculate_wer=Mock(return_value=0.45),
+                is_loaded=False,
+                unload=Mock(),
+            )
             designer = VoiceDesigner(engine=engine, library=library, validator=validator, wer_threshold=0.20)
-            character = Character(id="speaker", name="Speaker", gender=Gender.FEMALE, age_range="adult", voice_description="desc", test_sentence="some test words")
+            character = Character(
+                id="speaker",
+                name="Speaker",
+                gender=Gender.FEMALE,
+                age_range="adult",
+                voice_description="desc",
+                test_sentence="some test words",
+            )
 
-            with patch("subprocess.Popen") as mock_popen, patch("httpx.get") as mock_get, patch.object(designer, "_generate_voice") as mock_gen, patch.object(designer, "_acoustic_diagnostics", return_value=({}, [])):
+            with (
+                patch("subprocess.Popen") as mock_popen,
+                patch("httpx.get") as mock_get,
+                patch.object(designer, "_generate_voice") as mock_gen,
+                patch.object(designer, "_acoustic_diagnostics", return_value=({}, [])),
+            ):
                 mock_proc = Mock(poll=Mock(return_value=None), terminate=Mock(), wait=Mock())
                 mock_popen.return_value = mock_proc
                 mock_get.return_value = Mock(status_code=200, json=Mock(return_value={"model_loaded": True}))
 
                 wav_path = Path(directory) / "speaker.wav"
                 wav_path.write_bytes(b"fake_wav_data")
-                mock_gen.return_value = VoiceCandidate(id="speaker", file=str(wav_path), duration_seconds=5.0, sample_rate=24000)
+                mock_gen.return_value = VoiceCandidate(
+                    id="speaker", file=str(wav_path), duration_seconds=5.0, sample_rate=24000
+                )
 
                 req = BootstrapVoicesRequest(project_id="test_proj", characters={"speaker": character})
                 resp = designer.bootstrap_voices(req)
@@ -147,7 +169,6 @@ class VoiceModelResidencyTests(unittest.TestCase):
                 speaker_result = resp.voices_generated["speaker"]
                 self.assertEqual(len(speaker_result.candidates), 1)
                 self.assertTrue(any("exceeded threshold" in w for w in speaker_result.candidates[0].warnings))
-
 
 
 class CleanAudioPolicyTests(unittest.TestCase):
@@ -209,9 +230,7 @@ class CleanAudioPolicyTests(unittest.TestCase):
             )
 
         self.assertGreaterEqual(
-            engine.last_generation_metrics[
-                "autoregressive_generation_seconds"
-            ],
+            engine.last_generation_metrics["autoregressive_generation_seconds"],
             0.0,
         )
         self.assertGreaterEqual(engine.last_generation_metrics["total_seconds"], 0.0)
@@ -450,18 +469,10 @@ class LineSeedDerivationTests(unittest.TestCase):
 
     def test_seed_varies_with_every_identity_bearing_input(self) -> None:
         base = ValidationLoop._line_seed("p", "ch01_0001", "Text.", "narrator", 1)
-        self.assertNotEqual(
-            base, ValidationLoop._line_seed("other", "ch01_0001", "Text.", "narrator", 1)
-        )
-        self.assertNotEqual(
-            base, ValidationLoop._line_seed("p", "ch01_0002", "Text.", "narrator", 1)
-        )
-        self.assertNotEqual(
-            base, ValidationLoop._line_seed("p", "ch01_0001", "Text!", "narrator", 1)
-        )
-        self.assertNotEqual(
-            base, ValidationLoop._line_seed("p", "ch01_0001", "Text.", "kvothe", 1)
-        )
+        self.assertNotEqual(base, ValidationLoop._line_seed("other", "ch01_0001", "Text.", "narrator", 1))
+        self.assertNotEqual(base, ValidationLoop._line_seed("p", "ch01_0002", "Text.", "narrator", 1))
+        self.assertNotEqual(base, ValidationLoop._line_seed("p", "ch01_0001", "Text!", "narrator", 1))
+        self.assertNotEqual(base, ValidationLoop._line_seed("p", "ch01_0001", "Text.", "kvothe", 1))
 
     def test_seed_is_not_confusable_across_field_boundaries(self) -> None:
         """Fields are separated, so concatenation cannot collide."""

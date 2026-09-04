@@ -25,9 +25,7 @@ class WhisperValidator:
         vad_filter: bool = False,
     ):
         if backend not in {"auto", "faster_whisper", "openai_whisper"}:
-            raise ValueError(
-                "backend must be auto, faster_whisper, or openai_whisper"
-            )
+            raise ValueError("backend must be auto, faster_whisper, or openai_whisper")
         self.model_name = model_name
         self.device = device
         self.backend = backend
@@ -58,6 +56,7 @@ class WhisperValidator:
                 if device == "auto":
                     try:
                         import torch
+
                         device = "cuda" if torch.cuda.is_available() else "cpu"
                     except ImportError:
                         device = "cpu"
@@ -86,7 +85,9 @@ class WhisperValidator:
                 self._backend = "openai_whisper"
 
             self._is_loaded = True
-            logger.info("Whisper model loaded using %s (device=%s)", getattr(self, "_backend", "faster_whisper"), device)
+            logger.info(
+                "Whisper model loaded using %s (device=%s)", getattr(self, "_backend", "faster_whisper"), device
+            )
 
         except Exception as e:
             logger.error("Failed to load Whisper: %s", e)
@@ -101,6 +102,7 @@ class WhisperValidator:
 
             try:
                 import torch
+
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
             except ImportError:
@@ -173,6 +175,7 @@ class WhisperValidator:
                     return result.get("text", "").strip()
                 finally:
                     import os
+
                     os.unlink(tmp_path)
             else:
                 segments, info = self._model.transcribe(
@@ -217,11 +220,16 @@ class WhisperValidator:
             first_hyp = hyp_words[0].lower()
             first_ref = ref_words[0].lower()
             if first_hyp in {"you", "u", "user"} and first_ref not in {"you", "u", "user"}:
-                logger.warning("[WhisperValidator] Detected leading prompt token hallucination: %r vs ref %r", hyp_words[:3], ref_words[:3])
+                logger.warning(
+                    "[WhisperValidator] Detected leading prompt token hallucination: %r vs ref %r",
+                    hyp_words[:3],
+                    ref_words[:3],
+                )
                 return 0.50  # Instantly fail threshold for leading prompt hallucinations
 
         try:
             import jiwer
+
             wer = jiwer.wer(norm_ref, norm_hyp)
             return min(wer, 1.0)  # Cap at 1.0
         except ImportError:
@@ -280,10 +288,7 @@ class WhisperValidator:
 
         compact_reference = compact(reference)
         compact_hypothesis = compact(hypothesis)
-        return bool(
-            compact_reference
-            and compact_reference == compact_hypothesis
-        )
+        return bool(compact_reference and compact_reference == compact_hypothesis)
 
     @staticmethod
     def _expand_english_contractions(text: str) -> str:
@@ -329,6 +334,7 @@ class WhisperValidator:
         # Step 1: Use OpenAI Whisper's official English normalizer if available
         try:
             from whisper.normalizers import EnglishTextNormalizer
+
             if not hasattr(WhisperValidator, "_english_normalizer"):
                 WhisperValidator._english_normalizer = EnglishTextNormalizer()
             text = WhisperValidator._english_normalizer(text)

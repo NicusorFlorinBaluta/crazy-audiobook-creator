@@ -38,8 +38,16 @@ _MOOD_PROFILES: list[dict] = [
     {
         "tier": "intense",
         "keywords": (
-            "angry", "panic", "urgent", "excited", "shout", "furious",
-            "enraged", "terrified", "desperate", "demand",
+            "angry",
+            "panic",
+            "urgent",
+            "excited",
+            "shout",
+            "furious",
+            "enraged",
+            "terrified",
+            "desperate",
+            "demand",
         ),
         "pitch_delta": 0.40,
         "tone": "bright",
@@ -48,8 +56,16 @@ _MOOD_PROFILES: list[dict] = [
     {
         "tier": "soft",
         "keywords": (
-            "somber", "sad", "weary", "hushed", "whisper", "gentle",
-            "tender", "comfort", "soothing", "quiet",
+            "somber",
+            "sad",
+            "weary",
+            "hushed",
+            "whisper",
+            "gentle",
+            "tender",
+            "comfort",
+            "soothing",
+            "quiet",
         ),
         "pitch_delta": -0.30,
         "tone": "warm",
@@ -58,8 +74,15 @@ _MOOD_PROFILES: list[dict] = [
     {
         "tier": "playful",
         "keywords": (
-            "chuckle", "banter", "sarcastic", "teasing", "amused",
-            "playful", "wry", "ironic", "lighthearted",
+            "chuckle",
+            "banter",
+            "sarcastic",
+            "teasing",
+            "amused",
+            "playful",
+            "wry",
+            "ironic",
+            "lighthearted",
         ),
         "pitch_delta": 0.20,
         "tone": "bright",
@@ -68,8 +91,15 @@ _MOOD_PROFILES: list[dict] = [
     {
         "tier": "tense",
         "keywords": (
-            "suspenseful", "nervous", "wary", "cautious", "dread",
-            "anxious", "uneasy", "foreboding", "grim",
+            "suspenseful",
+            "nervous",
+            "wary",
+            "cautious",
+            "dread",
+            "anxious",
+            "uneasy",
+            "foreboding",
+            "grim",
         ),
         "pitch_delta": 0.15,
         "tone": "neutral",
@@ -78,8 +108,15 @@ _MOOD_PROFILES: list[dict] = [
     {
         "tier": "authoritative",
         "keywords": (
-            "commanding", "stern", "decisive", "firm", "warning",
-            "authoritative", "solemn", "grave", "resolute",
+            "commanding",
+            "stern",
+            "decisive",
+            "firm",
+            "warning",
+            "authoritative",
+            "solemn",
+            "grave",
+            "resolute",
         ),
         "pitch_delta": -0.15,
         "tone": "neutral",
@@ -88,8 +125,14 @@ _MOOD_PROFILES: list[dict] = [
     {
         "tier": "reflective",
         "keywords": (
-            "contemplative", "nostalgic", "thoughtful", "pensive",
-            "reflective", "melancholic", "wistful", "introspective",
+            "contemplative",
+            "nostalgic",
+            "thoughtful",
+            "pensive",
+            "reflective",
+            "melancholic",
+            "wistful",
+            "introspective",
         ),
         "pitch_delta": -0.10,
         "tone": "warm",
@@ -128,18 +171,14 @@ class Qwen3TTSEngine:
         self.dtype = dtype
         self.sample_rate = sample_rate
         self.post_processing_config = dict(post_processing_config or {})
-        self.post_processing_enabled = bool(
-            self.post_processing_config.get("enabled", False)
-        )
+        self.post_processing_enabled = bool(self.post_processing_config.get("enabled", False))
         self.allow_phase_vocoder_fallback = bool(
             self.post_processing_config.get(
                 "allow_phase_vocoder_fallback",
                 False,
             )
         )
-        self.fx = AudioPostProcessor(
-            allow_phase_vocoder_fallback=self.allow_phase_vocoder_fallback
-        )
+        self.fx = AudioPostProcessor(allow_phase_vocoder_fallback=self.allow_phase_vocoder_fallback)
         self.embedding_store = embedding_store
         self.generation_config = generation_config or {}
         self.max_text_length = max(100, int(max_text_length))
@@ -182,6 +221,7 @@ class Qwen3TTSEngine:
 
             # Use snapshot_download to get local path
             from huggingface_hub import snapshot_download
+
             model_path = snapshot_download(repo_id=self.model_name, local_files_only=False)
 
             # Load model directly using qwen_tts with local path
@@ -249,6 +289,7 @@ class Qwen3TTSEngine:
         # Free CUDA cache
         try:
             import torch
+
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
         except ImportError:
@@ -318,9 +359,7 @@ class Qwen3TTSEngine:
                 self._ensure_loaded()
             finally:
                 if not was_loaded:
-                    metrics["model_load_seconds"] = (
-                        time.perf_counter() - load_started
-                    )
+                    metrics["model_load_seconds"] = time.perf_counter() - load_started
             metrics["attention_implementation"] = self.attn_implementation
 
             resolved_seed = self._resolve_seed(seed)
@@ -337,26 +376,20 @@ class Qwen3TTSEngine:
                 try:
                     generated_part = self._generate(
                         text=part,
-                        voice_reference=str(voice_reference_path)
-                        if voice_reference_path
-                        else None,
+                        voice_reference=str(voice_reference_path) if voice_reference_path else None,
                         ref_text=ref_text,
                     )
                 finally:
                     part_elapsed = time.perf_counter() - part_started
                     part_metrics = dict(self._last_part_generation_metrics)
                     if not part_metrics:
-                        part_metrics["autoregressive_generation_seconds"] = (
-                            part_elapsed
-                        )
+                        part_metrics["autoregressive_generation_seconds"] = part_elapsed
                     for key in (
                         "reference_prompt_seconds",
                         "autoregressive_generation_seconds",
                         "audio_decode_seconds",
                     ):
-                        metrics[key] += float(
-                            part_metrics.get(key, 0.0) or 0.0
-                        )
+                        metrics[key] += float(part_metrics.get(key, 0.0) or 0.0)
                     cache_hit = part_metrics.get("reference_prompt_cache_hit")
                     if cache_hit is True:
                         metrics["reference_prompt_cache_hits"] += 1
@@ -365,14 +398,8 @@ class Qwen3TTSEngine:
                 generated_parts.append(generated_part)
 
             concatenate_started = time.perf_counter()
-            audio = (
-                np.concatenate(generated_parts)
-                if generated_parts
-                else np.zeros(0, dtype=np.float32)
-            )
-            metrics["audio_concatenation_seconds"] = (
-                time.perf_counter() - concatenate_started
-            )
+            audio = np.concatenate(generated_parts) if generated_parts else np.zeros(0, dtype=np.float32)
+            metrics["audio_concatenation_seconds"] = time.perf_counter() - concatenate_started
 
             post_started = time.perf_counter()
             effective_fx, matched_tier = self._effective_post_fx(
@@ -388,29 +415,21 @@ class Qwen3TTSEngine:
                     effective_fx.tone,
                     effective_fx.speed,
                 )
-            if (
-                self.post_processing_enabled
-                and self.fx
-                and not effective_fx.is_identity()
-            ):
+            if self.post_processing_enabled and self.fx and not effective_fx.is_identity():
                 audio = self.fx.apply(
                     audio,
                     self.sample_rate,
                     effective_fx,
                     blend_override=0.0,
                 )
-            metrics["post_processing_seconds"] = (
-                time.perf_counter() - post_started
-            )
+            metrics["post_processing_seconds"] = time.perf_counter() - post_started
 
             if output_path:
                 write_started = time.perf_counter()
                 output_path = Path(output_path)
                 output_path.parent.mkdir(parents=True, exist_ok=True)
                 self._write_audio_atomic(output_path, audio)
-                metrics["wav_write_seconds"] = (
-                    time.perf_counter() - write_started
-                )
+                metrics["wav_write_seconds"] = time.perf_counter() - write_started
 
             return audio
         finally:
@@ -440,9 +459,7 @@ class Qwen3TTSEngine:
             # Any other string: hash it so callers are not forced to pre-encode.
             import hashlib
 
-            value = int(
-                hashlib.sha256(text.encode("utf-8")).hexdigest()[:16], 16
-            )
+            value = int(hashlib.sha256(text.encode("utf-8")).hexdigest()[:16], 16)
         return value % cls._SEED_MODULUS
 
     @staticmethod
@@ -510,17 +527,14 @@ class Qwen3TTSEngine:
         part_metrics: dict[str, Any] = {}
         self._last_part_generation_metrics = part_metrics
         if not voice_reference:
-            raise RuntimeError(
-                "Qwen3-TTS Base generation requires a registered voice reference"
-            )
+            raise RuntimeError("Qwen3-TTS Base generation requires a registered voice reference")
 
         use_icl = bool(ref_text and ref_text.strip())
         x_vec_mode = not use_icl
 
         if x_vec_mode:
             logger.warning(
-                "No ref_text available for %s — using x_vector_only_mode=True "
-                "(quality/similarity may be reduced)",
+                "No ref_text available for %s — using x_vector_only_mode=True (quality/similarity may be reduced)",
                 voice_reference,
             )
         else:
@@ -538,12 +552,8 @@ class Qwen3TTSEngine:
                 x_vec_mode,
             )
         finally:
-            part_metrics["reference_prompt_seconds"] = (
-                time.perf_counter() - prompt_started
-            )
-            part_metrics["reference_prompt_cache_hit"] = (
-                self._last_prompt_cache_hit
-            )
+            part_metrics["reference_prompt_seconds"] = time.perf_counter() - prompt_started
+            part_metrics["reference_prompt_cache_hit"] = self._last_prompt_cache_hit
         generation_config = dict(self.generation_config)
         adaptive = generation_config.pop("adaptive_max_new_tokens", {}) or {}
         if adaptive.get("enabled", False):
@@ -570,9 +580,7 @@ class Qwen3TTSEngine:
                 **generation_config,
             )
         finally:
-            part_metrics["autoregressive_generation_seconds"] = (
-                time.perf_counter() - generation_started
-            )
+            part_metrics["autoregressive_generation_seconds"] = time.perf_counter() - generation_started
 
         decode_started = time.perf_counter()
         try:
@@ -584,9 +592,7 @@ class Qwen3TTSEngine:
             if max_peak > 0.99:
                 audio = audio * (0.99 / max_peak)
         finally:
-            part_metrics["audio_decode_seconds"] = (
-                time.perf_counter() - decode_started
-            )
+            part_metrics["audio_decode_seconds"] = time.perf_counter() - decode_started
 
         return audio
 
@@ -640,9 +646,7 @@ class Qwen3TTSEngine:
             for item in items:
                 serializable.append(
                     {
-                        "ref_code": item.ref_code.detach().cpu()
-                        if item.ref_code is not None
-                        else None,
+                        "ref_code": item.ref_code.detach().cpu() if item.ref_code is not None else None,
                         "ref_spk_embedding": item.ref_spk_embedding.detach().cpu(),
                         "x_vector_only_mode": item.x_vector_only_mode,
                         "icl_mode": item.icl_mode,
@@ -665,10 +669,7 @@ class Qwen3TTSEngine:
         parts: list[str] = []
         while len(remaining) > self.max_text_length:
             window = remaining[: self.max_text_length + 1]
-            boundaries = [
-                match.end()
-                for match in re.finditer(r"[.!?…][\"'”’]?\s+|\s+", window)
-            ]
+            boundaries = [match.end() for match in re.finditer(r"[.!?…][\"'”’]?\s+|\s+", window)]
             cut = boundaries[-1] if boundaries else self.max_text_length
             part = remaining[:cut].strip()
             if not part:
@@ -730,6 +731,7 @@ class Qwen3TTSEngine:
                 os.replace(temporary, output_path)
             except OSError:
                 import shutil
+
                 with open(output_path, "wb") as dst, open(temporary, "rb") as src:
                     shutil.copyfileobj(src, dst)
         finally:
@@ -744,6 +746,7 @@ class Qwen3TTSEngine:
         """Get current VRAM usage."""
         try:
             import torch
+
             if torch.cuda.is_available():
                 return {
                     "vram_total_gb": torch.cuda.get_device_properties(0).total_memory / 1e9,
@@ -760,6 +763,7 @@ class Qwen3TTSEngine:
         """Get the GPU name."""
         try:
             import torch
+
             if torch.cuda.is_available():
                 return torch.cuda.get_device_name(0)
         except ImportError:
@@ -782,16 +786,11 @@ class Qwen3TTSEngine:
     def speaker_embedding(self, audio_path: str | Path):
         """Extract one reusable Qwen speaker embedding from an audio file."""
         import torch
+
         pt_path = Path(audio_path).with_suffix(".pt")
         if pt_path.exists():
             try:
-                return (
-                    torch.load(pt_path, map_location="cpu", weights_only=True)
-                    .detach()
-                    .float()
-                    .flatten()
-                    .cpu()
-                )
+                return torch.load(pt_path, map_location="cpu", weights_only=True).detach().float().flatten().cpu()
             except Exception as e:
                 logger.warning("Could not load cached embedding %s: %s", pt_path, e)
 
@@ -808,10 +807,16 @@ class Qwen3TTSEngine:
                 orig_sr=sample_rate,
                 target_sr=target_rate,
             )
-        emb = self._model.model.extract_speaker_embedding(
-            audio=audio,
-            sr=target_rate,
-        ).detach().float().flatten().cpu()
+        emb = (
+            self._model.model.extract_speaker_embedding(
+                audio=audio,
+                sr=target_rate,
+            )
+            .detach()
+            .float()
+            .flatten()
+            .cpu()
+        )
 
         temp_path = pt_path.with_name(f".{pt_path.name}.tmp")
         try:

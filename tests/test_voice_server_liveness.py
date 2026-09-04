@@ -129,9 +129,7 @@ class ChapterRunSlotTakeoverTests(unittest.TestCase):
         voice_main.active_project_runs.clear()
         # `generate_chapter` refuses early without a validator. Supply a stub so
         # the test exercises run-slot contention, not the initialization guard.
-        self._validator_patch = unittest.mock.patch.object(
-            voice_main, "validator", unittest.mock.Mock()
-        )
+        self._validator_patch = unittest.mock.patch.object(voice_main, "validator", unittest.mock.Mock())
         self._validator_patch.start()
 
     def tearDown(self) -> None:
@@ -147,12 +145,10 @@ class ChapterRunSlotTakeoverTests(unittest.TestCase):
         from fastapi import HTTPException
 
         # Shorten the wait so the test does not sit for the production timeout.
-        with unittest.mock.patch.object(
-            voice_main, "RUN_SLOT_TAKEOVER_TIMEOUT_SECONDS", 0.5
-        ), unittest.mock.patch.object(
-            voice_main, "RUN_SLOT_POLL_ATTEMPTS", 2
-        ), unittest.mock.patch.object(
-            voice_main, "RUN_SLOT_POLL_INTERVAL_SECONDS", 0.01
+        with (
+            unittest.mock.patch.object(voice_main, "RUN_SLOT_TAKEOVER_TIMEOUT_SECONDS", 0.5),
+            unittest.mock.patch.object(voice_main, "RUN_SLOT_POLL_ATTEMPTS", 2),
+            unittest.mock.patch.object(voice_main, "RUN_SLOT_POLL_INTERVAL_SECONDS", 0.01),
         ):
             with self.assertRaises(HTTPException) as caught:
                 voice_main.generate_chapter(
@@ -180,12 +176,10 @@ class ChapterRunSlotTakeoverTests(unittest.TestCase):
 
         threading.Thread(target=release_soon, daemon=True).start()
 
-        with unittest.mock.patch.object(
-            voice_main, "RUN_SLOT_TAKEOVER_TIMEOUT_SECONDS", 5
-        ), unittest.mock.patch.object(
-            voice_main, "RUN_SLOT_POLL_ATTEMPTS", 1
-        ), unittest.mock.patch.object(
-            voice_main, "RUN_SLOT_POLL_INTERVAL_SECONDS", 0.01
+        with (
+            unittest.mock.patch.object(voice_main, "RUN_SLOT_TAKEOVER_TIMEOUT_SECONDS", 5),
+            unittest.mock.patch.object(voice_main, "RUN_SLOT_POLL_ATTEMPTS", 1),
+            unittest.mock.patch.object(voice_main, "RUN_SLOT_POLL_INTERVAL_SECONDS", 0.01),
         ):
             response = voice_main.generate_chapter(
                 _chapter_request("book"),

@@ -232,15 +232,10 @@ async def get_catalog(
         export_manifest = project_dir / "export_quality.json"
         if has_full_m4b and export_manifest.is_file():
             try:
-                exported = json.loads(
-                    export_manifest.read_text(encoding="utf-8")
-                )
-                exported_chapters = {
-                    int(number) for number in exported.get("chapters", [])
-                }
-                complete_export = (
-                    not bool(exported.get("partial"))
-                    and exported_chapters == set(range(1, total_chapters + 1))
+                exported = json.loads(export_manifest.read_text(encoding="utf-8"))
+                exported_chapters = {int(number) for number in exported.get("chapters", [])}
+                complete_export = not bool(exported.get("partial")) and exported_chapters == set(
+                    range(1, total_chapters + 1)
                 )
             except (OSError, ValueError, TypeError):
                 complete_export = False
@@ -285,31 +280,34 @@ async def get_catalog(
         except Exception:
             pass
 
-        updated_at = job_state.get("updated_at") or datetime.fromtimestamp(
-            project_dir.stat().st_mtime, tz=UTC
-        ).isoformat()
+        updated_at = (
+            job_state.get("updated_at") or datetime.fromtimestamp(project_dir.stat().st_mtime, tz=UTC).isoformat()
+        )
 
-        books.append({
-            "project_id": project_id,
-            "title": str(title),
-            "author": str(author),
-            "genre": str(metadata.get("genre") or ""),
-            "year": str(metadata.get("year") or ""),
-            "description": str(metadata.get("description") or ""),
-            "isbn": str(metadata.get("isbn") or ""),
-            "status": book_status,
-            "total_chapters": total_chapters,
-            "generated_chapters_count": len(generated_chapters),
-            "mastered_chapters_count": len(mastered_chapters),
-            "total_duration_seconds": round(total_duration, 2),
-            "is_live_generating": (len(mastered_chapters) > 0 and len(mastered_chapters) < total_chapters) or bool(job_state.get("running")),
-            "cover_url": cover_url,
-            "stream_url": f"api/projects/{project_id}/stream",
-            "download_url": f"api/projects/{project_id}/download",
-            "file_size_bytes": file_size,
-            "published_deliveries_count": published_deliveries,
-            "updated_at": updated_at,
-        })
+        books.append(
+            {
+                "project_id": project_id,
+                "title": str(title),
+                "author": str(author),
+                "genre": str(metadata.get("genre") or ""),
+                "year": str(metadata.get("year") or ""),
+                "description": str(metadata.get("description") or ""),
+                "isbn": str(metadata.get("isbn") or ""),
+                "status": book_status,
+                "total_chapters": total_chapters,
+                "generated_chapters_count": len(generated_chapters),
+                "mastered_chapters_count": len(mastered_chapters),
+                "total_duration_seconds": round(total_duration, 2),
+                "is_live_generating": (len(mastered_chapters) > 0 and len(mastered_chapters) < total_chapters)
+                or bool(job_state.get("running")),
+                "cover_url": cover_url,
+                "stream_url": f"api/projects/{project_id}/stream",
+                "download_url": f"api/projects/{project_id}/download",
+                "file_size_bytes": file_size,
+                "published_deliveries_count": published_deliveries,
+                "updated_at": updated_at,
+            }
+        )
 
     return {"books": sorted(books, key=lambda b: b.get("updated_at", ""), reverse=True)}
 
@@ -359,12 +357,8 @@ async def get_book_detail(project_id: str, request: Request) -> dict[str, Any]:
         export_manifest = project_dir / "export_quality.json"
         if export_manifest.is_file():
             try:
-                exported = json.loads(
-                    export_manifest.read_text(encoding="utf-8")
-                )
-                mastered_set.update(
-                    int(number) for number in exported.get("chapters", [])
-                )
+                exported = json.loads(export_manifest.read_text(encoding="utf-8"))
+                mastered_set.update(int(number) for number in exported.get("chapters", []))
             except (OSError, ValueError, TypeError):
                 pass
 
@@ -412,32 +406,36 @@ async def get_book_detail(project_id: str, request: Request) -> dict[str, Any]:
                     c_end = int((part_cum_offset + c_dur) * 1000)
                     part_cum_offset += c_dur
                     chapter_delivery_offsets[c_num] = (c_start, c_end)
-                    part_ch_details.append({
-                        "number": c_num,
-                        "title": c_title,
-                        "raw_title": c_title,
-                        "source_heading": c_title,
-                        "start_ms": c_start,
-                        "end_ms": c_end,
-                        "duration_seconds": c_dur,
-                        "status": "mastered" if c_num in mastered_set else "pending",
-                        "stream_url": f"api/projects/{project_id}/stream/chapter/{c_num}?format=aac",
-                        "download_url": f"api/projects/{project_id}/download/chapter/{c_num}",
-                    })
+                    part_ch_details.append(
+                        {
+                            "number": c_num,
+                            "title": c_title,
+                            "raw_title": c_title,
+                            "source_heading": c_title,
+                            "start_ms": c_start,
+                            "end_ms": c_end,
+                            "duration_seconds": c_dur,
+                            "status": "mastered" if c_num in mastered_set else "pending",
+                            "stream_url": f"api/projects/{project_id}/stream/chapter/{c_num}?format=aac",
+                            "download_url": f"api/projects/{project_id}/download/chapter/{c_num}",
+                        }
+                    )
 
                 if not d_dur and part_cum_offset > 0:
                     d_dur = part_cum_offset
 
-                deliveries.append({
-                    "delivery_id": str(d_id),
-                    "title": f"Part {d_ord}: Chapters {min_c}-{max_c}",
-                    "chapters": d_chaps,
-                    "status": "published",
-                    "download_url": f"api/projects/{project_id}/deliveries/{d_id}/download",
-                    "filename": d_artifact,
-                    "duration_seconds": d_dur,
-                    "chapter_details": part_ch_details,
-                })
+                deliveries.append(
+                    {
+                        "delivery_id": str(d_id),
+                        "title": f"Part {d_ord}: Chapters {min_c}-{max_c}",
+                        "chapters": d_chaps,
+                        "status": "published",
+                        "download_url": f"api/projects/{project_id}/deliveries/{d_id}/download",
+                        "filename": d_artifact,
+                        "duration_seconds": d_dur,
+                        "chapter_details": part_ch_details,
+                    }
+                )
     except Exception as e:
         logger.warning("Could not load deliveries for %s: %s", project_id, e)
 
@@ -458,18 +456,20 @@ async def get_book_detail(project_id: str, request: Request) -> dict[str, Any]:
         raw_title = (chapter_titles.get(c_num) or "").strip()
         formatted_title = raw_title if raw_title else f"Chapter {c_num}"
 
-        chapters_list.append({
-            "number": c_num,
-            "title": formatted_title,
-            "raw_title": formatted_title,
-            "source_heading": formatted_title,
-            "status": ch_status,
-            "duration_seconds": dur,
-            "start_ms": start_ms,
-            "end_ms": end_ms,
-            "stream_url": f"api/projects/{project_id}/stream/chapter/{c_num}?format=aac" if is_mastered else None,
-            "download_url": f"api/projects/{project_id}/download/chapter/{c_num}" if is_mastered else None,
-        })
+        chapters_list.append(
+            {
+                "number": c_num,
+                "title": formatted_title,
+                "raw_title": formatted_title,
+                "source_heading": formatted_title,
+                "status": ch_status,
+                "duration_seconds": dur,
+                "start_ms": start_ms,
+                "end_ms": end_ms,
+                "stream_url": f"api/projects/{project_id}/stream/chapter/{c_num}?format=aac" if is_mastered else None,
+                "download_url": f"api/projects/{project_id}/download/chapter/{c_num}" if is_mastered else None,
+            }
+        )
 
     is_live = (len(mastered_set) > 0 and len(mastered_set) < total_chapters) or bool(job_state.get("running"))
 
@@ -542,9 +542,7 @@ async def get_progress(project_id: str, req: Request) -> dict[str, Any]:
     }
 
 
-def _resolve_chapter_timeline(
-    project_dir: Path, workspace_dir: Path, chapter_num: int
-) -> dict[str, tuple[int, int]]:
+def _resolve_chapter_timeline(project_dir: Path, workspace_dir: Path, chapter_num: int) -> dict[str, tuple[int, int]]:
     """Return a mapping of line_id -> (start_ms, end_ms) for a mastered or segmented chapter."""
     timeline_path = project_dir / "manifests" / f"chapter_{chapter_num:03d}.timeline.json"
     if timeline_path.is_file():
@@ -677,9 +675,7 @@ def _resolve_chapter_timeline(
 
 
 @router.get("/books/{project_id}/chapters/{chapter_number}/lyrics")
-async def get_chapter_lyrics(
-    project_id: str, chapter_number: int, request: Request
-) -> dict[str, Any]:
+async def get_chapter_lyrics(project_id: str, chapter_number: int, request: Request) -> dict[str, Any]:
     """Return synchronized karaoke/script lines with timestamps for a chapter."""
     project_dir = _project_dir(project_id)
     workspace_dir = _workspace_project_dir(project_id)
@@ -694,33 +690,29 @@ async def get_chapter_lyrics(
     try:
         script_data = json.loads(script_file.read_text(encoding="utf-8"))
     except Exception as exc:
-        raise HTTPException(
-            status_code=500, detail="Failed to parse chapter script"
-        ) from exc
+        raise HTTPException(status_code=500, detail="Failed to parse chapter script") from exc
 
     timeline = _resolve_chapter_timeline(project_dir, workspace_dir, chapter_number)
 
     lines_out: list[dict[str, Any]] = []
-    chapter_title = (
-        script_data.get("chapter_title")
-        or script_data.get("title")
-        or f"Chapter {chapter_number}"
-    )
+    chapter_title = script_data.get("chapter_title") or script_data.get("title") or f"Chapter {chapter_number}"
 
     for line in script_data.get("lines", []):
         lid = str(line.get("line_id", ""))
         timing = timeline.get(lid, (0, 0))
-        lines_out.append({
-            "line_id": lid,
-            "speaker": line.get("speaker") or "Narrator",
-            "speaker_id": line.get("voice_id") or line.get("speaker") or "narrator",
-            "text": line.get("spoken_text") or line.get("text") or "",
-            "emotion": line.get("emotion"),
-            "start_ms": timing[0],
-            "end_ms": timing[1],
-            "source_start": line.get("source_start"),
-            "source_end": line.get("source_end"),
-        })
+        lines_out.append(
+            {
+                "line_id": lid,
+                "speaker": line.get("speaker") or "Narrator",
+                "speaker_id": line.get("voice_id") or line.get("speaker") or "narrator",
+                "text": line.get("spoken_text") or line.get("text") or "",
+                "emotion": line.get("emotion"),
+                "start_ms": timing[0],
+                "end_ms": timing[1],
+                "source_start": line.get("source_start"),
+                "source_end": line.get("source_end"),
+            }
+        )
 
     return {
         "project_id": project_id,
@@ -731,9 +723,7 @@ async def get_chapter_lyrics(
 
 
 @router.get("/books/{project_id}/chapters/{chapter_number}/reader")
-async def get_chapter_reader(
-    project_id: str, chapter_number: int, request: Request
-) -> dict[str, Any]:
+async def get_chapter_reader(project_id: str, chapter_number: int, request: Request) -> dict[str, Any]:
     """Return formatted chapter text partitioned into paragraphs with timing metadata."""
     project_dir = _project_dir(project_id)
     workspace_dir = _workspace_project_dir(project_id)
@@ -797,7 +787,8 @@ async def get_chapter_reader(
 
         # Match script lines overlapping this paragraph
         overlapping_lines = [
-            l for l in script_lines
+            l
+            for l in script_lines
             if (
                 l.get("source_start") is not None
                 and l.get("source_end") is not None
@@ -814,12 +805,14 @@ async def get_chapter_reader(
             p_start_ms = 0
             p_end_ms = 0
 
-        paragraphs_out.append({
-            "index": idx,
-            "text": p_text,
-            "start_ms": p_start_ms,
-            "end_ms": p_end_ms,
-        })
+        paragraphs_out.append(
+            {
+                "index": idx,
+                "text": p_text,
+                "start_ms": p_start_ms,
+                "end_ms": p_end_ms,
+            }
+        )
 
     # Fill in timing holes monotonically if any intro/transition paragraphs missed direct attribution
     last_valid_ms = 0
@@ -859,4 +852,3 @@ async def download_book_epub(project_id: str, request: Request):
         media_type="application/epub+zip",
         filename=f"{project_id}.epub",
     )
-

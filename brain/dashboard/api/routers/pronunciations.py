@@ -85,9 +85,7 @@ async def update_pronunciation(project_id: str, request: PronunciationRequest):
     atomic_write_json(dict_path, current_dict)
 
     affected_chapters: set[int] = set()
-    term_pattern = re.compile(
-        rf"(?<!\w){re.escape(term)}(?!\w)", re.IGNORECASE
-    )
+    term_pattern = re.compile(rf"(?<!\w){re.escape(term)}(?!\w)", re.IGNORECASE)
     for chapter_path in sorted((project_dir / "script").glob("chapter_*.json")):
         if chapter_path.name.endswith(".meta.json"):
             continue
@@ -190,9 +188,7 @@ async def preview_pronunciation(project_id: str, request: PronunciationPreviewRe
     clean_spoken = normalize_phonetic_text(spoken)
     if request.in_sentence:
         if request.context_sentence and request.term.strip():
-            text_to_speak = apply_pronunciations(
-                request.context_sentence, {request.term.strip(): clean_spoken}
-            )
+            text_to_speak = apply_pronunciations(request.context_sentence, {request.term.strip(): clean_spoken})
         else:
             text_to_speak = f"The word is {clean_spoken}."
     else:
@@ -298,4 +294,3 @@ async def get_pronunciation_preview_audio(project_id: str, preview_id: str):
             "Content-Disposition": f'inline; filename="preview_{safe_id}.wav"',
         },
     )
-

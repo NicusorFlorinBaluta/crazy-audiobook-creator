@@ -76,21 +76,35 @@ class GeminiAttributionValidationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             service = _service(root)
-            service.api = _FakeApi([{"decisions": [{
-                "item_id": "appendix-1",
-                "decision": "include",
-                "confidence": 0.96,
-                "reason": "The appendix is continuous narrative.",
-            }]}])
+            service.api = _FakeApi(
+                [
+                    {
+                        "decisions": [
+                            {
+                                "item_id": "appendix-1",
+                                "decision": "include",
+                                "confidence": 0.96,
+                                "reason": "The appendix is continuous narrative.",
+                            }
+                        ]
+                    }
+                ]
+            )
             service.web = _FakeWeb()
             result = service.resolve_extraction_sections(
                 project_dir=root,
-                sections=[{
-                    "item_id": "appendix-1", "href": "appendix.xhtml",
-                    "title": "Appendix: The Trial", "word_count": 2400,
-                    "semantics": ["appendix"], "decision": "exclude",
-                    "confidence": 0.7, "classifier_excerpt": "x" * 900,
-                }],
+                sections=[
+                    {
+                        "item_id": "appendix-1",
+                        "href": "appendix.xhtml",
+                        "title": "Appendix: The Trial",
+                        "word_count": 2400,
+                        "semantics": ["appendix"],
+                        "decision": "exclude",
+                        "confidence": 0.7,
+                        "classifier_excerpt": "x" * 900,
+                    }
+                ],
             )
             self.assertEqual(result["decisions"]["appendix-1"]["decision"], "include")
             prompt = service.api.calls[0]["prompt"]
@@ -101,15 +115,31 @@ class GeminiAttributionValidationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             service = _service(root)
-            abstain = {"decisions": [{
-                "item_id": "section-1", "decision": "abstain",
-                "confidence": 0.7, "reason": "Unclear.",
-            }]}
+            abstain = {
+                "decisions": [
+                    {
+                        "item_id": "section-1",
+                        "decision": "abstain",
+                        "confidence": 0.7,
+                        "reason": "Unclear.",
+                    }
+                ]
+            }
             service.api = _FakeApi([abstain, abstain])
-            service.web = _FakeWeb([{"decisions": [{
-                "item_id": "section-1", "decision": "reference",
-                "confidence": 0.95, "reason": "Glossary-like reference material.",
-            }]}])
+            service.web = _FakeWeb(
+                [
+                    {
+                        "decisions": [
+                            {
+                                "item_id": "section-1",
+                                "decision": "reference",
+                                "confidence": 0.95,
+                                "reason": "Glossary-like reference material.",
+                            }
+                        ]
+                    }
+                ]
+            )
             result = service.resolve_extraction_sections(
                 project_dir=root,
                 sections=[{"item_id": "section-1", "title": "Names", "word_count": 800}],
@@ -121,16 +151,22 @@ class GeminiAttributionValidationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             service = _service(root)
-            service.api = _FakeApi([{
-                "decisions": [{
-                    "item_id": "ch01_0001",
-                    "decision": "resolved",
-                    "speaker_id": "alice",
-                    "confidence": 0.97,
-                    "reason": "The attached speech tag names Alice.",
-                    "evidence": "Alice said",
-                }]
-            }])
+            service.api = _FakeApi(
+                [
+                    {
+                        "decisions": [
+                            {
+                                "item_id": "ch01_0001",
+                                "decision": "resolved",
+                                "speaker_id": "alice",
+                                "confidence": 0.97,
+                                "reason": "The attached speech tag names Alice.",
+                                "evidence": "Alice said",
+                            }
+                        ]
+                    }
+                ]
+            )
             service.web = _FakeWeb()
             line = ScriptLine(
                 line_id="ch01_0001",
@@ -160,14 +196,16 @@ class GeminiAttributionValidationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             invalid = {
-                "decisions": [{
-                    "item_id": "ch01_0001",
-                    "decision": "resolved",
-                    "speaker_id": "minor_female",
-                    "confidence": 1.0,
-                    "reason": "The line is attributed to Tuka.",
-                    "evidence": '"Wait," Tuka said.',
-                }]
+                "decisions": [
+                    {
+                        "item_id": "ch01_0001",
+                        "decision": "resolved",
+                        "speaker_id": "minor_female",
+                        "confidence": 1.0,
+                        "reason": "The line is attributed to Tuka.",
+                        "evidence": '"Wait," Tuka said.',
+                    }
+                ]
             }
             service = _service(root)
             service.api = _FakeApi([invalid, invalid])
@@ -208,23 +246,22 @@ class GeminiAttributionValidationTests(unittest.TestCase):
                 "different or missing character",
                 line.attribution_review_reason,
             )
-            self.assertTrue(
-                all(
-                    "validation_error" in entry
-                    for entry in line.attribution_confidence_history[1:]
-                )
-            )
+            self.assertTrue(all("validation_error" in entry for entry in line.attribution_confidence_history[1:]))
 
     def test_inconclusive_api_stages_use_persistent_web_purpose_then_stay_manual(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            low = lambda confidence: {"decisions": [{
-                "item_id": "ch01_0001",
-                "decision": "abstain",
-                "speaker_id": None,
-                "confidence": confidence,
-                "reason": "Insufficient source evidence.",
-            }]}
+            low = lambda confidence: {
+                "decisions": [
+                    {
+                        "item_id": "ch01_0001",
+                        "decision": "abstain",
+                        "speaker_id": None,
+                        "confidence": confidence,
+                        "reason": "Insufficient source evidence.",
+                    }
+                ]
+            }
             service = _service(root)
             service.api = _FakeApi([low(0.55), low(0.7)])
             service.web = _FakeWeb([low(0.72)])
@@ -251,32 +288,60 @@ class GeminiAttributionValidationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             service = _service(root)
-            service.api = _FakeApi([
-                {"decisions": [{
-                    "item_id": "ch01_0001", "decision": "resolved",
-                    "speaker_id": "alice", "confidence": 0.96,
-                    "reason": "Alice is named.", "evidence": "Alice said",
-                }]},
-                {"decisions": [{
-                    "item_id": "ch02_0001", "decision": "resolved",
-                    "speaker_id": "bob", "confidence": 0.96,
-                    "reason": "Bob is named.", "evidence": "Bob said",
-                }]},
-            ])
+            service.api = _FakeApi(
+                [
+                    {
+                        "decisions": [
+                            {
+                                "item_id": "ch01_0001",
+                                "decision": "resolved",
+                                "speaker_id": "alice",
+                                "confidence": 0.96,
+                                "reason": "Alice is named.",
+                                "evidence": "Alice said",
+                            }
+                        ]
+                    },
+                    {
+                        "decisions": [
+                            {
+                                "item_id": "ch02_0001",
+                                "decision": "resolved",
+                                "speaker_id": "bob",
+                                "confidence": 0.96,
+                                "reason": "Bob is named.",
+                                "evidence": "Bob said",
+                            }
+                        ]
+                    },
+                ]
+            )
             service.web = _FakeWeb()
             chapters = [
-                ScriptChapter(chapter_number=1, chapter_title="One", lines=[
-                    ScriptLine(
-                        line_id="ch01_0001", speaker="narrator",
-                        attribution_review_required=True, text='"Wait," Alice said.',
-                    )
-                ]),
-                ScriptChapter(chapter_number=2, chapter_title="Two", lines=[
-                    ScriptLine(
-                        line_id="ch02_0001", speaker="narrator",
-                        attribution_review_required=True, text='"Go," Bob said.',
-                    )
-                ]),
+                ScriptChapter(
+                    chapter_number=1,
+                    chapter_title="One",
+                    lines=[
+                        ScriptLine(
+                            line_id="ch01_0001",
+                            speaker="narrator",
+                            attribution_review_required=True,
+                            text='"Wait," Alice said.',
+                        )
+                    ],
+                ),
+                ScriptChapter(
+                    chapter_number=2,
+                    chapter_title="Two",
+                    lines=[
+                        ScriptLine(
+                            line_id="ch02_0001",
+                            speaker="narrator",
+                            attribution_review_required=True,
+                            text='"Go," Bob said.',
+                        )
+                    ],
+                ),
             ]
             result = service.resolve_attributions(
                 project_dir=root,
@@ -299,14 +364,22 @@ class GeminiAttributionValidationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             service = _service(root)
-            service.api = _FakeApi([{"decisions": [{
-                "item_id": "ch01_0002",
-                "decision": "resolved",
-                "speaker_id": "alice",
-                "confidence": 0.97,
-                "reason": "The turn alternates back to Alice.",
-                "evidence": "Alice owns the preceding side of the exchange.",
-            }]}])
+            service.api = _FakeApi(
+                [
+                    {
+                        "decisions": [
+                            {
+                                "item_id": "ch01_0002",
+                                "decision": "resolved",
+                                "speaker_id": "alice",
+                                "confidence": 0.97,
+                                "reason": "The turn alternates back to Alice.",
+                                "evidence": "Alice owns the preceding side of the exchange.",
+                            }
+                        ]
+                    }
+                ]
+            )
             service.web = _FakeWeb()
             chapter = ScriptChapter(
                 chapter_number=1,
@@ -356,28 +429,42 @@ class GeminiAttributionValidationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             service = _service(root)
-            ungrounded = {"decisions": [{
-                "character_id": "alice", "decision": "update",
-                "confidence": 0.99, "reason": "Inferred",
-                "evidence": ["This sentence is not in the source."],
-                "gender": "female", "voice_description": "bright precise voice",
-            }]}
-            grounded = {"decisions": [{
-                "character_id": "alice", "decision": "update",
-                "confidence": 0.96, "reason": "Grounded",
-                "evidence": ["Alice answered in a clear, deliberate voice."],
-                "gender": "female", "voice_description": "bright precise voice",
-            }]}
+            ungrounded = {
+                "decisions": [
+                    {
+                        "character_id": "alice",
+                        "decision": "update",
+                        "confidence": 0.99,
+                        "reason": "Inferred",
+                        "evidence": ["This sentence is not in the source."],
+                        "gender": "female",
+                        "voice_description": "bright precise voice",
+                    }
+                ]
+            }
+            grounded = {
+                "decisions": [
+                    {
+                        "character_id": "alice",
+                        "decision": "update",
+                        "confidence": 0.96,
+                        "reason": "Grounded",
+                        "evidence": ["Alice answered in a clear, deliberate voice."],
+                        "gender": "female",
+                        "voice_description": "bright precise voice",
+                    }
+                ]
+            }
             service.api = _FakeApi([ungrounded, grounded])
             service.web = _FakeWeb()
             result = service.augment_characters(
                 project_dir=root,
-                dossier={"alice": {
-                    "current_gender": "other",
-                    "evidence_snippets": [
-                        "Alice answered in a clear, deliberate voice."
-                    ],
-                }},
+                dossier={
+                    "alice": {
+                        "current_gender": "other",
+                        "evidence_snippets": ["Alice answered in a clear, deliberate voice."],
+                    }
+                },
             )
             self.assertIn("alice", result["accepted"])
             self.assertEqual(result["review"], [])
@@ -415,13 +502,17 @@ class GeminiAudioValidationTests(unittest.TestCase):
             audio = root / "line.wav"
             audio.write_bytes(b"RIFF")
             service = _service(root)
-            service.api = _FakeApi([{
-                "item_id": "line",
-                "decision": "accept",
-                "confidence": 0.96,
-                "reason": "Speech is clear and natural.",
-                "defects": [],
-            }])
+            service.api = _FakeApi(
+                [
+                    {
+                        "item_id": "line",
+                        "decision": "accept",
+                        "confidence": 0.96,
+                        "reason": "Speech is clear and natural.",
+                        "defects": [],
+                    }
+                ]
+            )
             service.web = _FakeWeb()
             result = QualityResult(
                 line_id="line",
@@ -502,12 +593,9 @@ class GeminiApiClientPacingTests(unittest.TestCase):
 
             mock_resp = MagicMock()
             mock_resp.status_code = 200
-            mock_resp.json.return_value = {
-                "candidates": [{"content": {"parts": [{"text": '{"decision": "accept"}'}]}}]
-            }
+            mock_resp.json.return_value = {"candidates": [{"content": {"parts": [{"text": '{"decision": "accept"}'}]}}]}
 
-            with patch("httpx.post", return_value=mock_resp) as mock_post, \
-                 patch("time.sleep") as mock_sleep:
+            with patch("httpx.post", return_value=mock_resp) as mock_post, patch("time.sleep") as mock_sleep:
                 client._last_request_time = 100.0
                 with patch("time.monotonic", side_effect=[100.01, 100.05, 100.1, 100.1]):
                     res = client.generate_json(
@@ -539,12 +627,9 @@ class GeminiApiClientPacingTests(unittest.TestCase):
 
             resp_200 = MagicMock()
             resp_200.status_code = 200
-            resp_200.json.return_value = {
-                "candidates": [{"content": {"parts": [{"text": '{"ok": true}'}]}}]
-            }
+            resp_200.json.return_value = {"candidates": [{"content": {"parts": [{"text": '{"ok": true}'}]}}]}
 
-            with patch("httpx.post", side_effect=[resp_429, resp_200]), \
-                 patch("time.sleep") as mock_sleep:
+            with patch("httpx.post", side_effect=[resp_429, resp_200]), patch("time.sleep") as mock_sleep:
                 res = client.generate_json(
                     model="gemini-3.5-flash-lite",
                     prompt="test prompt",

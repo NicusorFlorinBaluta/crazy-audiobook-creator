@@ -46,7 +46,7 @@ class DashboardBasePathTests(unittest.TestCase):
         so adding a script cannot leave this assertion silently weaker.
         """
         index = (FRONTEND / "index.html").read_text(encoding="utf-8")
-        referenced = re.findall(r'static/((?:js|css)/[\w.-]+)\?v=([0-9.]+)', index)
+        referenced = re.findall(r"static/((?:js|css)/[\w.-]+)\?v=([0-9.]+)", index)
         self.assertTrue(referenced, "no revisioned assets found in index.html")
 
         for relative, _ in referenced:
@@ -73,13 +73,11 @@ class DashboardBasePathTests(unittest.TestCase):
         makes "did the client get the new UI?" unanswerable from a response.
         """
         index = (FRONTEND / "index.html").read_text(encoding="utf-8")
-        revisions = set(re.findall(r'\.(?:css|js)\?v=([0-9.]+)', index))
+        revisions = set(re.findall(r"\.(?:css|js)\?v=([0-9.]+)", index))
         self.assertEqual(len(revisions), 1, f"assets disagree: {revisions}")
         asset_revision = revisions.pop()
 
-        api_source = Path("brain/dashboard/api/main.py").read_text(
-            encoding="utf-8"
-        )
+        api_source = Path("brain/dashboard/api/main.py").read_text(encoding="utf-8")
         match = re.search(r'FRONTEND_BUILD = "([0-9.]+)"', api_source)
         self.assertIsNotNone(match, "FRONTEND_BUILD not found")
 
@@ -92,9 +90,7 @@ class DashboardBasePathTests(unittest.TestCase):
         )
 
     def test_embedded_frontend_disables_stale_browser_caching(self):
-        api_source = Path("brain/dashboard/api/main.py").read_text(
-            encoding="utf-8"
-        )
+        api_source = Path("brain/dashboard/api/main.py").read_text(encoding="utf-8")
         self.assertIn(
             '"no-store, no-cache, max-age=0, must-revalidate"',
             api_source,

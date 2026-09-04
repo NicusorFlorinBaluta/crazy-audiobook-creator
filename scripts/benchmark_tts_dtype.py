@@ -52,12 +52,9 @@ def _mode_summary(runs: list[dict[str, Any]], loads: list[float]) -> dict[str, A
             "sessions": len(loads),
             "load_seconds_p50": percentile(loads, 0.50),
             "load_seconds_p95": percentile(loads, 0.95),
-            "total_measured_wall_seconds": sum(
-                float(run["wall_seconds"]) for run in runs
-            ),
+            "total_measured_wall_seconds": sum(float(run["wall_seconds"]) for run in runs),
             "autoregressive_seconds": sum(
-                float(run["engine_metrics"].get("autoregressive_generation_seconds", 0.0))
-                for run in runs
+                float(run["engine_metrics"].get("autoregressive_generation_seconds", 0.0)) for run in runs
             ),
         }
     )
@@ -86,9 +83,7 @@ def main() -> int:
     except ValueError as exc:
         parser.error(str(exc))
 
-    fixture_ids = [
-        item.strip() for item in args.fixtures.split(",") if item.strip() in FIXTURES
-    ]
+    fixture_ids = [item.strip() for item in args.fixtures.split(",") if item.strip() in FIXTURES]
     if not fixture_ids:
         parser.error("at least one valid fixture is required")
 
@@ -96,9 +91,7 @@ def main() -> int:
     config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     tts = config.get("tts", {})
     validation = config.get("validation", {})
-    library = VoiceLibraryManager(
-        config.get("storage", {}).get("voice_library_dir", "voice_library")
-    )
+    library = VoiceLibraryManager(config.get("storage", {}).get("voice_library_dir", "voice_library"))
     info = library.get_voice_info(args.project, args.voice)
     if not info:
         raise SystemExit(f"Voice not found: {args.project}/{args.voice}")
@@ -119,9 +112,7 @@ def main() -> int:
         "source_control": git_identity(ROOT),
         "dependencies": dependency_versions(),
         "config_sha256": sha256_file(config_path),
-        "fixture_manifest_sha256": json_fingerprint(
-            {name: FIXTURES[name] for name in fixture_ids}
-        ),
+        "fixture_manifest_sha256": json_fingerprint({name: FIXTURES[name] for name in fixture_ids}),
         "protocol": {
             "session_order": order,
             "warmup": "one unmeasured generation after every model load",
@@ -142,18 +133,14 @@ def main() -> int:
         "voice": {
             "id": args.voice,
             "reference_sha256": sha256_file(reference),
-            "reference_text_sha256": hashlib.sha256(
-                ref_text.encode("utf-8")
-            ).hexdigest(),
+            "reference_text_sha256": hashlib.sha256(ref_text.encode("utf-8")).hexdigest(),
         },
         "fixtures": [
             {
                 "id": name,
                 "characters": len(FIXTURES[name]),
                 "words": len(FIXTURES[name].split()),
-                "text_sha256": hashlib.sha256(
-                    FIXTURES[name].encode("utf-8")
-                ).hexdigest(),
+                "text_sha256": hashlib.sha256(FIXTURES[name].encode("utf-8")).hexdigest(),
             }
             for name in fixture_ids
         ],
@@ -211,12 +198,7 @@ def main() -> int:
                         torch.cuda.reset_peak_memory_stats()
                 except (ImportError, RuntimeError):
                     pass
-                output_path = (
-                    args.output_dir
-                    / mode_name
-                    / f"session-{repetition}"
-                    / f"{fixture_id}.wav"
-                )
+                output_path = args.output_dir / mode_name / f"session-{repetition}" / f"{fixture_id}.wav"
                 output_path.parent.mkdir(parents=True, exist_ok=True)
                 started = time.perf_counter()
                 engine.generate_speech(
@@ -248,9 +230,7 @@ def main() -> int:
                         "wall_seconds": wall_seconds,
                         "audio_seconds": audio_seconds,
                         "realtime_factor": wall_seconds / audio_seconds,
-                        "speaker_similarity": float(
-                            engine.speaker_similarity(output_path, reference)
-                        ),
+                        "speaker_similarity": float(engine.speaker_similarity(output_path, reference)),
                         "peak_memory_bytes": peak_memory_bytes,
                         "audio_sha256": sha256_file(output_path),
                         "relative_path": str(output_path.relative_to(args.output_dir)),
@@ -276,9 +256,7 @@ def main() -> int:
         for run in report["runs"]:
             transcript = validator.transcribe(str(args.output_dir / run["relative_path"]))
             run["wer"] = validator.calculate_wer(FIXTURES[run["fixture"]], transcript)
-            run["transcript_sha256"] = hashlib.sha256(
-                transcript.encode("utf-8")
-            ).hexdigest()
+            run["transcript_sha256"] = hashlib.sha256(transcript.encode("utf-8")).hexdigest()
             atomic_write_json(args.output_json, report)
     finally:
         validator.unload()
@@ -287,9 +265,7 @@ def main() -> int:
     for mode_label, (mode_name, _) in modes.items():
         mode_runs = [run for run in report["runs"] if run["mode_label"] == mode_label]
         mode_loads = [
-            float(session["load_seconds"])
-            for session in report["sessions"]
-            if session["mode_label"] == mode_label
+            float(session["load_seconds"]) for session in report["sessions"] if session["mode_label"] == mode_label
         ]
         summaries[mode_name] = _mode_summary(mode_runs, mode_loads)
     report["summary"] = summaries
@@ -300,8 +276,7 @@ def main() -> int:
         candidate["maximum_wer"] is not None
         and candidate["maximum_wer"] <= 0.20
         and candidate["average_wer"] <= control["average_wer"]
-        and candidate["minimum_speaker_similarity"]
-        >= control["minimum_speaker_similarity"] - 0.02
+        and candidate["minimum_speaker_similarity"] >= control["minimum_speaker_similarity"] - 0.02
     )
     report["decision"] = {
         "rtf_change_fraction": rtf_change,

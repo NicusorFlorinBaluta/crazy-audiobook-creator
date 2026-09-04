@@ -171,9 +171,7 @@ def detect_suspicious_turns(
                                 f"Consecutive same-speaker dialogue collapse: adjacent lines "
                                 f"share speaker '{line_a.speaker}' across a question or short response"
                             )
-                            flagged_map[line_b.line_id] = build_suspicious_turn(
-                                idx_b, reason, "consecutive_collapse"
-                            )
+                            flagged_map[line_b.line_id] = build_suspicious_turn(idx_b, reason, "consecutive_collapse")
 
         # -------------------------------------------------------------
         # Pattern 2: Narrator-Separated Dialogue Collapse
@@ -221,9 +219,7 @@ def detect_suspicious_turns(
                 if conf is not None and conf < min_confidence:
                     if line.line_id not in flagged_map:
                         reason = f"Low speaker confidence ({conf:.2f} < {min_confidence:.2f})"
-                        flagged_map[line.line_id] = build_suspicious_turn(
-                            idx, reason, "low_confidence"
-                        )
+                        flagged_map[line.line_id] = build_suspicious_turn(idx, reason, "low_confidence")
 
         # -------------------------------------------------------------
         # Pattern 4: Untagged Staccato Sequence Check
@@ -265,15 +261,8 @@ def _check_staccato_run(
         ev = (line.speaker_evidence or "").casefold().strip()
         conf = line.speaker_confidence or 0.0
 
-        is_weak_evidence = (
-            not ev
-            or any(kw in ev for kw in weak_keywords)
-            or len(ev) < 15
-        )
+        is_weak_evidence = not ev or any(kw in ev for kw in weak_keywords) or len(ev) < 15
 
         if is_weak_evidence and conf < 0.85:
-            reason = (
-                f"Untagged staccato dialogue turn with borderline confidence ({conf:.2f}) "
-                f"and weak evidence tag"
-            )
+            reason = f"Untagged staccato dialogue turn with borderline confidence ({conf:.2f}) and weak evidence tag"
             flagged_map[line.line_id] = builder(idx, reason, "untagged_staccato")

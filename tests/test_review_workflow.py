@@ -31,15 +31,32 @@ class ReviewWorkflowTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_gate_release_and_human_resolution(self) -> None:
-        (self.project / "script" / "chapter_001.json").write_text(json.dumps({
-            "chapter_number": 1,
-            "lines": [{"line_id": "line-1", "speaker": "narrator",
-                       "speaker_confidence": .4, "attribution_review_required": True,
-                       "attribution_review_reason": "ambiguous"}],
-        }), encoding="utf-8")
+        (self.project / "script" / "chapter_001.json").write_text(
+            json.dumps(
+                {
+                    "chapter_number": 1,
+                    "lines": [
+                        {
+                            "line_id": "line-1",
+                            "speaker": "narrator",
+                            "speaker_confidence": 0.4,
+                            "attribution_review_required": True,
+                            "attribution_review_reason": "ambiguous",
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
         self.queue.update_job("demo", {"generated_chapters": [1]})
         self.queue.log_quality(
-            "demo", "audio-1", 1, 1, 0.05, 0.9, "flagged",
+            "demo",
+            "audio-1",
+            1,
+            1,
+            0.05,
+            0.9,
+            "flagged",
             details={"selected": True, "manual_review_reason": "uncertain"},
         )
         self.queue.set_review_item("demo", "segment", "audio-1", "unreviewed", "uncertain")
@@ -54,16 +71,18 @@ class ReviewWorkflowTests(unittest.TestCase):
         self.assertTrue((self.project / "pre_master_release.json").is_file())
 
     def test_stale_audio_reviews_do_not_block_a_reconciled_generation(self) -> None:
-        self.queue.update_job(
-            "demo", {"generated_chapters": [], "mastered_chapters": []}
-        )
+        self.queue.update_job("demo", {"generated_chapters": [], "mastered_chapters": []})
         self.queue.log_quality(
-            "demo", "old-line", 1, 1, 0.2, 0.5, "flagged",
+            "demo",
+            "old-line",
+            1,
+            1,
+            0.2,
+            0.5,
+            "flagged",
             details={"selected": True, "manual_review_reason": "old result"},
         )
-        self.queue.set_review_item(
-            "demo", "segment", "old-line", "unreviewed", "old result"
-        )
+        self.queue.set_review_item("demo", "segment", "old-line", "unreviewed", "old result")
 
         gate = collect_review_gate("demo", self.project, self.queue)
 
@@ -71,36 +90,53 @@ class ReviewWorkflowTests(unittest.TestCase):
         self.assertFalse(any(item.item_id == "old-line" for item in gate.items))
 
     def test_active_incomplete_chapter_audio_review_remains_blocking(self) -> None:
-        self.queue.update_job("demo", {
-            "status": "waiting_for_review",
-            "active_stage": "waiting_for_review",
-            "generated_chapters": [],
-            "mastered_chapters": [],
-            "review_blocking_item_ids": ["current-line"],
-        })
+        self.queue.update_job(
+            "demo",
+            {
+                "status": "waiting_for_review",
+                "active_stage": "waiting_for_review",
+                "generated_chapters": [],
+                "mastered_chapters": [],
+                "review_blocking_item_ids": ["current-line"],
+            },
+        )
         self.queue.log_quality(
-            "demo", "current-line", 2, 1, 0.2, 0.5, "flagged",
+            "demo",
+            "current-line",
+            2,
+            1,
+            0.2,
+            0.5,
+            "flagged",
             details={"selected": True, "manual_review_reason": "listen"},
         )
-        self.queue.set_review_item(
-            "demo", "segment", "current-line", "unreviewed", "listen"
-        )
+        self.queue.set_review_item("demo", "segment", "current-line", "unreviewed", "listen")
 
         gate = collect_review_gate("demo", self.project, self.queue)
 
         self.assertEqual([item.item_id for item in gate.blocking_items], ["current-line"])
 
     def test_ambiguous_extraction_blocks_until_include_exclude_or_reference(self) -> None:
-        (self.project / "extraction_audit.json").write_text(json.dumps({
-            "schema": 1,
-            "sections": [{
-                "item_id": "appendix-1", "title": "Appendix: The Trial",
-                "href": "appendix.xhtml", "decision": "exclude",
-                "confidence": 0.64, "word_count": 1800,
-                "reason": "Narrative appendix is ambiguous",
-                "review_required": True,
-            }],
-        }), encoding="utf-8")
+        (self.project / "extraction_audit.json").write_text(
+            json.dumps(
+                {
+                    "schema": 1,
+                    "sections": [
+                        {
+                            "item_id": "appendix-1",
+                            "title": "Appendix: The Trial",
+                            "href": "appendix.xhtml",
+                            "decision": "exclude",
+                            "confidence": 0.64,
+                            "word_count": 1800,
+                            "reason": "Narrative appendix is ambiguous",
+                            "review_required": True,
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
         gate = collect_review_gate("demo", self.project, self.queue)
         self.assertEqual([item.category for item in gate.blocking_items], ["extraction"])
         self.assertNotIn("excerpt", gate.items[0].details)
@@ -112,69 +148,82 @@ class ReviewWorkflowTests(unittest.TestCase):
     def test_never_attempted_extraction_can_enter_automatic_resolver_once(self) -> None:
         audit_path = self.project / "extraction_audit.json"
         payload = {
-            "sections": [{
-                "item_id": "unknown-1", "title": "Unknown",
-                "decision": "include", "confidence": 0.6,
-                "review_required": True,
-            }]
+            "sections": [
+                {
+                    "item_id": "unknown-1",
+                    "title": "Unknown",
+                    "decision": "include",
+                    "confidence": 0.6,
+                    "review_required": True,
+                }
+            ]
         }
         audit_path.write_text(json.dumps(payload), encoding="utf-8")
         gate = collect_review_gate("demo", self.project, self.queue)
         original = dashboard_main._project_dir
         dashboard_main._project_dir = lambda _project_id: self.project
         try:
-            self.assertTrue(_automatic_extraction_review_pending(
-                "demo", gate.blocking_items
-            ))
+            self.assertTrue(_automatic_extraction_review_pending("demo", gate.blocking_items))
             payload["sections"][0]["external_validation_attempted"] = True
             audit_path.write_text(json.dumps(payload), encoding="utf-8")
-            self.assertFalse(_automatic_extraction_review_pending(
-                "demo", gate.blocking_items
-            ))
+            self.assertFalse(_automatic_extraction_review_pending("demo", gate.blocking_items))
         finally:
             dashboard_main._project_dir = original
 
     def test_incomplete_scripting_can_resume_into_automatic_attribution_validation(self) -> None:
         (self.project / "script" / "chapter_001.json").write_text(
-            json.dumps({
-                "chapter_number": 1,
-                "lines": [{
-                    "line_id": "line-1",
-                    "speaker": "narrator",
-                    "speaker_confidence": 0.25,
-                    "attribution_review_required": True,
-                    "attribution_review_reason": "ambiguous",
-                }],
-            }),
+            json.dumps(
+                {
+                    "chapter_number": 1,
+                    "lines": [
+                        {
+                            "line_id": "line-1",
+                            "speaker": "narrator",
+                            "speaker_confidence": 0.25,
+                            "attribution_review_required": True,
+                            "attribution_review_reason": "ambiguous",
+                        }
+                    ],
+                }
+            ),
             encoding="utf-8",
         )
         gate = collect_review_gate("demo", self.project, self.queue)
 
-        self.assertTrue(_automatic_pipeline_review_pending(
-            "demo",
-            gate.blocking_items,
-            {"script_completed": False},
-            PipelineStage.SCRIPTING,
-        ))
-        self.assertFalse(_automatic_pipeline_review_pending(
-            "demo",
-            gate.blocking_items,
-            {"script_completed": True},
-            PipelineStage.BOOTSTRAPPING,
-        ))
+        self.assertTrue(
+            _automatic_pipeline_review_pending(
+                "demo",
+                gate.blocking_items,
+                {"script_completed": False},
+                PipelineStage.SCRIPTING,
+            )
+        )
+        self.assertFalse(
+            _automatic_pipeline_review_pending(
+                "demo",
+                gate.blocking_items,
+                {"script_completed": True},
+                PipelineStage.BOOTSTRAPPING,
+            )
+        )
 
     def test_ledger_calibration_is_advisory(self) -> None:
         for index in range(25):
             self.queue.log_external_validation(
-                "demo", "segment", f"line-{index}", "gemini_api_triage", "test",
-                "accept", .95, "clear", 10,
+                "demo",
+                "segment",
+                f"line-{index}",
+                "gemini_api_triage",
+                "test",
+                "accept",
+                0.95,
+                "clear",
+                10,
             )
-            self.queue.reconcile_external_validation(
-                "demo", "segment", f"line-{index}", "acceptable"
-            )
+            self.queue.reconcile_external_validation("demo", "segment", f"line-{index}", "acceptable")
         calibration = self.queue.external_validation_calibration("demo")
         self.assertTrue(calibration["ready"])
-        self.assertEqual(calibration["recommended_auto_accept_threshold"], .95)
+        self.assertEqual(calibration["recommended_auto_accept_threshold"], 0.95)
         self.assertFalse(calibration["applied_automatically"])
         self.assertEqual(calibration["pooling_policy"], "provider_model_purpose_revision")
         self.assertEqual(calibration["pooled_groups"][0]["purpose"], "segment")
@@ -189,35 +238,53 @@ class ReviewWorkflowTests(unittest.TestCase):
             ("other", "segment", "gemini", "pro", "audio-v2"),
         ):
             self.queue.log_external_validation(
-                project, item_type, f"{project}-{item_type}-{model}",
-                provider, model, "accept", .9, "clear", 10,
+                project,
+                item_type,
+                f"{project}-{item_type}-{model}",
+                provider,
+                model,
+                "accept",
+                0.9,
+                "clear",
+                10,
                 {"purpose_version": revision},
             )
             self.queue.reconcile_external_validation(
-                project, item_type, f"{project}-{item_type}-{model}",
+                project,
+                item_type,
+                f"{project}-{item_type}-{model}",
                 "acceptable",
             )
 
         calibration = self.queue.external_validation_calibration("demo")
         groups = calibration["pooled_groups"]
         self.assertEqual(len(groups), 3)
-        audio_flash = next(
-            group for group in groups
-            if group["model"] == "flash" and group["purpose"] == "segment"
-        )
+        audio_flash = next(group for group in groups if group["model"] == "flash" and group["purpose"] == "segment")
         self.assertEqual(audio_flash["sample_count"], 2)
 
     def test_candidate_ranking_and_retention(self) -> None:
         audio = self.root / "source.wav"
         audio.write_bytes(b"RIFF-test")
-        weak = QualityResult(line_id="line-1", status=ValidationStatus.FLAGGED,
-                             wer=.2, quality_score=.3, attempt=1, selected=True,
-                             external_validation_decision="reject",
-                             external_validation_confidence=.9)
-        strong = QualityResult(line_id="line-1", status=ValidationStatus.PASS,
-                               wer=.01, quality_score=.95, attempt=2, selected=True,
-                               external_validation_decision="accept",
-                               external_validation_confidence=.95)
+        weak = QualityResult(
+            line_id="line-1",
+            status=ValidationStatus.FLAGGED,
+            wer=0.2,
+            quality_score=0.3,
+            attempt=1,
+            selected=True,
+            external_validation_decision="reject",
+            external_validation_confidence=0.9,
+        )
+        strong = QualityResult(
+            line_id="line-1",
+            status=ValidationStatus.PASS,
+            wer=0.01,
+            quality_score=0.95,
+            attempt=2,
+            selected=True,
+            external_validation_decision="accept",
+            external_validation_confidence=0.95,
+        )
         self.assertGreater(candidate_score(strong), candidate_score(weak))
         preserve_candidate(self.project, audio, weak, retain=2)
         preserve_candidate(self.project, audio, strong, retain=2)

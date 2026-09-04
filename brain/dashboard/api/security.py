@@ -26,17 +26,12 @@ SAFE_HTTP_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 def is_cross_site_mutation(method: str, sec_fetch_site: str | None) -> bool:
     """Detect modern-browser cross-site mutation attempts without blocking CLI/proxy clients."""
-    return (
-        method.upper() not in SAFE_HTTP_METHODS
-        and (sec_fetch_site or "").strip().lower() == "cross-site"
-    )
+    return method.upper() not in SAFE_HTTP_METHODS and (sec_fetch_site or "").strip().lower() == "cross-site"
 
 
 def configured_dashboard_token(dashboard_config: dict[str, Any]) -> str:
     """Return the runtime token without requiring secrets in tracked YAML."""
-    return os.environ.get(TOKEN_ENV_VAR, "").strip() or str(
-        dashboard_config.get("api_token", "")
-    ).strip()
+    return os.environ.get(TOKEN_ENV_VAR, "").strip() or str(dashboard_config.get("api_token", "")).strip()
 
 
 def is_loopback_client(host: str | None) -> bool:
@@ -94,9 +89,7 @@ def configured_trusted_lan_cidrs(
     if isinstance(configured, str):
         configured = [configured]
     if not isinstance(configured, (list, tuple)):
-        raise ValueError(
-            "dashboard.trusted_lan_cidrs must be a list of CIDR strings"
-        )
+        raise ValueError("dashboard.trusted_lan_cidrs must be a list of CIDR strings")
     return tuple(str(entry).strip() for entry in configured if str(entry).strip())
 
 
@@ -118,13 +111,8 @@ def dashboard_request_authorized(
     working deployment -- but relying on the default means the documented
     ``dashboard.trusted_lan_cidrs`` setting has no effect.
     """
-    if is_loopback_client(client_host) or is_private_client(
-        client_host, trusted_lan_cidrs
-    ):
+    if is_loopback_client(client_host) or is_private_client(client_host, trusted_lan_cidrs):
         return True
     if configured_token:
-        return bool(
-            presented_token
-            and secrets.compare_digest(configured_token, presented_token)
-        )
+        return bool(presented_token and secrets.compare_digest(configured_token, presented_token))
     return False

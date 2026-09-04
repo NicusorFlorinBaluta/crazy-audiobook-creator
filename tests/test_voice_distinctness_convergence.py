@@ -117,13 +117,9 @@ class CompareCastTests(unittest.TestCase):
         designer = _designer(engine, _FakeLibrary(root))
 
         voices = {name: _result(name, root) for name in ("alice", "bob", "carol")}
-        embeddings = {
-            name: ("embedding", str(root / f"{name}_v1.wav")) for name in voices
-        }
+        embeddings = {name: ("embedding", str(root / f"{name}_v1.wav")) for name in voices}
 
-        diagnostics, collisions = designer._compare_cast(
-            embeddings, voices, self._noop_emit, self._noop_cancel
-        )
+        diagnostics, collisions = designer._compare_cast(embeddings, voices, self._noop_emit, self._noop_cancel)
 
         self.assertEqual(len(diagnostics), 3)  # 3 voices -> 3 pairs
         self.assertEqual(collisions, {"alice": {"bob"}, "bob": {"alice"}})
@@ -162,9 +158,7 @@ class CompareCastTests(unittest.TestCase):
         ]
         VoiceDesigner._apply_similarity_warnings(diagnostics, voices)
 
-        self.assertEqual(
-            voices["alice"].warnings, ["Some unrelated warning worth keeping."]
-        )
+        self.assertEqual(voices["alice"].warnings, ["Some unrelated warning worth keeping."])
 
 
 class ConvergenceLoopTests(unittest.TestCase):
@@ -172,9 +166,7 @@ class ConvergenceLoopTests(unittest.TestCase):
         self.root = Path("voices")
         self.request = BootstrapVoicesRequest(
             project_id="proj",
-            characters={
-                name: _character(name) for name in ("alice", "bob", "carol")
-            },
+            characters={name: _character(name) for name in ("alice", "bob", "carol")},
         )
 
     @contextmanager
@@ -193,9 +185,7 @@ class ConvergenceLoopTests(unittest.TestCase):
         designer = _designer(engine, library)
         self._install(designer)
 
-        voices = {
-            name: _result(name, self.root) for name in ("alice", "bob", "carol")
-        }
+        voices = {name: _result(name, self.root) for name in ("alice", "bob", "carol")}
         collisions = {"alice": {"bob"}, "bob": {"alice"}}
 
         with (
@@ -204,9 +194,7 @@ class ConvergenceLoopTests(unittest.TestCase):
                 "_generate_voice",
                 side_effect=lambda pid, cid, ch, **kw: _result(cid, self.root, "v2"),
             ),
-            patch.object(
-                VoiceDesigner, "_acoustic_diagnostics", return_value=({}, [])
-            ),
+            patch.object(VoiceDesigner, "_acoustic_diagnostics", return_value=({}, [])),
         ):
             regenerated = designer._redesign_for_distinctness(
                 self.request,
@@ -235,9 +223,7 @@ class ConvergenceLoopTests(unittest.TestCase):
 
         with (
             patch.object(VoiceDesigner, "_generate_voice", side_effect=_capture),
-            patch.object(
-                VoiceDesigner, "_acoustic_diagnostics", return_value=({}, [])
-            ),
+            patch.object(VoiceDesigner, "_acoustic_diagnostics", return_value=({}, [])),
         ):
             designer._redesign_for_distinctness(
                 self.request,
@@ -267,9 +253,7 @@ class ConvergenceLoopTests(unittest.TestCase):
                 "_generate_voice",
                 side_effect=RuntimeError("design service died"),
             ),
-            patch.object(
-                VoiceDesigner, "_acoustic_diagnostics", return_value=({}, [])
-            ),
+            patch.object(VoiceDesigner, "_acoustic_diagnostics", return_value=({}, [])),
         ):
             regenerated = designer._redesign_for_distinctness(
                 self.request,
@@ -294,9 +278,7 @@ class ConvergenceLoopTests(unittest.TestCase):
 
         with (
             patch.object(VoiceDesigner, "_generate_voice") as generate,
-            patch.object(
-                VoiceDesigner, "_acoustic_diagnostics", return_value=({}, [])
-            ),
+            patch.object(VoiceDesigner, "_acoustic_diagnostics", return_value=({}, [])),
             self.assertRaises(RuntimeError),
         ):
             designer._redesign_for_distinctness(
@@ -325,17 +307,13 @@ class ConvergenceLoopTests(unittest.TestCase):
         self.assertEqual(self._constructed(-3).distinctness_rounds, 0)
 
     def test_default_is_two_rounds(self) -> None:
-        designer = VoiceDesigner(
-            engine=_FakeEngine({}), library=_FakeLibrary(self.root)
-        )
+        designer = VoiceDesigner(engine=_FakeEngine({}), library=_FakeLibrary(self.root))
         self.assertEqual(designer.distinctness_rounds, 2)
 
     # --- the loop itself ------------------------------------------------
 
     def _run_loop(self, designer, voices, embeddings):
-        diagnostics, collisions = designer._compare_cast(
-            embeddings, voices, lambda *a: None, lambda: None
-        )
+        diagnostics, collisions = designer._compare_cast(embeddings, voices, lambda *a: None, lambda: None)
         return designer._converge_distinctness(
             self.request,
             voices,
@@ -353,12 +331,8 @@ class ConvergenceLoopTests(unittest.TestCase):
         designer = _designer(engine, _FakeLibrary(self.root), rounds=2)
         self._install(designer)
 
-        voices = {
-            name: _result(name, self.root) for name in ("alice", "bob", "carol")
-        }
-        embeddings = {
-            name: ("embedding", str(self.root / f"{name}_v1.wav")) for name in voices
-        }
+        voices = {name: _result(name, self.root) for name in ("alice", "bob", "carol")}
+        embeddings = {name: ("embedding", str(self.root / f"{name}_v1.wav")) for name in voices}
 
         def _regenerate(pid, cid, character, **kw):
             # The new take is distinct: drop the colliding pair from the table.
@@ -367,9 +341,7 @@ class ConvergenceLoopTests(unittest.TestCase):
 
         with (
             patch.object(VoiceDesigner, "_generate_voice", side_effect=_regenerate),
-            patch.object(
-                VoiceDesigner, "_acoustic_diagnostics", return_value=({}, [])
-            ),
+            patch.object(VoiceDesigner, "_acoustic_diagnostics", return_value=({}, [])),
         ):
             diagnostics, rounds = self._run_loop(designer, voices, embeddings)
 
@@ -380,9 +352,7 @@ class ConvergenceLoopTests(unittest.TestCase):
         self.assertEqual(sorted(rounds[0]["redesigned"]), ["alice", "bob"])
         self.assertFalse([d for d in diagnostics if d.status == "similar"])
         # No collisions left, so no warnings survive.
-        self.assertFalse(
-            [w for w in voices["alice"].warnings if w.startswith("Sounds very similar")]
-        )
+        self.assertFalse([w for w in voices["alice"].warnings if w.startswith("Sounds very similar")])
 
     def test_loop_is_bounded_and_degrades_to_warnings(self) -> None:
         """Voices that will not separate must end as warnings, not a hang."""
@@ -390,12 +360,8 @@ class ConvergenceLoopTests(unittest.TestCase):
         designer = _designer(engine, _FakeLibrary(self.root), rounds=2)
         self._install(designer)
 
-        voices = {
-            name: _result(name, self.root) for name in ("alice", "bob", "carol")
-        }
-        embeddings = {
-            name: ("embedding", str(self.root / f"{name}_v1.wav")) for name in voices
-        }
+        voices = {name: _result(name, self.root) for name in ("alice", "bob", "carol")}
+        embeddings = {name: ("embedding", str(self.root / f"{name}_v1.wav")) for name in voices}
 
         with (
             patch.object(
@@ -404,9 +370,7 @@ class ConvergenceLoopTests(unittest.TestCase):
                 # Every redesign keeps colliding.
                 side_effect=lambda pid, cid, ch, **kw: _result(cid, self.root, "v1"),
             ),
-            patch.object(
-                VoiceDesigner, "_acoustic_diagnostics", return_value=({}, [])
-            ),
+            patch.object(VoiceDesigner, "_acoustic_diagnostics", return_value=({}, [])),
         ):
             diagnostics, rounds = self._run_loop(designer, voices, embeddings)
 
@@ -416,12 +380,7 @@ class ConvergenceLoopTests(unittest.TestCase):
         similar = [d for d in diagnostics if d.status == "similar"]
         self.assertEqual(len(similar), 1)
         # The unresolved collision is still surfaced for manual redesign.
-        self.assertTrue(
-            any(
-                w.startswith("Sounds very similar to bob")
-                for w in voices["alice"].warnings
-            )
-        )
+        self.assertTrue(any(w.startswith("Sounds very similar to bob") for w in voices["alice"].warnings))
 
     def test_a_clean_cast_costs_no_model_swap(self) -> None:
         """The common case must not pay for the loop at all."""
@@ -430,9 +389,7 @@ class ConvergenceLoopTests(unittest.TestCase):
         self._install(designer)
 
         voices = {name: _result(name, self.root) for name in ("alice", "bob")}
-        embeddings = {
-            name: ("embedding", str(self.root / f"{name}_v1.wav")) for name in voices
-        }
+        embeddings = {name: ("embedding", str(self.root / f"{name}_v1.wav")) for name in voices}
 
         with patch.object(VoiceDesigner, "_generate_voice") as generate:
             _, rounds = self._run_loop(designer, voices, embeddings)
@@ -447,9 +404,7 @@ class ConvergenceLoopTests(unittest.TestCase):
         self._install(designer)
 
         voices = {name: _result(name, self.root) for name in ("alice", "bob")}
-        embeddings = {
-            name: ("embedding", str(self.root / f"{name}_v1.wav")) for name in voices
-        }
+        embeddings = {name: ("embedding", str(self.root / f"{name}_v1.wav")) for name in voices}
 
         with patch.object(VoiceDesigner, "_generate_voice") as generate:
             diagnostics, rounds = self._run_loop(designer, voices, embeddings)
@@ -459,12 +414,7 @@ class ConvergenceLoopTests(unittest.TestCase):
         generate.assert_not_called()
         # Report-only behaviour is preserved exactly.
         self.assertEqual(len([d for d in diagnostics if d.status == "similar"]), 1)
-        self.assertTrue(
-            any(
-                w.startswith("Sounds very similar to bob")
-                for w in voices["alice"].warnings
-            )
-        )
+        self.assertTrue(any(w.startswith("Sounds very similar to bob") for w in voices["alice"].warnings))
 
     def test_redesigned_references_are_transcript_checked(self) -> None:
         """A contrast brief moves pitch and rate, which can hurt intelligibility.
@@ -495,9 +445,7 @@ class ConvergenceLoopTests(unittest.TestCase):
         self._install(designer)
 
         voices = {name: _result(name, self.root) for name in ("alice", "bob")}
-        embeddings = {
-            name: ("embedding", str(self.root / f"{name}_v1.wav")) for name in voices
-        }
+        embeddings = {name: ("embedding", str(self.root / f"{name}_v1.wav")) for name in voices}
 
         def _regenerate(pid, cid, character, **kw):
             new = _result(cid, self.root, "v2")
@@ -506,9 +454,7 @@ class ConvergenceLoopTests(unittest.TestCase):
 
         with (
             patch.object(VoiceDesigner, "_generate_voice", side_effect=_regenerate),
-            patch.object(
-                VoiceDesigner, "_acoustic_diagnostics", return_value=({}, [])
-            ),
+            patch.object(VoiceDesigner, "_acoustic_diagnostics", return_value=({}, [])),
         ):
             self._run_loop(designer, voices, embeddings)
 
@@ -540,9 +486,7 @@ class ConvergenceLoopTests(unittest.TestCase):
         self._install(designer)
 
         voices = {name: _result(name, self.root) for name in ("alice", "bob")}
-        embeddings = {
-            name: ("embedding", str(self.root / f"{name}_v1.wav")) for name in voices
-        }
+        embeddings = {name: ("embedding", str(self.root / f"{name}_v1.wav")) for name in voices}
         self._run_loop(designer, voices, embeddings)
         self.assertEqual(designer.validator.calls, 0)
 

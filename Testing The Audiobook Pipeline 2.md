@@ -84,11 +84,7 @@ canonical_id = next(
     (
         existing_id
         for existing_id, existing in accumulated_chars.items()
-        if existing_id == norm_id
-        or self._normalize_id(
-            str(existing.get("name", existing_id))
-        )
-        == display_key
+        if existing_id == norm_id or self._normalize_id(str(existing.get("name", existing_id))) == display_key
     ),
     norm_id,
 )
@@ -666,8 +662,7 @@ We do **NOT** use blind substring matching across all characters. Instead, alias
 We added an explicit `aliases` list field to the [Character model](file:///e:/Projects/crazy-audiobook-creator/shared/models.py#L118-L121):
 ```python
 aliases: list[str] = Field(
-    default_factory=list,
-    description="Known nicknames, titles, or alternative names for this character"
+    default_factory=list, description="Known nicknames, titles, or alternative names for this character"
 )
 ```
 Pass 1 explicitly asks the LLM for known titles and nicknames (e.g. `name: "Sixth of Dusk"`, `aliases: ["Dusk", "Sixth"]`).
@@ -1056,9 +1051,7 @@ Let's view `_parse_script_chapter` lines 670 to 750 of `brain/director/script_ge
 LOOK AT LINES 728–731 IN `_validate_metadata_speakers`:
 ```python
 if speaker not in allowed_speakers:
-    raise ValueError(
-        f"Fragment {id_offset + i} uses unknown speaker '{speaker}'"
-    )
+    raise ValueError(f"Fragment {id_offset + i} uses unknown speaker '{speaker}'")
 ```
 
 Look at `allowed_speakers`!
@@ -1085,15 +1078,11 @@ Let's view `_parse_script_chapter` lines 820 to 880 in `brain/director/script_ge
 LOOK AT LINES 841–856 IN `_parse_script_chapter`:
 
 ```python
-speaker = ScriptGenerator._normalize_speaker_id(
-    meta.get("speaker", "narrator")
-)
+speaker = ScriptGenerator._normalize_speaker_id(meta.get("speaker", "narrator"))
 if not is_dialogue:
     speaker = "narrator"
 elif speaker == "narrator":
-    speaker = ScriptGenerator._resolve_dialogue_speaker(
-        i, fragments, metadata_map, allowed_speakers
-    )
+    speaker = ScriptGenerator._resolve_dialogue_speaker(i, fragments, metadata_map, allowed_speakers)
 elif speaker not in allowed_speakers:
     logger.warning(
         "[ScriptGenerator] Unknown speaker '%s' for fragment %d — mapping to narrator",
@@ -1773,10 +1762,7 @@ def dashboard_request_authorized(
     is_forwarded: bool = False,
 ) -> bool:
     if configured_token:
-        return bool(
-            presented_token
-            and secrets.compare_digest(configured_token, presented_token)
-        )
+        return bool(presented_token and secrets.compare_digest(configured_token, presented_token))
     if is_loopback_client(client_host) or is_private_client(client_host):
         return True
     return False
@@ -1837,10 +1823,7 @@ BUT in `main.py` line 719:
 And look at `security.py` line 56:
 ```python
 if configured_token:
-    return bool(
-        presented_token
-        and secrets.compare_digest(configured_token, presented_token)
-    )
+    return bool(presented_token and secrets.compare_digest(configured_token, presented_token))
 if is_loopback_client(client_host) or is_private_client(client_host):
     return True
 return False
@@ -2659,11 +2642,7 @@ LOOK AT `ValidationLoop` IN `voice/validator/validation_loop.py` (lines 244–29
 ```python
 # Phase 3: retry both FAIL and FLAGGED results. Each retry is written to
 # a side file and replaces the current artifact only if it is better.
-candidates = [
-    line
-    for line in lines
-    if quality_by_id[line.line_id].status != ValidationStatus.PASS
-]
+candidates = [line for line in lines if quality_by_id[line.line_id].status != ValidationStatus.PASS]
 if auto_retry:
     for attempt in range(2, retry_limit + 1):
         # Retry with intelligibility fallbacks (speed=1.0, emotion=neutral, plain-normalized text)
@@ -3014,9 +2993,7 @@ if (
         project_id,
         {
             "voice_review_status": "waiting",
-            "pause_reason": (
-                "Review and approve the speaking cast before audio generation."
-            ),
+            "pause_reason": ("Review and approve the speaking cast before audio generation."),
         },
     )
     self._update_stage(project_id, PipelineStage.VOICE_REVIEW)
@@ -3050,10 +3027,7 @@ Great question! Here is how the Voice Review Approval gate works:
 In [pipeline.py](file:///e:/Projects/crazy-audiobook-creator/brain/orchestrator/pipeline.py#L799-L820), the system enforces a strict one-time casting review gate:
 
 ```python
-if (
-    state.get("voice_review_policy") == "required_once"
-    and state.get("voice_review_status") != "approved"
-):
+if state.get("voice_review_policy") == "required_once" and state.get("voice_review_status") != "approved":
     self._update_stage(project_id, PipelineStage.VOICE_REVIEW)
     logger.info("Voice references ready; waiting for one-time casting review")
     return ProjectStatus(...)  # Pauses execution and waits!
@@ -3525,11 +3499,7 @@ canonical_id = next(
     (
         existing_id
         for existing_id, existing in accumulated_chars.items()
-        if existing_id == norm_id
-        or self._normalize_id(
-            str(existing.get("name", existing_id))
-        )
-        == display_key
+        if existing_id == norm_id or self._normalize_id(str(existing.get("name", existing_id))) == display_key
     ),
     norm_id,
 )
@@ -3574,26 +3544,26 @@ def _consolidate_accumulated_characters(accumulated_chars: dict[str, dict[str, A
     """Merge short title variants (e.g. 'dusk' -> 'sixth_of_dusk') into canonical character entries."""
     keys = list(accumulated_chars.keys())
     merged_into: dict[str, str] = {}
-    
+
     for i, cid1 in enumerate(keys):
         if cid1 in merged_into:
             continue
         cinfo1 = accumulated_chars[cid1]
         name1 = str(cinfo1.get("name", cid1)).strip()
-        
+
         for j in range(i + 1, len(keys)):
             cid2 = keys[j]
             if cid2 in merged_into:
                 continue
             cinfo2 = accumulated_chars[cid2]
             name2 = str(cinfo2.get("name", cid2)).strip()
-            
+
             # Determine if one is a clear full-name variant of the other
             # Case 1: cid1 ends with '_' + cid2 (e.g., 'sixth_of_dusk' and 'dusk')
             # Case 2: name2 is a single distinct word inside name1 (e.g. 'Dusk' inside 'Sixth of Dusk')
             is_variant = False
             target_id, variant_id, target_info, variant_info = None, None, None, None
-            
+
             if cid1.endswith(f"_{cid2}"):
                 target_id, variant_id = cid1, cid2
                 target_info, variant_info = cinfo1, cinfo2
@@ -3602,27 +3572,30 @@ def _consolidate_accumulated_characters(accumulated_chars: dict[str, dict[str, A
                 target_id, variant_id = cid2, cid1
                 target_info, variant_info = cinfo2, cinfo1
                 is_variant = True
-                
+
             if is_variant and target_id and variant_id:
                 logger.info(
                     "[CharacterAnalyzer] Consolidating short variant '%s' (%s) into canonical key '%s' (%s)",
-                    variant_id, variant_info.get("name"), target_id, target_info.get("name")
+                    variant_id,
+                    variant_info.get("name"),
+                    target_id,
+                    target_info.get("name"),
                 )
                 # Combine dialogue & mention counts
-                target_info["dialogue_count"] = (
-                    target_info.get("dialogue_count", 0) + variant_info.get("dialogue_count", 0)
+                target_info["dialogue_count"] = target_info.get("dialogue_count", 0) + variant_info.get(
+                    "dialogue_count", 0
                 )
-                target_info["mention_count"] = (
-                    target_info.get("mention_count", 0) + variant_info.get("mention_count", 0)
+                target_info["mention_count"] = target_info.get("mention_count", 0) + variant_info.get(
+                    "mention_count", 0
                 )
                 # Preserve aliases
                 existing_aliases = set(target_info.get("aliases", []))
                 existing_aliases.add(variant_info.get("name", variant_id))
                 existing_aliases.add(variant_id)
                 target_info["aliases"] = sorted(list(existing_aliases))
-                
+
                 merged_into[variant_id] = target_id
-                
+
     return {k: v for k, v in accumulated_chars.items() if k not in merged_into}
 ```
 

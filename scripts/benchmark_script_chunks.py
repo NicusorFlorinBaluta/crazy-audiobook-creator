@@ -31,9 +31,7 @@ def _parse_configs(value: str) -> list[dict[str, int | str]]:
             words = int(words_text)
             fragments = int(fragments_text)
         except (TypeError, ValueError) as exc:
-            raise ValueError(
-                "configs must use WORDS:FRAGMENTS pairs, for example 350:40"
-            ) from exc
+            raise ValueError("configs must use WORDS:FRAGMENTS pairs, for example 350:40") from exc
         if words < 1 or fragments < 1:
             raise ValueError("script chunk bounds must be positive")
         configs.append(
@@ -108,9 +106,7 @@ def _run_excerpt(
     actual = normalize_for_coverage("".join(line.text for line in lines))
     line_ids = [line.line_id for line in lines]
     allowed_speakers = set(registry.characters)
-    unknown_speakers = sorted(
-        {line.speaker for line in lines if line.speaker not in allowed_speakers}
-    )
+    unknown_speakers = sorted({line.speaker for line in lines if line.speaker not in allowed_speakers})
     coverage_ok = expected == actual
     ids_ok = len(line_ids) == len(set(line_ids)) == len(fragments)
     baseline_speakers = baseline_speakers or {}
@@ -148,10 +144,7 @@ def _run_excerpt(
         "source_words": sum(len(item.text.split()) for item in fragments),
         "output_lines": len(lines),
         "wall_seconds": wall_seconds,
-        "wall_seconds_per_source_word": (
-            wall_seconds
-            / max(1, sum(len(item.text.split()) for item in fragments))
-        ),
+        "wall_seconds_per_source_word": (wall_seconds / max(1, sum(len(item.text.split()) for item in fragments))),
         "coverage_ok": coverage_ok,
         "ids_ok": ids_ok,
         "unknown_speakers": unknown_speakers,
@@ -160,25 +153,12 @@ def _run_excerpt(
         "baseline_attribution_change_ids": changed_fragment_ids,
         "target_validation": target_rows,
         "full_attempts": sum(
-            int(item.get("full_attempts", item.get("attempts", 0)) or 0)
-            for item in generator.call_metrics
+            int(item.get("full_attempts", item.get("attempts", 0)) or 0) for item in generator.call_metrics
         ),
-        "structural_retries": sum(
-            int(item.get("structural_retries", 0) or 0)
-            for item in generator.call_metrics
-        ),
-        "focused_retries": sum(
-            int(item.get("focused_retries", 0) or 0)
-            for item in generator.call_metrics
-        ),
-        "local_repairs": sum(
-            int(item.get("local_repairs", 0) or 0)
-            for item in generator.call_metrics
-        ),
-        "fragment_fallbacks": sum(
-            int(item.get("fragment_fallbacks", 0) or 0)
-            for item in generator.call_metrics
-        ),
+        "structural_retries": sum(int(item.get("structural_retries", 0) or 0) for item in generator.call_metrics),
+        "focused_retries": sum(int(item.get("focused_retries", 0) or 0) for item in generator.call_metrics),
+        "local_repairs": sum(int(item.get("local_repairs", 0) or 0) for item in generator.call_metrics),
+        "fragment_fallbacks": sum(int(item.get("fragment_fallbacks", 0) or 0) for item in generator.call_metrics),
         "calls": list(generator.call_metrics),
     }
 
@@ -222,8 +202,7 @@ def main() -> int:
         "--validation-only",
         action="store_true",
         help=(
-            "Run only the first configuration for correctness/performance "
-            "validation without a duplicate A/B candidate."
+            "Run only the first configuration for correctness/performance validation without a duplicate A/B candidate."
         ),
     )
     parser.add_argument("--output", type=Path, required=True)
@@ -236,9 +215,7 @@ def main() -> int:
     try:
         configs = _parse_configs(args.configs)
         offsets = [int(item) for item in args.offsets.split(",")]
-        target_fragments = {
-            int(item) for item in args.target_fragments.split(",") if item.strip()
-        }
+        target_fragments = {int(item) for item in args.target_fragments.split(",") if item.strip()}
     except ValueError as exc:
         parser.error(str(exc))
 
@@ -254,9 +231,7 @@ def main() -> int:
         checkpoint = json.loads(registry_path.read_text(encoding="utf-8"))
         registry_payload = checkpoint.get("registry") or {}
     book = json.loads(book_path.read_text(encoding="utf-8"))
-    chapter_data = next(
-        item for item in book["chapters"] if int(item["number"]) == args.chapter
-    )
+    chapter_data = next(item for item in book["chapters"] if int(item["number"]) == args.chapter)
     chapter = ExtractedChapter.model_validate(chapter_data)
     registry = CharacterRegistry.model_validate(registry_payload)
     baseline_path = project_dir / "script" / f"chapter_{args.chapter:03d}.json"
@@ -264,13 +239,9 @@ def main() -> int:
     if baseline_path.is_file():
         baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
         for line in baseline.get("lines", []):
-            for fragment_id in line.get("source_fragment_ids") or [
-                line.get("source_fragment_id")
-            ]:
+            for fragment_id in line.get("source_fragment_ids") or [line.get("source_fragment_id")]:
                 if fragment_id is not None:
-                    baseline_speakers[int(fragment_id)] = str(
-                        line.get("speaker") or "narrator"
-                    )
+                    baseline_speakers[int(fragment_id)] = str(line.get("speaker") or "narrator")
     pipeline = Pipeline()
     if args.model:
         pipeline.ollama.model = args.model
@@ -298,17 +269,13 @@ def main() -> int:
         "chapter": args.chapter,
         "source_control": git_identity(ROOT),
         "python_version": sys.version.split()[0],
-        "brain_config_sha256": hashlib.sha256(
-            config_path.read_bytes()
-        ).hexdigest(),
+        "brain_config_sha256": hashlib.sha256(config_path.read_bytes()).hexdigest(),
         "runtime": {
             "model": getattr(pipeline.ollama, "model", None),
             "context_window": getattr(pipeline.ollama, "context_window", None),
             "think": getattr(pipeline.ollama, "think", None),
             "temperature": generator.temperature,
-            "speaker_confidence_threshold": (
-                generator.speaker_confidence_threshold
-            ),
+            "speaker_confidence_threshold": (generator.speaker_confidence_threshold),
             "dialogue_focused_schema": generator.dialogue_focused_schema,
         },
         "book_sha256": hashlib.sha256(book_path.read_bytes()).hexdigest(),
@@ -397,43 +364,28 @@ def main() -> int:
                     atomic_write_json(args.output, report)
         report["summary"] = {}
         for config in configs:
-            runs = [
-                run
-                for run in report["runs"]
-                if run["config"] == config["label"]
-            ]
+            runs = [run for run in report["runs"] if run["config"] == config["label"]]
             if not runs:
                 continue
-            normalized = [
-                float(run["wall_seconds_per_source_word"])
-                for run in runs
-            ]
+            normalized = [float(run["wall_seconds_per_source_word"]) for run in runs]
             report["summary"][config["label"]] = {
                 "runs": len(runs),
                 "wall_seconds_per_source_word_p50": statistics.median(normalized),
                 "wall_seconds_per_source_word_p95": _p95(normalized),
                 "full_attempts": sum(run["full_attempts"] for run in runs),
-                "structural_retries": sum(
-                    run["structural_retries"] for run in runs
-                ),
+                "structural_retries": sum(run["structural_retries"] for run in runs),
                 "focused_retries": sum(run["focused_retries"] for run in runs),
                 "local_repairs": sum(run["local_repairs"] for run in runs),
-                "fragment_fallbacks": sum(
-                    run["fragment_fallbacks"] for run in runs
-                ),
+                "fragment_fallbacks": sum(run["fragment_fallbacks"] for run in runs),
                 "all_invariants_passed": all(
-                    run["coverage_ok"]
-                    and run["ids_ok"]
-                    and not run["unknown_speakers"]
-                    for run in runs
+                    run["coverage_ok"] and run["ids_ok"] and not run["unknown_speakers"] for run in runs
                 ),
             }
         control = report["summary"][configs[0]["label"]]
         if args.validation_only:
             report["decision"] = {
                 "automated_quality_gate_pass": bool(
-                    control["all_invariants_passed"]
-                    and control["fragment_fallbacks"] == 0
+                    control["all_invariants_passed"] and control["fragment_fallbacks"] == 0
                 ),
                 "requires_manual_attribution_review": True,
                 "promote": False,
@@ -444,9 +396,7 @@ def main() -> int:
             return 0
         candidate = report["summary"][configs[1]["label"]]
         change = (
-            candidate["wall_seconds_per_source_word_p50"]
-            / control["wall_seconds_per_source_word_p50"]
-            - 1.0
+            candidate["wall_seconds_per_source_word_p50"] / control["wall_seconds_per_source_word_p50"] - 1.0
             if control["wall_seconds_per_source_word_p50"]
             else None
         )
@@ -454,9 +404,7 @@ def main() -> int:
             "normalized_wall_change_fraction": change,
             "speed_gate_pass": change is not None and change <= -0.20,
             "automated_quality_gate_pass": bool(
-                candidate["all_invariants_passed"]
-                and candidate["fragment_fallbacks"]
-                <= control["fragment_fallbacks"]
+                candidate["all_invariants_passed"] and candidate["fragment_fallbacks"] <= control["fragment_fallbacks"]
             ),
             "requires_manual_attribution_review": True,
             "promote": False,

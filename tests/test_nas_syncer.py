@@ -18,6 +18,7 @@ from brain.orchestrator.nas_syncer import NASSyncer
 # `python -m unittest discover`, which is how CI invokes it.
 try:
     import paramiko  # noqa: F401
+
     HAS_PARAMIKO = True
 except ImportError:  # pragma: no cover - exercised only without the optional dep
     HAS_PARAMIKO = False
@@ -37,17 +38,19 @@ class TestNASSyncer(unittest.TestCase):
 
         # Create dummy book.json
         (self.project_dir / "book.json").write_text(
-            json.dumps({
-                "metadata": {
-                    "title": "Test Novel",
-                    "author": "Test Author",
-                    "total_chapters": 5,
-                },
-                "chapters": [
-                    {"chapter_number": 1, "title": "Chapter One"},
-                    {"chapter_number": 2, "title": "Chapter Two"},
-                ],
-            }),
+            json.dumps(
+                {
+                    "metadata": {
+                        "title": "Test Novel",
+                        "author": "Test Author",
+                        "total_chapters": 5,
+                    },
+                    "chapters": [
+                        {"chapter_number": 1, "title": "Chapter One"},
+                        {"chapter_number": 2, "title": "Chapter Two"},
+                    ],
+                }
+            ),
             encoding="utf-8",
         )
 
@@ -148,9 +151,7 @@ class TestNASSyncer(unittest.TestCase):
         mock_ssh.open_sftp.return_value = mock_sftp
         mock_ssh_cls.return_value = mock_ssh
 
-        mock_sftp.listdir.side_effect = lambda path: (
-            ["book.json", "cover.jpg"] if "test_project" in path else []
-        )
+        mock_sftp.listdir.side_effect = lambda path: ["book.json", "cover.jpg"] if "test_project" in path else []
 
         result = self.syncer.delete_project("test_project", delete_from_nas=True)
         self.assertEqual(result["status"], "deleted")

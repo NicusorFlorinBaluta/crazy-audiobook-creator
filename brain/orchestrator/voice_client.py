@@ -159,32 +159,23 @@ class VoiceClient:
                             if event.get("type") == "progress":
                                 progress_callback(event.get("data", {}))
                             elif event.get("type") == "result":
-                                return BootstrapVoicesResponse(
-                                    **event.get("data", {})
-                                )
+                                return BootstrapVoicesResponse(**event.get("data", {}))
                             elif event.get("type") == "error":
                                 raise RuntimeError(
-                                    "Voice Server bootstrap error: "
-                                    f"{event.get('error')} - "
-                                    f"{event.get('detail')}"
+                                    f"Voice Server bootstrap error: {event.get('error')} - {event.get('detail')}"
                                 )
-                raise RuntimeError(
-                    "Voice bootstrap stream ended without a result"
-                )
+                raise RuntimeError("Voice bootstrap stream ended without a result")
             except (httpx.TimeoutException, httpx.RequestError) as exc:
                 last_error = exc
                 logger.warning(
-                    "POST /voices/bootstrap/stream failed "
-                    "(attempt %d/%d): %s",
+                    "POST /voices/bootstrap/stream failed (attempt %d/%d): %s",
                     attempt,
                     self.retries,
                     exc,
                 )
                 if attempt < self.retries:
                     time.sleep(self.retry_delay)
-        raise last_error or RuntimeError(
-            "Failed to bootstrap voices after retries"
-        )
+        raise last_error or RuntimeError("Failed to bootstrap voices after retries")
 
     # ------------------------------------------------------------------
     # TTS generation
@@ -195,13 +186,10 @@ class VoiceClient:
         data = self._post("/generate/line", request.model_dump())
         return GenerateLineResponse(**data)
 
-    def generate_chapter(
-        self,
-        request: GenerateChapterRequest,
-        progress_callback=None
-    ) -> GenerateChapterResponse:
+    def generate_chapter(self, request: GenerateChapterRequest, progress_callback=None) -> GenerateChapterResponse:
         """Generate audio for an entire chapter via an NDJSON event stream."""
         import json
+
         logger.info(
             "Generating chapter %d (%d lines) for project '%s'",
             request.chapter_number,
@@ -247,7 +235,9 @@ class VoiceClient:
                             elif data.get("type") == "result":
                                 return GenerateChapterResponse(**data.get("data", {}))
                             elif data.get("type") == "error":
-                                raise RuntimeError(f"Voice Server generation error: {data.get('error')} - {data.get('detail')}")
+                                raise RuntimeError(
+                                    f"Voice Server generation error: {data.get('error')} - {data.get('detail')}"
+                                )
                 raise RuntimeError("Stream ended without returning a result.")
             except (httpx.TimeoutException, httpx.RequestError, httpx.HTTPStatusError) as e:
                 last_error = e
@@ -341,7 +331,9 @@ class VoiceClient:
         last_error: Exception | None = None
         req_size = len(str(json_data)) if json_data else 0
 
-        logger.info("[VoiceClient] Requesting %s %s (timeout=%ss, payload=%d bytes)", method, path, effective_timeout, req_size)
+        logger.info(
+            "[VoiceClient] Requesting %s %s (timeout=%ss, payload=%d bytes)", method, path, effective_timeout, req_size
+        )
 
         for attempt in range(1, self.retries + 1):
             t0 = time.time()
@@ -410,9 +402,7 @@ class VoiceClient:
             if attempt < self.retries:
                 time.sleep(self.retry_delay)
 
-        raise VoiceClientError(
-            f"{method} {path} failed after {self.retries} attempts: {last_error}"
-        ) from last_error
+        raise VoiceClientError(f"{method} {path} failed after {self.retries} attempts: {last_error}") from last_error
 
     def close(self) -> None:
         """Close the HTTP client."""

@@ -57,15 +57,18 @@ def preserve_candidate(
     except OSError:
         return None
     score = candidate_score(result)
-    atomic_write_json(saved_meta, {
-        "schema": 1,
-        "line_id": result.line_id,
-        "score": score,
-        "created_at": datetime.now(UTC).isoformat(),
-        "quality": result.model_dump(mode="json"),
-    })
+    atomic_write_json(
+        saved_meta,
+        {
+            "schema": 1,
+            "line_id": result.line_id,
+            "score": score,
+            "created_at": datetime.now(UTC).isoformat(),
+            "quality": result.model_dump(mode="json"),
+        },
+    )
     wavs = sorted(destination.glob("*.wav"), key=lambda path: path.stat().st_mtime, reverse=True)
-    for stale in wavs[max(1, retain):]:
+    for stale in wavs[max(1, retain) :]:
         if stale != saved_audio:
             try:
                 stale.unlink(missing_ok=True)
@@ -81,6 +84,7 @@ def list_candidates(project_dir: Path, line_id: str) -> list[dict[str, Any]]:
     for meta_path in (project_dir / "review_candidates" / line_id).glob("*.json"):
         try:
             import json
+
             row = json.loads(meta_path.read_text(encoding="utf-8"))
             row["filename"] = meta_path.with_suffix(".wav").name
             rows.append(row)

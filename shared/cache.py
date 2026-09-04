@@ -52,9 +52,7 @@ class CacheService:
                     )
                     """
                 )
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_cache_expires ON cache_entries (expires_at)"
-                )
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_cache_expires ON cache_entries (expires_at)")
         except Exception as exc:
             logger.warning("Failed to initialize cache DB: %s", exc)
 

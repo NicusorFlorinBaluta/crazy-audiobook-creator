@@ -7,6 +7,7 @@ import soundfile as sf
 
 logger = logging.getLogger(__name__)
 
+
 class ProsodyScorer:
     """Non-blocking prosody analyzer for generated speech.
     Flags potential monotone or flat deliveries for review.
@@ -42,7 +43,7 @@ class ProsodyScorer:
             # Load audio
             y, sr = sf.read(str(path))
             if y.ndim > 1:
-                y = y.mean(axis=1) # Mono
+                y = y.mean(axis=1)  # Mono
 
             # If audio is too short, skip
             duration = len(y) / sr
@@ -52,10 +53,7 @@ class ProsodyScorer:
             # 1. Pitch Variance (F0 Standard Deviation)
             # using pyin for fundamental frequency estimation
             f0, voiced_flag, voiced_probs = librosa.pyin(
-                y,
-                fmin=librosa.note_to_hz('C2'),
-                fmax=librosa.note_to_hz('C7'),
-                sr=sr
+                y, fmin=librosa.note_to_hz("C2"), fmax=librosa.note_to_hz("C7"), sr=sr
             )
             valid_f0 = f0[voiced_flag] if f0 is not None else []
 
@@ -82,16 +80,13 @@ class ProsodyScorer:
             # Heuristics for "monotone" delivery
             # These thresholds are empirical and should be tuned.
             # A low pitch coefficient of variation (< 0.05) and low dynamic range (< 5.0) often means flat.
-            is_monotone = (
-                pitch_cv < self.pitch_cv_threshold
-                and dynamic_range < self.dynamic_range_threshold
-            )
+            is_monotone = pitch_cv < self.pitch_cv_threshold and dynamic_range < self.dynamic_range_threshold
 
             return {
                 "pitch_std_hz": pitch_std,
                 "pitch_cv": pitch_cv,
                 "dynamic_range": dynamic_range,
-                "monotone_warning": is_monotone
+                "monotone_warning": is_monotone,
             }
 
         except Exception as e:

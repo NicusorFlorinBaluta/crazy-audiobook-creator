@@ -1,6 +1,7 @@
 """
 Benchmark Whisper `small` vs `medium` models for validation accuracy.
 """
+
 import json
 import logging
 import sys
@@ -16,6 +17,7 @@ init(autoreset=True)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
+
 def load_test_chapter(project_dir: Path, chapter_num: int) -> list[ScriptLine]:
     script_path = project_dir / "script" / f"chapter_{chapter_num:03d}.json"
     if not script_path.exists():
@@ -27,6 +29,7 @@ def load_test_chapter(project_dir: Path, chapter_num: int) -> list[ScriptLine]:
 
     return [ScriptLine(**item) for item in data.get("lines", [])]
 
+
 def get_voice_ref(voice_library_dir: Path, voice_id: str) -> Path:
     ref_path = voice_library_dir / f"{voice_id}.wav"
     if not ref_path.exists():
@@ -34,6 +37,7 @@ def get_voice_ref(voice_library_dir: Path, voice_id: str) -> Path:
         if fallback.exists():
             return fallback
     return ref_path
+
 
 def run_benchmark(project_id: str, chapter_num: int = 1, limit: int = 30):
     root_dir = Path(__file__).resolve().parent.parent
@@ -84,22 +88,18 @@ def run_benchmark(project_id: str, chapter_num: int = 1, limit: int = 30):
 
             wer = whisper.calculate_wer(whisper._normalize_text(line.text), transcribed)
 
-            model_results["lines"].append({
-                "line_id": line.line_id,
-                "text": line.text,
-                "transcribed": transcribed,
-                "wer": wer,
-                "time": val_time
-            })
+            model_results["lines"].append(
+                {"line_id": line.line_id, "text": line.text, "transcribed": transcribed, "wer": wer, "time": val_time}
+            )
             model_results["total_time"] += val_time
             logger.info("[%s] %s - WER: %.3f - Time: %.2fs", model_name, line.line_id, wer, val_time)
 
         results.append(model_results)
         whisper.unload()
 
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("WHISPER BENCHMARK SUMMARY")
-    print("="*80)
+    print("=" * 80)
 
     res_small = results[0]
     res_medium = results[1]
@@ -115,9 +115,11 @@ def run_benchmark(project_id: str, chapter_num: int = 1, limit: int = 30):
     print("-----------------|-----------------------|----------------------")
     print(f"Avg WER          | {avg_wer_small:.3f}                 | {avg_wer_medium:.3f}")
     print(f"Total Validation | {res_small['total_time']:.2f}s                | {res_medium['total_time']:.2f}s")
-    print(f"Val Time / Line  | {res_small['total_time']/len(lines):.2f}s                | {res_medium['total_time']/len(lines):.2f}s")
+    print(
+        f"Val Time / Line  | {res_small['total_time'] / len(lines):.2f}s                | {res_medium['total_time'] / len(lines):.2f}s"
+    )
     print(f"Fails (WER>0.2)  | {fails_small}/{len(lines)}                   | {fails_medium}/{len(lines)}")
-    print("="*80)
+    print("=" * 80)
 
     # Print differences where one failed and other passed
     print("\nDifferences:")
@@ -133,8 +135,10 @@ def run_benchmark(project_id: str, chapter_num: int = 1, limit: int = 30):
             print(f"  Small: {rs['transcribed']} (WER: {rs['wer']:.3f})")
             print(f"  Medium:{rm['transcribed']} (WER: {rm['wer']:.3f})")
 
+
 if __name__ == "__main__":
     from shared.live_test_guard import require_model_opt_in
+
     args = require_model_opt_in(sys.argv[1:])
     if len(args) < 1:
         print("Usage: python benchmark_whisper.py --allow-models <project_id> [chapter_num] [limit]")

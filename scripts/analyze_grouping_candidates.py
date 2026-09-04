@@ -36,13 +36,8 @@ def parse_candidates(value: str) -> list[GroupingBounds]:
     for index, raw in enumerate(value.split(","), 1):
         fields = raw.strip().split(":")
         if len(fields) != 4:
-            raise ValueError(
-                "grouping candidates must use ordinary_chars:ordinary_words:"
-                "narrator_chars:narrator_words"
-            )
-        ordinary_chars, ordinary_words, narrator_chars, narrator_words = (
-            int(field) for field in fields
-        )
+            raise ValueError("grouping candidates must use ordinary_chars:ordinary_words:narrator_chars:narrator_words")
+        ordinary_chars, ordinary_words, narrator_chars, narrator_words = (int(field) for field in fields)
         if min(ordinary_chars, ordinary_words, narrator_chars, narrator_words) <= 0:
             raise ValueError("grouping bounds must be positive")
         if ordinary_chars > 500 or narrator_chars > 500:
@@ -66,8 +61,7 @@ def _fragment_ids(script: ScriptChapter) -> list[int]:
         fragment_id
         for line in script.lines
         for fragment_id in (
-            line.source_fragment_ids
-            or ([line.source_fragment_id] if line.source_fragment_id is not None else [])
+            line.source_fragment_ids or ([line.source_fragment_id] if line.source_fragment_id is not None else [])
         )
     ]
 
@@ -75,7 +69,11 @@ def _fragment_ids(script: ScriptChapter) -> list[int]:
 def _source_mismatches(script: ScriptChapter, source_text: str) -> list[str]:
     mismatches: list[str] = []
     for line in script.lines:
-        if line.source_start is None or line.source_end is None or line.text != source_text[line.source_start : line.source_end]:
+        if (
+            line.source_start is None
+            or line.source_end is None
+            or line.text != source_text[line.source_start : line.source_end]
+        ):
             mismatches.append(line.line_id)
     return mismatches
 
@@ -94,9 +92,7 @@ def analyze_chapter(
         narrator_max_words=bounds.narrator_words,
     )
     candidate = generator._group_adjacent_utterances(control, source_text)
-    control_ranges = {
-        (line.source_start, line.source_end): line.line_id for line in control.lines
-    }
+    control_ranges = {(line.source_start, line.source_end): line.line_id for line in control.lines}
     added_merges: list[dict[str, Any]] = []
     for line in candidate.lines:
         line_range = (line.source_start, line.source_end)
@@ -130,9 +126,7 @@ def analyze_chapter(
     candidate_narrator = sum(line.speaker == "narrator" for line in candidate.lines)
     control_max_characters = max((len(line.text) for line in control.lines), default=0)
     max_characters = max((len(line.text) for line in candidate.lines), default=0)
-    introduced_over_engine_ceiling = any(
-        merge["characters"] > 500 for merge in added_merges
-    )
+    introduced_over_engine_ceiling = any(merge["characters"] > 500 for merge in added_merges)
     return {
         "chapter": control.chapter_number,
         "control_calls": len(control.lines),
@@ -140,8 +134,7 @@ def analyze_chapter(
         "call_reduction": len(control.lines) - len(candidate.lines),
         "narrator_call_reduction": control_narrator - candidate_narrator,
         "character_call_reduction": (
-            (len(control.lines) - control_narrator)
-            - (len(candidate.lines) - candidate_narrator)
+            (len(control.lines) - control_narrator) - (len(candidate.lines) - candidate_narrator)
         ),
         "control_max_characters": control_max_characters,
         "max_characters": max_characters,
@@ -177,9 +170,7 @@ def _source_control() -> dict[str, Any]:
 
 def analyze_project(project_dir: Path, candidates: list[GroupingBounds]) -> dict[str, Any]:
     book = json.loads((project_dir / "book.json").read_text(encoding="utf-8"))
-    source_by_chapter = {
-        int(chapter["number"]): str(chapter["text"]) for chapter in book["chapters"]
-    }
+    source_by_chapter = {int(chapter["number"]): str(chapter["text"]) for chapter in book["chapters"]}
     report: dict[str, Any] = {
         "schema_version": 1,
         "created_at": datetime.now(UTC).isoformat(),
@@ -200,12 +191,8 @@ def analyze_project(project_dir: Path, candidates: list[GroupingBounds]) -> dict
     for bounds in candidates:
         chapters: list[dict[str, Any]] = []
         for script_path in script_paths:
-            control = ScriptChapter.model_validate_json(
-                script_path.read_text(encoding="utf-8")
-            )
-            chapters.append(
-                analyze_chapter(control, source_by_chapter[control.chapter_number], bounds)
-            )
+            control = ScriptChapter.model_validate_json(script_path.read_text(encoding="utf-8"))
+            chapters.append(analyze_chapter(control, source_by_chapter[control.chapter_number], bounds))
         control_calls = sum(chapter["control_calls"] for chapter in chapters)
         candidate_calls = sum(chapter["candidate_calls"] for chapter in chapters)
         all_merges = [merge for chapter in chapters for merge in chapter["added_merges"]]
@@ -231,15 +218,9 @@ def analyze_project(project_dir: Path, candidates: list[GroupingBounds]) -> dict
                 "call_reduction_fraction": (
                     (control_calls - candidate_calls) / control_calls if control_calls else 0.0
                 ),
-                "narrator_call_reduction": sum(
-                    chapter["narrator_call_reduction"] for chapter in chapters
-                ),
-                "character_call_reduction": sum(
-                    chapter["character_call_reduction"] for chapter in chapters
-                ),
-                "max_characters": max(
-                    (chapter["max_characters"] for chapter in chapters), default=0
-                ),
+                "narrator_call_reduction": sum(chapter["narrator_call_reduction"] for chapter in chapters),
+                "character_call_reduction": sum(chapter["character_call_reduction"] for chapter in chapters),
+                "max_characters": max((chapter["max_characters"] for chapter in chapters), default=0),
                 "preexisting_over_engine_ceiling": any(
                     chapter["preexisting_over_engine_ceiling"] for chapter in chapters
                 ),

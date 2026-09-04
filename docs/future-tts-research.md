@@ -53,13 +53,13 @@ emotion taxonomy from the LLM:
 ```python
 # Proposed mapping — emotion label → exaggeration value
 _CHATTERBOX_EXAGGERATION = {
-    "neutral":          0.3,
-    "reflective":       0.35,
-    "authoritative":    0.4,
-    "tense":            0.5,
-    "soft":             0.55,   # whisper/somber: slight exaggeration for clarity
-    "playful":          0.65,
-    "intense":          0.85,   # angry/panicked/shout
+    "neutral": 0.3,
+    "reflective": 0.35,
+    "authoritative": 0.4,
+    "tense": 0.5,
+    "soft": 0.55,  # whisper/somber: slight exaggeration for clarity
+    "playful": 0.65,
+    "intense": 0.85,  # angry/panicked/shout
 }
 ```
 

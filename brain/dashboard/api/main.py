@@ -113,11 +113,13 @@ FFMPEG_STREAM_TIMEOUT_SECONDS = 300
 
 class AsyncioConnectionResetFilter(logging.Filter):
     """Filter out benign Windows asyncio socket connection reset errors."""
+
     def filter(self, record: logging.LogRecord) -> bool:
         msg = record.getMessage()
         if "_call_connection_lost" in msg or "10054" in msg:
             return False
         return True
+
 
 logging.getLogger("asyncio").addFilter(AsyncioConnectionResetFilter())
 
@@ -149,11 +151,7 @@ async def _release_gpu_resources(wait_seconds: float = 15.0) -> None:
     if not pipeline:
         return
 
-    active_projects = [
-        project_id
-        for project_id, task in running_tasks.items()
-        if not task.done()
-    ]
+    active_projects = [project_id for project_id, task in running_tasks.items() if not task.done()]
     for project_id in active_projects:
         pipeline.stop(project_id)
 
@@ -178,9 +176,7 @@ async def _release_gpu_resources(wait_seconds: float = 15.0) -> None:
                     exc,
                 )
 
-    active_tasks = [
-        task for task in running_tasks.values() if not task.done()
-    ]
+    active_tasks = [task for task in running_tasks.values() if not task.done()]
     if active_tasks:
         await asyncio.wait(active_tasks, timeout=wait_seconds)
 
@@ -198,8 +194,7 @@ async def _release_gpu_resources(wait_seconds: float = 15.0) -> None:
             # the job finishes. Log it so a stuck job is visible rather than
             # silently indistinguishable from a clean unload.
             logger.warning(
-                "Voice model unload declined or failed during release "
-                "(a GPU job may still be finishing): %s",
+                "Voice model unload declined or failed during release (a GPU job may still be finishing): %s",
                 exc,
             )
     pipeline._stop_ollama_server()
@@ -242,14 +237,13 @@ def _launch_dashboard_restart_helper() -> str:
     )
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()
-        raise RuntimeError(
-            f"Registered restart task is unavailable: {detail or result.returncode}"
-        )
+        raise RuntimeError(f"Registered restart task is unavailable: {detail or result.returncode}")
     return task_name
 
 
 class ChapterSelectionRequest(BaseModel):
     chapters: list[int] | None = None
+
 
 class ScriptLineUpdate(BaseModel):
     speaker: str = Field(
@@ -257,7 +251,6 @@ class ScriptLineUpdate(BaseModel):
         max_length=128,
         pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
     )
-
 
 
 class VoiceAssignmentRequest(BaseModel):
@@ -285,9 +278,7 @@ class VoiceApprovalRequest(BaseModel):
 class ReviewItemRequest(BaseModel):
     item_type: Literal["join", "segment"]
     item_id: str = Field(min_length=1, max_length=300)
-    disposition: Literal[
-        "unreviewed", "acceptable", "needs_remaster", "source_tts_issue", "regenerate"
-    ]
+    disposition: Literal["unreviewed", "acceptable", "needs_remaster", "source_tts_issue", "regenerate"]
     note: str = Field(default="", max_length=2000)
 
 
@@ -307,10 +298,6 @@ class MetadataFetchRequest(BaseModel):
 class MetadataSearchRequest(BaseModel):
     title: str = Field(min_length=1, max_length=300)
     author: str = Field(default="", max_length=300)
-
-
-
-
 
 
 def _require_job(project_id: str) -> dict[str, Any]:
@@ -341,6 +328,7 @@ def _validation_reset_targets(state) -> list[int]:
         selection = state.get("scripted_chapters") or []
     return sorted({int(chapter) for chapter in selection if int(chapter) > 0})
 
+
 def _project_dir(project_id: str) -> Path:
     root = shared_paths.PROJECTS_DIR.resolve()
     candidate = (root / project_id).resolve()
@@ -359,9 +347,7 @@ def _workspace_project_dir(project_id: str) -> Path:
 
 def _voice_project_dir(project_id: str) -> Path:
     config = shared_paths.voice_config()
-    root = shared_paths.repo_path(
-        str(config.get("storage", {}).get("voice_library_dir", "voice_library"))
-    ).resolve()
+    root = shared_paths.repo_path(str(config.get("storage", {}).get("voice_library_dir", "voice_library"))).resolve()
     candidate = (root / project_id).resolve()
     if not candidate.is_relative_to(root) or candidate == root:
         raise HTTPException(status_code=400, detail="Invalid project ID")
@@ -413,11 +399,7 @@ def _script_chapters(project_id: str) -> list[Any]:
         if not re.fullmatch(r"chapter_\d{3,}\.json", path.name):
             continue
         try:
-            chapters.append(
-                ScriptChapter.model_validate_json(
-                    path.read_text(encoding="utf-8")
-                )
-            )
+            chapters.append(ScriptChapter.model_validate_json(path.read_text(encoding="utf-8")))
         except Exception:
             logger.warning("Ignoring invalid script while building cast: %s", path)
 
@@ -524,9 +506,7 @@ def _join_review_items(project_id: str) -> list[dict[str, Any]]:
     project_dir = _project_dir(project_id)
     line_index = _script_line_index(project_id)
     items: list[dict[str, Any]] = []
-    for manifest_path in sorted(
-        (project_dir / "manifests").glob("chapter_*.master.json")
-    ):
+    for manifest_path in sorted((project_dir / "manifests").glob("chapter_*.master.json")):
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -551,12 +531,8 @@ def _join_review_items(project_id: str) -> list[dict[str, Any]]:
                     "current_line_id": current_id,
                     "previous_line": line_index.get(previous_id, {}),
                     "current_line": line_index.get(current_id, {}),
-                    "previous_audio_url": (
-                        f"api/projects/{project_id}/segments/{previous_id}/audio"
-                    ),
-                    "current_audio_url": (
-                        f"api/projects/{project_id}/segments/{current_id}/audio"
-                    ),
+                    "previous_audio_url": (f"api/projects/{project_id}/segments/{previous_id}/audio"),
+                    "current_audio_url": (f"api/projects/{project_id}/segments/{current_id}/audio"),
                     "severity": round(severity, 4),
                     **diagnostic,
                 }
@@ -588,21 +564,13 @@ def _cleanup_candidates(project_id: str) -> list[Path]:
     for pattern in ("segments/.*.attempt-*.wav", "**/*.tmp"):
         for path in root.glob(pattern):
             resolved = path.resolve()
-            if (
-                resolved.is_relative_to(root)
-                and resolved.is_file()
-                and not resolved.is_symlink()
-            ):
+            if resolved.is_relative_to(root) and resolved.is_file() and not resolved.is_symlink():
                 candidates.append(resolved)
     return sorted(set(candidates))
 
 
 def _cleanup_token(paths: list[Path]) -> str:
-    payload = "\n".join(
-        f"{path}|{path.stat().st_size}|{path.stat().st_mtime_ns}"
-        for path in paths
-        if path.exists()
-    )
+    payload = "\n".join(f"{path}|{path.stat().st_size}|{path.stat().st_mtime_ns}" for path in paths if path.exists())
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -611,8 +579,7 @@ def _redact_config(value: Any) -> Any:
         return {
             key: (
                 "<redacted>"
-                if any(term in key.lower() for term in ("token", "secret", "password"))
-                and item
+                if any(term in key.lower() for term in ("token", "secret", "password")) and item
                 else _redact_config(item)
             )
             for key, item in value.items()
@@ -645,9 +612,7 @@ def _registered_voice_path(
     registry_path = voice_dir / "voices.json"
     try:
         registered = (
-            json.loads(registry_path.read_text(encoding="utf-8")).get("voices", {})
-            if registry_path.exists()
-            else {}
+            json.loads(registry_path.read_text(encoding="utf-8")).get("voices", {}) if registry_path.exists() else {}
         )
     except (OSError, json.JSONDecodeError) as exc:
         raise HTTPException(status_code=500, detail="Voice registry is invalid") from exc
@@ -696,8 +661,7 @@ def _load_or_build_voice_cast(
         try:
             cast = json.loads(cast_path.read_text(encoding="utf-8"))
             has_narrator = any(
-                profile.get("owner_character_id") == "narrator"
-                for profile in cast.get("voices", {}).values()
+                profile.get("owner_character_id") == "narrator" for profile in cast.get("voices", {}).values()
             )
             if (
                 isinstance(cast.get("voices"), dict)
@@ -725,9 +689,7 @@ def _load_or_build_voice_cast(
             "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
         ),
         design_config={
-            "test_sentences": tts_config.get(
-                "voice_design_test_sentences", {}
-            ),
+            "test_sentences": tts_config.get("voice_design_test_sentences", {}),
             "language": tts_config.get("language", "English"),
             "reference_text_policy": "actual-dialogue-v1",
         },
@@ -758,13 +720,9 @@ def _mark_cast_distinctness_stale(
     quality["cast_pair_diagnostics"] = [
         item
         for item in quality.get("cast_pair_diagnostics", [])
-        if item.get("left_voice_id") not in stale
-        and item.get("right_voice_id") not in stale
+        if item.get("left_voice_id") not in stale and item.get("right_voice_id") not in stale
     ]
-    quality["similar_pairs"] = sum(
-        item.get("status") == "similar"
-        for item in quality["cast_pair_diagnostics"]
-    )
+    quality["similar_pairs"] = sum(item.get("status") == "similar" for item in quality["cast_pair_diagnostics"])
 
 
 def _cast_distinctness_review(
@@ -798,16 +756,11 @@ def _inspect_pcm_voice(path: Path) -> dict[str, float | int]:
     if not samples:
         raise ValueError("Uploaded voice contains no audio samples")
     peak = max(abs(sample) for sample in samples) / 32768.0
-    rms = math.sqrt(
-        sum(float(sample) * float(sample) for sample in samples)
-        / len(samples)
-    ) / 32768.0
+    rms = math.sqrt(sum(float(sample) * float(sample) for sample in samples) / len(samples)) / 32768.0
     duration = frame_count / sample_rate
     clipped = sum(abs(sample) >= 32760 for sample in samples) / len(samples)
     if duration < 3.0 or duration > 30.0:
-        raise ValueError(
-            "Reference audio must be between 3 and 30 seconds after conversion"
-        )
+        raise ValueError("Reference audio must be between 3 and 30 seconds after conversion")
     if rms < 0.003:
         raise ValueError("Reference audio is silent or too quiet")
     if clipped > 0.001:
@@ -849,22 +802,23 @@ async def _interrupt_pipeline_worker(
         except Exception:
             pass
 
+
 def _voice_review_approval_update(approved_at: str, cast_revision: str) -> dict:
     return {
         "voice_review_status": "approved",
         "voice_review_approved_at": approved_at,
         "voice_review_approved_revision": cast_revision,
         "voice_review_approved": True,
-        "pause_reason": None
+        "pause_reason": None,
     }
+
 
 def _uploaded_transcript_error(result, threshold: float = 0.20) -> str | None:
     """Return a safe user-facing mismatch error, or None when ASR agrees."""
     import re
+
     effective_error = float(
-        result.effective_text_error
-        if getattr(result, "effective_text_error", None) is not None
-        else result.wer
+        result.effective_text_error if getattr(result, "effective_text_error", None) is not None else result.wer
     )
     if effective_error <= threshold:
         return None
@@ -874,6 +828,7 @@ def _uploaded_transcript_error(result, threshold: float = 0.20) -> str | None:
         f"(effective error {effective_error:.1%}). "
         f"Whisper heard: {heard[:240] or '[no speech]'}"
     )
+
 
 def _ensure_voice_editable(project_id: str) -> dict[str, Any]:
     if not job_queue:
@@ -903,9 +858,7 @@ def _chapters_for_speakers(
     script_dir = _project_dir(project_id) / "script"
     for path in sorted(script_dir.glob("chapter_*.json")):
         try:
-            chapter = ScriptChapter.model_validate_json(
-                path.read_text(encoding="utf-8")
-            )
+            chapter = ScriptChapter.model_validate_json(path.read_text(encoding="utf-8"))
         except Exception:
             continue
         if any(line.speaker in speaker_ids for line in chapter.lines):
@@ -929,16 +882,8 @@ def _mark_voice_chapters_stale(
     job_queue.update_job(
         project_id,
         {
-            "generated_chapters": [
-                number
-                for number in state.get("generated_chapters", [])
-                if number not in affected
-            ],
-            "mastered_chapters": [
-                number
-                for number in state.get("mastered_chapters", [])
-                if number not in affected
-            ],
+            "generated_chapters": [number for number in state.get("generated_chapters", []) if number not in affected],
+            "mastered_chapters": [number for number in state.get("mastered_chapters", []) if number not in affected],
             "voice_revision_pending_chapters": sorted(pending),
         },
     )
@@ -955,16 +900,9 @@ def _validate_epub_archive(path: Path, max_expanded_mb: int) -> None:
                     raise ValueError(f"Unsafe EPUB member path: {info.filename}")
                 total += info.file_size
                 if total > max_expanded_mb * 1024 * 1024:
-                    raise ValueError(
-                        f"Expanded EPUB exceeds {max_expanded_mb} MB limit"
-                    )
-                if (
-                    info.compress_size > 0
-                    and info.file_size / info.compress_size > 1000
-                ):
-                    raise ValueError(
-                        f"Suspicious compression ratio in EPUB member: {info.filename}"
-                    )
+                    raise ValueError(f"Expanded EPUB exceeds {max_expanded_mb} MB limit")
+                if info.compress_size > 0 and info.file_size / info.compress_size > 1000:
+                    raise ValueError(f"Suspicious compression ratio in EPUB member: {info.filename}")
     except zipfile.BadZipFile as exc:
         raise ValueError("Uploaded file is not a valid EPUB/ZIP archive") from exc
 
@@ -980,13 +918,7 @@ def _purge_project_cache(
         return
     if reference_hashes is None:
         reference_hashes = [
-            digest
-            for digest in (
-                hash_file(path)
-                for path in voice_project.glob("*.wav")
-                if path.is_file()
-            )
-            if digest
+            digest for digest in (hash_file(path) for path in voice_project.glob("*.wav") if path.is_file()) if digest
         ]
     with sqlite3.connect(cache_path, timeout=10) as connection:
         connection.execute("BEGIN IMMEDIATE")
@@ -1001,16 +933,15 @@ def _purge_project_cache(
         if reference_hashes:
             placeholders = ",".join("?" for _ in reference_hashes)
             connection.execute(
-                f"DELETE FROM voice_clone_prompts "
-                f"WHERE ref_audio_hash IN ({placeholders})",
+                f"DELETE FROM voice_clone_prompts WHERE ref_audio_hash IN ({placeholders})",
                 reference_hashes,
             )
             connection.execute(
-                f"DELETE FROM fx_prompt_cache "
-                f"WHERE source_audio_hash IN ({placeholders})",
+                f"DELETE FROM fx_prompt_cache WHERE source_audio_hash IN ({placeholders})",
                 reference_hashes,
             )
         connection.commit()
+
 
 # ---------------------------------------------------------------------------
 # Per-project log capture
@@ -1037,10 +968,12 @@ class ProjectLogHandler(logging.Handler):
         super().__init__()
         self.project_id = project_id
         self._loop: asyncio.AbstractEventLoop | None = None
-        self.setFormatter(logging.Formatter(
-            "%(asctime)s.%(msecs)03d | %(levelname)-7s | %(name)s | %(message)s",
-            datefmt="%H:%M:%S",
-        ))
+        self.setFormatter(
+            logging.Formatter(
+                "%(asctime)s.%(msecs)03d | %(levelname)-7s | %(name)s | %(message)s",
+                datefmt="%H:%M:%S",
+            )
+        )
 
     def emit(self, record: logging.LogRecord) -> None:
         # Skip dashboard / uvicorn noise
@@ -1112,10 +1045,12 @@ async def lifespan(app: FastAPI):
     global pipeline, job_queue
 
     from shared.single_instance import SingleInstanceLock
+
     lock = SingleInstanceLock("dashboard_service.lock")
     if not lock.acquire():
         logger.error("Another Dashboard API instance is already running! Exiting.")
         import sys
+
         sys.exit(1)
 
     config = load_config()
@@ -1202,11 +1137,7 @@ async def lifespan(app: FastAPI):
                             st = await get_pipeline_status(pid)
                             for ws in list(ws_connections):
                                 try:
-                                    await ws.send_json({
-                                        "type": "status_update",
-                                        "project_id": pid,
-                                        "status": st
-                                    })
+                                    await ws.send_json({"type": "status_update", "project_id": pid, "status": st})
                                 except Exception:
                                     pass
                 except Exception:
@@ -1227,10 +1158,7 @@ async def lifespan(app: FastAPI):
             if any(not task.done() for task in running_tasks.values()):
                 continue
             for scheduled_job in job_queue.list_jobs():
-                if (
-                    scheduled_job.get("status")
-                    != PipelineStage.PAUSED_SCHEDULED.value
-                ):
+                if scheduled_job.get("status") != PipelineStage.PAUSED_SCHEDULED.value:
                     continue
                 try:
                     await start_pipeline(scheduled_job["project_id"])
@@ -1331,7 +1259,11 @@ app.add_middleware(
 @app.middleware("http")
 async def disable_api_caching(request: Request, call_next):
     response = await call_next(request)
-    if not request.url.path.endswith("/stream") and "/download" not in request.url.path and not request.url.path.endswith("/cover"):
+    if (
+        not request.url.path.endswith("/stream")
+        and "/download" not in request.url.path
+        and not request.url.path.endswith("/cover")
+    ):
         response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
@@ -1344,12 +1276,9 @@ async def require_dashboard_token(request: Request, call_next):
     if request.url.path == "/api/mobile/v1/server-info":
         return await call_next(request)
 
-    if (
-        request.url.path.startswith("/api/")
-        and is_cross_site_mutation(
-            request.method,
-            request.headers.get("Sec-Fetch-Site"),
-        )
+    if request.url.path.startswith("/api/") and is_cross_site_mutation(
+        request.method,
+        request.headers.get("Sec-Fetch-Site"),
     ):
         return JSONResponse(
             {"detail": "Cross-site state changes are not allowed"},
@@ -1357,14 +1286,11 @@ async def require_dashboard_token(request: Request, call_next):
         )
     token = configured_dashboard_token(_dashboard_cfg)
     client_host = request.client.host if request.client else None
-    if (
-        request.url.path.startswith("/api/")
-        and not dashboard_request_authorized(
-            client_host=client_host,
-            configured_token=token,
-            presented_token=request.headers.get("X-API-Token"),
-            trusted_lan_cidrs=_TRUSTED_LAN_CIDRS,
-        )
+    if request.url.path.startswith("/api/") and not dashboard_request_authorized(
+        client_host=client_host,
+        configured_token=token,
+        presented_token=request.headers.get("X-API-Token"),
+        trusted_lan_cidrs=_TRUSTED_LAN_CIDRS,
     ):
         if not token and not is_loopback_client(client_host):
             return JSONResponse(
@@ -1379,9 +1305,7 @@ async def require_dashboard_token(request: Request, call_next):
         # force revalidation after every app restart/deployment. Asset query
         # revisions still prevent an old HTML document from mixing JS/CSS
         # generations once the iframe is reloaded.
-        response.headers["Cache-Control"] = (
-            "no-store, no-cache, max-age=0, must-revalidate"
-        )
+        response.headers["Cache-Control"] = "no-store, no-cache, max-age=0, must-revalidate"
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
         response.headers["X-Crazy-Audiobook-UI-Version"] = FRONTEND_BUILD
@@ -1409,7 +1333,7 @@ async def serve_dashboard():
         timestamp = str(int(time.time()))
         content = re.sub(
             r'((?:src|href)="static/[^"]+?\.(?:js|css))(?:\?v=[^"]*)?(")',
-            rf'\1?v={timestamp}\2',
+            rf"\1?v={timestamp}\2",
             content,
         )
         return HTMLResponse(
@@ -1520,12 +1444,12 @@ async def create_project(
             atomic_write_json(book_json, book_data)
             status = status.model_copy(update=metadata_updates)
             pipeline.job_queue.update_job(status.project_id, metadata_updates)
-        logger.info("[DashboardAPI] Created project '%s' (%d chapters detected)", status.project_id, status.total_chapters)
+        logger.info(
+            "[DashboardAPI] Created project '%s' (%d chapters detected)", status.project_id, status.total_chapters
+        )
 
         if cfg.get("metadata", {}).get("auto_fetch_external", False):
-            asyncio.create_task(
-                asyncio.to_thread(_auto_fetch_metadata_sync, status.project_id)
-            )
+            asyncio.create_task(asyncio.to_thread(_auto_fetch_metadata_sync, status.project_id))
 
         return {
             "project_id": status.project_id,
@@ -1542,9 +1466,7 @@ async def create_project(
     finally:
         if temp_path.exists():
             temp_path.unlink()
-        for extracted_cover in temp_path.parent.glob(
-            f"{temp_path.stem}_cover.*"
-        ):
+        for extracted_cover in temp_path.parent.glob(f"{temp_path.stem}_cover.*"):
             if extracted_cover.is_file():
                 extracted_cover.unlink()
 
@@ -1575,6 +1497,7 @@ async def get_project(project_id: str):
 def _safe_delete_tree(path: Path) -> bool:
     """Safely delete a directory tree on Windows, clearing read-only attributes."""
     import stat
+
     if not path.exists() and not path.is_symlink():
         return True
 
@@ -1633,13 +1556,7 @@ async def delete_project(project_id: str, delete_from_nas: bool = False):
 
     voice_project = _voice_project_dir(project_id)
     reference_hashes = [
-        digest
-        for digest in (
-            hash_file(path)
-            for path in voice_project.glob("*.wav")
-            if path.is_file()
-        )
-        if digest
+        digest for digest in (hash_file(path) for path in voice_project.glob("*.wav") if path.is_file()) if digest
     ]
     remaining = [root for root in roots if not _safe_delete_tree(root)]
     if remaining:
@@ -1651,9 +1568,7 @@ async def delete_project(project_id: str, delete_from_nas: bool = False):
         raise HTTPException(
             status_code=409,
             detail={
-                "message": (
-                    "Project cleanup is incomplete; retry after releasing locked files"
-                ),
+                "message": ("Project cleanup is incomplete; retry after releasing locked files"),
                 "remaining_roots": [str(path) for path in remaining],
             },
         )
@@ -1677,6 +1592,7 @@ async def delete_project(project_id: str, delete_from_nas: bool = False):
     # Clean up from NAS if requested
     try:
         from brain.orchestrator.nas_syncer import NASSyncer
+
         nas_syncer = NASSyncer()
         if nas_syncer.is_configured:
             nas_syncer.delete_project(project_id, delete_from_nas=delete_from_nas)
@@ -1692,6 +1608,7 @@ async def delete_project(project_id: str, delete_from_nas: bool = False):
 # ---------------------------------------------------------------------------
 # NAS Storage & Sync endpoints
 # ---------------------------------------------------------------------------
+
 
 @app.get("/api/nas/status")
 async def get_nas_status():
@@ -1736,6 +1653,7 @@ async def sync_all_to_nas():
 async def get_notification_settings():
     """Return Home Assistant notification engine configuration and status."""
     from brain.orchestrator.notifier import notifier
+
     return {
         "configured": notifier.is_configured,
         "base_url": notifier.base_url,
@@ -1748,6 +1666,7 @@ async def get_notification_settings():
 async def test_notification():
     """Send a test notification to Home Assistant to verify mobile delivery."""
     from brain.orchestrator.notifier import NotificationEventType, NotificationPayload, notifier
+
     if not notifier.is_configured:
         raise HTTPException(status_code=400, detail="Home Assistant notification engine is not configured.")
     payload = NotificationPayload(
@@ -1767,6 +1686,7 @@ async def test_notification():
 # ---------------------------------------------------------------------------
 # Pipeline control
 # ---------------------------------------------------------------------------
+
 
 @app.post("/api/projects/{project_id}/start")
 async def start_pipeline(
@@ -1799,19 +1719,14 @@ async def start_pipeline(
                 }
         raise HTTPException(status_code=409, detail="Pipeline already running")
     active_project = next(
-        (
-            pid
-            for pid, task in running_tasks.items()
-            if pid != project_id and not task.done()
-        ),
+        (pid for pid, task in running_tasks.items() if pid != project_id and not task.done()),
         None,
     )
     if active_project:
         raise HTTPException(
             status_code=409,
             detail=(
-                "GPU pipeline is serialized; wait for or pause project "
-                f"'{active_project}' before starting another"
+                f"GPU pipeline is serialized; wait for or pause project '{active_project}' before starting another"
             ),
         )
 
@@ -1832,14 +1747,10 @@ async def start_pipeline(
         if gate.blocking_items:
             raise HTTPException(
                 status_code=409,
-                detail=(
-                    f"Resolve {len(gate.blocking_items)} blocking review item(s) "
-                    "before resuming the pipeline."
-                ),
+                detail=(f"Resolve {len(gate.blocking_items)} blocking review item(s) before resuming the pipeline."),
             )
     if (
-        current.get("voice_review_policy", "grandfathered")
-        == "required_once"
+        current.get("voice_review_policy", "grandfathered") == "required_once"
         and current.get("bootstrapping_completed", False)
         and current.get("voice_review_status") != "approved"
     ):
@@ -1884,11 +1795,13 @@ async def start_pipeline(
             logger.error("Pipeline failed for %s: %s", project_id, e)
             for ws in ws_connections:
                 try:
-                    await ws.send_json({
-                        "type": "error",
-                        "project_id": project_id,
-                        "message": str(e),
-                    })
+                    await ws.send_json(
+                        {
+                            "type": "error",
+                            "project_id": project_id,
+                            "message": str(e),
+                        }
+                    )
                 except Exception:
                     pass
         finally:
@@ -1949,10 +1862,7 @@ def _automatic_pipeline_review_pending(
     stage: PipelineStage,
 ) -> bool:
     if stage == PipelineStage.SCRIPTING and not state.get("script_completed", False):
-        return any(
-            getattr(item, "category", "") == "attribution"
-            for item in blocking_items
-        )
+        return any(getattr(item, "category", "") == "attribution" for item in blocking_items)
     return False
 
 
@@ -1991,10 +1901,7 @@ async def stop_pipeline(
     except KeyError:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    will_resume_on_schedule = bool(
-        resume_on_schedule
-        or (pipeline and not pipeline.schedule_is_open())
-    )
+    will_resume_on_schedule = bool(resume_on_schedule or (pipeline and not pipeline.schedule_is_open()))
     if will_resume_on_schedule:
         new_status = PipelineStage.PAUSED_SCHEDULED.value
         pause_reason = "waiting for configured working hours"
@@ -2015,9 +1922,7 @@ async def stop_pipeline(
 
     pipeline.stop(project_id)
 
-    active_stage = str(
-        state.get("active_stage") or state.get("status") or ""
-    )
+    active_stage = str(state.get("active_stage") or state.get("status") or "")
     if active_stage in _VOICE_STAGES:
         try:
             await asyncio.to_thread(pipeline.voice_client.health_check_once)
@@ -2140,69 +2045,94 @@ async def reset_pipeline_stage(project_id: str, request: Request):
                     await asyncio.to_thread(pipeline.reextract_project, project_id)
                 except FileNotFoundError as exc:
                     raise HTTPException(status_code=409, detail=str(exc)) from exc
-            update.update({
-                "script_completed": False,
-                "bootstrapping_completed": False,
-                "voice_review_approved": False,
-                "voice_review_status": "pending",
-                "voice_review_approved_at": None,
-                "scripted_chapters": [],
-                "generated_chapters": [],
-                "mastered_chapters": [],
-                "force_character_analysis": True,
-            })
+            update.update(
+                {
+                    "script_completed": False,
+                    "bootstrapping_completed": False,
+                    "voice_review_approved": False,
+                    "voice_review_status": "pending",
+                    "voice_review_approved_at": None,
+                    "scripted_chapters": [],
+                    "generated_chapters": [],
+                    "mastered_chapters": [],
+                    "force_character_analysis": True,
+                }
+            )
 
         elif stage == PipelineStage.BOOTSTRAPPING:
             job_queue.clear_review_items(project_id, item_type="segment")
-            update.update({
-                "bootstrapping_completed": False,
-                "voice_review_approved": False,
-                "voice_review_status": "pending",
-                "voice_review_approved_at": None,
-                "bootstrapping_fingerprint": None,
-                "generated_chapters": [],
-                "mastered_chapters": [],
-                "force_voice_regeneration": True,
-            })
+            update.update(
+                {
+                    "bootstrapping_completed": False,
+                    "voice_review_approved": False,
+                    "voice_review_status": "pending",
+                    "voice_review_approved_at": None,
+                    "bootstrapping_fingerprint": None,
+                    "generated_chapters": [],
+                    "mastered_chapters": [],
+                    "force_voice_regeneration": True,
+                }
+            )
             _safe_unlink(project_dir / "voice_cast.json")
-            for d in [project_dir / "segments", project_dir / "mastered", workspace_dir / "segments", workspace_dir / "mastered"]:
+            for d in [
+                project_dir / "segments",
+                project_dir / "mastered",
+                workspace_dir / "segments",
+                workspace_dir / "mastered",
+            ]:
                 if d.exists() and d.is_dir():
                     shutil.rmtree(d)
 
         elif stage == PipelineStage.VOICE_REVIEW:
             job_queue.clear_review_items(project_id, item_type="segment")
-            update.update({
-                "status": "paused",
-                "active_stage": "voice_review",
-                "pause_reason": "voice_review",
-                "voice_review_status": "pending",
-                "voice_review_policy": "required_once",
-                "voice_review_approved": False,
-                "voice_review_approved_at": None,
-                "generated_chapters": [],
-                "mastered_chapters": [],
-            })
-            for d in [project_dir / "segments", project_dir / "mastered", workspace_dir / "segments", workspace_dir / "mastered"]:
+            update.update(
+                {
+                    "status": "paused",
+                    "active_stage": "voice_review",
+                    "pause_reason": "voice_review",
+                    "voice_review_status": "pending",
+                    "voice_review_policy": "required_once",
+                    "voice_review_approved": False,
+                    "voice_review_approved_at": None,
+                    "generated_chapters": [],
+                    "mastered_chapters": [],
+                }
+            )
+            for d in [
+                project_dir / "segments",
+                project_dir / "mastered",
+                workspace_dir / "segments",
+                workspace_dir / "mastered",
+            ]:
                 if d.exists() and d.is_dir():
                     shutil.rmtree(d)
 
         elif stage == PipelineStage.GENERATING:
             job_queue.clear_review_items(project_id, item_type="segment")
-            update.update({
-                "generated_chapters": [],
-                "mastered_chapters": [],
-            })
-            for d in [project_dir / "segments", project_dir / "mastered", workspace_dir / "segments", workspace_dir / "mastered"]:
+            update.update(
+                {
+                    "generated_chapters": [],
+                    "mastered_chapters": [],
+                }
+            )
+            for d in [
+                project_dir / "segments",
+                project_dir / "mastered",
+                workspace_dir / "segments",
+                workspace_dir / "mastered",
+            ]:
                 if d.exists() and d.is_dir():
                     shutil.rmtree(d)
 
         elif stage == PipelineStage.VALIDATING:
             job_queue.clear_review_items(project_id, item_type="segment")
-            update.update({
-                "generated_chapters": [],
-                "mastered_chapters": [],
-                "validation_revision": uuid.uuid4().hex,
-            })
+            update.update(
+                {
+                    "generated_chapters": [],
+                    "mastered_chapters": [],
+                    "validation_revision": uuid.uuid4().hex,
+                }
+            )
             _safe_unlink(project_dir / "long_form_audio_quality.json")
             manifests_dir = project_dir / "manifests"
             if manifests_dir.is_dir():
@@ -2231,9 +2161,7 @@ async def reset_pipeline_stage(project_id: str, request: Request):
             if deliveries_dir.is_dir():
                 history_root = project_dir / "delivery_history"
                 history_root.mkdir(parents=True, exist_ok=True)
-                archive = history_root / datetime.now(UTC).strftime(
-                    "%Y%m%dT%H%M%S%fZ"
-                )
+                archive = history_root / datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
                 os.replace(deliveries_dir, archive)
                 DeliveryManager(project_dir).prune_delivery_history(retain=2)
             update.update(
@@ -2245,9 +2173,7 @@ async def reset_pipeline_stage(project_id: str, request: Request):
                 }
             )
         elif stage != PipelineStage.EXPORTING:
-            DeliveryManager(project_dir).mark_all_stale(
-                f"Pipeline reset to {stage.value}"
-            )
+            DeliveryManager(project_dir).mark_all_stale(f"Pipeline reset to {stage.value}")
         if stage != PipelineStage.EXPORTING:
             update["export_stale"] = True
         update["progress"] = {
@@ -2296,11 +2222,7 @@ async def download_audiobook(project_id: str, delivery_id: str | None = None):
             part, m4b_path = dm.resolve_published_artifact(delivery_id)
         except DeliveryError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
-        return FileResponse(
-            path=m4b_path,
-            filename=part.artifact,
-            media_type="audio/mp4"
-        )
+        return FileResponse(path=m4b_path, filename=part.artifact, media_type="audio/mp4")
     try:
         state = job_queue.get_job(project_id) if job_queue else {}
     except KeyError:
@@ -2330,18 +2252,11 @@ async def download_audiobook(project_id: str, delivery_id: str | None = None):
     book_json = project_dir / "book.json"
     if book_json.is_file():
         try:
-            title = (
-                json.loads(book_json.read_text(encoding="utf-8"))
-                .get("metadata", {})
-                .get("title")
-                or project_id
-            )
+            title = json.loads(book_json.read_text(encoding="utf-8")).get("metadata", {}).get("title") or project_id
         except (OSError, json.JSONDecodeError):
             pass
     return FileResponse(
-        path=m4b_path,
-        filename=f"{_download_name_component(str(title), project_id)}.m4b",
-        media_type="audio/mp4"
+        path=m4b_path, filename=f"{_download_name_component(str(title), project_id)}.m4b", media_type="audio/mp4"
     )
 
 
@@ -2380,20 +2295,12 @@ async def download_chapter_audio(project_id: str, chapter_num: int):
     """Download the mastered WAV file for a specific chapter."""
     if chapter_num < 1:
         raise HTTPException(status_code=422, detail="Chapter number must be positive")
-    ch_file = (
-        _workspace_project_dir(project_id)
-        / "chapters"
-        / f"chapter_{chapter_num:03d}.wav"
-    )
+    ch_file = _workspace_project_dir(project_id) / "chapters" / f"chapter_{chapter_num:03d}.wav"
     if not ch_file.exists():
         ch_file = _project_dir(project_id) / "chapters" / f"chapter_{chapter_num:03d}.wav"
     if not ch_file.exists():
         raise HTTPException(status_code=404, detail=f"Chapter {chapter_num} mastered audio not found")
-    return FileResponse(
-        path=ch_file,
-        filename=f"{project_id}_chapter_{chapter_num:03d}.wav",
-        media_type="audio/wav"
-    )
+    return FileResponse(path=ch_file, filename=f"{project_id}_chapter_{chapter_num:03d}.wav", media_type="audio/wav")
 
 
 @app.get("/api/projects/{project_id}/stream/chapter/{chapter_num}")
@@ -2402,11 +2309,7 @@ async def stream_chapter_audio(project_id: str, chapter_num: int, format: str = 
     if chapter_num < 1:
         raise HTTPException(status_code=422, detail="Chapter number must be positive")
 
-    ch_file = (
-        _workspace_project_dir(project_id)
-        / "chapters"
-        / f"chapter_{chapter_num:03d}.wav"
-    )
+    ch_file = _workspace_project_dir(project_id) / "chapters" / f"chapter_{chapter_num:03d}.wav"
     if not ch_file.exists():
         m4b_path = _project_dir(project_id) / f"{project_id}.m4b"
         if not m4b_path.exists():
@@ -2476,12 +2379,17 @@ async def stream_chapter_audio(project_id: str, chapter_num: int, format: str = 
         if not aac_file.exists() or aac_file.stat().st_mtime < ch_file.stat().st_mtime:
             try:
                 cmd = [
-                    "ffmpeg", "-y",
-                    "-i", str(ch_file),
-                    "-c:a", "aac",
-                    "-b:a", "128k",
-                    "-movflags", "+faststart",
-                    str(aac_file)
+                    "ffmpeg",
+                    "-y",
+                    "-i",
+                    str(ch_file),
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    "128k",
+                    "-movflags",
+                    "+faststart",
+                    str(aac_file),
                 ]
                 subprocess.run(
                     cmd,
@@ -2527,10 +2435,7 @@ async def get_pipeline_status(project_id: str):
         raise HTTPException(status_code=503, detail="Server not initialized")
     try:
         state = job_queue.get_job(project_id)
-        state["running"] = (
-            project_id in running_tasks
-            and not running_tasks[project_id].done()
-        )
+        state["running"] = project_id in running_tasks and not running_tasks[project_id].done()
 
         project_dir = _project_dir(project_id)
         cached_cast = state.get("voice_cast")
@@ -2542,10 +2447,7 @@ async def get_pipeline_status(project_id: str):
                 persisted_cast = json.loads(cast_path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError, AttributeError):
                 persisted_cast = None
-        if (
-            persisted_cast
-            and str(persisted_cast.get("fingerprint") or "") == cast_revision
-        ):
+        if persisted_cast and str(persisted_cast.get("fingerprint") or "") == cast_revision:
             active_cast = persisted_cast
         elif isinstance(cached_cast, dict):
             active_cast = cached_cast
@@ -2596,9 +2498,7 @@ async def get_pipeline_status(project_id: str):
                 state["isbn"] = meta.get("isbn") or ""
                 cover = _existing_project_cover(project_dir, meta)
                 if cover:
-                    state["cover_url"] = (
-                        f"api/projects/{project_id}/cover?v={cover.stat().st_mtime_ns}"
-                    )
+                    state["cover_url"] = f"api/projects/{project_id}/cover?v={cover.stat().st_mtime_ns}"
 
                 calc_total = len(b_chaps) or meta.get("total_chapters", 0)
                 if total_chapters == 0 and calc_total > 0:
@@ -2652,8 +2552,7 @@ async def get_pipeline_status(project_id: str):
 
         # Dynamically infer the next active scripting chapter if existing valid scripts exist
         existing_scripted = [
-            c for c in range(1, total_chapters + 1)
-            if _has_valid_script(c)[0] or c in scripted_chapters
+            c for c in range(1, total_chapters + 1) if _has_valid_script(c)[0] or c in scripted_chapters
         ]
         if existing_scripted:
             current_script_ch = min(max(existing_scripted) + 1, total_chapters)
@@ -2671,8 +2570,10 @@ async def get_pipeline_status(project_id: str):
             if ch_num in generated_chapters and total_lines > 0:
                 gen_count = max(gen_count, total_lines)
             validated_count = (
-                total_lines if ch_num in generated_chapters
-                else min(int(state.get("lines_validated") or 0), gen_count) if ch_num == state.get("current_gen_chapter")
+                total_lines
+                if ch_num in generated_chapters
+                else min(int(state.get("lines_validated") or 0), gen_count)
+                if ch_num == state.get("current_gen_chapter")
                 else min(gen_count, total_lines)
             )
 
@@ -2714,14 +2615,16 @@ async def get_pipeline_status(project_id: str):
             else:
                 pct = 0
 
-            chapter_details.append({
-                "number": ch_num,
-                "title": title,
-                "total_lines": total_lines,
-                "lines_generated": gen_count,
-                "lines_validated": min(validated_count, total_lines),
-                "progress_percent": min(max(pct, 0), 100)
-            })
+            chapter_details.append(
+                {
+                    "number": ch_num,
+                    "title": title,
+                    "total_lines": total_lines,
+                    "lines_generated": gen_count,
+                    "lines_validated": min(validated_count, total_lines),
+                    "progress_percent": min(max(pct, 0), 100),
+                }
+            )
 
         state["chapter_details"] = chapter_details
         return state
@@ -2739,9 +2642,7 @@ async def update_schedule(request: Request):
     """Update schedule config in brain/config.yaml."""
     data = await request.json()
     enabled = bool(data.get("enabled", False))
-    timezone_name = str(
-        data.get("timezone", "Europe/Bucharest")
-    ).strip()
+    timezone_name = str(data.get("timezone", "Europe/Bucharest")).strip()
     try:
         ZoneInfo(timezone_name)
     except Exception as exc:
@@ -2750,8 +2651,13 @@ async def update_schedule(request: Request):
             detail=f"Unknown timezone: {timezone_name}",
         ) from exc
     valid_day_order = (
-        "Monday", "Tuesday", "Wednesday", "Thursday",
-        "Friday", "Saturday", "Sunday",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+        "Sunday",
     )
     valid_days = set(valid_day_order)
     windows = data.get("windows", [])
@@ -2770,17 +2676,10 @@ async def update_schedule(request: Request):
                 detail=f"Window {index + 1} must use HH:MM start/end times",
             ) from exc
         days = window.get("days", [])
-        if (
-            not isinstance(days, list)
-            or not days
-            or any(day not in valid_days for day in days)
-        ):
+        if not isinstance(days, list) or not days or any(day not in valid_days for day in days):
             raise HTTPException(
                 status_code=422,
-                detail=(
-                    f"Window {index + 1} must select at least one valid "
-                    "weekday"
-                ),
+                detail=(f"Window {index + 1} must select at least one valid weekday"),
             )
         start = parsed_start.strftime("%H:%M")
         end = parsed_end.strftime("%H:%M")
@@ -2820,14 +2719,15 @@ def _replace_yaml_section(
 ) -> None:
     """Replace one top-level YAML section without discarding file comments."""
     text = path.read_text(encoding="utf-8") if path.exists() else ""
-    block = yaml.safe_dump(
-        {section: value},
-        sort_keys=False,
-        allow_unicode=True,
-    ).rstrip() + "\n"
-    section_pattern = re.compile(
-        rf"(?ms)^{re.escape(section)}:\s*\n.*?(?=^[A-Za-z_][\w-]*:\s*(?:#.*)?$|\Z)"
+    block = (
+        yaml.safe_dump(
+            {section: value},
+            sort_keys=False,
+            allow_unicode=True,
+        ).rstrip()
+        + "\n"
     )
+    section_pattern = re.compile(rf"(?ms)^{re.escape(section)}:\s*\n.*?(?=^[A-Za-z_][\w-]*:\s*(?:#.*)?$|\Z)")
     if section_pattern.search(text):
         updated = section_pattern.sub(block, text, count=1)
     else:
@@ -2864,9 +2764,7 @@ async def shutdown_dashboard():
             "pid": os.getpid(),
         }
 
-    _dashboard_shutdown_task = asyncio.create_task(
-        _shutdown_dashboard_process()
-    )
+    _dashboard_shutdown_task = asyncio.create_task(_shutdown_dashboard_process())
     return {
         "status": "shutting_down",
         "pid": os.getpid(),
@@ -2936,9 +2834,7 @@ def _read_metadata_candidate(
     try:
         candidate = json.loads(candidate_path.read_text(encoding="utf-8"))
         fetched_at = datetime.fromisoformat(candidate["fetched_at"])
-        cache_hours = float(
-            load_config().get("metadata", {}).get("cache_hours", 24)
-        )
+        cache_hours = float(load_config().get("metadata", {}).get("cache_hours", 24))
         age_seconds = (datetime.now(UTC) - fetched_at).total_seconds()
         if (
             candidate.get("status") != "matched"
@@ -3015,13 +2911,9 @@ def _metadata_response(
     payload = dict(candidate)
     payload.pop("cache_key", None)
     payload["applied"] = applied
-    payload["existing_cover"] = _existing_project_cover(
-        _project_dir(project_id), metadata
-    ) is not None
+    payload["existing_cover"] = _existing_project_cover(_project_dir(project_id), metadata) is not None
     payload["cover_preview_url"] = (
-        f"api/projects/{project_id}/metadata-candidate/cover"
-        if candidate.get("has_cover")
-        else None
+        f"api/projects/{project_id}/metadata-candidate/cover" if candidate.get("has_cover") else None
     )
     return payload
 
@@ -3050,8 +2942,7 @@ def _refresh_exported_audiobook_metadata_unlocked(
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         raise RuntimeError(
-            "Book details were saved, but FFmpeg is unavailable to refresh "
-            "the existing audiobook package"
+            "Book details were saved, but FFmpeg is unavailable to refresh the existing audiobook package"
         )
     project_dir = _project_dir(project_id)
     cover = _existing_project_cover(project_dir, metadata)
@@ -3066,25 +2957,38 @@ def _refresh_exported_audiobook_metadata_unlocked(
             command.extend(["-map", "0"])
         command.extend(
             [
-                "-map_metadata", "0",
-                "-map_chapters", "0",
-                "-c", "copy",
-                "-metadata", f"title={metadata.get('title') or ''}",
-                "-metadata", f"artist={metadata.get('author') or ''}",
-                "-metadata", f"album={metadata.get('title') or ''}",
-                "-metadata", f"genre={metadata.get('genre') or ''}",
-                "-metadata", f"date={metadata.get('year') or ''}",
-                "-metadata", f"comment={metadata.get('description') or ''}",
+                "-map_metadata",
+                "0",
+                "-map_chapters",
+                "0",
+                "-c",
+                "copy",
+                "-metadata",
+                f"title={metadata.get('title') or ''}",
+                "-metadata",
+                f"artist={metadata.get('author') or ''}",
+                "-metadata",
+                f"album={metadata.get('title') or ''}",
+                "-metadata",
+                f"genre={metadata.get('genre') or ''}",
+                "-metadata",
+                f"date={metadata.get('year') or ''}",
+                "-metadata",
+                f"comment={metadata.get('description') or ''}",
             ]
         )
         isbn = str(metadata.get("isbn") or "").strip()
         if isbn:
             # M4B has no universally supported ISBN atom. The standard
             # grouping atom survives across players without hiding cover art.
-            command.extend([
-                "-metadata", f"isbn={isbn}",
-                "-metadata", f"grouping=ISBN {isbn}",
-            ])
+            command.extend(
+                [
+                    "-metadata",
+                    f"isbn={isbn}",
+                    "-metadata",
+                    f"grouping=ISBN {isbn}",
+                ]
+            )
         command.extend(["-movflags", "+faststart", str(temporary)])
         try:
             result = subprocess.run(
@@ -3115,9 +3019,7 @@ def _refresh_exported_audiobook_metadata(
             project_id,
             metadata,
         )
-        manager.mark_all_stale(
-            "Book metadata or cover changed; republish this delivery"
-        )
+        manager.mark_all_stale("Book metadata or cover changed; republish this delivery")
         return refreshed
 
 
@@ -3144,10 +3046,7 @@ def _fetch_metadata_sync(
         book_data = json.loads(book_json.read_text(encoding="utf-8"))
         metadata = book_data.setdefault("metadata", {})
         cache_key = _metadata_cache_key(metadata)
-        candidate = (
-            None if refresh or provider_id
-            else _read_metadata_candidate(project_dir, cache_key)
-        )
+        candidate = None if refresh or provider_id else _read_metadata_candidate(project_dir, cache_key)
         if provider_id:
             fetched = MetadataFetcher.fetch_volume(
                 provider_id,
@@ -3202,15 +3101,11 @@ def _fetch_metadata_sync(
             metadata["cover_image_path"] = str(destination)
         atomic_write_json(book_json, book_data)
         try:
-            refreshed_exports = _refresh_exported_audiobook_metadata(
-                project_id, metadata
-            )
+            refreshed_exports = _refresh_exported_audiobook_metadata(project_id, metadata)
         except Exception:
             if job_queue:
                 try:
-                    job_queue.update_job(
-                        project_id, {"export_metadata_stale": True}
-                    )
+                    job_queue.update_job(project_id, {"export_metadata_stale": True})
                 except KeyError:
                     pass
             raise
@@ -3222,16 +3117,12 @@ def _fetch_metadata_sync(
                         "title": metadata.get("title", ""),
                         "author": metadata.get("author", ""),
                         "export_metadata_stale": False,
-                        "export_metadata_refreshed_at": datetime.now(
-                            UTC
-                        ).isoformat(),
+                        "export_metadata_refreshed_at": datetime.now(UTC).isoformat(),
                     },
                 )
             except KeyError:
                 pass
-        response = _metadata_response(
-            project_id, candidate, metadata, applied=True
-        )
+        response = _metadata_response(project_id, candidate, metadata, applied=True)
         response["refreshed_exports"] = len(refreshed_exports)
         return response
 
@@ -3389,9 +3280,7 @@ async def set_chapter_selection(
     if selection is not None:
         selection = sorted(set(selection))
         total = int(state.get("total_chapters") or 0)
-        invalid = [
-            chapter for chapter in selection if chapter < 1 or chapter > total
-        ]
+        invalid = [chapter for chapter in selection if chapter < 1 or chapter > total]
         if invalid:
             raise HTTPException(
                 status_code=422,
@@ -3496,10 +3385,7 @@ async def get_script(project_id: str):
     scripts_dir = project_dir / "script"
 
     if scripts_dir.exists():
-        chapter_files = [
-            p for p in sorted(scripts_dir.glob("chapter_*.json"))
-            if not p.name.endswith(".meta.json")
-        ]
+        chapter_files = [p for p in sorted(scripts_dir.glob("chapter_*.json")) if not p.name.endswith(".meta.json")]
         if chapter_files:
             needs_resync = not script_path.exists()
             if not needs_resync:
@@ -3510,17 +3396,10 @@ async def get_script(project_id: str):
                     book_file = project_dir / "book.json"
                     char_file = project_dir / "characters.json"
                     if book_file.exists() and char_file.exists():
-                        book = ExtractedBook.model_validate_json(
-                            book_file.read_text(encoding="utf-8")
-                        )
-                        registry = CharacterRegistry.model_validate_json(
-                            char_file.read_text(encoding="utf-8")
-                        )
+                        book = ExtractedBook.model_validate_json(book_file.read_text(encoding="utf-8"))
+                        registry = CharacterRegistry.model_validate_json(char_file.read_text(encoding="utf-8"))
                         chapter_scripts = [
-                            ScriptChapter.model_validate_json(
-                                cf.read_text(encoding="utf-8")
-                            )
-                            for cf in chapter_files
+                            ScriptChapter.model_validate_json(cf.read_text(encoding="utf-8")) for cf in chapter_files
                         ]
                         book_script = BookScript(
                             metadata=book.metadata,
@@ -3549,9 +3428,7 @@ def _invalidate_chapter_after_script_change(
     state = job_queue.get_job(project_id)
     updates: dict[str, Any] = {"export_stale": True}
     for key in ("generated_chapters", "mastered_chapters"):
-        updates[key] = [
-            number for number in state.get(key, []) if number != chapter_number
-        ]
+        updates[key] = [number for number in state.get(key, []) if number != chapter_number]
     job_queue.update_job(project_id, updates)
 
     manifests_dir = project_dir / "manifests"
@@ -3587,9 +3464,7 @@ async def update_script_line(
     characters_path = project_dir / "characters.json"
     if not characters_path.is_file():
         raise HTTPException(status_code=409, detail="Character registry is missing")
-    characters = json.loads(
-        characters_path.read_text(encoding="utf-8")
-    ).get("characters", {})
+    characters = json.loads(characters_path.read_text(encoding="utf-8")).get("characters", {})
     if request.speaker not in characters:
         raise HTTPException(
             status_code=422,
@@ -3605,13 +3480,15 @@ async def update_script_line(
             line["speaker_confidence"] = 1.0
             line["speaker_evidence"] = "Human-reviewed speaker assignment."
             line["attribution_resolver"] = "human"
-            line.setdefault("attribution_confidence_history", []).append({
-                "resolver": "human",
-                "decision": "resolved",
-                "speaker_id": request.speaker,
-                "confidence": 1.0,
-                "reason": "Human-reviewed speaker assignment.",
-            })
+            line.setdefault("attribution_confidence_history", []).append(
+                {
+                    "resolver": "human",
+                    "decision": "resolved",
+                    "speaker_id": request.speaker,
+                    "confidence": 1.0,
+                    "reason": "Human-reviewed speaker assignment.",
+                }
+            )
             line["attribution_review_required"] = False
             line["attribution_review_reason"] = ""
             updated = True
@@ -3638,25 +3515,20 @@ async def update_script_line(
             merged_updated = False
             if chapter is not None:
                 for merged_line in chapter.get("lines", []):
-                    if (
-                        str(merged_line.get("id")) == line_id
-                        or str(merged_line.get("line_id")) == line_id
-                    ):
+                    if str(merged_line.get("id")) == line_id or str(merged_line.get("line_id")) == line_id:
                         merged_line["speaker"] = request.speaker
                         merged_line["speaker_confidence"] = 1.0
-                        merged_line["speaker_evidence"] = (
-                            "Human-reviewed speaker assignment."
-                        )
+                        merged_line["speaker_evidence"] = "Human-reviewed speaker assignment."
                         merged_line["attribution_resolver"] = "human"
-                        merged_line.setdefault(
-                            "attribution_confidence_history", []
-                        ).append({
-                            "resolver": "human",
-                            "decision": "resolved",
-                            "speaker_id": request.speaker,
-                            "confidence": 1.0,
-                            "reason": "Human-reviewed speaker assignment.",
-                        })
+                        merged_line.setdefault("attribution_confidence_history", []).append(
+                            {
+                                "resolver": "human",
+                                "decision": "resolved",
+                                "speaker_id": request.speaker,
+                                "confidence": 1.0,
+                                "reason": "Human-reviewed speaker assignment.",
+                            }
+                        )
                         merged_line["attribution_review_required"] = False
                         merged_line["attribution_review_reason"] = ""
                         merged_updated = True
@@ -3682,9 +3554,7 @@ async def update_script_line(
         "Speaker attribution changed",
     )
     (project_dir / "attribution_audit.json").unlink(missing_ok=True)
-    job_queue.reconcile_external_validation(
-        project_id, "attribution", line_id, "resolved", request.speaker
-    )
+    job_queue.reconcile_external_validation(project_id, "attribution", line_id, "resolved", request.speaker)
     auto_resuming = _schedule_resume_after_reviews(project_id)
     return {
         "status": "success",
@@ -3746,8 +3616,7 @@ async def regenerate_chapter(project_id: str, chapter_number: int):
         merged_data = json.loads(merged_script.read_text(encoding="utf-8"))
         if "chapters" in merged_data:
             merged_data["chapters"] = [
-                chapter for chapter in merged_data["chapters"]
-                if chapter.get("chapter_number") != chapter_number
+                chapter for chapter in merged_data["chapters"] if chapter.get("chapter_number") != chapter_number
             ]
             atomic_write_json(merged_script, merged_data)
 
@@ -3786,8 +3655,7 @@ async def get_project_voices(project_id: str):
     voice_registry_path = voice_dir / "voices.json"
     try:
         registered = (
-            json.loads(voice_registry_path.read_text(encoding="utf-8"))
-            .get("voices", {})
+            json.loads(voice_registry_path.read_text(encoding="utf-8")).get("voices", {})
             if voice_registry_path.exists()
             else {}
         )
@@ -3811,12 +3679,9 @@ async def get_project_voices(project_id: str):
                 "voice_id": voice_id,
                 "name": profile.get("name") or owner.get("name") or info.get("name") or voice_id,
                 "gender": profile.get("gender") or owner.get("gender", "other"),
-                "age_range": profile.get("age_range")
-                or owner.get("age_range", "unknown"),
+                "age_range": profile.get("age_range") or owner.get("age_range", "unknown"),
                 "source_description": profile.get("source_description", ""),
-                "description": profile.get("effective_prompt")
-                or info.get("description")
-                or "",
+                "description": profile.get("effective_prompt") or info.get("description") or "",
                 "warnings": profile.get("warnings", []),
                 "source_type": info.get("source_type", "generated"),
                 "ref_text": info.get("ref_text", ""),
@@ -3827,9 +3692,7 @@ async def get_project_voices(project_id: str):
                     else None
                 ),
                 "download_url": (
-                    f"api/projects/{project_id}/voices/{voice_id}/download"
-                    if preview_path.is_file()
-                    else None
+                    f"api/projects/{project_id}/voices/{voice_id}/download" if preview_path.is_file() else None
                 ),
                 "assigned_characters": assigned_characters,
                 "required": bool(assigned_characters),
@@ -3855,20 +3718,14 @@ async def get_project_voices(project_id: str):
             "name": characters[character_id].get("name") or character_id,
             "gender": characters[character_id].get("gender", "other"),
             "age_range": characters[character_id].get("age_range", "unknown"),
-            "voice_description": characters[character_id].get(
-                "voice_description", ""
-            ),
+            "voice_description": characters[character_id].get("voice_description", ""),
             "speaking_style": characters[character_id].get("speaking_style", ""),
-            "voice_id": (
-                characters[character_id].get("voice_id") or character_id
-            ),
+            "voice_id": (characters[character_id].get("voice_id") or character_id),
         }
         for character_id in sorted(speaking_ids)
         if character_id in characters
     ]
-    narrator_options = [
-        voice for voice in voices if voice.get("owner_character_id") == "narrator"
-    ]
+    narrator_options = [voice for voice in voices if voice.get("owner_character_id") == "narrator"]
     narrator_selected = next(
         (voice["voice_id"] for voice in narrator_options if voice["assigned_characters"]),
         None,
@@ -3891,14 +3748,11 @@ async def get_project_voices(project_id: str):
         "editable": not running,
         "review": {
             "policy": state.get("voice_review_policy", "grandfathered"),
-            "status": state.get(
-                "voice_review_status", "grandfathered"
-            ),
+            "status": state.get("voice_review_status", "grandfathered"),
             "approved_at": state.get("voice_review_approved_at"),
             "required": (
                 (
-                    state.get("voice_review_policy", "grandfathered")
-                    == "required_once"
+                    state.get("voice_review_policy", "grandfathered") == "required_once"
                     and state.get("voice_review_status") != "approved"
                 )
                 or state.get("active_stage") == "voice_review"
@@ -3939,7 +3793,9 @@ async def download_all_project_voices(
             assigned_characters = [
                 (item.get("id") or item.get("character_id") if isinstance(item, dict) else str(item))
                 for item in assigned_raw
-                if not speaking_ids or (item.get("id") or item.get("character_id") if isinstance(item, dict) else str(item)) in speaking_ids or (item == "narrator" or (isinstance(item, dict) and item.get("id") == "narrator"))
+                if not speaking_ids
+                or (item.get("id") or item.get("character_id") if isinstance(item, dict) else str(item)) in speaking_ids
+                or (item == "narrator" or (isinstance(item, dict) and item.get("id") == "narrator"))
             ]
             if not all_variants and not assigned_characters:
                 continue
@@ -3954,15 +3810,10 @@ async def download_all_project_voices(
                 _voice_download_label(cast, voice_id, info),
                 "Narrator" if voice_id.startswith("narrator") else "Character",
             )
-            archive_name = (
-                f"{book_name} - {character_label} - voice-reference.wav"
-            )
+            archive_name = f"{book_name} - {character_label} - voice-reference.wav"
             if archive_name.casefold() in used_names:
                 safe_voice_id = _download_name_component(voice_id, "voice")
-                archive_name = (
-                    f"{book_name} - {character_label} - {safe_voice_id} "
-                    "- voice-reference.wav"
-                )
+                archive_name = f"{book_name} - {character_label} - {safe_voice_id} - voice-reference.wav"
             used_names.add(archive_name.casefold())
             bundle.write(voice_path, arcname=archive_name)
             manifest.append(
@@ -4008,7 +3859,8 @@ async def preview_project_voice(project_id: str, voice_id: str):
     try:
         registered = (
             json.loads(voice_registry_path.read_text(encoding="utf-8")).get("voices", {})
-            if voice_registry_path.exists() else {}
+            if voice_registry_path.exists()
+            else {}
         )
     except (OSError, json.JSONDecodeError):
         registered = {}
@@ -4077,9 +3929,7 @@ async def assign_character_voice(
     if request.voice_id not in assignable_ids:
         raise HTTPException(status_code=422, detail="Selected voice is not assignable")
 
-    previous_voice_id = (
-        characters[character_id].get("voice_id") or character_id
-    )
+    previous_voice_id = characters[character_id].get("voice_id") or character_id
     if previous_voice_id == request.voice_id:
         return {
             "status": "unchanged",
@@ -4091,11 +3941,7 @@ async def assign_character_voice(
     characters[character_id]["voice_id"] = request.voice_id
     atomic_write_json(chars_path, registry)
     for profile in cast.get("voices", {}).values():
-        assigned = [
-            candidate
-            for candidate in profile.get("assigned_characters", [])
-            if candidate != character_id
-        ]
+        assigned = [candidate for candidate in profile.get("assigned_characters", []) if candidate != character_id]
         if profile.get("voice_id") == request.voice_id:
             assigned.append(character_id)
         profile["assigned_characters"] = sorted(set(assigned))
@@ -4104,8 +3950,7 @@ async def assign_character_voice(
     affected = _chapters_for_speakers(project_id, {character_id})
     _mark_voice_chapters_stale(project_id, affected)
     logger.info(
-        "Character voice reassigned: project=%s character=%s %s -> %s; "
-        "affected_chapters=%s",
+        "Character voice reassigned: project=%s character=%s %s -> %s; affected_chapters=%s",
         project_id,
         character_id,
         previous_voice_id,
@@ -4132,10 +3977,7 @@ async def update_character_profile(
     updates = request.model_dump(exclude_none=True)
     if not updates:
         raise HTTPException(status_code=422, detail="Provide at least one profile field")
-    updates = {
-        key: value.strip() if isinstance(value, str) else value
-        for key, value in updates.items()
-    }
+    updates = {key: value.strip() if isinstance(value, str) else value for key, value in updates.items()}
     if any(value == "" for value in updates.values()):
         raise HTTPException(status_code=422, detail="Profile fields cannot be blank")
 
@@ -4143,11 +3985,7 @@ async def update_character_profile(
     character = registry["characters"].get(character_id)
     if not character:
         raise HTTPException(status_code=404, detail="Character not found")
-    changed = {
-        key: value
-        for key, value in updates.items()
-        if character.get(key) != value
-    }
+    changed = {key: value for key, value in updates.items() if character.get(key) != value}
     if not changed:
         return {
             "status": "unchanged",
@@ -4174,11 +4012,7 @@ async def update_character_profile(
     if merged_path.is_file():
         try:
             merged = json.loads(merged_path.read_text(encoding="utf-8"))
-            merged_character = (
-                merged.get("character_registry", {})
-                .get("characters", {})
-                .get(character_id)
-            )
+            merged_character = merged.get("character_registry", {}).get("characters", {}).get(character_id)
             if isinstance(merged_character, dict):
                 merged_character.update(changed)
                 atomic_write_json(merged_path, merged)
@@ -4208,8 +4042,7 @@ async def update_character_profile(
             *[
                 str(profile.get("voice_id") or "")
                 for profile in cast.get("voices", {}).values()
-                if profile.get("owner_character_id", profile.get("voice_id"))
-                == character_id
+                if profile.get("owner_character_id", profile.get("voice_id")) == character_id
             ],
         )
     _save_voice_cast(project_id, cast)
@@ -4315,10 +4148,7 @@ async def regenerate_project_voice(
             detail=f"Voice regeneration failed: {exc}",
         ) from exc
     finally:
-        if (
-            managed_before is None
-            and getattr(pipeline, "_voice_server_proc", None) is not None
-        ):
+        if managed_before is None and getattr(pipeline, "_voice_server_proc", None) is not None:
             await asyncio.to_thread(pipeline._stop_voice_server)
 
     if voice_id == owner_id:
@@ -4344,8 +4174,7 @@ async def regenerate_project_voice(
     affected = _chapters_for_speakers(project_id, dependent_speakers)
     _mark_voice_chapters_stale(project_id, affected)
     logger.info(
-        "Reference voice regenerated: project=%s voice=%s "
-        "affected_chapters=%s",
+        "Reference voice regenerated: project=%s voice=%s affected_chapters=%s",
         project_id,
         voice_id,
         affected,
@@ -4354,10 +4183,7 @@ async def regenerate_project_voice(
         "status": "success",
         "voice_id": voice_id,
         "affected_chapters": affected,
-        "preview_url": (
-            f"api/projects/{project_id}/voices/{voice_id}/preview"
-            f"?v={int(time.time())}"
-        ),
+        "preview_url": (f"api/projects/{project_id}/voices/{voice_id}/preview?v={int(time.time())}"),
         "result": response.voices_generated.get(voice_id),
     }
 
@@ -4445,8 +4271,7 @@ async def upload_project_voice(
         )
         if result.returncode != 0 or not canonical_path.is_file():
             raise ValueError(
-                "FFmpeg could not decode the uploaded audio: "
-                + (result.stderr.strip()[-500:] or "unknown format")
+                "FFmpeg could not decode the uploaded audio: " + (result.stderr.strip()[-500:] or "unknown format")
             )
         audio_info = _inspect_pcm_voice(canonical_path)
 
@@ -4456,6 +4281,7 @@ async def upload_project_voice(
         import json
         import sys
         import tempfile
+
         val_script = """
 import sys, json, os
 from voice.validator.whisper_validator import WhisperValidator
@@ -4497,6 +4323,7 @@ except Exception as e:
                 val_res = json.loads(proc.stdout)
                 if "error" in val_res:
                     raise ValueError(f"Whisper validation script error: {val_res['error']}")
+
                 class DummyResult:
                     wer = val_res["wer"]
                     transcribed_text = val_res["transcribed_text"]
@@ -4559,10 +4386,7 @@ except Exception as e:
             "source_type": "uploaded",
             "duration_seconds": audio_info["duration_seconds"],
             "affected_chapters": affected,
-            "preview_url": (
-                f"api/projects/{project_id}/voices/{voice_id}/preview"
-                f"?v={int(time.time())}"
-            ),
+            "preview_url": (f"api/projects/{project_id}/voices/{voice_id}/preview?v={int(time.time())}"),
         }
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -4599,9 +4423,7 @@ async def approve_voice_cast(
         registered = {}
 
     required_voice_ids = {
-        voice_id
-        for voice_id, profile in cast.get("voices", {}).items()
-        if profile.get("assigned_characters")
+        voice_id for voice_id, profile in cast.get("voices", {}).items() if profile.get("assigned_characters")
     }
     missing = [
         voice_id
@@ -4612,8 +4434,7 @@ async def approve_voice_cast(
         raise HTTPException(
             status_code=409,
             detail=(
-                "Every speaking voice needs a valid preview before approval. "
-                f"Missing: {', '.join(sorted(missing))}"
+                f"Every speaking voice needs a valid preview before approval. Missing: {', '.join(sorted(missing))}"
             ),
         )
 
@@ -4622,10 +4443,7 @@ async def approve_voice_cast(
         required_voice_ids,
     )
     if (required_pairs or distinctness_stale) and not request.acknowledge_similar_pairs:
-        pair_labels = [
-            f"{item['left_voice_id']} / {item['right_voice_id']}"
-            for item in required_pairs[:8]
-        ]
+        pair_labels = [f"{item['left_voice_id']} / {item['right_voice_id']}" for item in required_pairs[:8]]
         raise HTTPException(
             status_code=409,
             detail={
@@ -4683,17 +4501,21 @@ async def get_performance_metrics(
     """Return a deterministic summary of versioned project performance data."""
     _require_job(project_id)
     project_dir = _project_dir(project_id)
-    summary = summarize_metrics(
-        read_metrics(project_dir / "performance_metrics.jsonl")
-    )
+    summary = summarize_metrics(read_metrics(project_dir / "performance_metrics.jsonl"))
     if format == "json":
         return summary
     buffer = io.StringIO()
     fields = [
-        "chapter_number", "segments", "synthesis_cache_hits",
-        "synthesis_cache_misses", "validation_cache_hits",
-        "validation_cache_misses", "retries", "accepted_with_warning",
-        "failed_validation", "audio_duration_seconds",
+        "chapter_number",
+        "segments",
+        "synthesis_cache_hits",
+        "synthesis_cache_misses",
+        "validation_cache_hits",
+        "validation_cache_misses",
+        "retries",
+        "accepted_with_warning",
+        "failed_validation",
+        "audio_duration_seconds",
     ]
     writer = csv.DictWriter(buffer, fieldnames=fields, extrasaction="ignore")
     writer.writeheader()
@@ -4701,9 +4523,7 @@ async def get_performance_metrics(
     return StreamingResponse(
         iter([buffer.getvalue()]),
         media_type="text/csv",
-        headers={
-            "Content-Disposition": f'attachment; filename="{project_id}-metrics.csv"'
-        },
+        headers={"Content-Disposition": f'attachment; filename="{project_id}-metrics.csv"'},
     )
 
 
@@ -4776,9 +4596,7 @@ async def download_support_bundle(project_id: str):
         archive.writestr(
             "metrics-summary.json",
             json.dumps(
-                summarize_metrics(
-                    read_metrics(project_dir / "performance_metrics.jsonl")
-                ),
+                summarize_metrics(read_metrics(project_dir / "performance_metrics.jsonl")),
                 indent=2,
                 default=str,
             ),
@@ -4798,9 +4616,7 @@ async def download_support_bundle(project_id: str):
                 archive.writestr(name, data[-1_000_000:])
         managed_log = shared_paths.PROJECTS_DIR / "voice-server-managed.log"
         if managed_log.is_file():
-            archive.writestr(
-                "voice-server-managed.log", managed_log.read_bytes()[-1_000_000:]
-            )
+            archive.writestr("voice-server-managed.log", managed_log.read_bytes()[-1_000_000:])
     return FileResponse(
         bundle_path,
         filename=bundle_path.name,
@@ -4829,10 +4645,7 @@ async def get_segment_candidates(project_id: str, line_id: str):
         raise HTTPException(status_code=400, detail="Invalid line ID")
     rows = list_candidates(_project_dir(project_id), line_id)
     for row in rows:
-        row["audio_url"] = (
-            f"api/projects/{project_id}/segments/{line_id}/candidates/"
-            f"{quote(row.pop('filename'))}"
-        )
+        row["audio_url"] = f"api/projects/{project_id}/segments/{line_id}/candidates/{quote(row.pop('filename'))}"
     return {"candidates": rows}
 
 
@@ -4855,10 +4668,7 @@ async def get_segment_candidate_audio(project_id: str, line_id: str, filename: s
 async def get_quality_review(project_id: str):
     """Return join diagnostics and persisted human review dispositions."""
     _require_job(project_id)
-    persisted = {
-        (item["item_type"], item["item_id"]): item
-        for item in job_queue.get_review_items(project_id)
-    }
+    persisted = {(item["item_type"], item["item_id"]): item for item in job_queue.get_review_items(project_id)}
     joins = _join_review_items(project_id)
     for item in joins:
         review = persisted.get(("join", item["item_id"]), {})
@@ -4890,32 +4700,30 @@ async def get_quality_review(project_id: str):
         quality = latest_quality.get(item_id, {})
         details = quality.get("details", {})
         script_line = script_lines_by_id.get(item_id, {})
-        segment_reviews.append({
-            "item_id": item_id,
-            "chapter_number": quality.get("chapter_number") or script_line.get("chapter_number"),
-            "disposition": review.get("disposition", "unreviewed"),
-            "review_note": review.get("note", ""),
-            "reviewed_at": review.get("updated_at"),
-            "status": quality.get("status", "unknown"),
-            "validation_confidence": details.get("validation_confidence"),
-            "external_validation_provider": details.get("external_validation_provider", ""),
-            "external_validation_model": details.get("external_validation_model", ""),
-            "external_validation_decision": details.get("external_validation_decision", ""),
-            "external_validation_confidence": details.get("external_validation_confidence"),
-            "reason": details.get("manual_review_reason") or review.get("note", ""),
-            "audio_url": f"api/projects/{project_id}/segments/{item_id}/audio",
-            "text": script_line.get("text", ""),
-            "speaker": script_line.get("speaker", ""),
-        })
+        segment_reviews.append(
+            {
+                "item_id": item_id,
+                "chapter_number": quality.get("chapter_number") or script_line.get("chapter_number"),
+                "disposition": review.get("disposition", "unreviewed"),
+                "review_note": review.get("note", ""),
+                "reviewed_at": review.get("updated_at"),
+                "status": quality.get("status", "unknown"),
+                "validation_confidence": details.get("validation_confidence"),
+                "external_validation_provider": details.get("external_validation_provider", ""),
+                "external_validation_model": details.get("external_validation_model", ""),
+                "external_validation_decision": details.get("external_validation_decision", ""),
+                "external_validation_confidence": details.get("external_validation_confidence"),
+                "reason": details.get("manual_review_reason") or review.get("note", ""),
+                "audio_url": f"api/projects/{project_id}/segments/{item_id}/audio",
+                "text": script_line.get("text", ""),
+                "speaker": script_line.get("speaker", ""),
+            }
+        )
     return {
         "join_warnings": joins,
         "segment_reviews": segment_reviews,
-        "review_counts": dict(
-            collections.Counter(item["disposition"] for item in joins)
-        ),
-        "segment_review_counts": dict(
-            collections.Counter(item["disposition"] for item in segment_reviews)
-        ),
+        "review_counts": dict(collections.Counter(item["disposition"] for item in joins)),
+        "segment_review_counts": dict(collections.Counter(item["disposition"] for item in segment_reviews)),
     }
 
 
@@ -4927,10 +4735,7 @@ async def update_quality_review(project_id: str, request: ReviewItemRequest):
         _require_project_stopped(project_id)
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", request.item_id):
             raise HTTPException(status_code=400, detail="Invalid line ID")
-        quality = [
-            row for row in job_queue.get_quality_report(project_id)
-            if row["line_id"] == request.item_id
-        ]
+        quality = [row for row in job_queue.get_quality_report(project_id) if row["line_id"] == request.item_id]
         if not quality:
             raise HTTPException(status_code=404, detail="Quality record not found")
         chapter_number = int(quality[-1]["chapter_number"])
@@ -4940,13 +4745,9 @@ async def update_quality_review(project_id: str, request: ReviewItemRequest):
         audio.with_suffix(".pt").unlink(missing_ok=True)
         updates = {
             "generated_chapters": [
-                number for number in state.get("generated_chapters", [])
-                if number != chapter_number
+                number for number in state.get("generated_chapters", []) if number != chapter_number
             ],
-            "mastered_chapters": [
-                number for number in state.get("mastered_chapters", [])
-                if number != chapter_number
-            ],
+            "mastered_chapters": [number for number in state.get("mastered_chapters", []) if number != chapter_number],
             "export_stale": True,
         }
         job_queue.update_job(project_id, updates)
@@ -4977,7 +4778,6 @@ async def update_quality_review(project_id: str, request: ReviewItemRequest):
     return result
 
 
-
 @app.get("/api/projects/{project_id}/reviews")
 async def get_attention_reviews(project_id: str):
     """Return the unified, privacy-conscious Attention Required inbox."""
@@ -4987,9 +4787,7 @@ async def get_attention_reviews(project_id: str):
     release_path = pdir / "pre_master_release.json"
     if release_path.is_file():
         try:
-            result["pre_master_release"] = json.loads(
-                release_path.read_text(encoding="utf-8")
-            )
+            result["pre_master_release"] = json.loads(release_path.read_text(encoding="utf-8"))
         except (OSError, ValueError, TypeError):
             result["pre_master_release"] = None
     result["calibration"] = job_queue.external_validation_calibration(project_id)
@@ -5019,21 +4817,16 @@ async def get_quality_report(project_id: str):
         job = job_queue.get_job(project_id)
         if isinstance(job, dict) and ("generated_chapters" in job or "mastered_chapters" in job):
             current_chapters = {
-                int(ch) for ch in (
-                    job.get("generated_chapters", []) + job.get("mastered_chapters", [])
-                )
+                int(ch) for ch in (job.get("generated_chapters", []) + job.get("mastered_chapters", []))
             }
         if hasattr(job_queue, "get_review_items"):
             active_review_item_ids = {
                 item["item_id"]
                 for item in job_queue.get_review_items(project_id)
-                if item.get("item_type") == "segment"
-                and item.get("disposition") in {"unreviewed", "flagged"}
+                if item.get("item_type") == "segment" and item.get("disposition") in {"unreviewed", "flagged"}
             }
         if isinstance(job, dict):
-            active_review_item_ids.update(
-                str(item_id) for item_id in job.get("review_blocking_item_ids", [])
-            )
+            active_review_item_ids.update(str(item_id) for item_id in job.get("review_blocking_item_ids", []))
     except Exception:
         current_chapters = None
         active_review_item_ids = set()
@@ -5067,9 +4860,7 @@ async def get_quality_report(project_id: str):
     if not filtered_logs:
         return summary
 
-    def _attempt_payload(
-        log: dict[str, Any], *, include_audio: bool = False
-    ) -> dict[str, Any]:
+    def _attempt_payload(log: dict[str, Any], *, include_audio: bool = False) -> dict[str, Any]:
         details = log.get("details", {})
         payload = {
             "line_id": log["line_id"],
@@ -5086,36 +4877,17 @@ async def get_quality_report(project_id: str):
             "prosody_warning": details.get("prosody_warning", False),
             "selected": bool(details.get("selected", False)),
             "validation_confidence": details.get("validation_confidence"),
-            "external_validation_provider": details.get(
-                "external_validation_provider", ""
-            ),
-            "external_validation_model": details.get(
-                "external_validation_model", ""
-            ),
-            "external_validation_decision": details.get(
-                "external_validation_decision", ""
-            ),
-            "external_validation_confidence": details.get(
-                "external_validation_confidence"
-            ),
-            "external_validation_reason": details.get(
-                "external_validation_reason", ""
-            ),
-            "manual_review_required": bool(
-                details.get("manual_review_required", False)
-            ),
-            "manual_review_reason": details.get(
-                "manual_review_reason", ""
-            ),
-            "external_validation_history": details.get(
-                "external_validation_history", []
-            ),
+            "external_validation_provider": details.get("external_validation_provider", ""),
+            "external_validation_model": details.get("external_validation_model", ""),
+            "external_validation_decision": details.get("external_validation_decision", ""),
+            "external_validation_confidence": details.get("external_validation_confidence"),
+            "external_validation_reason": details.get("external_validation_reason", ""),
+            "manual_review_required": bool(details.get("manual_review_required", False)),
+            "manual_review_reason": details.get("manual_review_reason", ""),
+            "external_validation_history": details.get("external_validation_history", []),
         }
         if include_audio:
-            payload["audio_url"] = (
-                f"api/projects/{project_id}/segments/"
-                f"{log['line_id']}/audio"
-            )
+            payload["audio_url"] = f"api/projects/{project_id}/segments/{log['line_id']}/audio"
         return payload
 
     lines = {}
@@ -5123,27 +4895,18 @@ async def get_quality_report(project_id: str):
     for log in filtered_logs:
         line_id = log["line_id"]
         is_selected = bool(log.get("details", {}).get("selected"))
-        current_selected = bool(
-            lines.get(line_id, {}).get("details", {}).get("selected")
-        )
+        current_selected = bool(lines.get(line_id, {}).get("details", {}).get("selected"))
         if (
             line_id not in lines
             or (is_selected and not current_selected)
-            or (
-                is_selected == current_selected
-                and log["attempt"] > lines[line_id]["attempt"]
-            )
+            or (is_selected == current_selected and log["attempt"] > lines[line_id]["attempt"])
         ):
             lines[line_id] = log
         if log["attempt"] > 1:
             summary["retries_triggered"] += 1
             retried_ids.add(line_id)
 
-    summary["attempts"] = [
-        _attempt_payload(log)
-        for log in filtered_logs
-        if log["line_id"] in retried_ids
-    ]
+    summary["attempts"] = [_attempt_payload(log) for log in filtered_logs if log["line_id"] in retried_ids]
 
     summary["total_segments"] = len(lines)
     total_wer = 0.0
@@ -5164,14 +4927,8 @@ async def get_quality_report(project_id: str):
             summary["failed_silence"] += 1
         if details.get("clipping_detected", False):
             summary["failed_clipping"] += 1
-        if (
-            line["status"] != "pass"
-            or line["attempt"] > 1
-            or details.get("manual_review_required", False)
-        ):
-            summary["final_attempts"].append(
-                _attempt_payload(line, include_audio=True)
-            )
+        if line["status"] != "pass" or line["attempt"] > 1 or details.get("manual_review_required", False):
+            summary["final_attempts"].append(_attempt_payload(line, include_audio=True))
 
     if summary["total_segments"] > 0:
         summary["average_wer"] = total_wer / summary["total_segments"]
@@ -5218,9 +4975,7 @@ async def get_external_validation_status(project_id: str):
             "profile_initialized": profile.is_dir() and any(profile.iterdir()),
             "persistent_conversations": purposes,
         },
-        "provider_health": (
-            pipeline.external_validator.health_snapshot() if pipeline else {}
-        ),
+        "provider_health": (pipeline.external_validator.health_snapshot() if pipeline else {}),
         "calibration": job_queue.external_validation_calibration(project_id),
     }
 
@@ -5282,9 +5037,7 @@ async def retry_external_validation(
             if path.name.endswith(".meta.json"):
                 continue
             try:
-                chapter_scripts.append(
-                    ScriptChapter.model_validate_json(path.read_text(encoding="utf-8"))
-                )
+                chapter_scripts.append(ScriptChapter.model_validate_json(path.read_text(encoding="utf-8")))
             except Exception as exc:
                 logger.warning("Could not read script %s for validation retry: %s", path.name, exc)
 
@@ -5391,9 +5144,7 @@ async def update_delivery_settings(project_id: str, request: DeliverySettingsReq
     dm = DeliveryManager(project_dir)
     index = dm.load_index()
 
-    is_running = bool(state.get("running")) or (
-        project_id in running_tasks and not running_tasks[project_id].done()
-    )
+    is_running = bool(state.get("running")) or (project_id in running_tasks and not running_tasks[project_id].done())
     if index.batch_size != request.batch_size and not is_running:
         index.batch_size = request.batch_size
         for part in index.deliveries:
@@ -5437,12 +5188,8 @@ async def get_deliveries(project_id: str):
         "settings": state.get("incremental_delivery") or {"enabled": False, "batch_size": 5},
         "active_delivery_id": state.get("active_delivery_id"),
         "active_delivery_chapters": state.get("active_delivery_chapters") or [],
-        "pause_after_delivery_requested": bool(
-            state.get("pause_after_delivery_requested")
-        ),
-        "published_count": sum(
-            part.status == "published" for part in index.deliveries
-        ),
+        "pause_after_delivery_requested": bool(state.get("pause_after_delivery_requested")),
+        "published_count": sum(part.status == "published" for part in index.deliveries),
         "deliveries": [p.model_dump() for p in index.deliveries],
     }
 
@@ -5484,10 +5231,7 @@ async def cancel_pause_after_delivery(project_id: str):
 async def websocket_updates(websocket: WebSocket):
     """WebSocket for real-time pipeline updates."""
     token = configured_dashboard_token(_dashboard_cfg)
-    presented_token = (
-        websocket.headers.get("X-API-Token")
-        or websocket.query_params.get("token")
-    )
+    presented_token = websocket.headers.get("X-API-Token") or websocket.query_params.get("token")
     client_host = websocket.client.host if websocket.client else None
     if not dashboard_request_authorized(
         client_host=client_host,
@@ -5495,9 +5239,7 @@ async def websocket_updates(websocket: WebSocket):
         presented_token=presented_token,
         trusted_lan_cidrs=_TRUSTED_LAN_CIDRS,
     ):
-        await websocket.close(
-            code=1013 if not token and not is_loopback_client(client_host) else 1008
-        )
+        await websocket.close(code=1013 if not token and not is_loopback_client(client_host) else 1008)
         return
     await websocket.accept()
     ws_connections.append(websocket)

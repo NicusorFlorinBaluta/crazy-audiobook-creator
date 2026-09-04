@@ -1,5 +1,4 @@
-"""Single Instance Lock — Prevents multiple concurrent instances of the application or voice server.
-"""
+"""Single Instance Lock — Prevents multiple concurrent instances of the application or voice server."""
 
 import logging
 import os
@@ -7,6 +6,7 @@ import sys
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
 
 class SingleInstanceLock:
     def __init__(self, lock_name: str = "app.lock"):
@@ -24,9 +24,11 @@ class SingleInstanceLock:
             self.handle.seek(0)
             if sys.platform == "win32":
                 import msvcrt
+
                 msvcrt.locking(self.handle.fileno(), msvcrt.LK_NBLCK, 1)
             else:
                 import fcntl
+
                 fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             self.handle.seek(0)
             self.handle.truncate()
@@ -52,9 +54,11 @@ class SingleInstanceLock:
                 self.handle.seek(0)
                 if sys.platform == "win32":
                     import msvcrt
+
                     msvcrt.locking(self.handle.fileno(), msvcrt.LK_UNLCK, 1)
                 else:
                     import fcntl
+
                     fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
                 self.handle.close()
             except Exception as e:

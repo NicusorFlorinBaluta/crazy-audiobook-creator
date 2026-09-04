@@ -103,7 +103,10 @@ class EpubParserFilteringTests(unittest.TestCase):
             {"title": "Prologue", "text": "The dragon transformed on the grand balcony under first light."},
             {"title": "Chapter 1", "text": "Sixth of Dusk walked along the beach carrying Sak on his shoulder."},
             {"title": "Epilogue", "text": "The journey ended and peace returned to the islands."},
-            {"title": "About the Illustrators", "text": "The illustrations were created by talented artists worldwide."},
+            {
+                "title": "About the Illustrators",
+                "text": "The illustrations were created by talented artists worldwide.",
+            },
         ]
         # With skip_preface=True
         chapters = self.parser_skip_preface._finalize_chapters(raw_chapters)
@@ -191,11 +194,16 @@ class EpubParserFilteringTests(unittest.TestCase):
 
     def test_short_narrative_is_kept_and_short_generic_section_is_merged(self) -> None:
         parser = EpubParser(min_chapter_words=10)
-        chapters = parser._finalize_chapters([
-            {"title": "A small ornament", "text": "Three silver stars."},
-            {"title": "Interlude: The Bell", "text": "It rang once."},
-            {"title": "Chapter 2", "text": "Enough ordinary words follow here to make the main chapter comfortably long today."},
-        ])
+        chapters = parser._finalize_chapters(
+            [
+                {"title": "A small ornament", "text": "Three silver stars."},
+                {"title": "Interlude: The Bell", "text": "It rang once."},
+                {
+                    "title": "Chapter 2",
+                    "text": "Enough ordinary words follow here to make the main chapter comfortably long today.",
+                },
+            ]
+        )
         self.assertEqual([chapter.title for chapter in chapters], ["Interlude: The Bell", "Chapter 2"])
         self.assertIn("Three silver stars", chapters[0].text)
 
@@ -241,21 +249,63 @@ class EpubGoldenStructureTests(unittest.TestCase):
 
     def test_ten_structural_variants_preserve_story_and_trim_non_story(self) -> None:
         variants = [
-            [{"title": "Chapter 1", "html": "<h1>Chapter 1</h1><p>MARKER alpha story words continue beyond the threshold safely.</p>"}],
-            [{"title": "Chapter 2", "html": "<section><h3>Chapter 2</h3><p>MARKER beta story words continue beyond the threshold safely.</p></section>"}],
-            [{"nav_title": "Chapter Three", "html": "<div><p>MARKER gamma nav labelled narrative remains intact and readable.</p></div>"}],
-            [{"title": "Prologue", "html": "<h1>Prologue</h1><p>RUN FOR YOUR LIFE</p><p>MARKER delta story remains intact.</p>"}],
+            [
+                {
+                    "title": "Chapter 1",
+                    "html": "<h1>Chapter 1</h1><p>MARKER alpha story words continue beyond the threshold safely.</p>",
+                }
+            ],
+            [
+                {
+                    "title": "Chapter 2",
+                    "html": "<section><h3>Chapter 2</h3><p>MARKER beta story words continue beyond the threshold safely.</p></section>",
+                }
+            ],
+            [
+                {
+                    "nav_title": "Chapter Three",
+                    "html": "<div><p>MARKER gamma nav labelled narrative remains intact and readable.</p></div>",
+                }
+            ],
+            [
+                {
+                    "title": "Prologue",
+                    "html": "<h1>Prologue</h1><p>RUN FOR YOUR LIFE</p><p>MARKER delta story remains intact.</p>",
+                }
+            ],
             [{"title": "Interlude", "html": "<h2>Interlude</h2><p>MARKER epsilon.</p>"}],
             [
                 {"title": "Copyright", "html": "<h1>Copyright</h1><p>TRIM-ME publishing boilerplate only.</p>"},
-                {"title": "Chapter 6", "html": "<h1>Chapter 6</h1><p>MARKER zeta narrative words continue safely here.</p>"},
+                {
+                    "title": "Chapter 6",
+                    "html": "<h1>Chapter 6</h1><p>MARKER zeta narrative words continue safely here.</p>",
+                },
             ],
-            [{"title": "Chapter 7", "html": "<h1>Chapter 7</h1><p>MARKER eta continued.</p><aside epub:type='footnote'>TRIM-ME footnote.</aside>"}],
-            [{"title": "Chapter 8", "html": "<h1>Chapter 8</h1><div><p>MARKER theta first paragraph.</p><p>Second paragraph is not duplicated.</p></div>"}],
-            [{"title": "Chapter 9", "html": "<p>Chapter 9</p><p>MARKER iota pattern based body remains available.</p>"}],
+            [
+                {
+                    "title": "Chapter 7",
+                    "html": "<h1>Chapter 7</h1><p>MARKER eta continued.</p><aside epub:type='footnote'>TRIM-ME footnote.</aside>",
+                }
+            ],
+            [
+                {
+                    "title": "Chapter 8",
+                    "html": "<h1>Chapter 8</h1><div><p>MARKER theta first paragraph.</p><p>Second paragraph is not duplicated.</p></div>",
+                }
+            ],
+            [
+                {
+                    "title": "Chapter 9",
+                    "html": "<p>Chapter 9</p><p>MARKER iota pattern based body remains available.</p>",
+                }
+            ],
             [
                 {"title": "Chapter 10", "html": "<h1>Chapter 10</h1><p>MARKER kappa primary narrative remains.</p>"},
-                {"title": "Bonus", "linear": "no", "html": "<h2>Bonus</h2><p>TRIM-ME non linear promotional supplement.</p>"},
+                {
+                    "title": "Bonus",
+                    "linear": "no",
+                    "html": "<h2>Bonus</h2><p>TRIM-ME non linear promotional supplement.</p>",
+                },
             ],
         ]
         with tempfile.TemporaryDirectory() as directory:
@@ -277,16 +327,16 @@ class EpubGoldenStructureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "large-appendix.epub"
             large = " ".join(["reference"] * 1_100)
-            self._write_book(path, [
-                {"title": "Chapter 1", "html": "<h1>Chapter 1</h1><p>MARKER short narrative remains here.</p>"},
-                {"title": "Appendix", "html": f"<h1>Appendix</h1><p>{large}</p>"},
-            ])
+            self._write_book(
+                path,
+                [
+                    {"title": "Chapter 1", "html": "<h1>Chapter 1</h1><p>MARKER short narrative remains here.</p>"},
+                    {"title": "Appendix", "html": f"<h1>Appendix</h1><p>{large}</p>"},
+                ],
+            )
             parser = EpubParser(min_chapter_words=1)
             parser.parse(path)
-            appendix = next(
-                section for section in parser.last_audit["sections"]
-                if section["title"] == "Appendix"
-            )
+            appendix = next(section for section in parser.last_audit["sections"] if section["title"] == "Appendix")
             self.assertTrue(appendix["review_required"])
             self.assertIn("large_excluded_word_ratio", appendix["anomalies"])
             self.assertGreater(parser.last_audit["anomalies"]["excluded_ratio"], 0.9)
@@ -295,21 +345,22 @@ class EpubGoldenStructureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "nested-heading.epub"
             story = " ".join(["MARKER nested narrative remains intact"] * 30)
-            self._write_book(path, [{
-                "title": "Chapter One",
-                "html": (
-                    "<section><header><h1>Chapter One</h1></header>"
-                    f"<article><p>{story}</p></article></section>"
-                ),
-            }])
+            self._write_book(
+                path,
+                [
+                    {
+                        "title": "Chapter One",
+                        "html": (
+                            f"<section><header><h1>Chapter One</h1></header><article><p>{story}</p></article></section>"
+                        ),
+                    }
+                ],
+            )
             parser = EpubParser(min_chapter_words=5)
             extracted = parser.parse(path)
             combined = "\n".join(chapter.text for chapter in extracted.chapters)
             self.assertIn("MARKER", combined)
-            section = next(
-                item for item in parser.last_audit["sections"]
-                if item.get("title") == "Chapter One"
-            )
+            section = next(item for item in parser.last_audit["sections"] if item.get("title") == "Chapter One")
             self.assertGreater(section["extracted_word_count"], 0)
             self.assertGreater(section["coverage_ratio"], 0.5)
 
@@ -325,9 +376,7 @@ class BookTitleNormalizationTests(unittest.TestCase):
     def test_duplicate_separator_debris_is_collapsed(self) -> None:
         # Observed verbatim in this library.
         self.assertEqual(
-            EpubParser._normalize_book_title(
-                "The Finest Edge of Twilight - - Book"
-            ),
+            EpubParser._normalize_book_title("The Finest Edge of Twilight - - Book"),
             "The Finest Edge of Twilight - Book",
         )
         self.assertEqual(

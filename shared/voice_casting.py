@@ -76,12 +76,7 @@ _PROMPT_SIMILARITY_THRESHOLD = 0.68
 
 def speaking_character_ids(script_chapters: Iterable[Any]) -> set[str]:
     """Return only registry IDs that own at least one completed script line."""
-    return {
-        str(line.speaker)
-        for chapter in script_chapters
-        for line in chapter.lines
-        if str(line.speaker).strip()
-    }
+    return {str(line.speaker) for chapter in script_chapters for line in chapter.lines if str(line.speaker).strip()}
 
 
 def required_voice_character_ids(
@@ -155,8 +150,7 @@ def compile_effective_voice_prompt(
             flags=re.IGNORECASE,
         ).strip(" .")
         warnings.append(
-            "A previously compiled prompt was reduced to its source voice "
-            "description before recompilation."
+            "A previously compiled prompt was reduced to its source voice description before recompilation."
         )
 
     register_repairs: dict[str, dict[str, str]] = {
@@ -180,10 +174,7 @@ def compile_effective_voice_prompt(
         )
         if count:
             description = repaired
-            warnings.append(
-                f"Contradictory {contradictory} register wording was repaired "
-                f"to {replacement}."
-            )
+            warnings.append(f"Contradictory {contradictory} register wording was repaired to {replacement}.")
 
     if gender_value == Gender.FEMALE.value:
         identity = f"A clearly female {age} speaker"
@@ -194,10 +185,7 @@ def compile_effective_voice_prompt(
 
     if not description:
         description = "clear mid-range pitch, natural resonance, and measured pacing"
-        warnings.append(
-            "The analyzed voice description was empty; a neutral audible profile "
-            "was supplied."
-        )
+        warnings.append("The analyzed voice description was empty; a neutral audible profile was supplied.")
 
     description_words = set(re.findall(r"[a-z]+", description.lower()))
     if not (description_words & _AUDIBLE_TERMS):
@@ -205,18 +193,13 @@ def compile_effective_voice_prompt(
             "The source description contained few audible properties; explicit "
             "clarity, resonance, and pacing guidance was added."
         )
-        description = (
-            f"{description}; clear articulation, natural resonance, and measured pacing"
-        )
+        description = f"{description}; clear articulation, natural resonance, and measured pacing"
 
     style = re.sub(r"\s+", " ", str(speaking_style or "").strip(" ."))
     prompt = f"{identity}. {description}."
     if style:
         prompt += f" Speaking style: {style}."
-    prompt += (
-        " Maintain this vocal identity consistently and prioritize intelligible "
-        "natural audiobook speech."
-    )
+    prompt += " Maintain this vocal identity consistently and prioritize intelligible natural audiobook speech."
     return prompt, warnings
 
 
@@ -225,10 +208,31 @@ def _normalized_signature(value: str) -> str:
 
 
 _PROMPT_BOILERPLATE = {
-    "a", "an", "clearly", "speaker", "speaking", "style", "maintain", "this",
-    "vocal", "identity", "consistently", "and", "prioritize", "intelligible",
-    "natural", "audiobook", "speech", "distinguishing", "direction", "adult",
-    "with", "hint", "of", "emotional", "baseline"
+    "a",
+    "an",
+    "clearly",
+    "speaker",
+    "speaking",
+    "style",
+    "maintain",
+    "this",
+    "vocal",
+    "identity",
+    "consistently",
+    "and",
+    "prioritize",
+    "intelligible",
+    "natural",
+    "audiobook",
+    "speech",
+    "distinguishing",
+    "direction",
+    "adult",
+    "with",
+    "hint",
+    "of",
+    "emotional",
+    "baseline",
 }
 
 
@@ -303,10 +307,7 @@ def build_voice_cast(
     """Build a speaking-only cast and deterministic effective prompts."""
     missing = speaking_ids - set(registry.characters)
     if missing:
-        raise ValueError(
-            "Scripts reference speakers absent from character registry: "
-            f"{sorted(missing)}"
-        )
+        raise ValueError(f"Scripts reference speakers absent from character registry: {sorted(missing)}")
 
     owner_to_speakers: dict[str, list[str]] = {}
     owner_character_ids: dict[str, str] = {}
@@ -383,10 +384,7 @@ def build_voice_cast(
         similar_to = [
             previous_id
             for previous_id, previous_prompt, previous_source in previous_prompts
-            if (
-                source_signature
-                and source_signature == _normalized_signature(previous_source)
-            )
+            if (source_signature and source_signature == _normalized_signature(previous_source))
             or (
                 _token_similarity(
                     owner.voice_description,
@@ -394,10 +392,7 @@ def build_voice_cast(
                 )
                 >= _SOURCE_SIMILARITY_THRESHOLD
             )
-            or (
-                _token_similarity(prompt, previous_prompt)
-                >= _PROMPT_SIMILARITY_THRESHOLD
-            )
+            or (_token_similarity(prompt, previous_prompt) >= _PROMPT_SIMILARITY_THRESHOLD)
         ]
         # Every speaking profile receives a stable palette direction. Voice
         # Design otherwise tends to collapse same-gender characters onto the
@@ -449,9 +444,7 @@ def build_voice_cast(
         "schema": VOICE_CAST_SCHEMA_VERSION,
         "project_id": project_id,
         "speaking_characters": sorted(speaking_ids),
-        "non_speaking_characters": sorted(
-            set(registry.characters) - speaking_ids
-        ),
+        "non_speaking_characters": sorted(set(registry.characters) - speaking_ids),
         "voices": voices,
     }
     cast_payload["fingerprint"] = fingerprint(cast_payload)

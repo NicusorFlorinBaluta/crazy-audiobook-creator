@@ -159,10 +159,7 @@ def assert_script_covers_source(chapter: ScriptChapter, source_text: str) -> Non
     if not chapter.lines and source_text.strip():
         raise ValueError(f"Chapter {chapter.chapter_number} has source text but no script lines")
 
-    offsets_available = all(
-        line.source_start is not None and line.source_end is not None
-        for line in chapter.lines
-    )
+    offsets_available = all(line.source_start is not None and line.source_end is not None for line in chapter.lines)
     if offsets_available:
         previous_end = 0
         reconstructed: list[str] = []
@@ -170,14 +167,11 @@ def assert_script_covers_source(chapter: ScriptChapter, source_text: str) -> Non
             assert line.source_start is not None and line.source_end is not None
             if line.source_start < previous_end:
                 raise ValueError(
-                    f"Chapter {chapter.chapter_number} has overlapping or out-of-order "
-                    f"source spans at {line.line_id}"
+                    f"Chapter {chapter.chapter_number} has overlapping or out-of-order source spans at {line.line_id}"
                 )
             source_slice = source_text[line.source_start : line.source_end]
             if source_slice != line.text:
-                raise ValueError(
-                    f"Chapter {chapter.chapter_number} source span mismatch at {line.line_id}"
-                )
+                raise ValueError(f"Chapter {chapter.chapter_number} source span mismatch at {line.line_id}")
             reconstructed.append(source_slice)
             previous_end = line.source_end
         spoken = "".join(reconstructed)
@@ -187,8 +181,7 @@ def assert_script_covers_source(chapter: ScriptChapter, source_text: str) -> Non
 
     if normalize_for_coverage(spoken) != normalize_for_coverage(source_text):
         raise ValueError(
-            f"Chapter {chapter.chapter_number} script does not cover the normalized "
-            "source exactly once and in order"
+            f"Chapter {chapter.chapter_number} script does not cover the normalized source exactly once and in order"
         )
 
 
@@ -247,20 +240,20 @@ def build_segment_manifest(
     for order, line in enumerate(chapter.lines):
         voice_id = line.voice_id or line.speaker
         entry = {
-                "order": order,
-                "line_id": line.line_id,
-                "speaker": line.speaker,
-                "voice_id": voice_id,
-                "voice_reference_hash": voice_reference_hashes.get(voice_id, ""),
-                "text_hash": sha256_text(line.text),
-                "source_fragment_id": line.source_fragment_id,
-                "source_fragment_ids": line.source_fragment_ids,
-                "source_start": line.source_start,
-                "source_end": line.source_end,
-                "file": f"{project_id}/segments/{line.line_id}.wav",
-                "pause_before_ms": line.pause_before_ms,
-                "pause_after_ms": line.pause_after_ms,
-            }
+            "order": order,
+            "line_id": line.line_id,
+            "speaker": line.speaker,
+            "voice_id": voice_id,
+            "voice_reference_hash": voice_reference_hashes.get(voice_id, ""),
+            "text_hash": sha256_text(line.text),
+            "source_fragment_id": line.source_fragment_id,
+            "source_fragment_ids": line.source_fragment_ids,
+            "source_start": line.source_start,
+            "source_end": line.source_end,
+            "file": f"{project_id}/segments/{line.line_id}.wav",
+            "pause_before_ms": line.pause_before_ms,
+            "pause_after_ms": line.pause_after_ms,
+        }
         if line.spoken_text:
             entry["spoken_text_hash"] = sha256_text(line.spoken_text)
         entries.append(entry)
@@ -302,11 +295,7 @@ def finalize_segment_manifest(
         if not output_hash:
             raise ValueError(f"Missing generated segment: {output_path}")
         item["output_hash"] = output_hash
-    payload = {
-        key: value
-        for key, value in finalized.items()
-        if key != "manifest_hash"
-    }
+    payload = {key: value for key, value in finalized.items() if key != "manifest_hash"}
     finalized["manifest_hash"] = fingerprint(payload)
     return finalized
 

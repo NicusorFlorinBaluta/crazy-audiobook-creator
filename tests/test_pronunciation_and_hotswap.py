@@ -23,6 +23,7 @@ def _make_dummy_wav(path: Path, duration_s: float = 0.5, sample_rate: int = 2400
     """Create a minimal valid PCM WAV file for audio tests."""
     import struct
     import wave
+
     path.parent.mkdir(parents=True, exist_ok=True)
     num_samples = int(duration_s * sample_rate)
     with wave.open(str(path), "wb") as wf:
@@ -99,9 +100,9 @@ class PronunciationAndHotSwapTests(unittest.IsolatedAsyncioTestCase):
                             {"line_id": "ch01_0001", "speaker": "narrator", "text": "The homeisler sailed away."},
                             {"line_id": "ch01_0002", "speaker": "dusk", "text": "Farewell, Homeisle."},
                             {"line_id": "ch01_0003", "speaker": "narrator", "text": "And Homeisle faded from sight."},
-                        ]
+                        ],
                     }
-                ]
+                ],
             }
             (project_dir / "book_script.json").write_text(json.dumps(book_script), encoding="utf-8")
             (project_dir / "pronunciation_dict.json").write_text(
@@ -130,11 +131,7 @@ class PronunciationAndHotSwapTests(unittest.IsolatedAsyncioTestCase):
             project_dir.mkdir(parents=True)
             workspace_dir.mkdir(parents=True)
 
-            cast = {
-                "voices": {
-                    "narrator_male": {"name": "Narrator Male"}
-                }
-            }
+            cast = {"voices": {"narrator_male": {"name": "Narrator Male"}}}
             (project_dir / "voice_cast.json").write_text(json.dumps(cast), encoding="utf-8")
 
             class FakeVoiceClient:
@@ -222,9 +219,9 @@ class PronunciationAndHotSwapTests(unittest.IsolatedAsyncioTestCase):
                         "chapter_number": 1,
                         "lines": [
                             {"line_id": "ch01_0001", "speaker": "narrator", "text": "Kokerlii and homeisle."},
-                        ]
+                        ],
                     }
-                ]
+                ],
             }
             (project_dir / "book_script.json").write_text(json.dumps(book_script), encoding="utf-8")
 
@@ -320,7 +317,6 @@ class PronunciationAndHotSwapTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(line1_spoken, "The home aisle was peaceful.")
             ctx_line1_v2 = {"synthesis_text": line1_spoken, "model": "qwen3"}
 
-
             # Line 1 context has changed: MUST require regeneration
             needs_gen_1_updated = store.line_needs_synthesis(
                 project_id="test",
@@ -344,7 +340,7 @@ class PronunciationAndHotSwapTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(needs_gen_2_unchanged, "Line 2 untouched line MUST remain a cache hit (0 compute)")
 
             # 3. Hot-swap the regenerated segment and re-assemble chapter audio
-            _make_dummy_wav(line1_wav, 0.45) # simulated newly generated WAV
+            _make_dummy_wav(line1_wav, 0.45)  # simulated newly generated WAV
             store.save_synthesis_fingerprint(
                 project_id="test",
                 line_id="ch01_0001",
@@ -360,6 +356,7 @@ class PronunciationAndHotSwapTests(unittest.IsolatedAsyncioTestCase):
 
             # Master assembly test
             from shared.models import MasterSegmentInfo
+
             assembler = AudioAssembler(sample_rate=24000)
             lines_data = [
                 MasterSegmentInfo(line_id="ch01_0001", file=str(line1_wav)),

@@ -31,17 +31,21 @@ from shared.single_instance import SingleInstanceLock
 logger = logging.getLogger(__name__)
 
 _GENERIC_ATTRIBUTION_IDS = {
-    "minor_male", "minor_female", "child_male", "child_female",
-    "crowd", "collective", "character_male", "character_female",
+    "minor_male",
+    "minor_female",
+    "child_male",
+    "child_female",
+    "crowd",
+    "collective",
+    "character_male",
+    "character_female",
 }
 _EXPLICIT_IDENTITY_PATTERNS = (
     re.compile(
         r"\b(?:attributed to|spoken by|continuation of|dialogue (?:of|from))\s+"
         r"(?:the\s+)?([A-Z][\w'-]{1,})\b"
     ),
-    re.compile(
-        r"\b([A-Z][\w'-]{1,})(?:'s|’s)\s+(?:dialogue|speech|line|turn)\b"
-    ),
+    re.compile(r"\b([A-Z][\w'-]{1,})(?:'s|’s)\s+(?:dialogue|speech|line|turn)\b"),
     re.compile(
         r"\b([A-Z][\w'-]{1,})\s+(?:said|asked|replied|whispered|shouted|"
         r"murmured|exclaimed|noted|continued|frowned)\b"
@@ -76,18 +80,12 @@ def _attribution_identity_conflict(
     returned_identities = {
         _normalized_identity(returned),
         _normalized_identity(str(returned_context.get("name") or "")),
-        *{
-            _normalized_identity(str(alias))
-            for alias in returned_context.get("aliases", [])
-        },
+        *{_normalized_identity(str(alias)) for alias in returned_context.get("aliases", [])},
     }
     returned_identities.discard("")
     mismatches = sorted(claims - returned_identities)
     if mismatches:
-        return (
-            "Resolver rationale names a different or missing character: "
-            + ", ".join(mismatches)
-        )
+        return "Resolver rationale names a different or missing character: " + ", ".join(mismatches)
     if returned in _GENERIC_ATTRIBUTION_IDS and claims:
         # A proper named identity must never be collapsed into a generic voice,
         # even if that identity is absent from the candidate registry.
@@ -149,12 +147,10 @@ class _ProviderHealth:
             now = datetime.now(UTC).isoformat()
             entry["last_latency_ms"] = latency_ms
             if success:
-                entry.update({"consecutive_failures": 0, "last_success": now,
-                              "last_error": "", "open_until_epoch": 0})
+                entry.update({"consecutive_failures": 0, "last_success": now, "last_error": "", "open_until_epoch": 0})
             else:
                 failures = int(entry.get("consecutive_failures", 0)) + 1
-                entry.update({"consecutive_failures": failures, "last_failure": now,
-                              "last_error": error[:1000]})
+                entry.update({"consecutive_failures": failures, "last_failure": now, "last_error": error[:1000]})
                 if failures >= self.threshold:
                     entry["open_until_epoch"] = time.time() + self.cooldown_seconds
             state[provider] = entry
@@ -296,9 +292,7 @@ class _UsageBudget:
             models = state.setdefault("models", {})
             used = int(models.get(model, 0))
             if used >= limit:
-                raise ExternalValidationError(
-                    f"Local daily safety budget exhausted for {model} ({used}/{limit})"
-                )
+                raise ExternalValidationError(f"Local daily safety budget exhausted for {model} ({used}/{limit})")
             models[model] = used + 1
             atomic_write_json(self.path, state)
         finally:
@@ -313,10 +307,7 @@ class GeminiApiClient:
         self.request_interval = max(0.0, float(config.get("request_interval_seconds", 2.0)))
         self._last_request_time: float = 0.0
         self._request_lock = threading.Lock()
-        limits = {
-            str(key): int(value)
-            for key, value in dict(config.get("daily_request_budgets", {})).items()
-        }
+        limits = {str(key): int(value) for key, value in dict(config.get("daily_request_budgets", {})).items()}
         self.budget = _UsageBudget(projects_dir / ".gemini_api_usage.json", limits)
 
     @property
@@ -397,10 +388,7 @@ class GeminiApiClient:
             assert response is not None
             response.raise_for_status()
             body = response.json()
-            text = "".join(
-                str(part.get("text", ""))
-                for part in body["candidates"][0]["content"]["parts"]
-            )
+            text = "".join(str(part.get("text", "")) for part in body["candidates"][0]["content"]["parts"])
             return _extract_json(text)
         except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
             response_detail = ""
@@ -446,11 +434,7 @@ class GeminiWebClient:
         conversation = conversations.get(purpose, {})
         max_turns = max(1, int(self.config.get("max_turns_per_conversation", 100)))
         prior_turns = int(conversation.get("turns", 0) or 0)
-        saved_url = (
-            str(conversation.get("url", ""))
-            if prior_turns < max_turns
-            else ""
-        )
+        saved_url = str(conversation.get("url", "")) if prior_turns < max_turns else ""
         profile_dir = Path(str(self.config.get("profile_dir", "brain/projects/.gemini-browser-profile")))
         profile_dir.mkdir(parents=True, exist_ok=True)
         input_selector = str(
@@ -474,7 +458,9 @@ class GeminiWebClient:
                 )
                 try:
                     page = context.pages[0] if context.pages else context.new_page()
-                    page.goto(saved_url or "https://gemini.google.com/app", wait_until="domcontentloaded", timeout=timeout_ms)
+                    page.goto(
+                        saved_url or "https://gemini.google.com/app", wait_until="domcontentloaded", timeout=timeout_ms
+                    )
                     if "accounts.google." in page.url:
                         raise ExternalValidationError(
                             "Gemini browser profile is not authenticated; initialize it from the dashboard"
@@ -493,11 +479,16 @@ class GeminiWebClient:
                         raise ExternalValidationError(
                             "Gemini model chooser was not found; update browser.model_selector"
                         ) from exc
-                    chooser_label = " ".join(filter(None, [
-                        chooser.inner_text(),
-                        chooser.get_attribute("aria-label") or "",
-                        chooser.get_attribute("title") or "",
-                    ]))
+                    chooser_label = " ".join(
+                        filter(
+                            None,
+                            [
+                                chooser.inner_text(),
+                                chooser.get_attribute("aria-label") or "",
+                                chooser.get_attribute("title") or "",
+                            ],
+                        )
+                    )
                     if model_label.casefold() not in chooser_label.casefold():
                         chooser.click()
                         option = page.get_by_text(model_label, exact=False).last
@@ -506,11 +497,7 @@ class GeminiWebClient:
                     editor = page.locator(input_selector).last
                     editor.wait_for(state="visible", timeout=timeout_ms)
                     before = page.locator(response_selector).count()
-                    uploads = [
-                        str(path)
-                        for path in (audio_path, reference_audio_path)
-                        if path is not None
-                    ]
+                    uploads = [str(path) for path in (audio_path, reference_audio_path) if path is not None]
                     if uploads:
                         upload = page.locator('input[type="file"]').last
                         if upload.count() == 0:
@@ -539,8 +526,7 @@ class GeminiWebClient:
                         ]
                         if missing_uploads:
                             raise ExternalValidationError(
-                                "Gemini did not attach audio files: "
-                                + ", ".join(missing_uploads)
+                                "Gemini did not attach audio files: " + ", ".join(missing_uploads)
                             )
                     editor.fill(prompt)
                     editor.press("Enter")
@@ -588,15 +574,9 @@ class GeminiValidationService:
         self.triage_model = str(config.get("api", {}).get("triage_model", "gemini-3.5-flash-lite"))
         self.adjudication_model = str(config.get("api", {}).get("adjudication_model", "gemini-3.5-flash"))
         character_cfg = dict(config.get("character_augmentation", {}))
-        self.character_augmentation_enabled = bool(
-            character_cfg.get("enabled", False)
-        )
-        self.character_triage_model = str(
-            character_cfg.get("triage_model", self.triage_model)
-        )
-        self.character_adjudication_model = str(
-            character_cfg.get("adjudication_model", self.adjudication_model)
-        )
+        self.character_augmentation_enabled = bool(character_cfg.get("enabled", False))
+        self.character_triage_model = str(character_cfg.get("triage_model", self.triage_model))
+        self.character_adjudication_model = str(character_cfg.get("adjudication_model", self.adjudication_model))
         circuit = dict(config.get("circuit_breaker", {}))
         self.health = _ProviderHealth(
             projects_dir / ".external_validation_health.json",
@@ -621,9 +601,19 @@ class GeminiValidationService:
         self.health.record(stage, success=True, latency_ms=latency)
         return value, latency
 
-    def _event(self, project_dir: Path, item_type: str, item_id: str, provider: str,
-               model: str, decision: str, confidence: float | None, reason: str,
-               latency_ms: int | None = None, details: dict[str, Any] | None = None) -> None:
+    def _event(
+        self,
+        project_dir: Path,
+        item_type: str,
+        item_id: str,
+        provider: str,
+        model: str,
+        decision: str,
+        confidence: float | None,
+        reason: str,
+        latency_ms: int | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
         if self.event_sink is None:
             return
         event_details = dict(details or {})
@@ -637,8 +627,18 @@ class GeminiValidationService:
             }.get(item_type, f"{item_type or 'unknown'}-legacy"),
         )
         try:
-            self.event_sink(project_dir.name, item_type, item_id, provider, model,
-                            decision, confidence, reason, latency_ms, event_details)
+            self.event_sink(
+                project_dir.name,
+                item_type,
+                item_id,
+                provider,
+                model,
+                decision,
+                confidence,
+                reason,
+                latency_ms,
+                event_details,
+            )
         except Exception:
             logger.warning("Could not append external validation event", exc_info=True)
 
@@ -674,9 +674,7 @@ class GeminiValidationService:
         decision: CharacterAugmentationDecision,
         dossier: dict[str, Any],
     ) -> bool:
-        source = " ".join(
-            str(value) for value in dossier.get("evidence_snippets", [])
-        )
+        source = " ".join(str(value) for value in dossier.get("evidence_snippets", []))
         normalized_source = re.sub(r"\s+", " ", source).casefold()
         for evidence in decision.evidence:
             normalized = re.sub(r"\s+", " ", evidence).strip()
@@ -691,11 +689,7 @@ class GeminiValidationService:
         dossier: dict[str, dict[str, Any]],
     ) -> dict[str, Any]:
         """Return only high-confidence, source-grounded character enrichments."""
-        if (
-            not self.enabled
-            or not self.character_augmentation_enabled
-            or not dossier
-        ):
+        if not self.enabled or not self.character_augmentation_enabled or not dossier:
             return {"accepted": {}, "review": [], "trace": []}
 
         remaining = set(dossier)
@@ -760,9 +754,7 @@ class GeminiValidationService:
                 grounded = self._character_evidence_is_grounded(decision, current)
                 current_gender = str(current.get("current_gender") or "other")
                 gender_conflict = bool(
-                    decision.gender
-                    and current_gender in {"male", "female"}
-                    and decision.gender != current_gender
+                    decision.gender and current_gender in {"male", "female"} and decision.gender != current_gender
                 )
                 record = {
                     **decision.model_dump(mode="json"),
@@ -877,16 +869,17 @@ class GeminiValidationService:
             except _VALIDATION_RECOVERABLE_ERRORS as exc:
                 err_summary = str(exc).split("\n")[0][:300]
                 for item_id in sorted(remaining):
-                    self._event(project_dir, "extraction", item_id, stage, model,
-                                "unavailable", None, err_summary)
-                    trace.append({
-                        "item_id": item_id,
-                        "provider": stage,
-                        "model": model,
-                        "decision": "unavailable",
-                        "confidence": None,
-                        "reason": err_summary,
-                    })
+                    self._event(project_dir, "extraction", item_id, stage, model, "unavailable", None, err_summary)
+                    trace.append(
+                        {
+                            "item_id": item_id,
+                            "provider": stage,
+                            "model": model,
+                            "decision": "unavailable",
+                            "confidence": None,
+                            "reason": err_summary,
+                        }
+                    )
                 continue
             for decision in batch.decisions:
                 if decision.item_id not in remaining:
@@ -899,13 +892,18 @@ class GeminiValidationService:
                     "reason": decision.reason,
                 }
                 trace.append({"item_id": decision.item_id, **record})
-                self._event(project_dir, "extraction", decision.item_id, stage, model,
-                            decision.decision, decision.confidence, decision.reason,
-                            latency_ms)
-                if (
-                    decision.decision != "abstain"
-                    and decision.confidence >= self.auto_accept
-                ):
+                self._event(
+                    project_dir,
+                    "extraction",
+                    decision.item_id,
+                    stage,
+                    model,
+                    decision.decision,
+                    decision.confidence,
+                    decision.reason,
+                    latency_ms,
+                )
+                if decision.decision != "abstain" and decision.confidence >= self.auto_accept:
                     accepted[decision.item_id] = record
                     remaining.discard(decision.item_id)
         return {"decisions": accepted, "trace": trace}
@@ -932,14 +930,16 @@ class GeminiValidationService:
         by_id = {line.line_id: line for line in unresolved}
         for line in unresolved:
             if not line.attribution_confidence_history:
-                line.attribution_confidence_history.append({
-                    "resolver": "local",
-                    "model": "script_director",
-                    "decision": "resolved" if line.speaker else "abstain",
-                    "speaker_id": line.speaker or None,
-                    "confidence": line.speaker_confidence,
-                    "reason": line.attribution_review_reason or line.speaker_evidence,
-                })
+                line.attribution_confidence_history.append(
+                    {
+                        "resolver": "local",
+                        "model": "script_director",
+                        "decision": "resolved" if line.speaker else "abstain",
+                        "speaker_id": line.speaker or None,
+                        "confidence": line.speaker_confidence,
+                        "reason": line.attribution_review_reason or line.speaker_evidence,
+                    }
+                )
         cases: list[dict[str, Any]] = []
         unresolved_ids = set(by_id)
         for chapter in chapters:
@@ -955,30 +955,55 @@ class GeminiValidationService:
                     }
                     for neighbor in chapter.lines[max(0, index - 10) : index + 11]
                 ]
-                surrounding_scene = " ".join(
-                    neighbor.text for neighbor in chapter.lines[max(0, index - 8) : index + 9]
+                surrounding_scene = " ".join(neighbor.text for neighbor in chapter.lines[max(0, index - 8) : index + 9])
+                cases.append(
+                    {
+                        "item_id": line.line_id,
+                        "chapter": chapter.chapter_number,
+                        "chapter_title": chapter.chapter_title,
+                        "text": line.text,
+                        "attached_source_tag_or_evidence": line.speaker_evidence,
+                        "current_speaker": line.speaker,
+                        "local_confidence": line.speaker_confidence,
+                        "local_reason": line.attribution_review_reason or line.speaker_evidence,
+                        "surrounding_scene_text": surrounding_scene,
+                        "neighboring_turns": context,
+                    }
                 )
-                cases.append({
-                    "item_id": line.line_id,
-                    "chapter": chapter.chapter_number,
-                    "chapter_title": chapter.chapter_title,
-                    "text": line.text,
-                    "attached_source_tag_or_evidence": line.speaker_evidence,
-                    "current_speaker": line.speaker,
-                    "local_confidence": line.speaker_confidence,
-                    "local_reason": line.attribution_review_reason or line.speaker_evidence,
-                    "surrounding_scene_text": surrounding_scene,
-                    "neighboring_turns": context,
-                })
-        candidates = dict(character_context or {
-            character_id: {"id": character_id} for character_id in sorted(character_ids)
-        })
+        candidates = dict(
+            character_context or {character_id: {"id": character_id} for character_id in sorted(character_ids)}
+        )
         generic_defaults = {
-            "minor_male": {"id": "minor_male", "name": "Unnamed Man", "gender": "male", "description": "Any unnamed male speaker, man, senator, guard, soldier, trapper, technician."},
-            "minor_female": {"id": "minor_female", "name": "Unnamed Woman", "gender": "female", "description": "Any unnamed female speaker, woman, passerby, technician."},
-            "child_male": {"id": "child_male", "name": "Boy", "gender": "male", "description": "Any unnamed young boy or male child."},
-            "child_female": {"id": "child_female", "name": "Girl", "gender": "female", "description": "Any unnamed young girl or female child."},
-            "narrator": {"id": "narrator", "name": "Narrator", "gender": "neutral", "description": "The narrator. Use only for written text, signs, thoughts, or non-spoken quotations."},
+            "minor_male": {
+                "id": "minor_male",
+                "name": "Unnamed Man",
+                "gender": "male",
+                "description": "Any unnamed male speaker, man, senator, guard, soldier, trapper, technician.",
+            },
+            "minor_female": {
+                "id": "minor_female",
+                "name": "Unnamed Woman",
+                "gender": "female",
+                "description": "Any unnamed female speaker, woman, passerby, technician.",
+            },
+            "child_male": {
+                "id": "child_male",
+                "name": "Boy",
+                "gender": "male",
+                "description": "Any unnamed young boy or male child.",
+            },
+            "child_female": {
+                "id": "child_female",
+                "name": "Girl",
+                "gender": "female",
+                "description": "Any unnamed young girl or female child.",
+            },
+            "narrator": {
+                "id": "narrator",
+                "name": "Narrator",
+                "gender": "neutral",
+                "description": "The narrator. Use only for written text, signs, thoughts, or non-spoken quotations.",
+            },
         }
         for gid, gdef in generic_defaults.items():
             if gid not in candidates:
@@ -1006,7 +1031,17 @@ class GeminiValidationService:
                 for speaker_id in (line.speaker, line.voice_id)
                 if speaker_id in candidates
             }
-            generics = {"narrator", "minor_male", "minor_female", "child_male", "child_female", "crowd", "collective", "character_male", "character_female"}
+            generics = {
+                "narrator",
+                "minor_male",
+                "minor_female",
+                "child_male",
+                "child_female",
+                "crowd",
+                "collective",
+                "character_male",
+                "character_female",
+            }
             for cid, c in candidates.items():
                 if cid in generics:
                     active_ids.add(cid)
@@ -1015,14 +1050,8 @@ class GeminiValidationService:
                 if len(c_name) >= 2 and c_name in chapter_evidence:
                     active_ids.add(cid)
                     continue
-                c_aliases = [
-                    str(alias).strip().casefold()
-                    for alias in c.get("aliases", [])
-                ]
-                if any(
-                    len(alias) >= 3 and alias in chapter_evidence
-                    for alias in c_aliases
-                ):
+                c_aliases = [str(alias).strip().casefold() for alias in c.get("aliases", [])]
+                if any(len(alias) >= 3 and alias in chapter_evidence for alias in c_aliases):
                     active_ids.add(cid)
                     continue
                 # ID parts (e.g. 'dusk' from 'sixth_of_dusk')
@@ -1030,9 +1059,11 @@ class GeminiValidationService:
                 if any(part in chapter_evidence for part in id_parts):
                     active_ids.add(cid)
                     continue
-            chapter_candidates[chapter.chapter_number] = {
-                cid: c for cid, c in candidates.items() if cid in active_ids
-            } if len(active_ids - generics) > 0 else candidates
+            chapter_candidates[chapter.chapter_number] = (
+                {cid: c for cid, c in candidates.items() if cid in active_ids}
+                if len(active_ids - generics) > 0
+                else candidates
+            )
 
         remaining = set(by_id)
         trace: list[dict[str, Any]] = []
@@ -1053,9 +1084,7 @@ class GeminiValidationService:
                 stage_cases.append(staged)
             cases_by_chapter: dict[int, list[dict[str, Any]]] = {}
             for case in stage_cases:
-                cases_by_chapter.setdefault(
-                    int(case.get("chapter") or 0), []
-                ).append(case)
+                cases_by_chapter.setdefault(int(case.get("chapter") or 0), []).append(case)
             stage_batches = [
                 chapter_cases[start : start + self.attribution_batch_size]
                 for chapter_cases in cases_by_chapter.values()
@@ -1063,9 +1092,7 @@ class GeminiValidationService:
             ]
             for batch in stage_batches:
                 batch_chapter = int(batch[0].get("chapter") or 0)
-                batch_candidates = dict(
-                    chapter_candidates.get(batch_chapter, candidates)
-                )
+                batch_candidates = dict(chapter_candidates.get(batch_chapter, candidates))
                 if not batch_candidates:
                     batch_candidates = candidates
 
@@ -1078,7 +1105,7 @@ class GeminiValidationService:
                     "4. LEADING ACTION BEATS: When a quote is preceded in the same paragraph by a singular pronoun action beat (e.g. 'He nodded slowly. \"...\"'), the subject pronoun gender/identity binds to the speaker of that quote.\n"
                     "5. EXPLICIT SPEECH TAGS & PRONOUNS: When a quote has an attached speech tag in the context or evidence (e.g. 'he replied', 'she asked', '[Name] whispered'), the speaker's canonical gender and identity MUST strictly match the pronoun/name in that tag.\n"
                     "6. Return one decision for every case as JSON with shape:\n"
-                    "{\"decisions\":[{\"item_id\":str,\"decision\":\"resolved\"|\"abstain\",\"speaker_id\":str|null,\"confidence\":0..1,\"reason\":str,\"evidence\":str}]}.\n\n"
+                    '{"decisions":[{"item_id":str,"decision":"resolved"|"abstain","speaker_id":str|null,"confidence":0..1,"reason":str,"evidence":str}]}.\n\n'
                     "CANDIDATES:\n"
                     + json.dumps(batch_candidates, ensure_ascii=False, indent=2)
                     + "\n\nCASES:\n"
@@ -1089,31 +1116,34 @@ class GeminiValidationService:
                         stage,
                         # Loop variables bound as defaults, not captured; see
                         # the character-augmentation call site for why.
-                        lambda stage=stage, model=model, stage_prompt=stage_prompt: (
-                            self._run_attribution_stage(
-                                stage, model, stage_prompt, project_dir
-                            )
+                        lambda stage=stage, model=model, stage_prompt=stage_prompt: self._run_attribution_stage(
+                            stage, model, stage_prompt, project_dir
                         ),
                     )
                 except _VALIDATION_RECOVERABLE_ERRORS as exc:
                     err_summary = str(exc).split("\n")[0][:300]
                     logger.warning("Attribution escalation %s unavailable: %s", stage, err_summary)
-                    trace.append({
-                        "stage": stage,
-                        "model": model,
-                        "item_ids": [case["item_id"] for case in batch],
-                        "error": err_summary,
-                    })
-                    for case in batch:
-                        self._event(project_dir, "attribution", case["item_id"], stage,
-                                    model, "unavailable", None, err_summary)
-                        by_id[case["item_id"]].attribution_confidence_history.append({
-                            "resolver": stage,
+                    trace.append(
+                        {
+                            "stage": stage,
                             "model": model,
-                            "decision": "unavailable",
-                            "confidence": None,
-                            "reason": err_summary,
-                        })
+                            "item_ids": [case["item_id"] for case in batch],
+                            "error": err_summary,
+                        }
+                    )
+                    for case in batch:
+                        self._event(
+                            project_dir, "attribution", case["item_id"], stage, model, "unavailable", None, err_summary
+                        )
+                        by_id[case["item_id"]].attribution_confidence_history.append(
+                            {
+                                "resolver": stage,
+                                "model": model,
+                                "decision": "unavailable",
+                                "confidence": None,
+                                "reason": err_summary,
+                            }
+                        )
                     continue
                 for decision in result.decisions:
                     line = by_id.get(decision.item_id)
@@ -1130,17 +1160,21 @@ class GeminiValidationService:
                     }
                     line.attribution_confidence_history.append(record)
                     trace.append({"item_id": line.line_id, **record})
-                    self._event(project_dir, "attribution", line.line_id, stage, model,
-                                decision.decision, decision.confidence, decision.reason,
-                                latency_ms, {"speaker_id": decision.speaker_id,
-                                             "evidence": decision.evidence})
-                    is_quoted_dialogue = line.text.strip().startswith(('"', '“', '‘', "'"))
+                    self._event(
+                        project_dir,
+                        "attribution",
+                        line.line_id,
+                        stage,
+                        model,
+                        decision.decision,
+                        decision.confidence,
+                        decision.reason,
+                        latency_ms,
+                        {"speaker_id": decision.speaker_id, "evidence": decision.evidence},
+                    )
+                    is_quoted_dialogue = line.text.strip().startswith(('"', "“", "‘", "'"))
                     case = next(
-                        (
-                            item
-                            for item in batch
-                            if item["item_id"] == decision.item_id
-                        ),
+                        (item for item in batch if item["item_id"] == decision.item_id),
                         {},
                     )
                     allowed_ids = set(
@@ -1163,9 +1197,7 @@ class GeminiValidationService:
                             and identity_conflict is None
                         )
                     if identity_conflict:
-                        line.attribution_confidence_history[-1][
-                            "validation_error"
-                        ] = identity_conflict
+                        line.attribution_confidence_history[-1]["validation_error"] = identity_conflict
                         trace[-1]["validation_error"] = identity_conflict
 
                     if valid and decision.confidence >= self.auto_accept:
@@ -1193,7 +1225,11 @@ class GeminiValidationService:
             if not line.attribution_review_reason:
                 line.attribution_review_reason = "Unresolved speaker: confirmation required before voice synthesis"
         atomic_write_json(project_dir / "external_validation" / "attribution.json", trace)
-        return {"attempted": len(unresolved), "resolved": len(unresolved) - len(remaining), "manual_review": len(remaining)}
+        return {
+            "attempted": len(unresolved),
+            "resolved": len(unresolved) - len(remaining),
+            "manual_review": len(remaining),
+        }
 
     def validate_audio(
         self,
@@ -1216,13 +1252,15 @@ class GeminiValidationService:
             local_decision = "abstain"
             local_confidence = min(0.8, 0.4 + 0.4 * float(result.quality_score))
         result.validation_confidence = local_confidence
-        result.external_validation_history.append({
-            "provider": "local",
-            "model": "deterministic_audio_validator",
-            "decision": local_decision,
-            "confidence": local_confidence,
-            "reason": result.acceptance_reason or "; ".join(result.warnings),
-        })
+        result.external_validation_history.append(
+            {
+                "provider": "local",
+                "model": "deterministic_audio_validator",
+                "decision": local_decision,
+                "confidence": local_confidence,
+                "reason": result.acceptance_reason or "; ".join(result.warnings),
+            }
+        )
         if not self.enabled or (result.status.value == "pass" and not result.warnings):
             return result
         if not result.passed_hard_gates:
@@ -1232,8 +1270,8 @@ class GeminiValidationService:
         prompt = (
             "Evaluate this audiobook segment for audible defects, wrong/missing words, unnatural prosody, "
             "speaker inconsistency, emotion mismatch, glitches, and distracting noise. Be conservative and "
-            "abstain if uncertain. Return exactly {\"item_id\":str,\"decision\":\"accept\"|\"reject\"|"
-            "\"abstain\",\"confidence\":0..1,\"reason\":str,\"defects\":[str]}.\n"
+            'abstain if uncertain. Return exactly {"item_id":str,"decision":"accept"|"reject"|'
+            '"abstain","confidence":0..1,"reason":str,"defects":[str]}.\n'
             + json.dumps(
                 {
                     "item_id": result.line_id,
@@ -1259,11 +1297,19 @@ class GeminiValidationService:
                     # character-augmentation call site for why.
                     lambda stage=stage, model=model, prompt=prompt: (
                         self.web.generate_json(
-                            project_dir, "audio_qa_v1", prompt, audio_path=audio_path,
+                            project_dir,
+                            "audio_qa_v1",
+                            prompt,
+                            audio_path=audio_path,
                             reference_audio_path=reference_audio_path,
-                        ) if stage == "gemini_web" else self.api.generate_json(
-                            model=model, prompt=prompt, schema=self._audio_schema(),
-                            audio_path=audio_path, reference_audio_path=reference_audio_path,
+                        )
+                        if stage == "gemini_web"
+                        else self.api.generate_json(
+                            model=model,
+                            prompt=prompt,
+                            schema=self._audio_schema(),
+                            audio_path=audio_path,
+                            reference_audio_path=reference_audio_path,
                         )
                     ),
                 )
@@ -1271,44 +1317,56 @@ class GeminiValidationService:
             except _VALIDATION_RECOVERABLE_ERRORS as exc:
                 err_summary = str(exc).split("\n")[0][:300]
                 errors.append(f"{stage}: {err_summary}")
-                result.external_validation_history.append({
-                    "provider": stage,
-                    "model": model,
-                    "decision": "unavailable",
-                    "confidence": None,
-                    "reason": err_summary,
-                })
-                self._event(project_dir, "segment", result.line_id, stage, model,
-                            "unavailable", None, err_summary)
+                result.external_validation_history.append(
+                    {
+                        "provider": stage,
+                        "model": model,
+                        "decision": "unavailable",
+                        "confidence": None,
+                        "reason": err_summary,
+                    }
+                )
+                self._event(project_dir, "segment", result.line_id, stage, model, "unavailable", None, err_summary)
                 continue
             if decision.item_id != result.line_id:
-                errors.append(
-                    f"{stage}: response item_id {decision.item_id!r} did not match {result.line_id!r}"
+                errors.append(f"{stage}: response item_id {decision.item_id!r} did not match {result.line_id!r}")
+                result.external_validation_history.append(
+                    {
+                        "provider": stage,
+                        "model": model,
+                        "decision": "invalid",
+                        "confidence": None,
+                        "reason": errors[-1],
+                    }
                 )
-                result.external_validation_history.append({
-                    "provider": stage,
-                    "model": model,
-                    "decision": "invalid",
-                    "confidence": None,
-                    "reason": errors[-1],
-                })
                 continue
             result.external_validation_provider = stage
             result.external_validation_model = model
             result.external_validation_decision = decision.decision
             result.external_validation_confidence = decision.confidence
             result.external_validation_reason = decision.reason
-            result.external_validation_history.append({
-                "provider": stage,
-                "model": model,
-                "decision": decision.decision,
-                "confidence": decision.confidence,
-                "reason": decision.reason,
-                "defects": decision.defects,
-            })
-            self._event(project_dir, "segment", result.line_id, stage, model,
-                        decision.decision, decision.confidence, decision.reason,
-                        latency_ms, {"defects": decision.defects})
+            result.external_validation_history.append(
+                {
+                    "provider": stage,
+                    "model": model,
+                    "decision": decision.decision,
+                    "confidence": decision.confidence,
+                    "reason": decision.reason,
+                    "defects": decision.defects,
+                }
+            )
+            self._event(
+                project_dir,
+                "segment",
+                result.line_id,
+                stage,
+                model,
+                decision.decision,
+                decision.confidence,
+                decision.reason,
+                latency_ms,
+                {"defects": decision.defects},
+            )
             result.validation_confidence = decision.confidence
             if decision.confidence >= self.auto_accept and decision.decision == "accept":
                 result.manual_review_required = False
@@ -1338,8 +1396,7 @@ class GeminiValidationService:
             if (result.validation_confidence or 0.0) < self.manual_threshold
             else "below the automatic acceptance threshold"
         )
-        result.manual_review_reason = (
-            f"All audio fallbacks remained {confidence_label}"
-            + (": " + "; ".join(errors) if errors else "")
+        result.manual_review_reason = f"All audio fallbacks remained {confidence_label}" + (
+            ": " + "; ".join(errors) if errors else ""
         )
         return result

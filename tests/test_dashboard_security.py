@@ -118,17 +118,13 @@ class ConfiguredLanBoundaryTests(unittest.TestCase):
 
     def test_configured_list_replaces_the_default(self):
         self.assertEqual(
-            configured_trusted_lan_cidrs(
-                {"trusted_lan_cidrs": ["192.168.50.0/24"]}
-            ),
+            configured_trusted_lan_cidrs({"trusted_lan_cidrs": ["192.168.50.0/24"]}),
             ("192.168.50.0/24",),
         )
 
     def test_a_peer_outside_the_configured_range_is_refused(self):
         """The regression that matters: inside the default, outside the config."""
-        narrowed = configured_trusted_lan_cidrs(
-            {"trusted_lan_cidrs": ["192.168.50.0/24"]}
-        )
+        narrowed = configured_trusted_lan_cidrs({"trusted_lan_cidrs": ["192.168.50.0/24"]})
         # 10.1.2.3 is inside DEFAULT_TRUSTED_LAN_CIDRS but not the narrowed set.
         self.assertTrue(is_private_client("10.1.2.3", DEFAULT_TRUSTED_LAN_CIDRS))
         self.assertFalse(
@@ -185,9 +181,7 @@ class ConfiguredLanBoundaryTests(unittest.TestCase):
 
     def test_a_single_string_is_accepted_as_one_cidr(self):
         self.assertEqual(
-            configured_trusted_lan_cidrs(
-                {"trusted_lan_cidrs": "192.168.50.0/24"}
-            ),
+            configured_trusted_lan_cidrs({"trusted_lan_cidrs": "192.168.50.0/24"}),
             ("192.168.50.0/24",),
         )
 
@@ -197,9 +191,7 @@ class ConfiguredLanBoundaryTests(unittest.TestCase):
 
     def test_shipped_config_narrows_the_boundary(self):
         """The checked-in configuration must not rely on the wide default."""
-        config = yaml.safe_load(
-            Path("brain/config.yaml").read_text(encoding="utf-8")
-        )
+        config = yaml.safe_load(Path("brain/config.yaml").read_text(encoding="utf-8"))
         dashboard = config.get("dashboard", {})
         self.assertIn(
             "trusted_lan_cidrs",
@@ -213,24 +205,18 @@ class ConfiguredLanBoundaryTests(unittest.TestCase):
 
     def test_shipped_config_does_not_use_wildcard_cors(self):
         """`*` lets any page a LAN user visits read this dashboard's data."""
-        config = yaml.safe_load(
-            Path("brain/config.yaml").read_text(encoding="utf-8")
-        )
+        config = yaml.safe_load(Path("brain/config.yaml").read_text(encoding="utf-8"))
         self.assertNotIn("*", config.get("dashboard", {}).get("cors_origins", []))
 
 
 class InvalidCidrConfigurationTests(unittest.TestCase):
     def test_an_invalid_network_fails_startup_validation(self):
         with self.assertRaises(ValueError) as caught:
-            validate_brain_config(
-                {"dashboard": {"trusted_lan_cidrs": ["192.168.50.0/33"]}}
-            )
+            validate_brain_config({"dashboard": {"trusted_lan_cidrs": ["192.168.50.0/33"]}})
         self.assertIn("trusted_lan_cidrs", str(caught.exception))
 
     def test_a_valid_network_passes_startup_validation(self):
-        validate_brain_config(
-            {"dashboard": {"trusted_lan_cidrs": ["192.168.50.0/24"]}}
-        )
+        validate_brain_config({"dashboard": {"trusted_lan_cidrs": ["192.168.50.0/24"]}})
 
 
 if __name__ == "__main__":

@@ -119,11 +119,7 @@ class Pipeline:
     @classmethod
     def _script_files(cls, scripts_dir: Path) -> list[Path]:
         """Return chapter scripts without matching adjacent metadata sidecars."""
-        return sorted(
-            path
-            for path in scripts_dir.glob("chapter_*.json")
-            if cls._SCRIPT_FILENAME.fullmatch(path.name)
-        )
+        return sorted(path for path in scripts_dir.glob("chapter_*.json") if cls._SCRIPT_FILENAME.fullmatch(path.name))
 
     def __init__(
         self,
@@ -137,11 +133,7 @@ class Pipeline:
         # tests and alternate layouts can point it elsewhere, and production
         # resolves it from the repository root rather than the working
         # directory.
-        self.workspace_dir = Path(
-            workspace_dir
-            if workspace_dir is not None
-            else shared_paths.WORKSPACE_DIR
-        )
+        self.workspace_dir = Path(workspace_dir if workspace_dir is not None else shared_paths.WORKSPACE_DIR)
         self.projects_dir.mkdir(parents=True, exist_ok=True)
 
         self.config = self._load_config()
@@ -160,12 +152,8 @@ class Pipeline:
             max_retry_seconds=ollama_cfg.get("max_retry_seconds", 900),
             context_window=int(ollama_cfg.get("context_window", 8192)),
             max_output_tokens=int(ollama_cfg.get("max_output_tokens", 8192)),
-            max_generation_seconds=int(
-                ollama_cfg.get("max_generation_seconds", 600)
-            ),
-            repetition_window_chars=int(
-                ollama_cfg.get("repetition_window_chars", 512)
-            ),
+            max_generation_seconds=int(ollama_cfg.get("max_generation_seconds", 600)),
+            repetition_window_chars=int(ollama_cfg.get("repetition_window_chars", 512)),
             repetition_count=int(ollama_cfg.get("repetition_count", 4)),
             think=ollama_cfg.get("think"),
         )
@@ -213,36 +201,18 @@ class Pipeline:
             chunk_size_words=script_cfg.get("chunk_size_words", 450),
             chunk_overlap_words=script_cfg.get("chunk_overlap_words", 0),
             max_fragments_per_chunk=script_cfg.get("max_fragments_per_chunk", 60),
-            adaptive_split_enabled=script_cfg.get(
-                "adaptive_split_enabled", True
-            ),
-            adaptive_split_max_depth=script_cfg.get(
-                "adaptive_split_max_depth", 2
-            ),
-            adaptive_split_min_fragments=script_cfg.get(
-                "adaptive_split_min_fragments", 8
-            ),
-            dialogue_focused_schema=script_cfg.get(
-                "dialogue_focused_schema", False
-            ),
+            adaptive_split_enabled=script_cfg.get("adaptive_split_enabled", True),
+            adaptive_split_max_depth=script_cfg.get("adaptive_split_max_depth", 2),
+            adaptive_split_min_fragments=script_cfg.get("adaptive_split_min_fragments", 8),
+            dialogue_focused_schema=script_cfg.get("dialogue_focused_schema", False),
             group_utterances=script_cfg.get("group_utterances", True),
-            utterance_target_chars=script_cfg.get(
-                "utterance_target_chars", 260
-            ),
+            utterance_target_chars=script_cfg.get("utterance_target_chars", 260),
             utterance_max_words=script_cfg.get("utterance_max_words", 45),
-            narrator_target_chars=script_cfg.get(
-                "narrator_target_chars", 340
-            ),
+            narrator_target_chars=script_cfg.get("narrator_target_chars", 340),
             narrator_max_words=script_cfg.get("narrator_max_words", 58),
-            expressive_target_chars=script_cfg.get(
-                "expressive_target_chars", 180
-            ),
-            expressive_max_words=script_cfg.get(
-                "expressive_max_words", 30
-            ),
-            speaker_confidence_threshold=script_cfg.get(
-                "speaker_confidence_threshold", 0.55
-            ),
+            expressive_target_chars=script_cfg.get("expressive_target_chars", 180),
+            expressive_max_words=script_cfg.get("expressive_max_words", 30),
+            speaker_confidence_threshold=script_cfg.get("speaker_confidence_threshold", 0.55),
         )
         self._stop_flags: dict[str, bool] = {}
         self._ollama_server_proc = None
@@ -362,8 +332,7 @@ class Pipeline:
             return
         if not ollama_cfg.get("auto_start", False):
             raise RuntimeError(
-                f"Ollama/model unavailable at {self.ollama.host}; "
-                "start Ollama or enable ollama.auto_start"
+                f"Ollama/model unavailable at {self.ollama.host}; start Ollama or enable ollama.auto_start"
             )
 
         import os
@@ -378,9 +347,7 @@ class Pipeline:
             if candidate.is_file():
                 executable = str(candidate)
         if not executable or not Path(executable).is_file():
-            raise RuntimeError(
-                "Could not find ollama executable; set ollama.executable in brain/config.yaml"
-            )
+            raise RuntimeError("Could not find ollama executable; set ollama.executable in brain/config.yaml")
 
         parsed_host = urlsplit(self.ollama.host)
         if parsed_host.hostname not in {"127.0.0.1", "localhost"}:
@@ -428,9 +395,7 @@ class Pipeline:
         #     of a request's working time.
         #
         # One slot is correct here: the pipeline serializes GPU work anyway.
-        env["OLLAMA_NUM_PARALLEL"] = str(
-            int(ollama_cfg.get("num_parallel", 1))
-        )
+        env["OLLAMA_NUM_PARALLEL"] = str(int(ollama_cfg.get("num_parallel", 1)))
 
         kv_cache_type = str(ollama_cfg.get("kv_cache_type", "")).strip()
         if kv_cache_type:
@@ -472,8 +437,7 @@ class Pipeline:
         kwargs["stdout"] = self._ollama_server_log_handle
         kwargs["stderr"] = subprocess.STDOUT
         logger.info(
-            "Starting managed Ollama at %s (backend=%s, devices=%s, "
-            "num_parallel=%s, kv_cache=%s, models=%s, log=%s)",
+            "Starting managed Ollama at %s (backend=%s, devices=%s, num_parallel=%s, kv_cache=%s, models=%s, log=%s)",
             self.ollama.host,
             backend,
             visible_devices or "server default",
@@ -506,18 +470,14 @@ class Pipeline:
                     except Exception:
                         pass
                     self._ollama_server_log_handle = None
-                raise RuntimeError(
-                    f"Managed Ollama exited during startup with code {code}"
-                )
+                raise RuntimeError(f"Managed Ollama exited during startup with code {code}")
             if self.ollama.check_health(quiet=True):
                 logger.info("Managed Ollama is ready: %s", self.ollama.model)
                 return
             time.sleep(2)
 
         self._stop_ollama_server()
-        raise RuntimeError(
-            f"Managed Ollama/model did not become ready within {timeout}s"
-        )
+        raise RuntimeError(f"Managed Ollama/model did not become ready within {timeout}s")
 
     def _stop_ollama_server(self) -> None:
         """Stop Ollama only when this pipeline launched the process."""
@@ -566,9 +526,7 @@ class Pipeline:
             )
             if result.returncode not in (0, 128):
                 raise RuntimeError(
-                    result.stderr.strip()
-                    or result.stdout.strip()
-                    or f"taskkill failed with code {result.returncode}"
+                    result.stderr.strip() or result.stdout.strip() or f"taskkill failed with code {result.returncode}"
                 )
             try:
                 process.wait(timeout=5)
@@ -601,18 +559,9 @@ class Pipeline:
         import subprocess
         import sys
 
-        venv_py = Path(
-            voice_cfg.get("venv", r"E:\PyTorch env\my_venv")
-        )
-        configured_python = (
-            os.environ.get("CRAZY_AUDIOBOOK_VOICE_PYTHON")
-            or voice_cfg.get("python_executable")
-        )
-        python_exe = (
-            Path(configured_python)
-            if configured_python
-            else venv_py / "Scripts" / "python.exe"
-        )
+        venv_py = Path(voice_cfg.get("venv", r"E:\PyTorch env\my_venv"))
+        configured_python = os.environ.get("CRAZY_AUDIOBOOK_VOICE_PYTHON") or voice_cfg.get("python_executable")
+        python_exe = Path(configured_python) if configured_python else venv_py / "Scripts" / "python.exe"
         launcher_works = False
         if python_exe.is_file():
             try:
@@ -627,8 +576,7 @@ class Pipeline:
         if not launcher_works:
             fallback = Path(sys.executable)
             logger.warning(
-                "Configured Voice Python is unavailable: %s; falling back "
-                "to the dashboard interpreter %s",
+                "Configured Voice Python is unavailable: %s; falling back to the dashboard interpreter %s",
                 python_exe,
                 fallback,
             )
@@ -690,53 +638,39 @@ class Pipeline:
         """Persist the source-grounded audit and optionally enforce its gate."""
         from shared.models import CharacterRegistry, ExtractedBook, ScriptChapter
 
-        book = ExtractedBook.model_validate_json(
-            (project_dir / "book.json").read_text(encoding="utf-8")
-        )
-        registry = CharacterRegistry.model_validate_json(
-            (project_dir / "characters.json").read_text(encoding="utf-8")
-        )
+        book = ExtractedBook.model_validate_json((project_dir / "book.json").read_text(encoding="utf-8"))
+        registry = CharacterRegistry.model_validate_json((project_dir / "characters.json").read_text(encoding="utf-8"))
         scripts = [
             ScriptChapter.model_validate_json(path.read_text(encoding="utf-8"))
             for path in self._script_files(project_dir / "script")
         ]
         if chapter_numbers is not None:
-            scripts = [
-                script for script in scripts
-                if script.chapter_number in chapter_numbers
-            ]
-            book = book.model_copy(update={
-                "chapters": [
-                    chapter for chapter in book.chapters
-                    if chapter.number in chapter_numbers
-                ]
-            })
+            scripts = [script for script in scripts if script.chapter_number in chapter_numbers]
+            book = book.model_copy(
+                update={"chapters": [chapter for chapter in book.chapters if chapter.number in chapter_numbers]}
+            )
         report = audit_book_attribution(
             book,
             registry,
             scripts,
             confidence_threshold=self.script_generator.speaker_confidence_threshold,
         )
-        report["chapter_scope"] = (
-            sorted(chapter_numbers) if chapter_numbers is not None else None
-        )
+        report["chapter_scope"] = sorted(chapter_numbers) if chapter_numbers is not None else None
         report_path = project_dir / "attribution_audit.json"
         atomic_write_json(report_path, report)
         if enforce and not report["passed"]:
             from brain.orchestrator.review_gate import collect_review_gate
+
             blocking_items = [
                 item
-                for item in collect_review_gate(
-                    project_dir.name, project_dir, self.job_queue
-                ).blocking_items
+                for item in collect_review_gate(project_dir.name, project_dir, self.job_queue).blocking_items
                 if item.category == "attribution"
                 and (chapter_numbers is None or item.chapter_number in chapter_numbers)
             ]
             if blocking_items:
                 count = len(blocking_items)
                 raise RuntimeError(
-                    f"Speaker attribution release gate failed with {count} "
-                    f"blocking issue(s); inspect {report_path}"
+                    f"Speaker attribution release gate failed with {count} blocking issue(s); inspect {report_path}"
                 )
         return report
 
@@ -765,9 +699,7 @@ class Pipeline:
         if getattr(self, "_voice_server_proc", None) is not None:
             logger.info("Stopping Voice Server subprocess...")
             try:
-                self._terminate_managed_process_tree(
-                    self._voice_server_proc
-                )
+                self._terminate_managed_process_tree(self._voice_server_proc)
             except Exception as e:
                 logger.warning("Force killing Voice Server subprocess: %s", e)
                 try:
@@ -804,10 +736,7 @@ class Pipeline:
         if not windows:
             return
 
-        if any(
-            self._window_contains(win, self._schedule_now(schedule_cfg))
-            for win in windows
-        ):
+        if any(self._window_contains(win, self._schedule_now(schedule_cfg)) for win in windows):
             return
 
         def schedule_open() -> bool:
@@ -822,10 +751,7 @@ class Pipeline:
             if not current_windows:
                 return False
             now = self._schedule_now(current)
-            return any(
-                self._window_contains(win, now)
-                for win in current_windows
-            )
+            return any(self._window_contains(win, now) for win in current_windows)
 
         managed_voice_server = getattr(self, "_voice_server_proc", None) is not None
         if managed_voice_server:
@@ -848,6 +774,7 @@ class Pipeline:
         if state.get("deployment_requested", False):
             try:
                 from plyer import notification
+
                 notification.notify(
                     title="Audiobook Creator — Safe Deployment",
                     message=f"Pipeline parked for project '{project_id}'. Safe to deploy updates.",
@@ -860,9 +787,7 @@ class Pipeline:
                 project_id,
                 PipelineStage.DEPLOY_PAUSED,
                 "safe deployment requested",
-                lambda: not self.job_queue.get_job(project_id).get(
-                    "deployment_requested", False
-                ),
+                lambda: not self.job_queue.get_job(project_id).get("deployment_requested", False),
                 5,
             )
 
@@ -872,9 +797,7 @@ class Pipeline:
 
     def create_project(self, epub_path: str | Path) -> ProjectStatus:
         """Create a new audiobook project from an EPUB file."""
-        max_projects = int(
-            self.config.get("dashboard", {}).get("max_projects", 50)
-        )
+        max_projects = int(self.config.get("dashboard", {}).get("max_projects", 50))
         if max_projects > 0 and len(self.job_queue.list_jobs()) >= max_projects:
             raise ValueError(
                 f"Project limit reached ({max_projects}). Delete or archive an "
@@ -891,10 +814,7 @@ class Pipeline:
                 self.job_queue.get_job(project_id)
             except KeyError:
                 state_exists = False
-            if (
-                not state_exists
-                and not (self.projects_dir / project_id).exists()
-            ):
+            if not state_exists and not (self.projects_dir / project_id).exists():
                 break
             project_id = f"{base_id}-{counter}"
             counter += 1
@@ -992,9 +912,7 @@ class Pipeline:
         """Run one globally serialized pipeline worker."""
         run_lock = SingleInstanceLock("crazy-audiobook-pipeline.lock")
         if not run_lock.acquire():
-            raise RuntimeError(
-                "Another audiobook pipeline worker still owns the GPU lease"
-            )
+            raise RuntimeError("Another audiobook pipeline worker still owns the GPU lease")
         try:
             return self._run_exclusive(project_id)
         finally:
@@ -1007,10 +925,7 @@ class Pipeline:
             raise ValueError(f"Project not found: {project_id}")
 
         state = self.job_queue.get_job(project_id)
-        if (
-            state.get("script_completed", False)
-            and not self._script_artifacts_current(project_dir)
-        ):
+        if state.get("script_completed", False) and not self._script_artifacts_current(project_dir):
             logger.info(
                 "Script dependencies changed for '%s'; scheduling a book-wide "
                 "script refresh before further audio generation",
@@ -1028,13 +943,19 @@ class Pipeline:
                 },
             )
             state = self.job_queue.get_job(project_id)
-        current_stage = PipelineStage(
-            state.get("active_stage") or state.get("status", PipelineStage.CREATED)
-        )
+        current_stage = PipelineStage(state.get("active_stage") or state.get("status", PipelineStage.CREATED))
 
         # When starting or re-running a pipeline:
         # Determine the appropriate stage to resume from based on completed phases.
-        if current_stage in (PipelineStage.COMPLETE, PipelineStage.SELECTION_COMPLETE, PipelineStage.PAUSED, PipelineStage.ERROR, PipelineStage.PAUSED_SCHEDULED, PipelineStage.DEPLOY_PAUSED, PipelineStage.WAITING_FOR_REVIEW):
+        if current_stage in (
+            PipelineStage.COMPLETE,
+            PipelineStage.SELECTION_COMPLETE,
+            PipelineStage.PAUSED,
+            PipelineStage.ERROR,
+            PipelineStage.PAUSED_SCHEDULED,
+            PipelineStage.DEPLOY_PAUSED,
+            PipelineStage.WAITING_FOR_REVIEW,
+        ):
             current_stage = PipelineResumePlan.from_state(state).stage
             self.job_queue.update_job(
                 project_id,
@@ -1102,9 +1023,7 @@ class Pipeline:
                 if not attribution_audit["passed"]:
                     attribution_items = [
                         item.item_id
-                        for item in collect_review_gate(
-                            project_id, project_dir, self.job_queue
-                        ).blocking_items
+                        for item in collect_review_gate(project_id, project_dir, self.job_queue).blocking_items
                         if item.category == "attribution"
                     ]
                     if not attribution_items:
@@ -1117,8 +1036,7 @@ class Pipeline:
                         )
                     raise _WaitingForReview(
                         attribution_items,
-                        f"{len(attribution_items)} speaker attribution(s) "
-                        "require review before voice bootstrapping.",
+                        f"{len(attribution_items)} speaker attribution(s) require review before voice bootstrapping.",
                     )
 
             # Ollama and Qwen TTS share the GPU on the local setup. Do not load
@@ -1137,9 +1055,8 @@ class Pipeline:
             self._check_stop(project_id)
             state = self.job_queue.get_job(project_id)
             cast_path = project_dir / "voice_cast.json"
-            needs_bootstrap = (
-                not state.get("bootstrapping_completed", False)
-                or bool(state.get("force_voice_regeneration", False))
+            needs_bootstrap = not state.get("bootstrapping_completed", False) or bool(
+                state.get("force_voice_regeneration", False)
             )
             if cast_path.exists():
                 try:
@@ -1153,24 +1070,19 @@ class Pipeline:
 
             state = self.job_queue.get_job(project_id)
             if (
-                state.get("voice_review_policy", "grandfathered")
-                == "required_once"
+                state.get("voice_review_policy", "grandfathered") == "required_once"
                 and state.get("voice_review_status") != "approved"
             ):
                 self.job_queue.update_job(
                     project_id,
                     {
                         "voice_review_status": "waiting",
-                        "pause_reason": (
-                            "Review and approve the speaking cast before audio "
-                            "generation."
-                        ),
+                        "pause_reason": ("Review and approve the speaking cast before audio generation."),
                     },
                 )
                 self._update_stage(project_id, PipelineStage.VOICE_REVIEW)
                 logger.info(
-                    "Voice references are ready for '%s'; waiting for the "
-                    "one-time casting review",
+                    "Voice references are ready for '%s'; waiting for the one-time casting review",
                     project_id,
                 )
                 return ProjectStatus(**self.job_queue.get_job(project_id))
@@ -1241,8 +1153,7 @@ class Pipeline:
                 expected = set(range(1, total_chapters + 1))
                 if mastered != expected:
                     raise RuntimeError(
-                        "Full export refused because mastered chapters are missing: "
-                        f"{sorted(expected - mastered)}"
+                        f"Full export refused because mastered chapters are missing: {sorted(expected - mastered)}"
                     )
                 self._run_export(project_id, project_dir, partial=False)
 
@@ -1376,12 +1287,8 @@ class Pipeline:
         try:
             from shared.models import CharacterRegistry, ExtractedBook
 
-            book = ExtractedBook.model_validate_json(
-                book_path.read_text(encoding="utf-8")
-            )
-            registry = CharacterRegistry.model_validate_json(
-                chars_path.read_text(encoding="utf-8")
-            )
+            book = ExtractedBook.model_validate_json(book_path.read_text(encoding="utf-8"))
+            registry = CharacterRegistry.model_validate_json(chars_path.read_text(encoding="utf-8"))
             character_source_fingerprint = self._character_source_fingerprint(book)
             expected_character_fingerprint = fingerprint(
                 {
@@ -1389,13 +1296,8 @@ class Pipeline:
                     "model": self.ollama.model,
                 }
             )
-            character_metadata = json.loads(
-                chars_meta_path.read_text(encoding="utf-8")
-            )
-            if (
-                character_metadata.get("fingerprint")
-                != expected_character_fingerprint
-            ):
+            character_metadata = json.loads(chars_meta_path.read_text(encoding="utf-8"))
+            if character_metadata.get("fingerprint") != expected_character_fingerprint:
                 return False
             return self.script_generator.cached_scripts_are_current(
                 book.chapters,
@@ -1504,6 +1406,7 @@ class Pipeline:
 
         book_path = project_dir / "book.json"
         from shared.models import ExtractedBook
+
         book = ExtractedBook.model_validate_json(book_path.read_text(encoding="utf-8"))
 
         t0 = time.time()
@@ -1521,15 +1424,9 @@ class Pipeline:
         reuse_characters = False
         state = self.job_queue.get_job(project_id)
         force_character_analysis = bool(state.get("force_character_analysis"))
-        if (
-            not force_character_analysis
-            and chars_path.exists()
-            and chars_meta_path.exists()
-        ):
+        if not force_character_analysis and chars_path.exists() and chars_meta_path.exists():
             try:
-                chars_meta = json.loads(
-                    chars_meta_path.read_text(encoding="utf-8")
-                )
+                chars_meta = json.loads(chars_meta_path.read_text(encoding="utf-8"))
                 reuse_characters = chars_meta.get("fingerprint") == chars_fingerprint
             except Exception:
                 reuse_characters = False
@@ -1540,11 +1437,7 @@ class Pipeline:
             self._progress_estimator.snapshot(
                 f"{project_id}:character_analysis",
                 stage=PipelineStage.SCRIPTING.value,
-                phase=(
-                    "fragment_annotation"
-                    if reuse_characters
-                    else "character_discovery"
-                ),
+                phase=("fragment_annotation" if reuse_characters else "character_discovery"),
                 message=(
                     "Preparing chapter scripting..."
                     if reuse_characters
@@ -1561,6 +1454,7 @@ class Pipeline:
         joint_discovery = self._joint_script_analysis_enabled()
         joint_checkpoint_path = project_dir / "characters.joint.checkpoint.json"
         discovery_checkpoint_chapters: set[int] = set()
+
         def _analyzer_check():
             self._check_stop(project_id)
             self._check_schedule(project_id)
@@ -1569,23 +1463,21 @@ class Pipeline:
         if joint_discovery:
             if reuse_characters:
                 from shared.models import CharacterRegistry
+
                 registry = CharacterRegistry.model_validate_json(chars_path.read_text(encoding="utf-8"))
             else:
                 from shared.models import CharacterRegistry
+
                 registry = self.character_analyzer.create_joint_seed_registry(book)
                 if joint_checkpoint_path.is_file():
                     try:
-                        checkpoint = json.loads(
-                            joint_checkpoint_path.read_text(encoding="utf-8")
-                        )
+                        checkpoint = json.loads(joint_checkpoint_path.read_text(encoding="utf-8"))
                         if self._joint_checkpoint_is_compatible(
                             checkpoint,
                             character_fingerprint=chars_fingerprint,
                             source_fingerprint=chars_source_fingerprint,
                         ):
-                            registry = CharacterRegistry.model_validate(
-                                checkpoint["registry"]
-                            )
+                            registry = CharacterRegistry.model_validate(checkpoint["registry"])
                             discovery_checkpoint_chapters = {
                                 int(number)
                                 for number in checkpoint.get(
@@ -1594,8 +1486,7 @@ class Pipeline:
                                 )
                             }
                             logger.info(
-                                "Loaded source-compatible joint character checkpoint "
-                                "through chapter %d%s",
+                                "Loaded source-compatible joint character checkpoint through chapter %d%s",
                                 max(discovery_checkpoint_chapters, default=0),
                                 (
                                     " after a runtime-model migration"
@@ -1611,12 +1502,15 @@ class Pipeline:
         else:
             if reuse_characters:
                 from shared.models import CharacterRegistry
+
                 registry = CharacterRegistry.model_validate_json(chars_path.read_text(encoding="utf-8"))
             else:
                 chars_ckpt_path = project_dir / "characters.checkpoint.json"
                 analysis_tick = time.perf_counter()
 
-                def _analyzer_progress(percent: float, message: str, ch_num: int, unit_idx: int, total_units: int) -> None:
+                def _analyzer_progress(
+                    percent: float, message: str, ch_num: int, unit_idx: int, total_units: int
+                ) -> None:
                     """Publish character-discovery progress via the canonical snapshot."""
                     nonlocal analysis_tick
                     key = f"{project_id}:character_analysis"
@@ -1646,9 +1540,7 @@ class Pipeline:
                     check_callback=_analyzer_check,
                     checkpoint_path=chars_ckpt_path,
                     checkpoint_fingerprint=chars_fingerprint,
-                    reference_audit_path=(
-                        project_dir / "character_reference_audit.json"
-                    ),
+                    reference_audit_path=(project_dir / "character_reference_audit.json"),
                     project_dir=project_dir,
                     progress_callback=_analyzer_progress,
                 )
@@ -1699,10 +1591,14 @@ class Pipeline:
             if merged_script.exists():
                 try:
                     import json
+
                     merged_data = json.loads(merged_script.read_text(encoding="utf-8"))
                     if "chapters" in merged_data:
-                        merged_data["chapters"] = [c for c in merged_data["chapters"] if c.get("chapter_number") != chapter_num]
+                        merged_data["chapters"] = [
+                            c for c in merged_data["chapters"] if c.get("chapter_number") != chapter_num
+                        ]
                         from brain.utils.file_utils import atomic_write_text
+
                         atomic_write_text(merged_script, json.dumps(merged_data, indent=2, ensure_ascii=False))
                 except Exception:
                     pass
@@ -1735,12 +1631,8 @@ class Pipeline:
                     now - script_tick,
                 )
             script_tick = now
-            completed_chapters = len(
-                self.job_queue.get_job(project_id).get("scripted_chapters", [])
-            )
-            completed = completed_chapters + max(0, chunk_num - 1) / max(
-                chunk_total, 1
-            )
+            completed_chapters = len(self.job_queue.get_job(project_id).get("scripted_chapters", []))
+            completed = completed_chapters + max(0, chunk_num - 1) / max(chunk_total, 1)
             ch_idx = current_script_chapter - 1
             ch_obj = book.chapters[ch_idx] if 0 <= ch_idx < len(book.chapters) else None
             ch_title = getattr(ch_obj, "title", None) or f"chapter {current_script_chapter}"
@@ -1750,10 +1642,7 @@ class Pipeline:
                     f"{project_id}:scripting",
                     stage=PipelineStage.SCRIPTING.value,
                     phase="fragment_annotation",
-                    message=(
-                        f"Scripting {ch_title}: "
-                        f"fragment batch {chunk_num} of {chunk_total}"
-                    ),
+                    message=(f"Scripting {ch_title}: fragment batch {chunk_num} of {chunk_total}"),
                     completed_units=completed,
                     total_units=len(book.chapters),
                     chapter=current_script_chapter,
@@ -1770,10 +1659,13 @@ class Pipeline:
             scripted = state.get("scripted_chapters", [])
             if chapter_script.chapter_number not in scripted:
                 scripted.append(chapter_script.chapter_number)
-                self.job_queue.update_job(project_id, {
-                    "scripted_chapters": scripted,
-                    "current_script_chapter": chapter_script.chapter_number,
-                })
+                self.job_queue.update_job(
+                    project_id,
+                    {
+                        "scripted_chapters": scripted,
+                        "current_script_chapter": chapter_script.chapter_number,
+                    },
+                )
 
         def on_registry_progress(
             current_registry,
@@ -1798,12 +1690,8 @@ class Pipeline:
             chapter_start_callback=on_chapter_start,
             chunk_progress_callback=on_script_chunk,
             allow_character_discovery=joint_discovery,
-            discovery_checkpoint_chapters=(
-                discovery_checkpoint_chapters if joint_discovery else None
-            ),
-            registry_progress_callback=(
-                on_registry_progress if joint_discovery else None
-            ),
+            discovery_checkpoint_chapters=(discovery_checkpoint_chapters if joint_discovery else None),
+            registry_progress_callback=(on_registry_progress if joint_discovery else None),
         )
 
         if joint_discovery:
@@ -1812,9 +1700,7 @@ class Pipeline:
                 registry,
                 book,
                 check_callback=_analyzer_check if not reuse_characters else None,
-                reference_audit_path=(
-                    project_dir / "character_reference_audit.json"
-                ),
+                reference_audit_path=(project_dir / "character_reference_audit.json"),
                 project_dir=project_dir,
             )
             self._apply_character_overrides(project_dir, registry)
@@ -1947,11 +1833,7 @@ class Pipeline:
         for script in chapter_scripts:
             script_path = scripts_dir / f"chapter_{script.chapter_number:03d}.json"
             atomic_write_text(script_path, script.model_dump_json(indent=2))
-            source_chapter = next(
-                chapter
-                for chapter in book.chapters
-                if chapter.number == script.chapter_number
-            )
+            source_chapter = next(chapter for chapter in book.chapters if chapter.number == script.chapter_number)
             atomic_write_json(
                 scripts_dir / f"chapter_{script.chapter_number:03d}.meta.json",
                 self.script_generator.chapter_dependency_metadata(
@@ -1982,11 +1864,14 @@ class Pipeline:
         )
 
         total_elapsed = time.time() - t0
-        self.job_queue.update_job(project_id, {
-            "total_lines": total_lines,
-            "script_completed": True,
-            "current_script_chapter": None,
-        })
+        self.job_queue.update_job(
+            project_id,
+            {
+                "total_lines": total_lines,
+                "script_completed": True,
+                "current_script_chapter": None,
+            },
+        )
         self._append_performance_metric(
             project_dir,
             {
@@ -2018,9 +1903,8 @@ class Pipeline:
 
         chars_path = project_dir / "characters.json"
         from shared.models import CharacterRegistry
-        registry = CharacterRegistry.model_validate_json(
-            chars_path.read_text(encoding="utf-8")
-        )
+
+        registry = CharacterRegistry.model_validate_json(chars_path.read_text(encoding="utf-8"))
         # Character analysis intentionally sees the whole book and may identify
         # named non-speaking entities. Only bootstrap reference voices that are
         # actually used by a completed script, following any shared voice_id
@@ -2030,11 +1914,7 @@ class Pipeline:
 
         script_chapters: list[ScriptChapter] = []
         for script_path in self._script_files(project_dir / "script"):
-            script_chapters.append(
-                ScriptChapter.model_validate_json(
-                    script_path.read_text(encoding="utf-8")
-                )
-            )
+            script_chapters.append(ScriptChapter.model_validate_json(script_path.read_text(encoding="utf-8")))
         speaking_ids = required_voice_character_ids(script_chapters, registry)
 
         voice_config = shared_paths.voice_config()
@@ -2049,9 +1929,7 @@ class Pipeline:
             speaking_ids=speaking_ids,
             design_model=design_model,
             design_config={
-                "test_sentences": tts_config.get(
-                    "voice_design_test_sentences", {}
-                ),
+                "test_sentences": tts_config.get("voice_design_test_sentences", {}),
                 "language": tts_config.get("language", "English"),
                 "reference_text_policy": "ranked-actual-dialogue-v2",
             },
@@ -2085,15 +1963,10 @@ class Pipeline:
             ts = reference_selection.text
 
             dialogue_turns = sum(
-                len(speaker_script_lines.get(speaker_id, []))
-                for speaker_id in profile.get("assigned_characters", [])
+                len(speaker_script_lines.get(speaker_id, [])) for speaker_id in profile.get("assigned_characters", [])
             )
             effective_importance = (
-                "major"
-                if owner_id == "narrator"
-                or base_char.importance == "major"
-                or dialogue_turns >= 5
-                else "minor"
+                "major" if owner_id == "narrator" or base_char.importance == "major" or dialogue_turns >= 5 else "minor"
             )
             characters_for_request[voice_id] = base_char.model_copy(
                 update={
@@ -2133,14 +2006,9 @@ class Pipeline:
         request = BootstrapVoicesRequest(
             project_id=project_id,
             characters=characters_for_request,
-            force_regenerate=bool(
-                self.job_queue.get_job(project_id).get(
-                    "force_voice_regeneration", False
-                )
-            ),
+            force_regenerate=bool(self.job_queue.get_job(project_id).get("force_voice_regeneration", False)),
             design_fingerprints={
-                voice_id: profile["design_fingerprint"]
-                for voice_id, profile in cast["voices"].items()
+                voice_id: profile["design_fingerprint"] for voice_id, profile in cast["voices"].items()
             },
             candidate_counts={
                 voice_id: (
@@ -2166,8 +2034,7 @@ class Pipeline:
                     "acoustic_metrics": result.acoustic_metrics,
                 }
                 existing_warnings = [
-                    w for w in profile.get("warnings", [])
-                    if not w.startswith("Sounds very similar to")
+                    w for w in profile.get("warnings", []) if not w.startswith("Sounds very similar to")
                 ]
                 for warning in result.warnings:
                     if warning not in existing_warnings:
@@ -2179,6 +2046,7 @@ class Pipeline:
                     if cand.id == voice_id or cand.id in cast["voices"]:
                         continue
                     import copy
+
                     cand_profile = copy.deepcopy(profile)
                     cand_profile["voice_id"] = cand.id
                     if "_cand" in cand.id:
@@ -2200,24 +2068,16 @@ class Pipeline:
             cast["quality"] = {
                 "distinctness_status": "current",
                 "stale_voice_ids": [],
-                "cast_pair_diagnostics": [
-                    item.model_dump() for item in response.cast_diagnostics
-                ],
-                "similar_pairs": sum(
-                    item.status == "similar"
-                    for item in response.cast_diagnostics
-                ),
+                "cast_pair_diagnostics": [item.model_dump() for item in response.cast_diagnostics],
+                "similar_pairs": sum(item.status == "similar" for item in response.cast_diagnostics),
             }
             cast.pop("fingerprint", None)
             cast["fingerprint"] = fingerprint(cast)
             atomic_write_json(project_dir / "voice_cast.json", cast)
             current_state = self.job_queue.get_job(project_id)
-            review_status = current_state.get(
-                "voice_review_status", "grandfathered"
-            )
+            review_status = current_state.get("voice_review_status", "grandfathered")
             if (
-                current_state.get("voice_review_policy", "grandfathered")
-                == "required_once"
+                current_state.get("voice_review_policy", "grandfathered") == "required_once"
                 and review_status != "approved"
             ):
                 review_status = "ready"
@@ -2247,10 +2107,9 @@ class Pipeline:
         scripts_dir = project_dir / "script"
         script_files = self._script_files(scripts_dir)
         from shared.models import ScriptChapter as _ScriptChapter
+
         scripts_by_number = {
-            _ScriptChapter.model_validate_json(
-                path.read_text(encoding="utf-8")
-            ).chapter_number: path
+            _ScriptChapter.model_validate_json(path.read_text(encoding="utf-8")).chapter_number: path
             for path in script_files
         }
         chapter_numbers = list(scripts_by_number)
@@ -2268,19 +2127,14 @@ class Pipeline:
             # IncrementalDeliverySettings model instance or similar
             batch_size = int(getattr(incremental_cfg, "batch_size", 5))
         script_dependency_fingerprint = fingerprint(
-            {
-                str(number): hash_file(scripts_by_number[number])
-                for number in chapter_numbers
-            }
+            {str(number): hash_file(scripts_by_number[number]) for number in chapter_numbers}
         )
         index, batches = dm.ensure_plan(
             chapter_numbers,
             batch_size,
             script_dependency_fingerprint=script_dependency_fingerprint,
         )
-        book_data = json.loads(
-            (project_dir / "book.json").read_text(encoding="utf-8")
-        )
+        book_data = json.loads((project_dir / "book.json").read_text(encoding="utf-8"))
         book_meta = book_data.get("metadata", {})
         cover_candidate = Path(str(book_meta.get("cover_image_path") or ""))
         metadata_fingerprint = fingerprint(
@@ -2300,19 +2154,16 @@ class Pipeline:
                     return {}, {}
                 hashes[str(number)] = manifest_hash
                 try:
-                    qualities[str(number)] = json.loads(
-                        manifest_file.read_text(encoding="utf-8")
-                    ).get("mastering_quality", {})
+                    qualities[str(number)] = json.loads(manifest_file.read_text(encoding="utf-8")).get(
+                        "mastering_quality", {}
+                    )
                 except (OSError, ValueError, TypeError):
                     qualities[str(number)] = {}
             return hashes, qualities
 
         def update_publication_state(latest_id: str | None = None) -> None:
             current_index = dm.load_index()
-            published = [
-                part for part in current_index.deliveries
-                if part.status == "published"
-            ]
+            published = [part for part in current_index.deliveries if part.status == "published"]
             updates: dict[str, Any] = {
                 "published_delivery_count": len(published),
             }
@@ -2347,9 +2198,7 @@ class Pipeline:
                 },
             )
 
-            current_master_hashes, current_quality = master_dependencies(
-                batch.chapter_numbers
-            )
+            current_master_hashes, current_quality = master_dependencies(batch.chapter_numbers)
             if dm.is_published_and_valid(
                 batch,
                 plan_fingerprint=index.plan_fingerprint,
@@ -2375,10 +2224,8 @@ class Pipeline:
             batch_blocking_items = [
                 item["item_id"]
                 for item in release["items"]
-                if item["blocking"] and (
-                    item.get("chapter_number") is None
-                    or item.get("chapter_number") in batch_chapter_set
-                )
+                if item["blocking"]
+                and (item.get("chapter_number") is None or item.get("chapter_number") in batch_chapter_set)
             ]
             if batch_blocking_items:
                 raise _WaitingForReview(
@@ -2390,25 +2237,24 @@ class Pipeline:
             self._run_mastering(project_id, project_dir, batch_chapter_set)
             self._check_stop(project_id)
 
-            current_master_hashes, current_quality = master_dependencies(
-                batch.chapter_numbers
-            )
+            current_master_hashes, current_quality = master_dependencies(batch.chapter_numbers)
             if len(current_master_hashes) != len(batch.chapter_numbers):
-                raise RuntimeError(
-                    f"Delivery {batch.delivery_id} has incomplete mastering dependencies"
-                )
+                raise RuntimeError(f"Delivery {batch.delivery_id} has incomplete mastering dependencies")
 
             # Export and index under the same project-scoped packaging lock.
             temp_export_path = project_dir / f".temp_export_{batch.delivery_id}.m4b"
             with dm.packaging_lock(wait=True):
-                export_result = self._run_export(
-                    project_id,
-                    project_dir,
-                    partial=True,
-                    chapter_selection=batch_chapter_set,
-                    temp_output=temp_export_path,
-                    acquire_packaging_lock=False,
-                ) or {}
+                export_result = (
+                    self._run_export(
+                        project_id,
+                        project_dir,
+                        partial=True,
+                        chapter_selection=batch_chapter_set,
+                        temp_output=temp_export_path,
+                        acquire_packaging_lock=False,
+                    )
+                    or {}
+                )
                 title = book_meta.get("title") or project_id
                 published_part = dm.publish_delivery(
                     batch=batch,
@@ -2422,6 +2268,7 @@ class Pipeline:
                 )
                 try:
                     from brain.orchestrator.nas_syncer import NASSyncer
+
                     nas_syncer = NASSyncer()
                     if nas_syncer.is_configured and nas_syncer.auto_sync:
                         part_file = dm.resolve_artifact(published_part.artifact)
@@ -2434,7 +2281,7 @@ class Pipeline:
                 except Exception as nas_exc:
                     logger.warning("NAS sync for delivery %s failed: %s", batch.delivery_id, nas_exc)
                 try:
-                        notifier.notify_delivery_published(
+                    notifier.notify_delivery_published(
                         project_id=project_id,
                         project_title=title,
                         part_title=f"Part {batch.ordinal:02d}",
@@ -2473,9 +2320,7 @@ class Pipeline:
         if not attribution_audit["passed"]:
             attribution_items = [
                 item.item_id
-                for item in collect_review_gate(
-                    project_id, project_dir, self.job_queue
-                ).blocking_items
+                for item in collect_review_gate(project_id, project_dir, self.job_queue).blocking_items
                 if item.category == "attribution"
             ]
             if attribution_items:
@@ -2493,17 +2338,18 @@ class Pipeline:
         state = self.job_queue.get_job(project_id)
         project_language: str | None = None
         try:
-            project_language = str(
-                json.loads((project_dir / "book.json").read_text(encoding="utf-8"))
-                .get("metadata", {})
-                .get("language")
-                or ""
-            ).strip() or None
+            project_language = (
+                str(
+                    json.loads((project_dir / "book.json").read_text(encoding="utf-8"))
+                    .get("metadata", {})
+                    .get("language")
+                    or ""
+                ).strip()
+                or None
+            )
         except (OSError, ValueError, TypeError):
             project_language = None
-        generated_chapters, mastered_chapters = self._reconcile_artifacts(
-            project_id, project_dir, script_files
-        )
+        generated_chapters, mastered_chapters = self._reconcile_artifacts(project_id, project_dir, script_files)
         selection = (
             set(chapter_numbers)
             if chapter_numbers is not None
@@ -2517,9 +2363,7 @@ class Pipeline:
             selection
             if selection is not None
             else [
-                ScriptChapter.model_validate_json(
-                    path.read_text(encoding="utf-8")
-                ).chapter_number
+                ScriptChapter.model_validate_json(path.read_text(encoding="utf-8")).chapter_number
                 for path in script_files
             ]
         )
@@ -2536,9 +2380,7 @@ class Pipeline:
             self._check_schedule(project_id)
             self._check_deployment_pause(project_id)
 
-            chapter_script = ScriptChapter.model_validate_json(
-                script_file.read_text(encoding="utf-8")
-            )
+            chapter_script = ScriptChapter.model_validate_json(script_file.read_text(encoding="utf-8"))
 
             # Selection filter
             if selection is not None and chapter_script.chapter_number not in selection:
@@ -2599,10 +2441,7 @@ class Pipeline:
                 ) -> None:
                     phase = msg.get("phase", "synthesis")
                     now = time.perf_counter()
-                    estimator_key = (
-                        f"{project_id}:chapter:{chapter_script.chapter_number}:"
-                        f"{phase}"
-                    )
+                    estimator_key = f"{project_id}:chapter:{chapter_script.chapter_number}:{phase}"
                     # A stream retry restarts the chapter from its first
                     # utterance. Carrying the pre-failure samples forward would
                     # blend two different runs into one rate estimate and skew
@@ -2611,8 +2450,7 @@ class Pipeline:
                     stream_attempt = int(msg.get("stream_attempt", 1) or 1)
                     if stream_state["attempt"] != stream_attempt:
                         logger.info(
-                            "Voice stream restarted (attempt %d); resetting "
-                            "chapter %d progress estimate",
+                            "Voice stream restarted (attempt %d); resetting chapter %d progress estimate",
                             stream_attempt,
                             chapter_script.chapter_number,
                         )
@@ -2623,16 +2461,12 @@ class Pipeline:
                     if previous_tick is None:
                         self._progress_estimator.reset(estimator_key)
                     else:
-                        self._progress_estimator.observe(
-                            estimator_key, 1.0, now - previous_tick
-                        )
+                        self._progress_estimator.observe(estimator_key, 1.0, now - previous_tick)
                     progress_ticks[phase] = now
                     completed = int(msg.get("progress", 0) or 0)
                     total = int(msg.get("total", len(request_lines)) or 0)
                     stage_value = (
-                        PipelineStage.VALIDATING.value
-                        if phase == "validation"
-                        else PipelineStage.GENERATING.value
+                        PipelineStage.VALIDATING.value if phase == "validation" else PipelineStage.GENERATING.value
                     )
                     chapter_position = (
                         selected_numbers.index(chapter_script.chapter_number) + 1
@@ -2646,10 +2480,7 @@ class Pipeline:
                             estimator_key,
                             stage=stage_value,
                             phase=phase,
-                            message=(
-                                f"{phase.title()} {ch_title}: "
-                                f"utterance {completed} of {total}"
-                            ),
+                            message=(f"{phase.title()} {ch_title}: utterance {completed} of {total}"),
                             completed_units=completed,
                             total_units=total,
                             chapter=chapter_script.chapter_number,
@@ -2721,21 +2552,17 @@ class Pipeline:
                     ),
                 )
                 while True:
-                    external_review_ids, auto_regenerate_ids = (
-                        self._apply_external_audio_validation(
-                            project_id=project_id,
-                            project_dir=project_dir,
-                            request_lines=request_lines,
-                            response=response,
-                        )
+                    external_review_ids, auto_regenerate_ids = self._apply_external_audio_validation(
+                        project_id=project_id,
+                        project_dir=project_dir,
+                        request_lines=request_lines,
+                        response=response,
                     )
                     segment_dir = Path(response.segment_files_dir)
                     for candidate_result in response.quality_results:
                         candidate_audio = segment_dir / f"{candidate_result.line_id}.wav"
                         if candidate_result.selected and candidate_audio.is_file():
-                            preserved = preserve_candidate(
-                                project_dir, candidate_audio, candidate_result, retain=2
-                            )
+                            preserved = preserve_candidate(project_dir, candidate_audio, candidate_result, retain=2)
                             if preserved is not None:
                                 pool = candidate_pool.setdefault(candidate_result.line_id, [])
                                 pool.append(preserved)
@@ -2771,10 +2598,7 @@ class Pipeline:
                 # Gemini confidence. Restore the strongest artifact before logs
                 # and mastering consume it.
                 for line_id, candidates in candidate_pool.items():
-                    valid_candidates = [
-                        c for c in candidates
-                        if c is not None and Path(c.audio_path).is_file()
-                    ]
+                    valid_candidates = [c for c in candidates if c is not None and Path(c.audio_path).is_file()]
                     if not valid_candidates:
                         continue
                     winner = max(valid_candidates, key=lambda candidate: candidate.score)
@@ -2790,15 +2614,16 @@ class Pipeline:
                             try:
                                 shutil.copy2(winner.audio_path, final_audio)
                             except OSError as copy_exc:
-                                logger.warning("Could not restore winning candidate %s: %s", winner.audio_path, copy_exc)
+                                logger.warning(
+                                    "Could not restore winning candidate %s: %s", winner.audio_path, copy_exc
+                                )
                         for item in response.quality_results:
                             if item.line_id == line_id:
                                 item.selected = False
                         winner.result.selected = True
                         response.quality_results.append(winner.result)
                 review_by_id = {
-                    item["item_id"]: item
-                    for item in self.job_queue.get_review_items(project_id, "segment")
+                    item["item_id"]: item for item in self.job_queue.get_review_items(project_id, "segment")
                 }
                 for result in response.quality_results:
                     if not result.selected:
@@ -2840,9 +2665,7 @@ class Pipeline:
                         details=result.model_dump(mode="json"),
                     )
                 self._update_long_form_audio_quality(project_id, project_dir)
-                quality_summary = (
-                    self.job_queue.get_project_quality_summary(project_id)
-                )
+                quality_summary = self.job_queue.get_project_quality_summary(project_id)
                 expected_ids = {line.line_id for line in request_lines}
                 generated_ids = set(response.generated_line_ids)
                 accepted_review_ids = {
@@ -2865,11 +2688,7 @@ class Pipeline:
                     if result.selected and result.manual_review_required
                 }
                 fatal_failures = failed_ids - active_review_ids
-                if (
-                    response.generated != len(request_lines)
-                    or generated_ids != expected_ids
-                    or fatal_failures
-                ):
+                if response.generated != len(request_lines) or generated_ids != expected_ids or fatal_failures:
                     raise RuntimeError(
                         f"Chapter {chapter_script.chapter_number} generation incomplete: "
                         f"generated={response.generated}/{len(request_lines)}, "
@@ -2884,9 +2703,7 @@ class Pipeline:
                     manifest_path(project_dir, chapter_script.chapter_number),
                     segment_manifest,
                 )
-                generated_chapters = sorted(
-                    set(generated_chapters) | {chapter_script.chapter_number}
-                )
+                generated_chapters = sorted(set(generated_chapters) | {chapter_script.chapter_number})
                 current_state = self.job_queue.get_job(project_id)
                 voice_revision_pending = sorted(
                     set(
@@ -2898,25 +2715,31 @@ class Pipeline:
                     - {chapter_script.chapter_number}
                 )
                 project_quality = self.job_queue.get_project_quality_summary(project_id)
-                self.job_queue.update_job(project_id, {
-                    "generated_chapters": generated_chapters,
-                    "current_chapter": chapter_script.chapter_number,
-                    "lines_generated": response.generated,
-                    "lines_failed": response.failed_validation,
-                    "lines_accepted_with_warning": response.accepted_with_warning,
-                    "average_wer": project_quality.get(
-                        "average_wer", quality_summary.get("average_wer", 0.0)
-                    ),
-                    "validation_retries": project_quality.get(
-                        "total_retries", quality_summary.get("total_retries", 0)
-                    ),
-                    "validated_segments": project_quality.get(
-                        "total_segments", quality_summary.get("total_segments", 0)
-                    ),
-                    "voice_revision_pending_chapters": voice_revision_pending,
-                })
+                self.job_queue.update_job(
+                    project_id,
+                    {
+                        "generated_chapters": generated_chapters,
+                        "current_chapter": chapter_script.chapter_number,
+                        "lines_generated": response.generated,
+                        "lines_failed": response.failed_validation,
+                        "lines_accepted_with_warning": response.accepted_with_warning,
+                        "average_wer": project_quality.get("average_wer", quality_summary.get("average_wer", 0.0)),
+                        "validation_retries": project_quality.get(
+                            "total_retries", quality_summary.get("total_retries", 0)
+                        ),
+                        "validated_segments": project_quality.get(
+                            "total_segments", quality_summary.get("total_segments", 0)
+                        ),
+                        "voice_revision_pending_chapters": voice_revision_pending,
+                    },
+                )
 
-                logger.info("Chapter %d generated: %d/%d lines", chapter_script.chapter_number, response.generated, response.total_lines)
+                logger.info(
+                    "Chapter %d generated: %d/%d lines",
+                    chapter_script.chapter_number,
+                    response.generated,
+                    response.total_lines,
+                )
             except Exception as e:
                 logger.error("Failed to generate chapter %d: %s", chapter_script.chapter_number, e)
                 if self._stop_flags.get(project_id):
@@ -2933,10 +2756,9 @@ class Pipeline:
         script_files = self._script_files(scripts_dir)
 
         from shared.models import ScriptChapter
+
         state = self.job_queue.get_job(project_id)
-        generated_chapters, mastered_chapters = self._reconcile_artifacts(
-            project_id, project_dir, script_files
-        )
+        generated_chapters, mastered_chapters = self._reconcile_artifacts(project_id, project_dir, script_files)
         self.job_queue.update_job(
             project_id,
             {
@@ -2957,9 +2779,7 @@ class Pipeline:
             selection
             if selection is not None
             else [
-                ScriptChapter.model_validate_json(
-                    path.read_text(encoding="utf-8")
-                ).chapter_number
+                ScriptChapter.model_validate_json(path.read_text(encoding="utf-8")).chapter_number
                 for path in script_files
             ]
         )
@@ -2970,9 +2790,7 @@ class Pipeline:
             self._check_schedule(project_id)
             self._check_deployment_pause(project_id)
 
-            chapter_script = ScriptChapter.model_validate_json(
-                script_file.read_text(encoding="utf-8")
-            )
+            chapter_script = ScriptChapter.model_validate_json(script_file.read_text(encoding="utf-8"))
 
             if selection is not None and chapter_script.chapter_number not in selection:
                 continue
@@ -2983,8 +2801,7 @@ class Pipeline:
 
             if chapter_script.chapter_number not in generated_chapters:
                 raise RuntimeError(
-                    f"Cannot master chapter {chapter_script.chapter_number}: "
-                    "its segment manifest is incomplete"
+                    f"Cannot master chapter {chapter_script.chapter_number}: its segment manifest is incomplete"
                 )
 
             chapter_position = (
@@ -2999,10 +2816,7 @@ class Pipeline:
                     f"{project_id}:mastering",
                     stage=PipelineStage.MASTERING.value,
                     phase="chapter_mastering",
-                    message=(
-                        f"Mastering {ch_title} "
-                        f"({chapter_position} of {len(selected_numbers)})"
-                    ),
+                    message=(f"Mastering {ch_title} ({chapter_position} of {len(selected_numbers)})"),
                     completed_units=len(mastered_chapters),
                     total_units=len(selected_numbers),
                     chapter=chapter_script.chapter_number,
@@ -3035,19 +2849,11 @@ class Pipeline:
                 mastering_started = time.perf_counter()
                 response = self.voice_client.master_chapter(request)
                 mastering_seconds = time.perf_counter() - mastering_started
-                if (
-                    response.status != "success"
-                    or not self._valid_audio(Path(response.output_file))
-                ):
-                    raise RuntimeError(
-                        f"Chapter {chapter_script.chapter_number} mastering "
-                        "did not produce valid audio"
-                    )
+                if response.status != "success" or not self._valid_audio(Path(response.output_file)):
+                    raise RuntimeError(f"Chapter {chapter_script.chapter_number} mastering did not produce valid audio")
 
                 segment_manifest = json.loads(
-                    manifest_path(
-                        project_dir, chapter_script.chapter_number
-                    ).read_text(encoding="utf-8")
+                    manifest_path(project_dir, chapter_script.chapter_number).read_text(encoding="utf-8")
                 )
                 atomic_write_json(
                     master_manifest_path(project_dir, chapter_script.chapter_number),
@@ -3070,17 +2876,18 @@ class Pipeline:
                     },
                 )
                 if getattr(response, "timeline", None):
-                    timeline_file = project_dir / "manifests" / f"chapter_{chapter_script.chapter_number:03d}.timeline.json"
+                    timeline_file = (
+                        project_dir / "manifests" / f"chapter_{chapter_script.chapter_number:03d}.timeline.json"
+                    )
                     atomic_write_json(timeline_file, response.timeline)
-                mastered_chapters = sorted(
-                    set(mastered_chapters) | {chapter_script.chapter_number}
+                mastered_chapters = sorted(set(mastered_chapters) | {chapter_script.chapter_number})
+                self.job_queue.update_job(
+                    project_id,
+                    {
+                        "mastered_chapters": mastered_chapters,
+                    },
                 )
-                self.job_queue.update_job(project_id, {
-                    "mastered_chapters": mastered_chapters,
-                })
-                self._progress_estimator.observe(
-                    f"{project_id}:mastering", 1.0, mastering_seconds
-                )
+                self._progress_estimator.observe(f"{project_id}:mastering", 1.0, mastering_seconds)
                 self._append_performance_metric(
                     project_dir,
                     {
@@ -3094,7 +2901,12 @@ class Pipeline:
                     },
                 )
 
-                logger.info("Chapter %d mastered: %.1f seconds, %.1f LUFS", chapter_script.chapter_number, response.duration_seconds, response.lufs)
+                logger.info(
+                    "Chapter %d mastered: %.1f seconds, %.1f LUFS",
+                    chapter_script.chapter_number,
+                    response.duration_seconds,
+                    response.lufs,
+                )
             except Exception as e:
                 logger.error("Failed to master chapter %d: %s", chapter_script.chapter_number, e)
                 raise
@@ -3142,6 +2954,7 @@ class Pipeline:
 
         book_path = project_dir / "book.json"
         from shared.models import ExtractedBook, ScriptChapter
+
         book = ExtractedBook.model_validate_json(book_path.read_text(encoding="utf-8"))
 
         scripts_dir = project_dir / "script"
@@ -3163,37 +2976,29 @@ class Pipeline:
 
         chapters: list[ExportChapterInfo] = []
         for script_file in script_files:
-            ch = ScriptChapter.model_validate_json(
-                script_file.read_text(encoding="utf-8")
-            )
-            if (
-                partial
-                and chapter_selection is not None
-                and ch.chapter_number not in chapter_selection
-            ):
+            ch = ScriptChapter.model_validate_json(script_file.read_text(encoding="utf-8"))
+            if partial and chapter_selection is not None and ch.chapter_number not in chapter_selection:
                 continue
             if ch.chapter_number not in mastered_chapters:
                 if partial:
                     continue
-                raise RuntimeError(
-                    f"Full export refused: chapter {ch.chapter_number} is not mastered"
-                )
+                raise RuntimeError(f"Full export refused: chapter {ch.chapter_number} is not mastered")
 
             mastering_quality: dict[str, Any] = {}
-            chapter_master_manifest = master_manifest_path(
-                project_dir, ch.chapter_number
-            )
+            chapter_master_manifest = master_manifest_path(project_dir, ch.chapter_number)
             if chapter_master_manifest.is_file():
-                mastering_quality = json.loads(
-                    chapter_master_manifest.read_text(encoding="utf-8")
-                ).get("mastering_quality", {})
-            chapters.append(ExportChapterInfo(
-                number=ch.chapter_number,
-                title=ch.chapter_title,
-                file=f"chapters/chapter_{ch.chapter_number:03d}.wav",
-                lufs=mastering_quality.get("lufs"),
-                peak_dbfs=mastering_quality.get("peak_dbfs"),
-            ))
+                mastering_quality = json.loads(chapter_master_manifest.read_text(encoding="utf-8")).get(
+                    "mastering_quality", {}
+                )
+            chapters.append(
+                ExportChapterInfo(
+                    number=ch.chapter_number,
+                    title=ch.chapter_title,
+                    file=f"chapters/chapter_{ch.chapter_number:03d}.wav",
+                    lufs=mastering_quality.get("lufs"),
+                    peak_dbfs=mastering_quality.get("peak_dbfs"),
+                )
+            )
 
         if not chapters:
             raise RuntimeError("No mastered chapters are available for export")
@@ -3210,16 +3015,12 @@ class Pipeline:
                 )
 
         cover_art = (
-            Path(book.metadata.cover_image_path)
-            if book.metadata.cover_image_path
-            else project_dir / "cover.jpg"
+            Path(book.metadata.cover_image_path) if book.metadata.cover_image_path else project_dir / "cover.jpg"
         )
         cover_path_str = str(cover_art) if cover_art.is_file() else None
 
         output_name = (
-            f"{project_id}_chapters_{format_chapter_set(included_numbers)}.m4b"
-            if partial
-            else f"{project_id}.m4b"
+            f"{project_id}_chapters_{format_chapter_set(included_numbers)}.m4b" if partial else f"{project_id}.m4b"
         )
         request = ExportM4BRequest(
             project_id=project_id,
@@ -3243,9 +3044,8 @@ class Pipeline:
             raise RuntimeError(f"M4B exporter returned status '{response.status}'")
 
         import shutil
-        suffix = (
-            f"_chapters_{format_chapter_set(included_numbers)}" if partial else ""
-        )
+
+        suffix = f"_chapters_{format_chapter_set(included_numbers)}" if partial else ""
         local_m4b = temp_output if temp_output else project_dir / f"{project_id}{suffix}.m4b"
         local_m4b.parent.mkdir(parents=True, exist_ok=True)
 
@@ -3285,9 +3085,7 @@ class Pipeline:
             },
         )
         atomic_write_json(
-            project_dir / (
-                f"export_quality{suffix}.json"
-            ),
+            project_dir / (f"export_quality{suffix}.json"),
             {
                 "partial": partial,
                 "chapters": included_numbers,
@@ -3299,6 +3097,7 @@ class Pipeline:
         if not partial:
             try:
                 from brain.orchestrator.nas_syncer import NASSyncer
+
                 nas_syncer = NASSyncer()
                 if nas_syncer.is_configured and nas_syncer.auto_sync:
                     nas_syncer.sync_full_export(
@@ -3372,6 +3171,7 @@ class Pipeline:
     def _make_project_id(title: str) -> str:
         """Generate a URL-safe project ID from a book title."""
         import re
+
         project_id = title.lower().strip()
         project_id = re.sub(r"[^\w\s-]", "", project_id)
         project_id = re.sub(r"[-\s]+", "-", project_id)
@@ -3424,16 +3224,14 @@ class Pipeline:
         if not getattr(self.external_validator, "enabled", True):
             return set(), set()
         line_by_id = {line.line_id: line for line in request_lines}
-        review_by_id = {
-            item["item_id"]: item
-            for item in self.job_queue.get_review_items(project_id, "segment")
-        }
+        review_by_id = {item["item_id"]: item for item in self.job_queue.get_review_items(project_id, "segment")}
         manual_review_ids: set[str] = set()
         auto_regenerate_ids: set[str] = set()
         segment_dir = Path(response.segment_files_dir)
         reference_manager = None
         try:
             from voice.tts_server.voice_library import VoiceLibraryManager
+
             voice_config = shared_paths.voice_config()
             reference_manager = VoiceLibraryManager(
                 Path(
@@ -3478,12 +3276,9 @@ class Pipeline:
             high_confidence_reject = (
                 result.external_validation_decision == "reject"
                 and result.external_validation_confidence is not None
-                and result.external_validation_confidence
-                >= self.external_validator.auto_accept
+                and result.external_validation_confidence >= self.external_validator.auto_accept
             )
-            if high_confidence_reject and not (
-                human_review and human_review["disposition"] == "acceptable"
-            ):
+            if high_confidence_reject and not (human_review and human_review["disposition"] == "acceptable"):
                 auto_regenerate_ids.add(result.line_id)
             if result.manual_review_required:
                 manual_review_ids.add(result.line_id)
@@ -3503,9 +3298,7 @@ class Pipeline:
         characters: dict[str, Any] = {}
         chars_file = project_dir / "characters.json"
         if chars_file.exists():
-            characters = json.loads(chars_file.read_text(encoding="utf-8")).get(
-                "characters", {}
-            )
+            characters = json.loads(chars_file.read_text(encoding="utf-8")).get("characters", {})
 
         speaker_to_voice: dict[str, str] = {}
         cast_file = project_dir / "voice_cast.json"
@@ -3519,9 +3312,7 @@ class Pipeline:
 
         for line in lines:
             spoken_text = apply_pronunciations(line.text, pronunciation_dict)
-            line.spoken_text = (
-                spoken_text if spoken_text != line.text else None
-            )
+            line.spoken_text = spoken_text if spoken_text != line.text else None
             char_info = characters.get(line.speaker, {})
             line.voice_id = speaker_to_voice.get(line.speaker) or char_info.get("voice_id") or line.speaker
             if char_info.get("voice_fx"):
@@ -3534,9 +3325,7 @@ class Pipeline:
         terms: set[str] = set()
         characters_path = project_dir / "characters.json"
         if characters_path.exists():
-            characters = json.loads(
-                characters_path.read_text(encoding="utf-8")
-            ).get("characters", {})
+            characters = json.loads(characters_path.read_text(encoding="utf-8")).get("characters", {})
             for character_id, info in characters.items():
                 terms.add(character_id.replace("_", " "))
                 if isinstance(info, dict) and info.get("name"):
@@ -3565,11 +3354,9 @@ class Pipeline:
                             text,
                         ):
                             candidate = match.group(0)
-                            candidate_counts[candidate] = (
-                                candidate_counts.get(candidate, 0) + 1
-                            )
-                            prefix = text[:match.start()].rstrip()
-                            while prefix and prefix[-1] in '"\'“”‘’([{':
+                            candidate_counts[candidate] = candidate_counts.get(candidate, 0) + 1
+                            prefix = text[: match.start()].rstrip()
+                            while prefix and prefix[-1] in "\"'“”‘’([{":
                                 prefix = prefix[:-1].rstrip()
                             if prefix and prefix[-1] not in ".!?":
                                 mid_sentence_candidates.add(candidate)
@@ -3595,19 +3382,46 @@ class Pipeline:
                         pass
 
             sentence_words = {
-                "After", "Again", "Because", "Before", "Could", "Every",
-                "Finally", "First", "From", "Here", "However", "Instead",
-                "Perhaps", "Something", "That", "Their", "Then", "There",
-                "These", "They", "This", "Those", "Though", "Through",
-                "Until", "What", "Whatever", "When", "Where", "Whether",
-                "Which", "While", "With", "Without", "Would",
+                "After",
+                "Again",
+                "Because",
+                "Before",
+                "Could",
+                "Every",
+                "Finally",
+                "First",
+                "From",
+                "Here",
+                "However",
+                "Instead",
+                "Perhaps",
+                "Something",
+                "That",
+                "Their",
+                "Then",
+                "There",
+                "These",
+                "They",
+                "This",
+                "Those",
+                "Though",
+                "Through",
+                "Until",
+                "What",
+                "Whatever",
+                "When",
+                "Where",
+                "Whether",
+                "Which",
+                "While",
+                "With",
+                "Without",
+                "Would",
             }
             terms.update(
                 candidate
                 for candidate, count in candidate_counts.items()
-                if (
-                    count >= 2 or candidate in mid_sentence_candidates
-                ) and candidate not in sentence_words
+                if (count >= 2 or candidate in mid_sentence_candidates) and candidate not in sentence_words
             )
         return sorted(term for term in terms if term.strip())
 
@@ -3625,10 +3439,7 @@ class Pipeline:
             }
             metrics_path = project_dir / "performance_metrics.jsonl"
             with metrics_path.open("a", encoding="utf-8") as handle:
-                handle.write(
-                    json.dumps(metric, ensure_ascii=False, sort_keys=True)
-                    + "\n"
-                )
+                handle.write(json.dumps(metric, ensure_ascii=False, sort_keys=True) + "\n")
                 handle.flush()
         except Exception as exc:
             logger.warning("Could not persist performance metric: %s", exc)
@@ -3648,9 +3459,7 @@ class Pipeline:
         narrator_voice_id = self._selected_narrator_voice_id(project_dir)
 
         for script_file in script_files:
-            chapter = ScriptChapter.model_validate_json(
-                script_file.read_text(encoding="utf-8")
-            )
+            chapter = ScriptChapter.model_validate_json(script_file.read_text(encoding="utf-8"))
             generation_chapter = chapter.model_copy(
                 update={
                     "lines": self._prepare_generation_lines(
@@ -3669,72 +3478,43 @@ class Pipeline:
             if not segment_info_file.exists():
                 continue
             try:
-                stored_manifest = json.loads(
-                    segment_info_file.read_text(encoding="utf-8")
-                )
+                stored_manifest = json.loads(segment_info_file.read_text(encoding="utf-8"))
             except Exception:
                 continue
-            stored_payload = {
-                key: value
-                for key, value in stored_manifest.items()
-                if key != "manifest_hash"
-            }
+            stored_payload = {key: value for key, value in stored_manifest.items() if key != "manifest_hash"}
             if stored_manifest.get("manifest_hash") != fingerprint(stored_payload):
                 continue
             stored_dependency_payload = {
-                key: value
-                for key, value in stored_manifest.items()
-                if key not in {"dependency_hash", "manifest_hash"}
+                key: value for key, value in stored_manifest.items() if key not in {"dependency_hash", "manifest_hash"}
             }
             stored_dependency_payload["segments"] = [
-                {
-                    key: value
-                    for key, value in item.items()
-                    if key != "output_hash"
-                }
+                {key: value for key, value in item.items() if key != "output_hash"}
                 for item in stored_manifest.get("segments", [])
             ]
             stored_dependency_hash = fingerprint(stored_dependency_payload)
             if not (
-                stored_manifest.get("dependency_hash")
-                == stored_dependency_hash
-                == expected_manifest["dependency_hash"]
+                stored_manifest.get("dependency_hash") == stored_dependency_hash == expected_manifest["dependency_hash"]
             ):
                 continue
 
             stored_segments = stored_manifest.get("segments", [])
-            segment_paths = [
-                self.workspace_dir / item["file"]
-                for item in stored_segments
-            ]
-            if not segment_paths or not all(
-                self._valid_audio(path) for path in segment_paths
-            ):
+            segment_paths = [self.workspace_dir / item["file"] for item in stored_segments]
+            if not segment_paths or not all(self._valid_audio(path) for path in segment_paths):
                 continue
-            if any(
-                item.get("output_hash") != hash_file(path)
-                for item, path in zip(stored_segments, segment_paths)
-            ):
+            if any(item.get("output_hash") != hash_file(path) for item, path in zip(stored_segments, segment_paths)):
                 continue
             generated.append(chapter.chapter_number)
 
-            master_file = (
-                workspace / "chapters" / f"chapter_{chapter.chapter_number:03d}.wav"
-            )
-            master_info_file = master_manifest_path(
-                project_dir, chapter.chapter_number
-            )
+            master_file = workspace / "chapters" / f"chapter_{chapter.chapter_number:03d}.wav"
+            master_info_file = master_manifest_path(project_dir, chapter.chapter_number)
             if not self._valid_audio(master_file) or not master_info_file.exists():
                 continue
             try:
-                master_info = json.loads(
-                    master_info_file.read_text(encoding="utf-8")
-                )
+                master_info = json.loads(master_info_file.read_text(encoding="utf-8"))
             except Exception:
                 continue
             if (
-                master_info.get("segment_manifest_hash")
-                == stored_manifest["manifest_hash"]
+                master_info.get("segment_manifest_hash") == stored_manifest["manifest_hash"]
                 and master_info.get("dependency_hash")
                 == self._master_dependency_hash(
                     project_id,
@@ -3745,10 +3525,7 @@ class Pipeline:
                         segments=[
                             MasterSegmentInfo(
                                 line_id=line.line_id,
-                                file=(
-                                    f"{project_id}/segments/"
-                                    f"{line.line_id}.wav"
-                                ),
+                                file=(f"{project_id}/segments/{line.line_id}.wav"),
                                 pause_before_ms=line.pause_before_ms,
                                 pause_after_ms=line.pause_after_ms,
                                 utterance_group_id=line.utterance_group_id,
@@ -3772,9 +3549,7 @@ class Pipeline:
         cast_path = project_dir / "voice_cast.json"
         if cast_path.is_file():
             try:
-                voices = json.loads(
-                    cast_path.read_text(encoding="utf-8")
-                ).get("voices", {})
+                voices = json.loads(cast_path.read_text(encoding="utf-8")).get("voices", {})
                 for voice_id, profile in voices.items():
                     if "narrator" in profile.get("assigned_characters", []):
                         return str(voice_id)
@@ -3804,9 +3579,7 @@ class Pipeline:
             )
             project_voice_dir = voice_root / project_id
             result["voice_reference_hashes"] = {
-                path.stem: digest
-                for path in sorted(project_voice_dir.glob("*.wav"))
-                if (digest := hash_file(path))
+                path.stem: digest for path in sorted(project_voice_dir.glob("*.wav")) if (digest := hash_file(path))
             }
         return result
 

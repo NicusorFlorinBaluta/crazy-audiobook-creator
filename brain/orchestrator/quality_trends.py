@@ -19,9 +19,9 @@ from shared.models import ScriptChapter
 # block a release, and they were chosen to be quiet on the current corpus so
 # that a *change* in variance is the signal rather than an absolute level.
 WITHIN_CHAPTER_MIN_SEGMENTS = 6
-PITCH_VARIATION_WARN_RATIO = 0.22        # stdev / median of pitch_median
-RATE_VARIATION_WARN_RATIO = 0.30         # stdev / median of chars-per-second
-PITCH_JUMP_WARN_RATIO = 0.45             # largest adjacent-line pitch jump
+PITCH_VARIATION_WARN_RATIO = 0.22  # stdev / median of pitch_median
+RATE_VARIATION_WARN_RATIO = 0.30  # stdev / median of chars-per-second
+PITCH_JUMP_WARN_RATIO = 0.45  # largest adjacent-line pitch jump
 
 
 def _relative_spread(values: list[float]) -> float | None:
@@ -66,10 +66,7 @@ def _within_chapter_consistency(
     if len(voiced_pitches) >= 2:
         centre = median(voiced_pitches)
         if centre > 0:
-            jumps = [
-                abs(later - earlier) / centre
-                for earlier, later in zip(voiced_pitches, voiced_pitches[1:])
-            ]
+            jumps = [abs(later - earlier) / centre for earlier, later in zip(voiced_pitches, voiced_pitches[1:])]
             largest_jump = round(max(jumps), 6)
 
     pitch_spread = _relative_spread(pitches)
@@ -129,18 +126,10 @@ def build_long_form_quality_report(
     by_voice: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for (voice_id, chapter_number), details_rows in sorted(buckets.items()):
         similarities = [
-            float(row["speaker_similarity"])
-            for row in details_rows
-            if row.get("speaker_similarity") is not None
+            float(row["speaker_similarity"]) for row in details_rows if row.get("speaker_similarity") is not None
         ]
-        pitches = [
-            float(row["pitch_median"])
-            for row in details_rows
-            if float(row.get("pitch_median") or 0) > 0
-        ]
-        eligible_prosody = [
-            row for row in details_rows if float(row.get("duration_seconds") or 0) >= 1.0
-        ]
+        pitches = [float(row["pitch_median"]) for row in details_rows if float(row.get("pitch_median") or 0) > 0]
+        eligible_prosody = [row for row in details_rows if float(row.get("duration_seconds") or 0) >= 1.0]
         item = {
             "voice_id": voice_id,
             "chapter_number": chapter_number,
@@ -149,15 +138,13 @@ def build_long_form_quality_report(
             "pitch_median_hz": median(pitches) if pitches else None,
             "prosody_eligible_segments": len(eligible_prosody),
             "monotone_fraction": (
-                sum(bool(row.get("monotone_warning")) for row in eligible_prosody)
-                / len(eligible_prosody)
-                if eligible_prosody else None
+                sum(bool(row.get("monotone_warning")) for row in eligible_prosody) / len(eligible_prosody)
+                if eligible_prosody
+                else None
             ),
             "warnings": [],
         }
-        item["within_chapter_consistency"] = _within_chapter_consistency(
-            details_rows
-        )
+        item["within_chapter_consistency"] = _within_chapter_consistency(details_rows)
         chapter_rows.append(item)
         if len(details_rows) >= 3:
             by_voice[voice_id].append(item)
@@ -165,38 +152,22 @@ def build_long_form_quality_report(
     warnings: list[dict[str, Any]] = []
     for voice_id, rows in by_voice.items():
         similarity_baseline_values = [
-            row["speaker_similarity_median"]
-            for row in rows
-            if row["speaker_similarity_median"] is not None
+            row["speaker_similarity_median"] for row in rows if row["speaker_similarity_median"] is not None
         ]
-        pitch_baseline_values = [
-            row["pitch_median_hz"]
-            for row in rows
-            if row["pitch_median_hz"] is not None
-        ]
-        similarity_baseline = (
-            median(similarity_baseline_values) if similarity_baseline_values else None
-        )
+        pitch_baseline_values = [row["pitch_median_hz"] for row in rows if row["pitch_median_hz"] is not None]
+        similarity_baseline = median(similarity_baseline_values) if similarity_baseline_values else None
         pitch_baseline = median(pitch_baseline_values) if pitch_baseline_values else None
         for row in rows:
             similarity = row["speaker_similarity_median"]
             pitch = row["pitch_median_hz"]
             similarity_drop = (
-                similarity_baseline - similarity
-                if similarity is not None and similarity_baseline is not None
-                else 0.0
+                similarity_baseline - similarity if similarity is not None and similarity_baseline is not None else 0.0
             )
-            pitch_deviation = (
-                abs(pitch - pitch_baseline) / pitch_baseline
-                if pitch and pitch_baseline
-                else 0.0
-            )
+            pitch_deviation = abs(pitch - pitch_baseline) / pitch_baseline if pitch and pitch_baseline else 0.0
             # Pitch alone is expressive, not identity drift.  Escalate only
             # sustained pitch movement accompanied by weaker voice identity.
             if similarity is not None and (
-                similarity < 0.62
-                or similarity_drop >= 0.10
-                or (pitch_deviation >= 0.25 and similarity_drop >= 0.05)
+                similarity < 0.62 or similarity_drop >= 0.10 or (pitch_deviation >= 0.25 and similarity_drop >= 0.05)
             ):
                 warning = {
                     "kind": "cross_chapter_voice_drift",
@@ -211,26 +182,26 @@ def build_long_form_quality_report(
             for consistency_warning in row["within_chapter_consistency"]["warnings"]:
                 if consistency_warning not in row["warnings"]:
                     row["warnings"].append(consistency_warning)
-                warnings.append({
-                    "kind": consistency_warning,
-                    "voice_id": voice_id,
-                    "chapter_number": row["chapter_number"],
-                    **{
-                        key: value
-                        for key, value in row["within_chapter_consistency"].items()
-                        if key != "warnings"
-                    },
-                })
+                warnings.append(
+                    {
+                        "kind": consistency_warning,
+                        "voice_id": voice_id,
+                        "chapter_number": row["chapter_number"],
+                        **{key: value for key, value in row["within_chapter_consistency"].items() if key != "warnings"},
+                    }
+                )
             monotone_fraction = row["monotone_fraction"]
             if row["prosody_eligible_segments"] >= 5 and monotone_fraction is not None and monotone_fraction >= 0.35:
                 row["warnings"].append("sustained_monotone_delivery")
-                warnings.append({
-                    "kind": "sustained_monotone_delivery",
-                    "voice_id": voice_id,
-                    "chapter_number": row["chapter_number"],
-                    "monotone_fraction": monotone_fraction,
-                    "segments": row["prosody_eligible_segments"],
-                })
+                warnings.append(
+                    {
+                        "kind": "sustained_monotone_delivery",
+                        "voice_id": voice_id,
+                        "chapter_number": row["chapter_number"],
+                        "monotone_fraction": monotone_fraction,
+                        "segments": row["prosody_eligible_segments"],
+                    }
+                )
 
     return {
         "schema": "long-form-audio-quality-v1",

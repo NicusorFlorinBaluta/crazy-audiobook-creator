@@ -77,17 +77,14 @@ class ExtractedBook(BaseModel):
 
 class VoiceFXSettings(BaseModel):
     """Post-processing controls for TTS generation."""
+
     pitch_semitones: float = Field(default=0.0, ge=-12.0, le=12.0)
     speed: float = Field(default=1.0, ge=0.5, le=2.0)
     tone: str = Field(default="neutral", description="neutral | warm | bright")
 
     def is_identity(self) -> bool:
         """Return True when the settings would not alter the audio."""
-        return (
-            abs(self.pitch_semitones) < 1e-3
-            and abs(self.speed - 1.0) < 1e-3
-            and self.tone == "neutral"
-        )
+        return abs(self.pitch_semitones) < 1e-3 and abs(self.speed - 1.0) < 1e-3 and self.tone == "neutral"
 
 
 class Character(BaseModel):
@@ -103,9 +100,7 @@ class Character(BaseModel):
         default_factory=list,
         description="Known nicknames, titles, or alternative names for this character",
     )
-    voice_description: str = Field(
-        description="Natural language voice description for TTS Voice Design"
-    )
+    voice_description: str = Field(description="Natural language voice description for TTS Voice Design")
     speaking_style: str = Field(
         default="",
         description="How the character typically speaks",
@@ -200,7 +195,9 @@ class ScriptLine(BaseModel):
         description="Voice-library ID when it differs from the character/speaker ID",
     )
     text: str = Field(description="The text to speak")
-    spoken_text: str | None = Field(default=None, description="Optional explicitly overridden pronunciation for TTS synthesis")
+    spoken_text: str | None = Field(
+        default=None, description="Optional explicitly overridden pronunciation for TTS synthesis"
+    )
     emotion: str = Field(
         default="neutral",
         description="Emotional state described in natural language, e.g. 'contemplative, somber'",
@@ -227,9 +224,7 @@ class ScriptLine(BaseModel):
         le=5000,
         description="Silence after this segment (ms)",
     )
-    dialogue_kind: Literal[
-        "spoken", "non_spoken_quote", "reported_collective_speech"
-    ] | None = Field(
+    dialogue_kind: Literal["spoken", "non_spoken_quote", "reported_collective_speech"] | None = Field(
         default=None,
         description=(
             "Classification for quoted source fragments. Spoken quotations "
@@ -269,11 +264,13 @@ class ScriptLine(BaseModel):
 
 class SceneState(BaseModel):
     """A scene-level prosody state for pacing and mood constraint."""
+
     mood: str = Field(description="Overall scene mood (e.g. 'tense', 'melancholic')")
     tension: str = Field(description="Tension level (e.g. 'high', 'building', 'low')")
     narrator_pace: float = Field(description="Base pacing for the narrator in this scene")
     character_state: str = Field(description="General state of characters in the scene")
     transition_intent: str = Field(description="How this scene transitions to the next")
+
 
 class ScriptChapter(BaseModel):
     """A fully annotated chapter script ready for TTS generation."""
@@ -434,12 +431,12 @@ class VoiceCandidate(BaseModel):
     acoustic_metrics: dict[str, float] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
 
+
 class BootstrapVoiceResult(VoiceCandidate):
     """Result of generating voice reference clips for a character."""
 
     id: str = "default"
     candidates: list[VoiceCandidate] = Field(default_factory=list)
-
 
 
 class CastPairDiagnostic(BaseModel):
@@ -456,8 +453,8 @@ class CastPairDiagnostic(BaseModel):
     warning_suppressed: bool = False
     suppression_reason: str | None = None
 
-class BootstrapVoicesResponse(BaseModel):
 
+class BootstrapVoicesResponse(BaseModel):
     """Response after generating all voice reference clips."""
 
     status: str = "success"
@@ -724,9 +721,7 @@ class ProgressSnapshot(BaseModel):
     eta_seconds: float | None = None
     eta_confidence: Literal["none", "low", "medium", "high"] = "none"
     started_at: datetime | None = None
-    updated_at: datetime = Field(
-        default_factory=lambda: datetime.now(UTC)
-    )
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class ProjectStatus(BaseModel):
@@ -772,6 +767,7 @@ class ProjectStatus(BaseModel):
     published_delivery_count: int = 0
     latest_published_delivery_id: str | None = None
     pause_after_delivery_requested: bool = False
+
 
 class ProjectSummary(BaseModel):
     """Brief summary of a project for listing."""

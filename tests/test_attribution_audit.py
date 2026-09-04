@@ -27,20 +27,32 @@ class AttributionAuditTests(unittest.TestCase):
             book_author="Author",
             characters={
                 "narrator": Character(
-                    id="narrator", name="Narrator", gender=Gender.MALE,
-                    age_range="adult", voice_description="neutral narrator",
+                    id="narrator",
+                    name="Narrator",
+                    gender=Gender.MALE,
+                    age_range="adult",
+                    voice_description="neutral narrator",
                 ),
                 "vathi": Character(
-                    id="vathi", name="Vathi", gender=Gender.FEMALE,
-                    age_range="adult", voice_description="clear voice",
+                    id="vathi",
+                    name="Vathi",
+                    gender=Gender.FEMALE,
+                    age_range="adult",
+                    voice_description="clear voice",
                 ),
                 "dusk": Character(
-                    id="dusk", name="Dusk", gender=Gender.MALE,
-                    age_range="adult", voice_description="measured voice",
+                    id="dusk",
+                    name="Dusk",
+                    gender=Gender.MALE,
+                    age_range="adult",
+                    voice_description="measured voice",
                 ),
                 "minor_female": Character(
-                    id="minor_female", name="Unnamed Woman", gender=Gender.FEMALE,
-                    age_range="adult", voice_description="generic female voice",
+                    id="minor_female",
+                    name="Unnamed Woman",
+                    gender=Gender.FEMALE,
+                    age_range="adult",
+                    voice_description="generic female voice",
                 ),
             },
         )
@@ -67,9 +79,7 @@ class AttributionAuditTests(unittest.TestCase):
             lines.append(ScriptLine(**values))
         book = ExtractedBook(
             metadata=BookMetadata(title="Book", author="Author", total_chapters=1),
-            chapters=[
-                ExtractedChapter(number=1, title="One", text=source, word_count=3)
-            ],
+            chapters=[ExtractedChapter(number=1, title="One", text=source, word_count=3)],
         )
         script = ScriptChapter(chapter_number=1, chapter_title="One", lines=lines)
         return book, [script]
@@ -132,16 +142,12 @@ class AttributionAuditTests(unittest.TestCase):
             scripts,
         )
 
-        dialogue = next(
-            line for line in scripts[0].lines if line.dialogue_kind == "spoken"
-        )
+        dialogue = next(line for line in scripts[0].lines if line.dialogue_kind == "spoken")
         self.assertEqual(len(result["repaired"]), 1)
         self.assertEqual(dialogue.speaker, "vathi")
         self.assertEqual(dialogue.speaker_confidence, 1.0)
         self.assertEqual(dialogue.attribution_resolver, "deterministic_named_tag")
-        self.assertTrue(
-            audit_book_attribution(book, self.registry, scripts)["passed"]
-        )
+        self.assertTrue(audit_book_attribution(book, self.registry, scripts)["passed"])
 
     def test_repairs_generic_scene_after_registered_self_identity_reveal(self) -> None:
         source = (
@@ -164,18 +170,14 @@ class AttributionAuditTests(unittest.TestCase):
             scripts,
         )
 
-        dialogue = [
-            line for line in scripts[0].lines if line.dialogue_kind == "spoken"
-        ]
+        dialogue = [line for line in scripts[0].lines if line.dialogue_kind == "spoken"]
         self.assertEqual(len(result["repaired"]), 3)
         self.assertEqual({line.speaker for line in dialogue}, {"vathi"})
         self.assertEqual(
             {line.attribution_resolver for line in dialogue},
             {"deterministic_identity_reveal"},
         )
-        self.assertTrue(
-            audit_book_attribution(book, self.registry, scripts)["passed"]
-        )
+        self.assertTrue(audit_book_attribution(book, self.registry, scripts)["passed"])
 
     def test_does_not_repair_identity_reveal_with_gender_conflict(self) -> None:
         source = '"My name is Dusk," the woman said.'
@@ -187,9 +189,7 @@ class AttributionAuditTests(unittest.TestCase):
             scripts,
         )
 
-        dialogue = next(
-            line for line in scripts[0].lines if line.dialogue_kind == "spoken"
-        )
+        dialogue = next(line for line in scripts[0].lines if line.dialogue_kind == "spoken")
         self.assertEqual(result["repaired"], [])
         self.assertEqual(dialogue.speaker, "minor_female")
         self.assertIn(dialogue.line_id, result["conflicted_line_ids"])
@@ -197,9 +197,7 @@ class AttributionAuditTests(unittest.TestCase):
     def test_repairs_bare_name_answer_after_identity_question(self) -> None:
         source = '"What is your name?" Dusk asked. "Vathi," the woman replied.'
         book, scripts = self._artifacts(source, "minor_female")
-        dialogue = [
-            line for line in scripts[0].lines if line.dialogue_kind == "spoken"
-        ]
+        dialogue = [line for line in scripts[0].lines if line.dialogue_kind == "spoken"]
         dialogue[0].speaker = "dusk"
 
         result = repair_deterministic_named_attribution(
@@ -221,9 +219,7 @@ class AttributionAuditTests(unittest.TestCase):
             scripts,
         )
 
-        dialogue = next(
-            line for line in scripts[0].lines if line.dialogue_kind == "spoken"
-        )
+        dialogue = next(line for line in scripts[0].lines if line.dialogue_kind == "spoken")
         self.assertEqual(dialogue.speaker, "minor_female")
         self.assertEqual(result["repaired"], [])
 
@@ -237,9 +233,7 @@ class AttributionAuditTests(unittest.TestCase):
             confidence_threshold=0.55,
         )
 
-        dialogue = next(
-            line for line in scripts[0].lines if line.dialogue_kind == "spoken"
-        )
+        dialogue = next(line for line in scripts[0].lines if line.dialogue_kind == "spoken")
         self.assertEqual(queued, [dialogue.line_id])
         self.assertTrue(dialogue.attribution_review_required)
         self.assertLess(dialogue.speaker_confidence, 0.55)
@@ -249,9 +243,7 @@ class AttributionAuditTests(unittest.TestCase):
         source = '"Just for me?" she whispered. "Just for you."'
         fragments = ScriptGenerator._split_into_fragment_spans(source)
         dialogue_indexes = [
-            index
-            for index, fragment in enumerate(fragments)
-            if ScriptGenerator._is_dialogue_fragment(fragment.text)
+            index for index, fragment in enumerate(fragments) if ScriptGenerator._is_dialogue_fragment(fragment.text)
         ]
         lines = []
         for index, fragment in enumerate(fragments):

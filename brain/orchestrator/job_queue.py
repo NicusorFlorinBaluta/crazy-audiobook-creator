@@ -201,11 +201,7 @@ class JobQueue:
         progress: ProgressSnapshot | dict[str, Any],
     ) -> None:
         """Persist one canonical progress snapshot and compatibility fields."""
-        snapshot = (
-            progress
-            if isinstance(progress, ProgressSnapshot)
-            else ProgressSnapshot.model_validate(progress)
-        )
+        snapshot = progress if isinstance(progress, ProgressSnapshot) else ProgressSnapshot.model_validate(progress)
         payload = snapshot.model_dump(mode="json")
         updates: dict[str, Any] = {
             "progress": payload,
@@ -292,9 +288,17 @@ class JobQueue:
         }
 
     def log_external_validation(
-        self, project_id: str, item_type: str, item_id: str, provider: str,
-        model: str, decision: str, confidence: float | None, reason: str,
-        latency_ms: int | None = None, details: dict[str, Any] | None = None,
+        self,
+        project_id: str,
+        item_type: str,
+        item_id: str,
+        provider: str,
+        model: str,
+        decision: str,
+        confidence: float | None,
+        reason: str,
+        latency_ms: int | None = None,
+        details: dict[str, Any] | None = None,
     ) -> int:
         """Append one immutable machine-decision event."""
         now = datetime.now(UTC).isoformat()
@@ -303,15 +307,30 @@ class JobQueue:
                 """INSERT INTO external_validation_events
                 (project_id,item_type,item_id,provider,model,decision,confidence,reason,latency_ms,details,created_at)
                 VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-                (project_id, item_type, item_id, provider, model, decision,
-                 confidence, reason, latency_ms, json.dumps(details or {}), now),
+                (
+                    project_id,
+                    item_type,
+                    item_id,
+                    provider,
+                    model,
+                    decision,
+                    confidence,
+                    reason,
+                    latency_ms,
+                    json.dumps(details or {}),
+                    now,
+                ),
             )
             conn.commit()
             return int(cursor.lastrowid)
 
     def reconcile_external_validation(
-        self, project_id: str, item_type: str, item_id: str,
-        human_disposition: str, human_value: str = "",
+        self,
+        project_id: str,
+        item_type: str,
+        item_id: str,
+        human_disposition: str,
+        human_value: str = "",
     ) -> None:
         """Attach a human outcome to all prior machine decisions for an item."""
         now = datetime.now(UTC).isoformat()
@@ -333,8 +352,22 @@ class JobQueue:
                 FROM external_validation_events WHERE project_id=? ORDER BY id DESC""",
                 (project_id,),
             ).fetchall()
-        keys = ("id","item_type","item_id","provider","model","decision","confidence",
-                "reason","latency_ms","details","human_disposition","human_value","human_at","created_at")
+        keys = (
+            "id",
+            "item_type",
+            "item_id",
+            "provider",
+            "model",
+            "decision",
+            "confidence",
+            "reason",
+            "latency_ms",
+            "details",
+            "human_disposition",
+            "human_value",
+            "human_at",
+            "created_at",
+        )
         result = []
         for row in rows:
             item = dict(zip(keys, row))
@@ -344,7 +377,8 @@ class JobQueue:
 
     @staticmethod
     def _calibration_summary(
-        outcomes: list[tuple[float, bool]], minimum_samples: int,
+        outcomes: list[tuple[float, bool]],
+        minimum_samples: int,
     ) -> dict[str, Any]:
         """Summarize confidence-versus-human agreement without tuning policy."""
         sample_count = len(outcomes)
@@ -352,8 +386,14 @@ class JobQueue:
         for low in (0.0, 0.5, 0.7, 0.85):
             high = {0.0: 0.5, 0.5: 0.7, 0.7: 0.85, 0.85: 1.01}[low]
             rows = [agree for confidence, agree in outcomes if low <= confidence < high]
-            bins.append({"low": low, "high": min(high, 1.0), "samples": len(rows),
-                         "agreement": sum(rows) / len(rows) if rows else None})
+            bins.append(
+                {
+                    "low": low,
+                    "high": min(high, 1.0),
+                    "samples": len(rows),
+                    "agreement": sum(rows) / len(rows) if rows else None,
+                }
+            )
         recommended = None
         if sample_count >= minimum_samples:
             lowest_observed = min(confidence for confidence, _ in outcomes)
@@ -365,9 +405,9 @@ class JobQueue:
                     recommended = threshold
                     break
         brier_score = (
-            sum((confidence - float(agrees)) ** 2 for confidence, agrees in outcomes)
-            / sample_count
-            if sample_count else None
+            sum((confidence - float(agrees)) ** 2 for confidence, agrees in outcomes) / sample_count
+            if sample_count
+            else None
         )
         populated_bins = [row for row in bins if row["samples"]]
         expected_calibration_error = (
@@ -385,15 +425,20 @@ class JobQueue:
                 )
                 for row in populated_bins
             )
-            if sample_count else None
+            if sample_count
+            else None
         )
-        return {"sample_count": sample_count, "minimum_samples": minimum_samples,
-                "samples_needed": max(0, minimum_samples - sample_count),
-                "ready": sample_count >= minimum_samples, "bins": bins,
-                "brier_score": brier_score,
-                "expected_calibration_error": expected_calibration_error,
-                "recommended_auto_accept_threshold": recommended,
-                "applied_automatically": False}
+        return {
+            "sample_count": sample_count,
+            "minimum_samples": minimum_samples,
+            "samples_needed": max(0, minimum_samples - sample_count),
+            "ready": sample_count >= minimum_samples,
+            "bins": bins,
+            "brier_score": brier_score,
+            "expected_calibration_error": expected_calibration_error,
+            "recommended_auto_accept_threshold": recommended,
+            "applied_automatically": False,
+        }
 
     def external_validation_calibration(self, project_id: str, minimum_samples: int = 25) -> dict[str, Any]:
         """Compute project and purpose-matched pooled calibration metrics.
@@ -417,8 +462,16 @@ class JobQueue:
         seen: set[tuple[str, str, str]] = set()
         for row in rows:
             (
-                event_project, item_type, item_id, provider, model, decision,
-                confidence, details_json, human, _event_id,
+                event_project,
+                item_type,
+                item_id,
+                provider,
+                model,
+                decision,
+                confidence,
+                details_json,
+                human,
+                _event_id,
             ) = row
             item_key = (str(event_project), str(item_type), str(item_id))
             if item_key in seen or confidence is None:
@@ -427,12 +480,8 @@ class JobQueue:
             decision_norm = str(decision or "").lower()
             human_norm = str(human or "").lower()
             agrees = (
-                decision_norm in {"accept", "accepted", "resolved"}
-                and human_norm in {"acceptable", "resolved"}
-            ) or (
-                decision_norm in {"reject", "regenerate"}
-                and human_norm in {"regenerate", "source_tts_issue"}
-            )
+                decision_norm in {"accept", "accepted", "resolved"} and human_norm in {"acceptable", "resolved"}
+            ) or (decision_norm in {"reject", "regenerate"} and human_norm in {"regenerate", "source_tts_issue"})
             outcome = (max(0.0, min(1.0, float(confidence))), agrees)
             if event_project == project_id:
                 project_outcomes.append(outcome)
@@ -441,10 +490,7 @@ class JobQueue:
             except (TypeError, json.JSONDecodeError):
                 details = {}
             revision = str(
-                details.get("purpose_version")
-                or details.get("schema_revision")
-                or details.get("schema")
-                or "legacy"
+                details.get("purpose_version") or details.get("schema_revision") or details.get("schema") or "legacy"
             )
             key = (
                 str(provider or "unknown"),
@@ -474,10 +520,7 @@ class JobQueue:
         item_type: str | None = None,
     ) -> list[dict[str, Any]]:
         """Return persisted human review dispositions for a project."""
-        query = (
-            "SELECT item_type, item_id, disposition, note, updated_at "
-            "FROM review_items WHERE project_id = ?"
-        )
+        query = "SELECT item_type, item_id, disposition, note, updated_at FROM review_items WHERE project_id = ?"
         params: list[Any] = [project_id]
         if item_type:
             query += " AND item_type = ?"
@@ -519,8 +562,7 @@ class JobQueue:
                 )
             else:
                 conn.execute(
-                    "DELETE FROM review_items "
-                    "WHERE project_id = ? AND item_type = ?",
+                    "DELETE FROM review_items WHERE project_id = ? AND item_type = ?",
                     (project_id, item_type),
                 )
             conn.commit()
@@ -577,8 +619,7 @@ class JobQueue:
                 )
             else:
                 conn.execute(
-                    "DELETE FROM quality_logs "
-                    "WHERE project_id = ? AND chapter_number = ?",
+                    "DELETE FROM quality_logs WHERE project_id = ? AND chapter_number = ?",
                     (project_id, chapter_number),
                 )
             conn.commit()
@@ -619,12 +660,8 @@ class JobQueue:
             grouped.setdefault(item["line_id"], []).append(item)
         selected: list[dict[str, Any]] = []
         for attempts in grouped.values():
-            explicit = [
-                item for item in attempts if item.get("details", {}).get("selected")
-            ]
-            selected.append(
-                max(explicit or attempts, key=lambda item: int(item.get("attempt") or 1))
-            )
+            explicit = [item for item in attempts if item.get("details", {}).get("selected")]
+            selected.append(max(explicit or attempts, key=lambda item: int(item.get("attempt") or 1)))
         return selected
 
     @staticmethod
@@ -641,10 +678,7 @@ class JobQueue:
 
     def get_chapter_quality_summary(self, project_id: str, chapter_number: int) -> dict[str, Any]:
         """Get aggregated quality metrics for a chapter."""
-        logs = [
-            item for item in self.get_quality_report(project_id)
-            if item.get("chapter_number") == chapter_number
-        ]
+        logs = [item for item in self.get_quality_report(project_id) if item.get("chapter_number") == chapter_number]
         final = self._selected_quality_logs(logs)
         if not final:
             return {}
@@ -704,7 +738,15 @@ class JobQueue:
                     is_completed = excluded.is_completed,
                     updated_at = excluded.updated_at
                 """,
-                (project_id, client_id, int(chapter_number), int(position_ms), float(playback_speed), 1 if is_completed else 0, now),
+                (
+                    project_id,
+                    client_id,
+                    int(chapter_number),
+                    int(position_ms),
+                    float(playback_speed),
+                    1 if is_completed else 0,
+                    now,
+                ),
             )
             conn.commit()
         return {

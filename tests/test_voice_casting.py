@@ -55,10 +55,7 @@ class VoiceCastingTests(unittest.TestCase):
             source_description=source,
             speaking_style="quick and inquisitive",
         )
-        compiled = (
-            first
-            + " Distinguishing direction: Smooth dark resonance and relaxed articulation."
-        )
+        compiled = first + " Distinguishing direction: Smooth dark resonance and relaxed articulation."
 
         second, warnings = compile_effective_voice_prompt(
             gender=Gender.FEMALE,
@@ -144,22 +141,30 @@ class VoiceCastingTests(unittest.TestCase):
             book_author="Author",
             characters={
                 "narrator": _character(
-                    "narrator", gender=Gender.MALE,
+                    "narrator",
+                    gender=Gender.MALE,
                     description="warm measured baritone",
                 ),
                 "speaker": _character(
-                    "speaker", gender=Gender.FEMALE,
+                    "speaker",
+                    gender=Gender.FEMALE,
                     description="clear bright alto",
                 ),
             },
         )
-        chapters = [ScriptChapter(
-            chapter_number=1,
-            chapter_title="Only dialogue",
-            lines=[ScriptLine(
-                line_id="ch01_0001", speaker="speaker", text="Hello.",
-            )],
-        )]
+        chapters = [
+            ScriptChapter(
+                chapter_number=1,
+                chapter_title="Only dialogue",
+                lines=[
+                    ScriptLine(
+                        line_id="ch01_0001",
+                        speaker="speaker",
+                        text="Hello.",
+                    )
+                ],
+            )
+        ]
 
         required = required_voice_character_ids(chapters, registry)
 
@@ -238,9 +243,7 @@ class VoiceCastingTests(unittest.TestCase):
             "Distinguishing direction:",
             second["effective_prompt"],
         )
-        self.assertTrue(
-            any("too similar" in warning for warning in second["warnings"])
-        )
+        self.assertTrue(any("too similar" in warning for warning in second["warnings"]))
         self.assertNotEqual(
             first["design_fingerprint"],
             second["design_fingerprint"],
@@ -254,16 +257,12 @@ class VoiceCastingTests(unittest.TestCase):
                 "starling": _character(
                     "starling",
                     gender=Gender.FEMALE,
-                    description=(
-                        "high-pitched and energetic with a hint of nervousness"
-                    ),
+                    description=("high-pitched and energetic with a hint of nervousness"),
                 ),
                 "tuka": _character(
                     "tuka",
                     gender=Gender.FEMALE,
-                    description=(
-                        "high-pitched and energetic with a touch of roughness"
-                    ),
+                    description=("high-pitched and energetic with a touch of roughness"),
                 ),
             },
         )
@@ -305,8 +304,7 @@ class VoiceCastingTests(unittest.TestCase):
             design_model="test-model",
         )
         directions = {
-            profile["effective_prompt"].split("Distinguishing direction: ", 1)[1]
-            for profile in cast["voices"].values()
+            profile["effective_prompt"].split("Distinguishing direction: ", 1)[1] for profile in cast["voices"].values()
         }
         self.assertEqual(len(directions), 12)
 

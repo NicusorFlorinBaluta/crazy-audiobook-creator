@@ -29,19 +29,10 @@ class VoiceLibraryManager:
 
     def _project_dir(self, project_id: str) -> Path:
         """Resolve a project directory without permitting path traversal."""
-        if (
-            not project_id
-            or project_id in {".", ".."}
-            or "/" in project_id
-            or "\\" in project_id
-            or ":" in project_id
-        ):
+        if not project_id or project_id in {".", ".."} or "/" in project_id or "\\" in project_id or ":" in project_id:
             raise ValueError("Invalid project ID")
         project_dir = (self.library_dir / project_id).resolve()
-        if (
-            not project_dir.is_relative_to(self.library_dir)
-            or project_dir == self.library_dir
-        ):
+        if not project_dir.is_relative_to(self.library_dir) or project_dir == self.library_dir:
             raise ValueError("Invalid project ID")
         return project_dir
 
@@ -156,11 +147,7 @@ class VoiceLibraryManager:
         """Remove superseded WAV/embedding pairs not referenced by the registry."""
         project_dir = self._project_dir(project_id)
         registry = self._load_registry(project_id)
-        referenced = {
-            Path(info["file"]).resolve()
-            for info in registry.get("voices", {}).values()
-            if info.get("file")
-        }
+        referenced = {Path(info["file"]).resolve() for info in registry.get("voices", {}).values() if info.get("file")}
         removed: list[str] = []
         for audio_path in project_dir.glob("*.wav"):
             if audio_path.resolve() in referenced:
@@ -182,11 +169,7 @@ class VoiceLibraryManager:
         if not resolved.is_relative_to(project_dir):
             logger.warning("Refusing to clean voice artifact outside %s", project_dir)
             return
-        referenced = {
-            Path(info["file"]).resolve()
-            for info in registry.get("voices", {}).values()
-            if info.get("file")
-        }
+        referenced = {Path(info["file"]).resolve() for info in registry.get("voices", {}).values() if info.get("file")}
         if resolved in referenced:
             return
         for artifact in (resolved, resolved.with_suffix(".pt")):

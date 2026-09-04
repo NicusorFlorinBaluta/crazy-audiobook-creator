@@ -50,7 +50,7 @@ def test_notifier_not_configured():
 def test_send_notification_success(mock_urlopen, mock_notifier):
     mock_resp = MagicMock()
     mock_resp.status = 200
-    mock_resp.read.return_value = b'[]'
+    mock_resp.read.return_value = b"[]"
     mock_urlopen.return_value.__enter__.return_value = mock_resp
 
     payload = NotificationPayload(
@@ -80,7 +80,7 @@ def test_send_notification_success(mock_urlopen, mock_notifier):
 def test_notification_deduplication(mock_urlopen, mock_notifier):
     mock_resp = MagicMock()
     mock_resp.status = 200
-    mock_resp.read.return_value = b'[]'
+    mock_resp.read.return_value = b"[]"
     mock_urlopen.return_value.__enter__.return_value = mock_resp
 
     payload = NotificationPayload(
@@ -104,7 +104,7 @@ def test_notification_deduplication(mock_urlopen, mock_notifier):
 def test_helpers(mock_urlopen, mock_notifier):
     mock_resp = MagicMock()
     mock_resp.status = 200
-    mock_resp.read.return_value = b'[]'
+    mock_resp.read.return_value = b"[]"
     mock_urlopen.return_value.__enter__.return_value = mock_resp
 
     with patch.object(mock_notifier, "notify_async") as mock_async:

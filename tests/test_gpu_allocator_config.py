@@ -52,9 +52,7 @@ class TorchAllocatorConfigTests(unittest.TestCase):
         """
         env: dict[str, str] = {}
         apply_torch_alloc_conf(env)
-        self.assertEqual(
-            set(env), {"PYTORCH_CUDA_ALLOC_CONF", "PYTORCH_HIP_ALLOC_CONF"}
-        )
+        self.assertEqual(set(env), {"PYTORCH_CUDA_ALLOC_CONF", "PYTORCH_HIP_ALLOC_CONF"})
         for name in TORCH_ALLOC_ENV_VARS:
             self.assertEqual(env[name], TORCH_ALLOC_CONF)
 
@@ -65,9 +63,7 @@ class TorchAllocatorConfigTests(unittest.TestCase):
         """Someone debugging an allocator problem must be able to override it."""
         env = {"PYTORCH_HIP_ALLOC_CONF": "garbage_collection_threshold:0.8"}
         apply_torch_alloc_conf(env)
-        self.assertEqual(
-            env["PYTORCH_HIP_ALLOC_CONF"], "garbage_collection_threshold:0.8"
-        )
+        self.assertEqual(env["PYTORCH_HIP_ALLOC_CONF"], "garbage_collection_threshold:0.8")
         self.assertEqual(env["PYTORCH_CUDA_ALLOC_CONF"], TORCH_ALLOC_CONF)
 
     def test_managed_voice_server_subprocess_receives_the_allocator_config(
@@ -153,19 +149,12 @@ class TorchAllocatorConfigTests(unittest.TestCase):
         so pin that it happens above the project imports rather than merely
         somewhere in the file.
         """
-        source = (
-            REPO_ROOT / "brain" / "dashboard" / "api" / "main.py"
-        ).read_text(encoding="utf-8")
+        source = (REPO_ROOT / "brain" / "dashboard" / "api" / "main.py").read_text(encoding="utf-8")
         alloc_at = source.find("TORCH_ALLOC_ENV_VARS")
         self.assertNotEqual(alloc_at, -1, "allocator config absent from main.py")
 
         first_project_import = min(
-            (
-                match.start()
-                for match in re.finditer(
-                    r"^from (?:brain|voice)\.", source, re.MULTILINE
-                )
-            ),
+            (match.start() for match in re.finditer(r"^from (?:brain|voice)\.", source, re.MULTILINE)),
             default=-1,
         )
         self.assertNotEqual(first_project_import, -1)

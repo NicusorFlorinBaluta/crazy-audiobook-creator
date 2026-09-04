@@ -102,7 +102,7 @@ The insistence that "file existence is never sufficient evidence of completion,"
 async def unload_models():
     global engine, validator
     unloaded = []
-    with gpu_job_lock:              # <-- blocking acquire on the event loop
+    with gpu_job_lock:  # <-- blocking acquire on the event loop
         if active_gpu_jobs:
             raise HTTPException(status_code=409, detail="Models are busy; ...")
 ```

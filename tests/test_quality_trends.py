@@ -56,10 +56,7 @@ def test_pitch_expression_alone_does_not_claim_identity_drift():
         _logs(1, 0.86, 140.0) + _logs(2, 0.86, 190.0),
         [_script(1), _script(2)],
     )
-    assert not any(
-        warning["kind"] == "cross_chapter_voice_drift"
-        for warning in report["warnings"]
-    )
+    assert not any(warning["kind"] == "cross_chapter_voice_drift" for warning in report["warnings"])
 
 
 class WithinChapterConsistencyTests(unittest.TestCase):
@@ -84,17 +81,13 @@ class WithinChapterConsistencyTests(unittest.TestCase):
         ]
 
     def test_a_consistent_narrator_reports_no_warning(self) -> None:
-        result = _within_chapter_consistency(
-            self._rows([120.0, 121.0, 119.5, 120.5, 120.0, 121.5, 119.0])
-        )
+        result = _within_chapter_consistency(self._rows([120.0, 121.0, 119.5, 120.5, 120.0, 121.5, 119.0]))
         self.assertTrue(result["measured_for_warnings"])
         self.assertEqual(result["warnings"], [])
         self.assertLess(result["pitch_relative_spread"], 0.05)
 
     def test_wildly_varying_pitch_is_flagged(self) -> None:
-        result = _within_chapter_consistency(
-            self._rows([90.0, 180.0, 95.0, 200.0, 100.0, 190.0, 88.0])
-        )
+        result = _within_chapter_consistency(self._rows([90.0, 180.0, 95.0, 200.0, 100.0, 190.0, 88.0]))
         self.assertIn("within_chapter_pitch_variation", result["warnings"])
         self.assertIn("within_chapter_pitch_jump", result["warnings"])
 
@@ -105,12 +98,14 @@ class WithinChapterConsistencyTests(unittest.TestCase):
             [(1.0, 30), (4.0, 30), (1.0, 30), (4.5, 30), (1.0, 30), (5.0, 30), (1.0, 30)],
             start=1,
         ):
-            rows.append({
-                "line_id": f"ch01_{index:04d}",
-                "pitch_median": 120.0,
-                "duration_seconds": duration,
-                "text_characters": characters,
-            })
+            rows.append(
+                {
+                    "line_id": f"ch01_{index:04d}",
+                    "pitch_median": 120.0,
+                    "duration_seconds": duration,
+                    "text_characters": characters,
+                }
+            )
         result = _within_chapter_consistency(rows)
         self.assertIn("within_chapter_rate_variation", result["warnings"])
         self.assertNotIn("within_chapter_pitch_variation", result["warnings"])

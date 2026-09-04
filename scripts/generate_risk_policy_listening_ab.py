@@ -116,9 +116,7 @@ def main() -> None:
             ("clarity_policy", True, policy_path),
         ):
             loop.risk_aware_first_attempt = enabled
-            synthesis_text, emotion, speed, voice_fx, reason = (
-                loop._initial_delivery(line, set())
-            )
+            synthesis_text, emotion, speed, voice_fx, reason = loop._initial_delivery(line, set())
             torch.manual_seed(args.seed)
             if torch.cuda.is_available():
                 torch.cuda.manual_seed_all(args.seed)

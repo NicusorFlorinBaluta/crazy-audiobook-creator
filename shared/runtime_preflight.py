@@ -149,8 +149,7 @@ def collect_runtime_report(
         )
     if validation.get("whisper_vad_filter", False):
         warnings.append(
-            "VAD is enabled; the 2026-08-09 E2E showed false negatives for "
-            "short, high-pitched, and repeated speech"
+            "VAD is enabled; the 2026-08-09 E2E showed false negatives for short, high-pitched, and repeated speech"
         )
     ffmpeg = shutil.which("ffmpeg")
     ffprobe = shutil.which("ffprobe")
@@ -197,9 +196,7 @@ def collect_runtime_report(
             "whisper_model": str(validation.get("whisper_model", "")),
             "whisper_backend": backend,
             "whisper_device": device,
-            "whisper_vad_filter": bool(
-                validation.get("whisper_vad_filter", False)
-            ),
+            "whisper_vad_filter": bool(validation.get("whisper_vad_filter", False)),
             "amd_rocm_profile": amd_rocm_profile,
         },
         "executables": {"ffmpeg": ffmpeg, "ffprobe": ffprobe},

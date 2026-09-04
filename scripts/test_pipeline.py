@@ -14,6 +14,7 @@ API_URL = "http://localhost:8000/api/projects"
 UPLOAD_TIMEOUT_SECONDS = 120
 REQUEST_TIMEOUT_SECONDS = 30
 
+
 def run_test():
     # Resolved from the repository root, not the working directory, so this
     # script works from anywhere rather than only from the repo root.
@@ -37,9 +38,7 @@ def run_test():
     print(f"Title: {data.get('title')}, Chapters: {data.get('chapters_detected')}")
 
     print("\n2. Starting Pipeline...")
-    start_resp = requests.post(
-        f"{API_URL}/{project_id}/start", timeout=REQUEST_TIMEOUT_SECONDS
-    )
+    start_resp = requests.post(f"{API_URL}/{project_id}/start", timeout=REQUEST_TIMEOUT_SECONDS)
     if not start_resp.ok:
         print(f"Failed to start pipeline: {start_resp.text}")
         sys.exit(1)
@@ -48,9 +47,7 @@ def run_test():
 
     # Poll status
     while True:
-        status_resp = requests.get(
-            f"{API_URL}/{project_id}/status", timeout=REQUEST_TIMEOUT_SECONDS
-        )
+        status_resp = requests.get(f"{API_URL}/{project_id}/status", timeout=REQUEST_TIMEOUT_SECONDS)
         if not status_resp.ok:
             print("Failed to get status")
             break
@@ -66,6 +63,7 @@ def run_test():
             break
 
         time.sleep(10)
+
 
 if __name__ == "__main__":
     run_test()

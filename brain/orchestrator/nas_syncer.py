@@ -59,38 +59,23 @@ class NASSyncer:
         auto_sync: bool = True,
     ):
         if host is None:
-            self.host = (
-                os.getenv("NAS_SSH_HOST")
-                or os.getenv("HA_SERVER_SSH_HOST")
-                or "192.168.50.26"
-            ).strip()
+            self.host = (os.getenv("NAS_SSH_HOST") or os.getenv("HA_SERVER_SSH_HOST") or "192.168.50.26").strip()
         else:
             self.host = host.strip()
 
         if username is None:
-            self.username = (
-                os.getenv("NAS_SSH_USER")
-                or os.getenv("HA_SERVER_SSH_USER")
-                or "crazywiz"
-            ).strip()
+            self.username = (os.getenv("NAS_SSH_USER") or os.getenv("HA_SERVER_SSH_USER") or "crazywiz").strip()
         else:
             self.username = username.strip()
 
         if password is None:
-            self.password = (
-                os.getenv("NAS_SSH_PASSWORD")
-                or os.getenv("HA_SERVER_SSH_PASSWORD")
-                or ""
-            )
+            self.password = os.getenv("NAS_SSH_PASSWORD") or os.getenv("HA_SERVER_SSH_PASSWORD") or ""
         else:
             self.password = password
 
         self.port = int(port or os.getenv("NAS_SSH_PORT") or DEFAULT_NAS_PORT)
         if shared_folder is None:
-            self.shared_folder = (
-                os.getenv("NAS_SHARED_FOLDER")
-                or DEFAULT_SHARED_FOLDER
-            ).strip().strip("/")
+            self.shared_folder = (os.getenv("NAS_SHARED_FOLDER") or DEFAULT_SHARED_FOLDER).strip().strip("/")
         else:
             self.shared_folder = shared_folder.strip().strip("/")
         self.prune_parts_on_full = prune_parts_on_full
@@ -235,12 +220,8 @@ class NASSyncer:
                 # The NASError below is the real failure; this cleanup is best
                 # effort. Log it so a NAS that has started refusing removals
                 # leaves a trace instead of quietly accruing .tmp_ files.
-                logger.debug(
-                    "Could not remove partial upload %s: %s", tmp_remote, exc
-                )
-            raise NASError(
-                f"SFTP upload corrupted: local {local_size} bytes != remote {remote_size} bytes"
-            )
+                logger.debug("Could not remove partial upload %s: %s", tmp_remote, exc)
+            raise NASError(f"SFTP upload corrupted: local {local_size} bytes != remote {remote_size} bytes")
 
         # Atomic rename
         try:
@@ -392,8 +373,7 @@ class NASSyncer:
                                 logger.info("Pruned partial delivery file on NAS: %s", item)
                             except Exception as exc:
                                 logger.warning(
-                                    "Could not prune partial delivery file "
-                                    "%s: %s",
+                                    "Could not prune partial delivery file %s: %s",
                                     item,
                                     exc,
                                 )
@@ -485,9 +465,7 @@ class NASSyncer:
             except (OSError, ValueError) as exc:
                 # Falling through means the delivery ships with a fallback
                 # cover. Worth a line: it is otherwise invisible.
-                logger.warning(
-                    "Could not read cover path from %s: %s", book_json, exc
-                )
+                logger.warning("Could not read cover path from %s: %s", book_json, exc)
 
         for candidate in cover_candidates:
             if candidate.is_file() and candidate.stat().st_size > 0:
@@ -572,8 +550,7 @@ class NASSyncer:
                             delivery_chapter_map[c_num] = url
             except (OSError, ValueError, TypeError) as exc:
                 logger.warning(
-                    "Could not read the delivery index; published parts will "
-                    "not be cross-referenced: %s",
+                    "Could not read the delivery index; published parts will not be cross-referenced: %s",
                     exc,
                 )
 
@@ -587,9 +564,7 @@ class NASSyncer:
                     if d:
                         return float(d)
                 except (OSError, ValueError, TypeError) as exc:
-                    logger.debug(
-                        "Could not read duration from %s: %s", m_file, exc
-                    )
+                    logger.debug("Could not read duration from %s: %s", m_file, exc)
             # Try workspace wav
             for cand in [
                 shared_paths.WORKSPACE_DIR / project_id / "chapters" / f"chapter_{ch_num:03d}.wav",
@@ -599,6 +574,7 @@ class NASSyncer:
                 if cand.is_file():
                     try:
                         import wave
+
                         with wave.open(str(cand), "rb") as handle:
                             frames = handle.getnframes()
                             rate = handle.getframerate()
@@ -610,15 +586,14 @@ class NASSyncer:
                         logger.debug("wave could not read %s: %s", cand, exc)
                     try:
                         import soundfile as sf
+
                         info = sf.info(str(cand))
                         return round(float(info.duration), 2)
                     except Exception as exc:
                         # Both readers failed; the caller reports 0.0 duration,
                         # which the companion app renders as an unseekable
                         # chapter. Leave evidence for that.
-                        logger.warning(
-                            "Could not determine duration for %s: %s", cand, exc
-                        )
+                        logger.warning("Could not determine duration for %s: %s", cand, exc)
             return 0.0
 
         # Check delivery parts directory on NAS
@@ -661,34 +636,40 @@ class NASSyncer:
                     for c_num in ch_nums:
                         c_dur = get_chapter_duration(c_num)
                         ch_entry = book_chapters[c_num - 1] if 0 <= c_num - 1 < len(book_chapters) else {}
-                        c_title = str(ch_entry.get("source_heading") or ch_entry.get("title") or f"Chapter {c_num}").strip()
+                        c_title = str(
+                            ch_entry.get("source_heading") or ch_entry.get("title") or f"Chapter {c_num}"
+                        ).strip()
                         c_start = int(part_cum_offset * 1000)
                         c_end = int((part_cum_offset + c_dur) * 1000)
                         part_cum_offset += c_dur
                         chapter_delivery_offsets[c_num] = (c_start, c_end)
-                        part_ch_details.append({
-                            "number": c_num,
-                            "title": c_title,
-                            "start_ms": c_start,
-                            "end_ms": c_end,
-                            "duration_seconds": c_dur,
-                            "stream_url": download_url,
-                            "status": "mastered",
-                        })
+                        part_ch_details.append(
+                            {
+                                "number": c_num,
+                                "title": c_title,
+                                "start_ms": c_start,
+                                "end_ms": c_end,
+                                "duration_seconds": c_dur,
+                                "stream_url": download_url,
+                                "status": "mastered",
+                            }
+                        )
 
                     deliv_info = delivery_info_map.get(item) or delivery_info_map.get(download_url) or {}
                     part_total_dur = float(deliv_info.get("duration_seconds") or part_cum_offset)
 
-                    parts_list.append({
-                        "delivery_id": f"part-{ord_val:03d}",
-                        "title": f"Part {ord_val:02d}",
-                        "filename": item,
-                        "chapters": ch_nums,
-                        "chapter_details": part_ch_details,
-                        "duration_seconds": part_total_dur,
-                        "status": "published",
-                        "download_url": download_url,
-                    })
+                    parts_list.append(
+                        {
+                            "delivery_id": f"part-{ord_val:03d}",
+                            "title": f"Part {ord_val:02d}",
+                            "filename": item,
+                            "chapters": ch_nums,
+                            "chapter_details": part_ch_details,
+                            "duration_seconds": part_total_dur,
+                            "status": "published",
+                            "download_url": download_url,
+                        }
+                    )
         except OSError:
             pass
 
@@ -723,18 +704,20 @@ class NASSyncer:
                 stream_url = None
                 ch_status = "mastered" if dur else "pending"
 
-            chapters_manifest.append({
-                "number": idx,
-                "title": formatted_title,
-                "raw_title": raw_title,
-                "source_heading": raw_title,
-                "status": ch_status,
-                "duration_seconds": dur,
-                "start_ms": start_ms,
-                "end_ms": end_ms,
-                "stream_url": stream_url,
-                "download_url": stream_url,
-            })
+            chapters_manifest.append(
+                {
+                    "number": idx,
+                    "title": formatted_title,
+                    "raw_title": raw_title,
+                    "source_heading": raw_title,
+                    "status": ch_status,
+                    "duration_seconds": dur,
+                    "start_ms": start_ms,
+                    "end_ms": end_ms,
+                    "stream_url": stream_url,
+                    "download_url": stream_url,
+                }
+            )
 
         default_stream = (
             f"{project_id}/full/{quote(full_m4b_name)}"
@@ -827,7 +810,9 @@ class NASSyncer:
                             "isbn": str(bdata.get("isbn") or ""),
                             "status": str(bdata.get("status") or "queued"),
                             "total_chapters": int(bdata.get("total_chapters") or len(bdata.get("chapters") or []) or 0),
-                            "generated_chapters_count": int(bdata.get("generated_chapters_count") or len(bdata.get("chapters") or []) or 0),
+                            "generated_chapters_count": int(
+                                bdata.get("generated_chapters_count") or len(bdata.get("chapters") or []) or 0
+                            ),
                             "mastered_chapters_count": int(bdata.get("mastered_chapters_count") or 0),
                             "total_duration_seconds": float(bdata.get("total_duration_seconds") or 0.0),
                             "is_live_generating": bool(bdata.get("is_live_generating", False)),
@@ -874,6 +859,7 @@ class NASSyncer:
             if db_file.is_file():
                 try:
                     import sqlite3
+
                     conn = sqlite3.connect(db_file)
                     cur = conn.cursor()
                     tables = [r[0] for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
@@ -891,8 +877,7 @@ class NASSyncer:
                     # the safe direction -- but must not be silent, or the NAS
                     # quietly stops being tidied.
                     logger.warning(
-                        "Could not read active project ids; NAS pruning is "
-                        "disabled for this run: %s",
+                        "Could not read active project ids; NAS pruning is disabled for this run: %s",
                         exc,
                     )
 
@@ -936,7 +921,9 @@ class NASSyncer:
                 # Write book.json and api/mobile/v1 alias
                 book_manifest = self._generate_book_manifest(project_id, p_dir, sftp, proj_remote_dir)
                 self._atomic_write_json(sftp, book_manifest, posixpath.join(proj_remote_dir, "book.json"))
-                self._atomic_write_json(sftp, book_manifest, posixpath.join(nas_root, "api/mobile/v1/books", project_id))
+                self._atomic_write_json(
+                    sftp, book_manifest, posixpath.join(nas_root, "api/mobile/v1/books", project_id)
+                )
 
             # Rebuild catalog
             catalog = self.rebuild_global_catalog(sftp=sftp, nas_root=nas_root, active_project_ids=active_project_ids)

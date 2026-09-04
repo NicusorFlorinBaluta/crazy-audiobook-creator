@@ -118,22 +118,11 @@ class EmbeddingStore:
                     PRIMARY KEY (project_id, line_id)
                 )
             """)
-            columns = {
-                row[1]
-                for row in conn.execute(
-                    "PRAGMA table_info(generation_fingerprints)"
-                ).fetchall()
-            }
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(generation_fingerprints)").fetchall()}
             if "fingerprint_hash" not in columns:
-                conn.execute(
-                    "ALTER TABLE generation_fingerprints "
-                    "ADD COLUMN fingerprint_hash TEXT DEFAULT ''"
-                )
+                conn.execute("ALTER TABLE generation_fingerprints ADD COLUMN fingerprint_hash TEXT DEFAULT ''")
             if "output_hash" not in columns:
-                conn.execute(
-                    "ALTER TABLE generation_fingerprints "
-                    "ADD COLUMN output_hash TEXT DEFAULT ''"
-                )
+                conn.execute("ALTER TABLE generation_fingerprints ADD COLUMN output_hash TEXT DEFAULT ''")
             conn.commit()
 
     @staticmethod
@@ -421,10 +410,7 @@ class EmbeddingStore:
         when its generation fingerprint and content hash still match; it is
         never treated as accepted until validation has its own matching record.
         """
-        if output_path and (
-            not Path(output_path).exists()
-            or Path(output_path).stat().st_size < 1000
-        ):
+        if output_path and (not Path(output_path).exists() or Path(output_path).stat().st_size < 1000):
             return True
         expected_fingerprint = self._generation_fingerprint(
             text=text,
@@ -444,12 +430,7 @@ class EmbeddingStore:
                 """,
                 (project_id, line_id),
             ).fetchone()
-        return not (
-            row
-            and row[0] == expected_fingerprint
-            and row[1]
-            and row[1] == current_output_hash
-        )
+        return not (row and row[0] == expected_fingerprint and row[1] and row[1] == current_output_hash)
 
     def save_synthesis_fingerprint(
         self,
@@ -651,6 +632,7 @@ class EmbeddingStore:
         generation_context: dict[str, Any] | None,
     ) -> str:
         from voice.tts_server.qwen3_engine import MOOD_TIER_VERSION
+
         payload = {
             "text": text,
             "speaker": speaker,
@@ -660,6 +642,4 @@ class EmbeddingStore:
             "context": generation_context or {},
             "mood_tier_version": MOOD_TIER_VERSION,
         }
-        return self.hash_text(
-            json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        )
+        return self.hash_text(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")))

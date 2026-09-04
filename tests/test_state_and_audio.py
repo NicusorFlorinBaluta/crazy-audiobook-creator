@@ -43,9 +43,7 @@ from voice.tts_server.voice_library import VoiceLibraryManager
 
 class SingleInstanceTests(unittest.TestCase):
     def test_pipeline_lock_rejects_a_second_owner_without_erasing_pid(self) -> None:
-        with tempfile.TemporaryDirectory() as directory, patch.dict(
-            os.environ, {"TEMP": directory}
-        ):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"TEMP": directory}):
             first = SingleInstanceLock("pipeline-test.lock")
             second = SingleInstanceLock("pipeline-test.lock")
             try:
@@ -99,11 +97,23 @@ class JobQueueTests(unittest.TestCase):
             queue = JobQueue(str(Path(directory) / "state.db"))
             queue.create_job("book", {"status": "created"})
             queue.log_quality(
-                "book", "line-1", 1, 1, 0.0, 0.95, "pass",
+                "book",
+                "line-1",
+                1,
+                1,
+                0.0,
+                0.95,
+                "pass",
                 details={"selected": True},
             )
             queue.log_quality(
-                "book", "line-1", 1, 2, 0.5, 0.10, "fail",
+                "book",
+                "line-1",
+                1,
+                2,
+                0.5,
+                0.10,
+                "fail",
                 details={"selected": False},
             )
 
@@ -120,7 +130,11 @@ class JobQueueTests(unittest.TestCase):
             queue.create_job("book", {"status": "created"})
             queue.set_review_item("book", "join", "ch01-2", "acceptable")
             queue.set_review_item(
-                "book", "join", "ch01-2", "needs_remaster", "Level jump",
+                "book",
+                "join",
+                "ch01-2",
+                "needs_remaster",
+                "Level jump",
             )
 
             items = queue.get_review_items("book", "join")
@@ -295,9 +309,7 @@ class ArtifactStateTests(unittest.TestCase):
                 self.assertEqual(generated, [1])
                 self.assertEqual(mastered, [])
 
-                chapter_audio = (
-                    root / "workspace" / project_id / "chapters" / "chapter_001.wav"
-                )
+                chapter_audio = root / "workspace" / project_id / "chapters" / "chapter_001.wav"
                 chapter_audio.parent.mkdir(parents=True)
                 sf.write(
                     chapter_audio,
@@ -558,16 +570,32 @@ class FingerprintTests(unittest.TestCase):
                 generation_context=context,
             )
 
-            self.assertFalse(store.line_needs_synthesis(
-                project_id="book", line_id="line", text="Text",
-                speaker="speaker", emotion="neutral", speed=1.0,
-                fx_dict=None, output_path=audio, generation_context=context,
-            ))
-            self.assertTrue(store.line_needs_regeneration(
-                project_id="book", line_id="line", text="Text",
-                speaker="speaker", emotion="neutral", speed=1.0,
-                fx_dict=None, output_path=audio, generation_context=context,
-            ))
+            self.assertFalse(
+                store.line_needs_synthesis(
+                    project_id="book",
+                    line_id="line",
+                    text="Text",
+                    speaker="speaker",
+                    emotion="neutral",
+                    speed=1.0,
+                    fx_dict=None,
+                    output_path=audio,
+                    generation_context=context,
+                )
+            )
+            self.assertTrue(
+                store.line_needs_regeneration(
+                    project_id="book",
+                    line_id="line",
+                    text="Text",
+                    speaker="speaker",
+                    emotion="neutral",
+                    speed=1.0,
+                    fx_dict=None,
+                    output_path=audio,
+                    generation_context=context,
+                )
+            )
 
     def test_voice_reference_change_invalidates_line(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

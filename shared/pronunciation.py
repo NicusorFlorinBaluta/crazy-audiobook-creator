@@ -24,15 +24,82 @@ def _repo_root() -> Path:
 
 
 _COMMON_SENTENCE_WORDS = {
-    "After", "Again", "Ago", "All", "Always", "And", "As", "Because", "Before", "But",
-    "Could", "Every", "Finally", "First", "For", "From", "Had", "Have",
-    "Company", "Father", "He", "Her", "Here", "His", "How", "However", "If", "Instead",
-    "It", "Its", "No", "Not", "Now", "One", "Only", "Or", "Perhaps",
-    "She", "So", "Something", "That", "The", "Their", "Then", "There",
-    "These", "They", "This", "Those", "Though", "Through", "Until", "Was",
-    "We", "What", "Whatever", "When", "Where", "Whether", "Which", "While",
-    "Uncle", "Who", "Why", "Will", "With", "Without", "Would", "Years", "Yes", "You", "Your",
-    "I'd", "I'll", "I'm", "I've",
+    "After",
+    "Again",
+    "Ago",
+    "All",
+    "Always",
+    "And",
+    "As",
+    "Because",
+    "Before",
+    "But",
+    "Could",
+    "Every",
+    "Finally",
+    "First",
+    "For",
+    "From",
+    "Had",
+    "Have",
+    "Company",
+    "Father",
+    "He",
+    "Her",
+    "Here",
+    "His",
+    "How",
+    "However",
+    "If",
+    "Instead",
+    "It",
+    "Its",
+    "No",
+    "Not",
+    "Now",
+    "One",
+    "Only",
+    "Or",
+    "Perhaps",
+    "She",
+    "So",
+    "Something",
+    "That",
+    "The",
+    "Their",
+    "Then",
+    "There",
+    "These",
+    "They",
+    "This",
+    "Those",
+    "Though",
+    "Through",
+    "Until",
+    "Was",
+    "We",
+    "What",
+    "Whatever",
+    "When",
+    "Where",
+    "Whether",
+    "Which",
+    "While",
+    "Uncle",
+    "Who",
+    "Why",
+    "Will",
+    "With",
+    "Without",
+    "Would",
+    "Years",
+    "Yes",
+    "You",
+    "Your",
+    "I'd",
+    "I'll",
+    "I'm",
+    "I've",
 }
 _CANDIDATE_PATTERN = re.compile(r"\b[A-Z][A-Za-z'’-]{2,}\b")
 
@@ -40,7 +107,7 @@ _CANDIDATE_PATTERN = re.compile(r"\b[A-Z][A-Za-z'’-]{2,}\b")
 def _is_sentence_initial(text: str, start: int) -> bool:
     """Return true when a token only has sentence punctuation/quotes before it."""
     prefix = text[:start].rstrip()
-    while prefix and prefix[-1] in '\"\'“”‘’([{':
+    while prefix and prefix[-1] in "\"'“”‘’([{":
         prefix = prefix[:-1].rstrip()
     return not prefix or prefix[-1] in ".!?"
 
@@ -103,19 +170,60 @@ def normalize_phonetic_text(text: str) -> str:
 
 
 _COMPOUND_BASES = {
-    "home": "Home", "isle": "aisle", "isles": "aisles", "isler": "eye ler", "islers": "eye lers",
-    "night": "Night", "blood": "blood", "storm": "Storm", "light": "light", "high": "High",
-    "sun": "Sun", "maker": "maker", "rock": "Rock", "bud": "bud", "shard": "Shard",
-    "blade": "blade", "plate": "plate", "truth": "Truth", "watcher": "watcher",
-    "wind": "Wind", "runner": "runner", "sky": "Sky", "breaker": "breaker",
-    "soul": "Soul", "caster": "caster", "mist": "Mist", "born": "born",
-    "fire": "Fire", "heart": "heart", "dragon": "Dragon", "rider": "rider",
-    "shadow": "Shadow", "dancer": "dancer", "chasm": "Chasm", "fiend": "fiend",
-    "void": "Void", "bringer": "bringer", "bringers": "bringers", "oath": "Oath",
-    "gate": "gate", "keeper": "keeper", "singer": "singer", "singers": "singers",
-    "world": "World", "hopper": "hopper", "sing": "Sing", "ash": "Ash",
-    "fell": "Fell", "haven": "haven", "stone": "Stone", "wood": "Wood",
-    "bright": "Bright", "lord": "lord", "lady": "lady",
+    "home": "Home",
+    "isle": "aisle",
+    "isles": "aisles",
+    "isler": "eye ler",
+    "islers": "eye lers",
+    "night": "Night",
+    "blood": "blood",
+    "storm": "Storm",
+    "light": "light",
+    "high": "High",
+    "sun": "Sun",
+    "maker": "maker",
+    "rock": "Rock",
+    "bud": "bud",
+    "shard": "Shard",
+    "blade": "blade",
+    "plate": "plate",
+    "truth": "Truth",
+    "watcher": "watcher",
+    "wind": "Wind",
+    "runner": "runner",
+    "sky": "Sky",
+    "breaker": "breaker",
+    "soul": "Soul",
+    "caster": "caster",
+    "mist": "Mist",
+    "born": "born",
+    "fire": "Fire",
+    "heart": "heart",
+    "dragon": "Dragon",
+    "rider": "rider",
+    "shadow": "Shadow",
+    "dancer": "dancer",
+    "chasm": "Chasm",
+    "fiend": "fiend",
+    "void": "Void",
+    "bringer": "bringer",
+    "bringers": "bringers",
+    "oath": "Oath",
+    "gate": "gate",
+    "keeper": "keeper",
+    "singer": "singer",
+    "singers": "singers",
+    "world": "World",
+    "hopper": "hopper",
+    "sing": "Sing",
+    "ash": "Ash",
+    "fell": "Fell",
+    "haven": "haven",
+    "stone": "Stone",
+    "wood": "Wood",
+    "bright": "Bright",
+    "lord": "lord",
+    "lady": "lady",
 }
 
 _KNOWN_TERM_OVERRIDES = {
@@ -248,10 +356,7 @@ def generate_phonetic_recommendations(term: str, context: str = "") -> dict[str,
 
 def apply_pronunciations(text: str, mappings: dict[str, str]) -> str:
     """Apply longest-first replacements once, never recursively."""
-    folded = {
-        word.casefold(): (word, normalize_phonetic_text(replacement))
-        for word, replacement in mappings.items()
-    }
+    folded = {word.casefold(): (word, normalize_phonetic_text(replacement)) for word, replacement in mappings.items()}
     ordered = sorted(folded.values(), key=lambda item: (-len(item[0]), item[0].casefold()))
     if not ordered:
         return text
@@ -280,8 +385,7 @@ class PronunciationLLM(Protocol):
         top_p: float = ...,
         system: str | None = ...,
         format: str | None = ...,
-    ) -> str:
-        ...
+    ) -> str: ...
 
 
 def _get_configured_ollama() -> tuple[str, str]:
@@ -299,14 +403,14 @@ def _get_configured_ollama() -> tuple[str, str]:
     if cfg_path.is_file():
         try:
             import yaml
+
             cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
             ollama_cfg = cfg.get("ollama", {})
             host = str(ollama_cfg.get("host") or host)
             model = str(ollama_cfg.get("model") or model)
         except Exception as exc:
             logger.warning(
-                "Could not read %s for pronunciation model selection; "
-                "falling back to %s: %s",
+                "Could not read %s for pronunciation model selection; falling back to %s: %s",
                 cfg_path,
                 model,
                 exc,
@@ -321,7 +425,7 @@ _PRONUNCIATION_PROMPT_HEADER = (
     "1. Write phonetic respellings in plain English syllables (e.g. 'KALL-uh-din', 'Zeth', 'tah-rah-VAN-jee-an', 'shah-LAHN').\n"
     "2. Capitalize the stressed syllable.\n"
     "3. Provide 1 default respelling and 1 alternate valid respelling.\n"
-    "4. Output STRICT JSON with key 'recommendations': [{\"term\": \"...\", \"default\": \"...\", \"alternate\": \"...\"}]\n\n"
+    '4. Output STRICT JSON with key \'recommendations\': [{"term": "...", "default": "...", "alternate": "..."}]\n\n'
     "CANDIDATES:\n"
 )
 
@@ -389,6 +493,7 @@ def resolve_pronunciations_with_llm(
     target_model = model or default_model
 
     import urllib.request
+
     prompt = (
         "You are an expert fantasy and fiction pronunciation director for audiobooks.\n"
         "For each candidate proper noun or out-of-vocabulary term and its book context, provide the exact spoken phonetic respelling for a Neural TTS engine.\n"
@@ -396,23 +501,24 @@ def resolve_pronunciations_with_llm(
         "1. Write phonetic respellings in plain English syllables (e.g. 'KALL-uh-din', 'Zeth', 'tah-rah-VAN-jee-an', 'shah-LAHN').\n"
         "2. Capitalize the stressed syllable.\n"
         "3. Provide 1 default respelling and 1 alternate valid respelling.\n"
-        "4. Output STRICT JSON with key 'recommendations': [{\"term\": \"...\", \"default\": \"...\", \"alternate\": \"...\"}]\n\n"
-        "CANDIDATES:\n"
-        + json.dumps([{"term": t, "context": c[:200]} for t, c in items], ensure_ascii=False, indent=2)
+        '4. Output STRICT JSON with key \'recommendations\': [{"term": "...", "default": "...", "alternate": "..."}]\n\n'
+        "CANDIDATES:\n" + json.dumps([{"term": t, "context": c[:200]} for t, c in items], ensure_ascii=False, indent=2)
     )
 
-    req_body = json.dumps({
-        "model": target_model,
-        "prompt": prompt,
-        "stream": False,
-        "format": "json",
-        "think": False,
-        "options": {
-            "temperature": 0.2,
-            "top_p": 0.9,
-            "num_predict": 2048,
-        },
-    }).encode("utf-8")
+    req_body = json.dumps(
+        {
+            "model": target_model,
+            "prompt": prompt,
+            "stream": False,
+            "format": "json",
+            "think": False,
+            "options": {
+                "temperature": 0.2,
+                "top_p": 0.9,
+                "num_predict": 2048,
+            },
+        }
+    ).encode("utf-8")
 
     req = urllib.request.Request(
         f"{target_host.rstrip('/')}/api/generate",
@@ -486,10 +592,7 @@ def build_pronunciation_inventory(
 
     payload = json.loads(script_path.read_text(encoding="utf-8"))
     mappings, mapping_sources = load_pronunciation_dictionary(project_dir)
-    mapping_by_folded = {
-        word.casefold(): (word, replacement)
-        for word, replacement in mappings.items()
-    }
+    mapping_by_folded = {word.casefold(): (word, replacement) for word, replacement in mappings.items()}
     source_by_folded = {word.casefold(): source for word, source in mapping_sources.items()}
 
     # Load cached recommendations if present
@@ -504,9 +607,7 @@ def build_pronunciation_inventory(
     character_names: set[str] = set()
     characters_path = project_dir / "characters.json"
     if characters_path.exists():
-        characters = json.loads(characters_path.read_text(encoding="utf-8")).get(
-            "characters", {}
-        )
+        characters = json.loads(characters_path.read_text(encoding="utf-8")).get("characters", {})
         for character_id, info in characters.items():
             character_names.add(str(character_id).replace("_", " ").casefold())
             if isinstance(info, dict) and info.get("name"):
@@ -544,9 +645,7 @@ def build_pronunciation_inventory(
                 continue
             occupied: list[tuple[int, int]] = []
             for alias in sorted(multiword_aliases, key=lambda value: (-len(value), value)):
-                for alias_match in re.finditer(
-                    rf"(?<!\w){re.escape(alias)}(?!\w)", text, re.IGNORECASE
-                ):
+                for alias_match in re.finditer(rf"(?<!\w){re.escape(alias)}(?!\w)", text, re.IGNORECASE):
                     record(alias_match.group(0), chapter_number, text)
                     occupied.append(alias_match.span())
             for match in _CANDIDATE_PATTERN.finditer(text):
@@ -650,10 +749,10 @@ def build_pronunciation_inventory(
 
     try:
         from shared.artifacts import atomic_write_json
+
         atomic_write_json(inv_path, result)
     except Exception:
         pass
 
     cache_service.set(cache_key, {"sig": current_sig, "data": result}, ttl_seconds=1800)
     return result
-

@@ -101,10 +101,7 @@ class LoudnessNormalizer:
         audio = self._apply_peak_ceiling(audio)
         peak_limit = 10 ** (self.peak_limit_dbfs / 20)
         knee = peak_limit * 0.80
-        limited_sample_fraction = (
-            float(np.mean(np.abs(pre_ceiling_audio) > knee))
-            if pre_ceiling_audio.size else 0.0
-        )
+        limited_sample_fraction = float(np.mean(np.abs(pre_ceiling_audio) > knee)) if pre_ceiling_audio.size else 0.0
 
         # Final measurements
         final_lufs = self._measure_lufs(audio, sample_rate)
@@ -148,8 +145,10 @@ class LoudnessNormalizer:
     def _measure_lufs(self, audio: np.ndarray, sample_rate: int) -> float:
         """Measure integrated loudness in LUFS."""
         import math
+
         try:
             import pyloudnorm
+
             meter = pyloudnorm.Meter(sample_rate)
             # pyloudnorm expects at least 0.4 seconds
             if len(audio) / sample_rate < 0.4:
@@ -160,7 +159,7 @@ class LoudnessNormalizer:
             return lufs
         except ImportError:
             logger.warning("pyloudnorm not available — using RMS approximation")
-            rms = float(np.sqrt(np.mean(audio ** 2)))
+            rms = float(np.sqrt(np.mean(audio**2)))
             if rms > 0:
                 lufs = float(20 * np.log10(rms) - 0.691)  # Rough LUFS approximation
                 if math.isinf(lufs) or math.isnan(lufs):
@@ -200,9 +199,7 @@ class LoudnessNormalizer:
         limited = audio.copy()
         above = magnitude > knee
         if np.any(above):
-            compressed = knee + headroom * (
-                1.0 - np.exp(-(magnitude[above] - knee) / headroom)
-            )
+            compressed = knee + headroom * (1.0 - np.exp(-(magnitude[above] - knee) / headroom))
             limited[above] = np.sign(audio[above]) * compressed
         return limited
 
@@ -215,7 +212,7 @@ class LoudnessNormalizer:
         # Calculate envelope using fast moving average of squared signal
         window_size = max(1, int(sample_rate * 0.01))  # 10ms windows
         kernel = np.ones(window_size) / window_size
-        squared_env = np.convolve(audio ** 2, kernel, mode="same")
+        squared_env = np.convolve(audio**2, kernel, mode="same")
         envelope = np.sqrt(np.maximum(0, squared_env))
 
         # Gate binary mask
@@ -267,6 +264,7 @@ class LoudnessNormalizer:
         """Resample audio to a new sample rate."""
         try:
             import librosa
+
             return librosa.resample(audio, orig_sr=orig_sr, target_sr=target_sr)
         except ImportError:
             # Simple linear interpolation fallback

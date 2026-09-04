@@ -21,9 +21,7 @@ class TextCleaner:
 
         # Pre-compiled regex patterns for performance
         self._page_number = re.compile(r"^\s*\d{1,4}\s*$", re.MULTILINE)
-        self._header_footer = re.compile(
-            r"^\s*(?:[A-Z][A-Z\s]{3,}|[\w\s]+\|\s*\d+)\s*$", re.MULTILINE
-        )
+        self._header_footer = re.compile(r"^\s*(?:[A-Z][A-Z\s]{3,}|[\w\s]+\|\s*\d+)\s*$", re.MULTILINE)
         self._multiple_newlines = re.compile(r"\n{3,}")
         self._multiple_spaces = re.compile(r"[ \t]{2,}")
         self._leading_trailing_whitespace = re.compile(r"^[ \t]+|[ \t]+$", re.MULTILINE)
@@ -75,19 +73,19 @@ class TextCleaner:
             "\ufb02": "fl",
             "\ufb03": "ffi",
             "\ufb04": "ffl",
-            "\ufb05": "st",   # long st
+            "\ufb05": "st",  # long st
             "\ufb06": "st",
         }
         for lig, replacement in ligature_map.items():
             text = text.replace(lig, replacement)
 
         # Replace common problematic unicode
-        text = text.replace("\u00a0", " ")     # Non-breaking space
-        text = text.replace("\u200b", "")      # Zero-width space
-        text = text.replace("\u200c", "")      # Zero-width non-joiner
-        text = text.replace("\u200d", "")      # Zero-width joiner
-        text = text.replace("\ufeff", "")      # BOM
-        text = text.replace("\u2028", "\n")    # Line separator
+        text = text.replace("\u00a0", " ")  # Non-breaking space
+        text = text.replace("\u200b", "")  # Zero-width space
+        text = text.replace("\u200c", "")  # Zero-width non-joiner
+        text = text.replace("\u200d", "")  # Zero-width joiner
+        text = text.replace("\ufeff", "")  # BOM
+        text = text.replace("\u2028", "\n")  # Line separator
         text = text.replace("\u2029", "\n\n")  # Paragraph separator
 
         return text

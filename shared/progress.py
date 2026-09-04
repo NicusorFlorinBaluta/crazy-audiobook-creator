@@ -65,11 +65,7 @@ class ProgressEstimator:
             completed_units=completed_units,
             total_units=total_units,
         )
-        percent = (
-            min(100.0, max(0.0, completed_units * 100.0 / total_units))
-            if total_units > 0
-            else 0.0
-        )
+        percent = min(100.0, max(0.0, completed_units * 100.0 / total_units)) if total_units > 0 else 0.0
         return ProgressSnapshot(
             stage=stage,
             phase=phase,

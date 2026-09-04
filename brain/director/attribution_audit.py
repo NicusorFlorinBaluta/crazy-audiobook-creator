@@ -80,18 +80,12 @@ def audit_book_attribution(
     for chapter in book.chapters:
         script = scripts_by_number.get(chapter.number)
         if script is None:
-            issues.append(
-                _issue(chapter.number, None, None, "missing_script", "Chapter script is missing")
-            )
+            issues.append(_issue(chapter.number, None, None, "missing_script", "Chapter script is missing"))
             continue
         owners = _fragment_owners(script)
         fragments = ScriptGenerator._split_into_fragment_spans(chapter.text)
         chapter_speakers = ScriptGenerator._get_chapter_scoped_speakers(chapter.text, registry)
-        para_dialogue_map, para_tag_map = (
-            ScriptGenerator._paragraph_attribution_maps(
-                fragments, registry, chapter.text
-            )
-        )
+        para_dialogue_map, para_tag_map = ScriptGenerator._paragraph_attribution_maps(fragments, registry, chapter.text)
 
         for index, fragment in enumerate(fragments):
             if not ScriptGenerator._is_dialogue_fragment(fragment.text):
@@ -136,11 +130,7 @@ def audit_book_attribution(
             tag_text = (
                 next_text
                 if ScriptGenerator._is_pure_dialogue_tag(next_text)
-                else (
-                    prev_text
-                    if ScriptGenerator._is_leading_dialogue_tag(prev_text)
-                    else ""
-                )
+                else (prev_text if ScriptGenerator._is_leading_dialogue_tag(prev_text) else "")
             )
             exact: str | None = None
             evidence_kind: str | None = None
@@ -158,9 +148,7 @@ def audit_book_attribution(
             collective_tag = ScriptGenerator._is_collective_dialogue_tag(tag_text)
             embedded_term = ScriptGenerator._is_embedded_quoted_term(index, fragments)
 
-            if embedded_term and (
-                speaker != "narrator" or kind != "non_spoken_quote"
-            ):
+            if embedded_term and (speaker != "narrator" or kind != "non_spoken_quote"):
                 issues.append(
                     _issue(
                         chapter.number,
@@ -244,8 +232,7 @@ def audit_book_attribution(
                         index,
                         owner,
                         "attribution_review_required",
-                        owner.attribution_review_reason
-                        or "Speaker attribution requires human confirmation",
+                        owner.attribution_review_reason or "Speaker attribution requires human confirmation",
                         fragment.text,
                     )
                 )
@@ -258,18 +245,12 @@ def audit_book_attribution(
                 _self_identified_character(
                     owner.text,
                     registry,
-                    prior_context=chapter.text[
-                        max(0, owner.source_start - 500):owner.source_start
-                    ],
+                    prior_context=chapter.text[max(0, owner.source_start - 500) : owner.source_start],
                 )
                 if speaker in _GENERIC_SPEAKER_IDS
                 else None
             )
-            if (
-                speaker in _GENERIC_SPEAKER_IDS
-                and self_identity is not None
-                and self_identity != speaker
-            ):
+            if speaker in _GENERIC_SPEAKER_IDS and self_identity is not None and self_identity != speaker:
                 issues.append(
                     _issue(
                         chapter.number,
@@ -306,11 +287,7 @@ def audit_book_attribution(
                 and evidence_gender is not None
                 and character.gender == evidence_gender
             )
-            contradiction = (
-                exact is not None
-                and exact != speaker
-                and not compatible_named_role
-            )
+            contradiction = exact is not None and exact != speaker and not compatible_named_role
             gender_contradiction = (
                 evidence_gender is not None
                 and character is not None
@@ -337,8 +314,6 @@ def audit_book_attribution(
                     )
                 )
                 continue
-
-
 
             if speaker != "narrator" and speaker not in chapter_speakers:
                 issues.append(
@@ -386,21 +361,12 @@ def repair_deterministic_named_attribution(
         scripts,
         confidence_threshold=confidence_threshold,
     )
-    lines_by_id = {
-        line.line_id: line
-        for chapter in scripts
-        for line in chapter.lines
-    }
+    lines_by_id = {line.line_id: line for chapter in scripts for line in chapter.lines}
     targets_by_line: dict[str, set[str]] = {}
     for issue in report["issues"]:
         line_id = str(issue.get("line_id") or "")
         target = str(issue.get("expected_speaker") or "")
-        if (
-            issue.get("kind") != "named_tag"
-            or not line_id
-            or target not in registry.characters
-            or target == "narrator"
-        ):
+        if issue.get("kind") != "named_tag" or not line_id or target not in registry.characters or target == "narrator":
             continue
         targets_by_line.setdefault(line_id, set()).add(target)
 
@@ -412,20 +378,14 @@ def repair_deterministic_named_attribution(
     chapter_text = {chapter.number: chapter.text for chapter in book.chapters}
     for chapter in scripts:
         generic_lines = sorted(
-            (
-                line
-                for line in chapter.lines
-                if line.speaker in _GENERIC_SPEAKER_IDS
-                and line.dialogue_kind == "spoken"
-            ),
+            (line for line in chapter.lines if line.speaker in _GENERIC_SPEAKER_IDS and line.dialogue_kind == "spoken"),
             key=lambda line: (line.source_start or 0, line.line_id),
         )
         clusters: list[list[ScriptLine]] = []
         for line in generic_lines:
             if (
                 not clusters
-                or (line.source_start or 0) - (clusters[-1][-1].source_end or 0)
-                > _IDENTITY_CLUSTER_MAX_GAP
+                or (line.source_start or 0) - (clusters[-1][-1].source_end or 0) > _IDENTITY_CLUSTER_MAX_GAP
                 or line.speaker != clusters[-1][-1].speaker
             ):
                 clusters.append([line])
@@ -440,7 +400,7 @@ def repair_deterministic_named_attribution(
                         line.text,
                         registry,
                         prior_context=chapter_text.get(chapter.chapter_number, "")[
-                            max(0, line.source_start - 500):line.source_start
+                            max(0, line.source_start - 500) : line.source_start
                         ],
                     )
                 )
@@ -465,9 +425,7 @@ def repair_deterministic_named_attribution(
             continue
         line.speaker = target
         line.speaker_confidence = 1.0
-        line.speaker_evidence = (
-            f"Deterministic attached source tag identifies '{target}'."
-        )
+        line.speaker_evidence = f"Deterministic attached source tag identifies '{target}'."
         line.attribution_resolver = "deterministic_named_tag"
         line.attribution_review_required = False
         line.attribution_review_reason = ""
@@ -493,9 +451,7 @@ def repair_deterministic_named_attribution(
         target_character = registry.characters.get(target)
         cluster = identity_cluster_lines[cluster_id]
         generic = cluster[0].speaker
-        expected_gender = (
-            Gender.FEMALE if generic.endswith("female") else Gender.MALE
-        )
+        expected_gender = Gender.FEMALE if generic.endswith("female") else Gender.MALE
         if target_character is None or target_character.gender != expected_gender:
             conflicted.extend(line.line_id for line in cluster)
             continue
@@ -503,9 +459,7 @@ def repair_deterministic_named_attribution(
             previous = line.speaker
             line.speaker = target
             line.speaker_confidence = 1.0
-            line.speaker_evidence = (
-                f"Deterministic self-identity reveal resolves this scene speaker as '{target}'."
-            )
+            line.speaker_evidence = f"Deterministic self-identity reveal resolves this scene speaker as '{target}'."
             line.attribution_resolver = "deterministic_identity_reveal"
             line.attribution_review_required = False
             line.attribution_review_reason = ""
@@ -523,10 +477,9 @@ def repair_deterministic_named_attribution(
     if repaired:
         ScriptGenerator.sync_dialogue_counts(scripts, registry)
     return {
-        "attempted": len(targets_by_line) + sum(
-            len(lines)
-            for cluster_id, lines in identity_cluster_lines.items()
-            if identity_cluster_targets[cluster_id]
+        "attempted": len(targets_by_line)
+        + sum(
+            len(lines) for cluster_id, lines in identity_cluster_lines.items() if identity_cluster_targets[cluster_id]
         ),
         "repaired": repaired,
         "conflicted_line_ids": conflicted,
@@ -545,11 +498,7 @@ def queue_attribution_audit_issues(
     contradiction.  Mark those lines uncertain before Gemini is invoked so the
     normal escalation and provenance path can adjudicate them automatically.
     """
-    lines_by_id = {
-        line.line_id: line
-        for chapter in scripts
-        for line in chapter.lines
-    }
+    lines_by_id = {line.line_id: line for chapter in scripts for line in chapter.lines}
     queued: list[str] = []
     confidence_ceiling = max(0.0, confidence_threshold - 0.01)
     for issue in report.get("issues", []):

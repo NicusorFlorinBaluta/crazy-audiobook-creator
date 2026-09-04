@@ -95,10 +95,10 @@ class AudioAnalyzer:
         cps = char_count / duration if duration > 0 and char_count > 0 else 0.0
         pacing_anomaly = False
         if char_count > 10 and duration > 0:
-            if cps < 4.0:   # Hallucinated long silence/repetition
+            if cps < 4.0:  # Hallucinated long silence/repetition
                 pacing_anomaly = True
                 logger.warning("[AudioAnalyzer] Slow pacing anomaly detected (%.1f CPS) for file: %s", cps, audio_file)
-            elif cps > 32.0: # Swallowed/rushed text
+            elif cps > 32.0:  # Swallowed/rushed text
                 pacing_anomaly = True
                 logger.warning("[AudioAnalyzer] Fast pacing anomaly detected (%.1f CPS) for file: %s", cps, audio_file)
 
@@ -117,11 +117,7 @@ class AudioAnalyzer:
         # Duration score
         # A clip inside the accepted timing envelope should not subsequently
         # fail the aggregate score for the same duration measurement.
-        duration_score = (
-            1.0
-            if expected_duration <= 0 or duration_ok
-            else max(0.0, 1.0 - duration_deviation)
-        )
+        duration_score = 1.0 if expected_duration <= 0 or duration_ok else max(0.0, 1.0 - duration_deviation)
 
         return {
             # These metrics are embedded in QualityResult.metrics (dict[str,
@@ -161,10 +157,10 @@ class AudioAnalyzer:
         max_lag = int(sample_rate / 50.0)
 
         for i in range(0, len(audio) - frame_size, frame_size):
-            frame = audio[i:i + frame_size]
+            frame = audio[i : i + frame_size]
             # Autocorrelation
-            result = np.correlate(frame, frame, mode='full')
-            result = result[len(result) // 2:]
+            result = np.correlate(frame, frame, mode="full")
+            result = result[len(result) // 2 :]
 
             if max_lag < len(result):
                 peak_idx = min_lag + np.argmax(result[min_lag:max_lag])
@@ -182,10 +178,7 @@ class AudioAnalyzer:
         """Measure the noise floor by analyzing the quietest segments."""
         # Split audio into short frames
         frame_size = int(sample_rate * 0.05)  # 50ms frames
-        frames = [
-            audio[i : i + frame_size]
-            for i in range(0, len(audio) - frame_size, frame_size)
-        ]
+        frames = [audio[i : i + frame_size] for i in range(0, len(audio) - frame_size, frame_size)]
 
         if not frames:
             return -100.0
@@ -193,7 +186,7 @@ class AudioAnalyzer:
         # Calculate RMS for each frame
         rms_values = []
         for frame in frames:
-            rms = np.sqrt(np.mean(frame ** 2))
+            rms = np.sqrt(np.mean(frame**2))
             if rms > 0:
                 rms_db = 20 * np.log10(rms)
                 rms_values.append(rms_db)
@@ -238,9 +231,7 @@ class AudioAnalyzer:
         # Treat punctuation-separated words as distinct spoken words. A plain
         # whitespace split undercounts prose such as "white-faintly" and
         # "Starling-finally-felt", producing false slow-duration failures.
-        word_count = len(
-            re.findall(r"[^\W_]+(?:['’][^\W_]+)*|\d+", text, re.UNICODE)
-        )
+        word_count = len(re.findall(r"[^\W_]+(?:['’][^\W_]+)*|\d+", text, re.UNICODE))
         wpm = AVERAGE_WORDS_PER_MINUTE * speed
         expected_seconds = (word_count / wpm) * 60
 

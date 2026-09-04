@@ -113,9 +113,7 @@ def _workspace() -> Path:
     audio intermediates live when they are started from different directories.
     An absolute value is honoured as given.
     """
-    configured = Path(
-        config.get("storage", {}).get("workspace_dir", "workspace")
-    )
+    configured = Path(config.get("storage", {}).get("workspace_dir", "workspace"))
     if not configured.is_absolute():
         configured = shared_paths.REPO_ROOT / configured
     return configured.resolve()
@@ -144,13 +142,13 @@ def _enforce_workspace_quota() -> None:
     if max_gb <= 0:
         return
     used_bytes = _directory_size_bytes(_workspace())
-    limit_bytes = max_gb * 1024 ** 3
+    limit_bytes = max_gb * 1024**3
     if used_bytes >= limit_bytes:
         raise HTTPException(
             status_code=507,
             detail=(
                 f"Voice workspace quota reached "
-                f"({used_bytes / 1024 ** 3:.1f}/{max_gb:.1f} GiB). "
+                f"({used_bytes / 1024**3:.1f}/{max_gb:.1f} GiB). "
                 "Remove old intermediates before generating more audio."
             ),
         )
@@ -224,14 +222,17 @@ async def lifespan(app: FastAPI):
     config = load_config()
 
     from shared.single_instance import SingleInstanceLock
+
     lock = SingleInstanceLock("voice_server.lock")
     if not lock.acquire():
         logger.error("Another Voice Server instance is already running! Exiting.")
         import sys
+
         sys.exit(1)
 
     # Initialize components
     from voice.tts_server.embedding_store import EmbeddingStore
+
     embedding_store = EmbeddingStore(db_path="voice_cache.db")
 
     tts_cfg = config.get("tts", {})
@@ -269,16 +270,10 @@ async def lifespan(app: FastAPI):
             "voice_design_model",
             "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
         ),
-        voice_design_test_sentences=tts_cfg.get(
-            "voice_design_test_sentences", {}
-        ),
+        voice_design_test_sentences=tts_cfg.get("voice_design_test_sentences", {}),
         wer_threshold=val_cfg.get("wer_threshold", 0.20),
-        similarity_warning_threshold=val_cfg.get(
-            "voice_profile_similarity_warning", 0.97
-        ),
-        acoustic_regeneration_attempts=val_cfg.get(
-            "voice_profile_acoustic_regenerations", 1
-        ),
+        similarity_warning_threshold=val_cfg.get("voice_profile_similarity_warning", 0.97),
+        acoustic_regeneration_attempts=val_cfg.get("voice_profile_acoustic_regenerations", 1),
         distinctness_rounds=val_cfg.get("voice_distinctness_rounds", 2),
     )
     audio_analyzer = AudioAnalyzer(
@@ -299,12 +294,8 @@ async def lifespan(app: FastAPI):
             "speaker_similarity_threshold",
             0.55,
         ),
-        keep_models_resident=val_cfg.get(
-            "keep_tts_and_whisper_resident", False
-        ),
-        risk_aware_first_attempt=val_cfg.get(
-            "risk_aware_first_attempt", False
-        ),
+        keep_models_resident=val_cfg.get("keep_tts_and_whisper_resident", False),
+        risk_aware_first_attempt=val_cfg.get("risk_aware_first_attempt", False),
         emotion_wer_allowance=val_cfg.get("emotion_wer_allowance", 0.0),
         prosody_config=val_cfg.get("prosody", {}),
     )
@@ -338,11 +329,7 @@ async def lifespan(app: FastAPI):
         while True:
             await asyncio.sleep(min(30, max(5, idle_seconds)))
             try:
-                if (
-                    idle_seconds > 0
-                    and active_gpu_jobs == 0
-                    and time.time() - last_activity >= idle_seconds
-                ):
+                if idle_seconds > 0 and active_gpu_jobs == 0 and time.time() - last_activity >= idle_seconds:
                     with gpu_job_lock:
                         if active_gpu_jobs == 0 and engine and engine.is_loaded:
                             engine.unload()
@@ -448,15 +435,9 @@ async def health_check() -> VoiceHealthResponse:
         vram_peak_reserved_gb=vram.get("vram_peak_reserved_gb", 0.0),
         model_loaded=engine.model_name if engine and engine.is_loaded else "none",
         attention_backend=engine.attn_implementation if engine else "",
-        validator_backend=(
-            validator.whisper.backend if validator else ""
-        ),
-        validator_model=(
-            validator.whisper.model_name if validator else ""
-        ),
-        validator_vad_filter=(
-            bool(validator.whisper.vad_filter) if validator else False
-        ),
+        validator_backend=(validator.whisper.backend if validator else ""),
+        validator_model=(validator.whisper.model_name if validator else ""),
+        validator_vad_filter=(bool(validator.whisper.vad_filter) if validator else False),
         uptime_seconds=time.time() - start_time,
     )
 
@@ -488,6 +469,7 @@ def _run_voice_bootstrap(
             )
         except Exception as e:
             import traceback
+
             with open("voice_crash.log", "a") as f:
                 f.write(f"Crash in bootstrap_voices: {e}\n{traceback.format_exc()}\n")
             raise
@@ -533,9 +515,7 @@ def bootstrap_voices_stream(
             events.put({"type": "result", "data": result.model_dump()})
         except Exception as exc:
             logger.exception("Voice bootstrap stream failed")
-            events.put(
-                {"type": "error", "error": "exception", "detail": str(exc)}
-            )
+            events.put({"type": "error", "error": "exception", "detail": str(exc)})
         finally:
             with run_state_lock:
                 if active_project_runs.get(request.project_id) is cancellation:
@@ -560,9 +540,7 @@ def bootstrap_voices_stream(
             if await fast_req.is_disconnected():
                 cancellation.set()
 
-    return StreamingResponse(
-        event_generator(), media_type="application/x-ndjson"
-    )
+    return StreamingResponse(event_generator(), media_type="application/x-ndjson")
 
 
 @app.post("/voices/regenerate")
@@ -576,6 +554,7 @@ def regenerate_voice(
         raise HTTPException(status_code=503, detail="Server not initialized")
 
     from shared.models import Character
+
     character = Character(
         id=character_id,
         name=character_id.replace("_", " ").title(),
@@ -609,11 +588,7 @@ def generate_line(request: GenerateLineRequest) -> GenerateLineResponse:
         raise HTTPException(status_code=503, detail="Server not initialized")
 
     t0 = time.time()
-    output_path = (
-        _safe_workspace_project(request.project_id)
-        / "segments"
-        / f"{request.line.line_id}.wav"
-    )
+    output_path = _safe_workspace_project(request.project_id) / "segments" / f"{request.line.line_id}.wav"
 
     logger.info(
         "[VoiceServer] Synthesizing line %s (speaker='%s', text_len=%d, emotion='%s')",
@@ -734,6 +709,7 @@ def generate_chapter(request: GenerateChapterRequest, fast_req: Request):
 
     import json
     import queue
+
     q = queue.Queue()
 
     def _stream_progress(msg: dict[str, Any]) -> None:
@@ -744,6 +720,7 @@ def generate_chapter(request: GenerateChapterRequest, fast_req: Request):
         torch_module = None
         try:
             import torch
+
             if torch.cuda.is_available():
                 torch.cuda.reset_peak_memory_stats()
                 torch_module = torch
@@ -805,7 +782,7 @@ def generate_chapter(request: GenerateChapterRequest, fast_req: Request):
                     if msg.get("type") in ("result", "error"):
                         break
                 except queue.Empty:
-                    yield "\n" # keepalive
+                    yield "\n"  # keepalive
         finally:
             if await fast_req.is_disconnected():
                 cancellation.set()
@@ -821,9 +798,7 @@ def validate_segment(request: ValidateRequest) -> dict:
     audio_path = Path(request.audio_file).resolve()
     allowed_roots = [
         _workspace(),
-        Path(
-            config.get("storage", {}).get("voice_library_dir", "voice_library")
-        ).resolve(),
+        Path(config.get("storage", {}).get("voice_library_dir", "voice_library")).resolve(),
     ]
     if not any(audio_path.is_relative_to(root) for root in allowed_roots):
         raise HTTPException(status_code=403, detail="Audio path is outside allowed storage")
@@ -863,14 +838,9 @@ def master_chapter(request: MasterChapterRequest) -> MasterChapterResponse:
         if not narrator_ref.is_file():
             raise HTTPException(
                 status_code=422,
-                detail=(
-                    "Selected narrator voice is required for chapter "
-                    f"announcements: {request.narrator_voice_id}"
-                ),
+                detail=(f"Selected narrator voice is required for chapter announcements: {request.narrator_voice_id}"),
             )
-        announcement_text = request.chapter_title.strip() or (
-            f"Chapter {request.chapter_number}"
-        )
+        announcement_text = request.chapter_title.strip() or (f"Chapter {request.chapter_number}")
         with gpu_job():
             announcement_audio = engine.generate_speech(
                 text=announcement_text,

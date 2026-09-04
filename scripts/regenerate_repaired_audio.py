@@ -55,7 +55,8 @@ def find_repaired_chapters(project_dir: Path) -> set[int]:
         try:
             data = json.loads(report_file.read_text(encoding="utf-8"))
             repairs = [
-                x for x in data.get("results", [])
+                x
+                for x in data.get("results", [])
                 if x.get("resolved_speaker") and x.get("resolved_speaker") != x.get("original_speaker")
             ]
             return {int(x["chapter_number"]) for x in repairs}

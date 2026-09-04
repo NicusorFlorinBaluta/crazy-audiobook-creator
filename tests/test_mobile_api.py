@@ -108,6 +108,7 @@ class MobileApiTests(unittest.TestCase):
             self.assertFalse(data["is_completed"])
         finally:
             import shutil
+
             if project_dir.exists():
                 shutil.rmtree(project_dir)
 
@@ -118,26 +119,31 @@ class MobileApiTests(unittest.TestCase):
         try:
             book_json = project_dir / "book.json"
             book_json.write_text(
-                json.dumps({
-                    "metadata": {
-                        "title": "A Great Adventure",
-                        "author": "John Doe",
-                        "genre": "Fantasy",
-                        "year": "2026",
-                        "description": "An epic journey",
-                        "isbn": "1234567890",
-                    },
-                    "chapters": [{"title": "Ch 1"}, {"title": "Ch 2"}],
-                }),
+                json.dumps(
+                    {
+                        "metadata": {
+                            "title": "A Great Adventure",
+                            "author": "John Doe",
+                            "genre": "Fantasy",
+                            "year": "2026",
+                            "description": "An epic journey",
+                            "isbn": "1234567890",
+                        },
+                        "chapters": [{"title": "Ch 1"}, {"title": "Ch 2"}],
+                    }
+                ),
                 encoding="utf-8",
             )
-            self.job_queue.create_job(project_id, {
-                "title": "A Great Adventure",
-                "author": "John Doe",
-                "status": "complete",
-                "total_chapters": 2,
-                "mastered_chapters": [1, 2],
-            })
+            self.job_queue.create_job(
+                project_id,
+                {
+                    "title": "A Great Adventure",
+                    "author": "John Doe",
+                    "status": "complete",
+                    "total_chapters": 2,
+                    "mastered_chapters": [1, 2],
+                },
+            )
 
             # Create dummy m4b file
             m4b_file = project_dir / f"{project_id}.m4b"
@@ -157,6 +163,7 @@ class MobileApiTests(unittest.TestCase):
             self.assertEqual(found["file_size_bytes"], 1024)
         finally:
             import shutil
+
             if project_dir.exists():
                 shutil.rmtree(project_dir)
 
@@ -167,26 +174,31 @@ class MobileApiTests(unittest.TestCase):
         try:
             book_json = project_dir / "book.json"
             book_json.write_text(
-                json.dumps({
-                    "metadata": {
-                        "title": "Detailed Story",
-                        "author": "Jane Smith",
-                    },
-                    "chapters": [
-                        {"title": "Prologue"},
-                        {"title": "The Awakening"},
-                    ],
-                }),
+                json.dumps(
+                    {
+                        "metadata": {
+                            "title": "Detailed Story",
+                            "author": "Jane Smith",
+                        },
+                        "chapters": [
+                            {"title": "Prologue"},
+                            {"title": "The Awakening"},
+                        ],
+                    }
+                ),
                 encoding="utf-8",
             )
-            self.job_queue.create_job(project_id, {
-                "title": "Detailed Story",
-                "author": "Jane Smith",
-                "status": "generating",
-                "total_chapters": 2,
-                "mastered_chapters": [1],
-                "generated_chapters": [1, 2],
-            })
+            self.job_queue.create_job(
+                project_id,
+                {
+                    "title": "Detailed Story",
+                    "author": "Jane Smith",
+                    "status": "generating",
+                    "total_chapters": 2,
+                    "mastered_chapters": [1],
+                    "generated_chapters": [1, 2],
+                },
+            )
 
             response = self.client.get(f"/api/mobile/v1/books/{project_id}")
             self.assertEqual(response.status_code, 200)
@@ -201,6 +213,7 @@ class MobileApiTests(unittest.TestCase):
             self.assertEqual(data["chapters"][1]["status"], "generating")
         finally:
             import shutil
+
             if project_dir.exists():
                 shutil.rmtree(project_dir)
 
@@ -209,22 +222,40 @@ class MobileApiTests(unittest.TestCase):
         project_dir = Path("brain/projects") / project_id
         project_dir.mkdir(parents=True, exist_ok=True)
         try:
-            (project_dir / "book.json").write_text(json.dumps({
-                "metadata": {"title": "Subset", "author": "Author"},
-                "chapters": [
-                    {"title": "One"}, {"title": "Two"}, {"title": "Three"},
-                ],
-            }), encoding="utf-8")
+            (project_dir / "book.json").write_text(
+                json.dumps(
+                    {
+                        "metadata": {"title": "Subset", "author": "Author"},
+                        "chapters": [
+                            {"title": "One"},
+                            {"title": "Two"},
+                            {"title": "Three"},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
             (project_dir / f"{project_id}.m4b").write_bytes(b"audio")
-            (project_dir / "export_quality.json").write_text(json.dumps({
-                "partial": True,
-                "chapters": [2],
-                "output_file": str(project_dir / f"{project_id}.m4b"),
-            }), encoding="utf-8")
-            self.job_queue.create_job(project_id, {
-                "title": "Subset", "status": "complete", "total_chapters": 3,
-                "mastered_chapters": [], "generated_chapters": [],
-            })
+            (project_dir / "export_quality.json").write_text(
+                json.dumps(
+                    {
+                        "partial": True,
+                        "chapters": [2],
+                        "output_file": str(project_dir / f"{project_id}.m4b"),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.job_queue.create_job(
+                project_id,
+                {
+                    "title": "Subset",
+                    "status": "complete",
+                    "total_chapters": 3,
+                    "mastered_chapters": [],
+                    "generated_chapters": [],
+                },
+            )
 
             response = self.client.get(f"/api/mobile/v1/books/{project_id}")
             self.assertEqual(response.status_code, 200)
@@ -234,6 +265,7 @@ class MobileApiTests(unittest.TestCase):
             )
         finally:
             import shutil
+
             if project_dir.exists():
                 shutil.rmtree(project_dir)
 
@@ -273,6 +305,7 @@ class MobileApiTests(unittest.TestCase):
             self.assertEqual(range_resp2.content, dummy_bytes[1024:2048])
         finally:
             import shutil
+
             if project_dir.exists():
                 shutil.rmtree(project_dir)
 
@@ -299,6 +332,7 @@ class MobileApiTests(unittest.TestCase):
             self.assertNotIn(orphan_id, catalog_ids)
         finally:
             import shutil
+
             if active_dir.exists():
                 shutil.rmtree(active_dir)
             if orphan_dir.exists():
@@ -314,48 +348,66 @@ class MobileApiTests(unittest.TestCase):
         manifests_dir.mkdir(parents=True, exist_ok=True)
 
         try:
-            (project_dir / "book.json").write_text(json.dumps({
-                "metadata": {"title": "Delivery Book", "author": "Author"},
-                "chapters": [
-                    {"title": "Prologue"},
-                    {"title": "Chapter One"},
-                    {"title": "Chapter Two"},
-                ],
-            }), encoding="utf-8")
+            (project_dir / "book.json").write_text(
+                json.dumps(
+                    {
+                        "metadata": {"title": "Delivery Book", "author": "Author"},
+                        "chapters": [
+                            {"title": "Prologue"},
+                            {"title": "Chapter One"},
+                            {"title": "Chapter Two"},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
 
             # Write master manifests for durations
             for ch_num, dur in [(1, 100.0), (2, 200.0), (3, 300.0)]:
-                (manifests_dir / f"chapter_{ch_num:03d}.master.json").write_text(json.dumps({
-                    "duration_seconds": dur,
-                }), encoding="utf-8")
+                (manifests_dir / f"chapter_{ch_num:03d}.master.json").write_text(
+                    json.dumps(
+                        {
+                            "duration_seconds": dur,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
 
             # Write delivery index
-            (deliv_dir / "index.json").write_text(json.dumps({
-                "schema_version": 1,
-                "project_id": project_id,
-                "batch_size": 2,
-                "chapter_numbers": [1, 2],
-                "deliveries": [
+            (deliv_dir / "index.json").write_text(
+                json.dumps(
                     {
-                        "delivery_id": "part-001",
-                        "ordinal": 1,
+                        "schema_version": 1,
+                        "project_id": project_id,
+                        "batch_size": 2,
                         "chapter_numbers": [1, 2],
-                        "status": "published",
-                        "artifact": "Part-01.m4b",
-                        "duration_seconds": 300.0,
-                        "published_at": "2026-08-27T12:00:00Z",
-                        "sha256": "abc123def456",
-                        "bytes": 1024,
+                        "deliveries": [
+                            {
+                                "delivery_id": "part-001",
+                                "ordinal": 1,
+                                "chapter_numbers": [1, 2],
+                                "status": "published",
+                                "artifact": "Part-01.m4b",
+                                "duration_seconds": 300.0,
+                                "published_at": "2026-08-27T12:00:00Z",
+                                "sha256": "abc123def456",
+                                "bytes": 1024,
+                            }
+                        ],
                     }
-                ],
-            }), encoding="utf-8")
+                ),
+                encoding="utf-8",
+            )
 
-            self.job_queue.create_job(project_id, {
-                "title": "Delivery Book",
-                "status": "generating",
-                "total_chapters": 3,
-                "mastered_chapters": [1, 2],
-            })
+            self.job_queue.create_job(
+                project_id,
+                {
+                    "title": "Delivery Book",
+                    "status": "generating",
+                    "total_chapters": 3,
+                    "mastered_chapters": [1, 2],
+                },
+            )
 
             response = self.client.get(f"/api/mobile/v1/books/{project_id}")
             self.assertEqual(response.status_code, 200)
@@ -388,6 +440,7 @@ class MobileApiTests(unittest.TestCase):
             self.assertEqual(all_chaps[1]["end_ms"], 300000)
         finally:
             import shutil
+
             if project_dir.exists():
                 shutil.rmtree(project_dir)
 
@@ -452,6 +505,7 @@ class MobileApiTests(unittest.TestCase):
             self.assertEqual(lines[1]["end_ms"], 7800)
         finally:
             import shutil
+
             if project_dir.exists():
                 shutil.rmtree(project_dir)
 
@@ -527,6 +581,7 @@ class MobileApiTests(unittest.TestCase):
             self.assertEqual(paragraphs[1]["end_ms"], 9000)
         finally:
             import shutil
+
             if project_dir.exists():
                 shutil.rmtree(project_dir)
 
@@ -544,8 +599,6 @@ class MobileApiTests(unittest.TestCase):
             self.assertIn("application/epub+zip", response.headers["content-type"])
         finally:
             import shutil
+
             if project_dir.exists():
                 shutil.rmtree(project_dir)
-
-
-

@@ -56,12 +56,8 @@ class VoiceDesigner:
         self.voice_design_duration = voice_design_duration
         self.voice_design_model = voice_design_model
         self.wer_threshold = wer_threshold
-        self.similarity_warning_threshold = max(
-            -1.0, min(1.0, similarity_warning_threshold)
-        )
-        self.acoustic_regeneration_attempts = max(
-            0, int(acoustic_regeneration_attempts)
-        )
+        self.similarity_warning_threshold = max(-1.0, min(1.0, similarity_warning_threshold))
+        self.acoustic_regeneration_attempts = max(0, int(acoustic_regeneration_attempts))
         # Extra design/compare rounds spent separating colliding voices.
         # Bounded on purpose: each round re-boots the VoiceDesign subprocess,
         # so the cost is real, and a cast that will not separate must end as a
@@ -70,29 +66,24 @@ class VoiceDesigner:
         self.distinctness_rounds = max(0, min(5, int(distinctness_rounds)))
         configured_sentences = voice_design_test_sentences or {}
         self.voice_design_test_sentences = {
-            "male": configured_sentences.get(
-                "male", VOICE_DESIGN_TEST_SENTENCES["male"]
-            ),
-            "female": configured_sentences.get(
-                "female", VOICE_DESIGN_TEST_SENTENCES["female"]
-            ),
+            "male": configured_sentences.get("male", VOICE_DESIGN_TEST_SENTENCES["male"]),
+            "female": configured_sentences.get("female", VOICE_DESIGN_TEST_SENTENCES["female"]),
             "other": configured_sentences.get(
                 "other",
-                configured_sentences.get(
-                    "neutral", VOICE_DESIGN_TEST_SENTENCES["other"]
-                ),
+                configured_sentences.get("neutral", VOICE_DESIGN_TEST_SENTENCES["other"]),
             ),
         }
 
     def _build_test_sentence(self, char_id: str, character: Character) -> str:
-        gender_key = (
-            character.gender.value
-            if hasattr(character.gender, "value")
-            else str(character.gender)
-        ).lower()
+        gender_key = (character.gender.value if hasattr(character.gender, "value") else str(character.gender)).lower()
         fallback = self.voice_design_test_sentences.get(
             gender_key,
-            self.voice_design_test_sentences.get("neutral", self.voice_design_test_sentences.get("other", "This is a fallback test sentence to ensure adequate duration for voice design references.")),
+            self.voice_design_test_sentences.get(
+                "neutral",
+                self.voice_design_test_sentences.get(
+                    "other", "This is a fallback test sentence to ensure adequate duration for voice design references."
+                ),
+            ),
         )
 
         importance = getattr(character, "importance", "minor")
@@ -174,26 +165,17 @@ class VoiceDesigner:
             for _ in range(300):
                 check_cancelled()
                 if design_proc.poll() is not None:
-                    raise RuntimeError(
-                        "Qwen VoiceDesign Microservice exited during startup; "
-                        f"see {log_path}"
-                    )
+                    raise RuntimeError(f"Qwen VoiceDesign Microservice exited during startup; see {log_path}")
                 try:
                     resp = httpx.get("http://127.0.0.1:8101/health", timeout=2.0)
-                    if (
-                        resp.status_code == 200
-                        and resp.json().get("model_loaded") is True
-                    ):
+                    if resp.status_code == 200 and resp.json().get("model_loaded") is True:
                         logger.info("Qwen VoiceDesign Microservice is ready!")
                         break
                 except Exception:
                     pass
                 time.sleep(2)
             else:
-                raise RuntimeError(
-                    "Qwen VoiceDesign Microservice failed to start; "
-                    f"see {log_path}"
-                )
+                raise RuntimeError(f"Qwen VoiceDesign Microservice failed to start; see {log_path}")
             yield
         finally:
             logger.info("Shutting down Qwen VoiceDesign Microservice...")
@@ -214,18 +196,18 @@ class VoiceDesigner:
     ) -> BootstrapVoicesResponse:
         """Generate voice reference clips for all characters in a project.
 
-        For each character:
-        1. Check if a voice already exists (skip if idempotent)
-        2. Select a test sentence based on gender
-3. Use Qwen3-TTS VoiceDesign to generate a reference clip
-        4. Transcribe reference clip with Whisper for Full ICL mode
-        5. Save to the voice library
+                For each character:
+                1. Check if a voice already exists (skip if idempotent)
+                2. Select a test sentence based on gender
+        3. Use Qwen3-TTS VoiceDesign to generate a reference clip
+                4. Transcribe reference clip with Whisper for Full ICL mode
+                5. Save to the voice library
 
-        Args:
-            request: Bootstrap request with project ID and characters.
+                Args:
+                    request: Bootstrap request with project ID and characters.
 
-        Returns:
-            Response with generated voice file paths.
+                Returns:
+                    Response with generated voice file paths.
         """
         project_id = request.project_id
         voices_generated: dict[str, BootstrapVoiceResult] = {}
@@ -262,10 +244,7 @@ class VoiceDesigner:
                     int(
                         request.candidate_counts.get(
                             char_id,
-                            3
-                            if char_id == "narrator"
-                            or getattr(character, "importance", "minor") == "major"
-                            else 1,
+                            3 if char_id == "narrator" or getattr(character, "importance", "minor") == "major" else 1,
                         )
                     ),
                 ),
@@ -314,17 +293,17 @@ class VoiceDesigner:
                     # major voice immediately usable and approvable.
                     cand_id = self._candidate_id(char_id, cand_idx)
 
-                    if not request.force_regenerate and self.library.voice_exists(
-                        project_id, cand_id
-                    ):
+                    if not request.force_regenerate and self.library.voice_exists(project_id, cand_id):
                         existing = self.library.get_voice_info(project_id, cand_id)
                         if existing and existing.get("source_type") == "uploaded":
-                            candidates.append(VoiceCandidate(
-                                id=cand_id,
-                                file=existing.get("file", ""),
-                                duration_seconds=existing.get("duration_seconds", 0.0),
-                                sample_rate=existing.get("sample_rate", 24000),
-                            ))
+                            candidates.append(
+                                VoiceCandidate(
+                                    id=cand_id,
+                                    file=existing.get("file", ""),
+                                    duration_seconds=existing.get("duration_seconds", 0.0),
+                                    sample_rate=existing.get("sample_rate", 24000),
+                                )
+                            )
                             designed_candidates += 1
                             emit(
                                 "designing_references",
@@ -340,12 +319,14 @@ class VoiceDesigner:
                             and existing.get("design_fingerprint") == expected_fingerprint
                         )
                         if existing and fingerprint_matches:
-                            candidates.append(VoiceCandidate(
-                                id=cand_id,
-                                file=existing.get("file", ""),
-                                duration_seconds=existing.get("duration_seconds", 0.0),
-                                sample_rate=existing.get("sample_rate", 24000),
-                            ))
+                            candidates.append(
+                                VoiceCandidate(
+                                    id=cand_id,
+                                    file=existing.get("file", ""),
+                                    duration_seconds=existing.get("duration_seconds", 0.0),
+                                    sample_rate=existing.get("sample_rate", 24000),
+                                )
+                            )
                             designed_candidates += 1
                             emit(
                                 "designing_references",
@@ -408,10 +389,7 @@ class VoiceDesigner:
 
         # Validate only after VoiceDesign has released VRAM.
         if self.validator:
-            validation_total = sum(
-                len(result.candidates)
-                for result in voices_generated.values()
-            )
+            validation_total = sum(len(result.candidates) for result in voices_generated.values())
             validation_completed = 0
             emit(
                 "validating_transcripts",
@@ -464,10 +442,7 @@ class VoiceDesigner:
             self.validator.unload()
 
         embeddings: dict[str, Any] = {}
-        acoustic_total = sum(
-            len(result.candidates)
-            for result in voices_generated.values()
-        )
+        acoustic_total = sum(len(result.candidates) for result in voices_generated.values())
         acoustic_completed = 0
         emit(
             "measuring_references",
@@ -480,9 +455,7 @@ class VoiceDesigner:
             character = request.characters[char_id]
             for cand in result.candidates:
                 check_cancelled()
-                metrics, warnings = self._acoustic_diagnostics(
-                    Path(cand.file), character
-                )
+                metrics, warnings = self._acoustic_diagnostics(Path(cand.file), character)
                 cand.acoustic_metrics = metrics
                 cand.warnings.extend(warnings)
                 acoustic_completed += 1
@@ -503,13 +476,9 @@ class VoiceDesigner:
                     char_id,
                     exc,
                 )
-                result.warnings.append(
-                    "Acoustic distinctness could not be checked."
-                )
+                result.warnings.append("Acoustic distinctness could not be checked.")
 
-        cast_diagnostics, collisions = self._compare_cast(
-            embeddings, voices_generated, emit, check_cancelled
-        )
+        cast_diagnostics, collisions = self._compare_cast(embeddings, voices_generated, emit, check_cancelled)
         cast_diagnostics, convergence_rounds = self._converge_distinctness(
             request,
             voices_generated,
@@ -604,9 +573,7 @@ class VoiceDesigner:
             for char_id in regenerated:
                 check_cancelled()
                 try:
-                    embeddings[char_id] = self.engine.speaker_embedding(
-                        voices_generated[char_id].file
-                    )
+                    embeddings[char_id] = self.engine.speaker_embedding(voices_generated[char_id].file)
                 except Exception as exc:
                     logger.warning(
                         "Could not re-extract cast embedding for '%s': %s",
@@ -614,9 +581,7 @@ class VoiceDesigner:
                         exc,
                     )
 
-            cast_diagnostics, collisions = self._compare_cast(
-                embeddings, voices_generated, emit, check_cancelled
-            )
+            cast_diagnostics, collisions = self._compare_cast(embeddings, voices_generated, emit, check_cancelled)
             after = self._collision_summary(cast_diagnostics)
             convergence_rounds.append(
                 {
@@ -629,8 +594,7 @@ class VoiceDesigner:
                 }
             )
             logger.info(
-                "Distinctness round %d complete: similar pairs %d -> %d, "
-                "worst similarity %.3f -> %.3f",
+                "Distinctness round %d complete: similar pairs %d -> %d, worst similarity %.3f -> %.3f",
                 round_index,
                 before["similar_pairs"],
                 after["similar_pairs"],
@@ -656,11 +620,7 @@ class VoiceDesigner:
         # rate is exactly the kind of change that can hurt intelligibility.
         # Done once at the end rather than per round: one Whisper load, and
         # only when something was actually redesigned.
-        redesigned = {
-            char_id
-            for entry in convergence_rounds
-            for char_id in entry["redesigned"]
-        }
+        redesigned = {char_id for entry in convergence_rounds for char_id in entry["redesigned"]}
         if redesigned and self.validator:
             self._revalidate_transcripts(request, redesigned, voices_generated)
 
@@ -679,9 +639,7 @@ class VoiceDesigner:
                 if result is None or not result.candidates:
                     continue
                 candidate = result.candidates[0]
-                expected = self._build_test_sentence(
-                    char_id, request.characters[char_id]
-                )
+                expected = self._build_test_sentence(char_id, request.characters[char_id])
                 transcribed = self.validator.transcribe(candidate.file)
                 wer = float(self.validator.calculate_wer(expected, transcribed))
                 candidate.transcription_wer = wer
@@ -742,7 +700,7 @@ class VoiceDesigner:
             "Comparing cast distinctness",
         )
         for index, left_id in enumerate(voice_ids):
-            for right_id in voice_ids[index + 1:]:
+            for right_id in voice_ids[index + 1 :]:
                 check_cancelled()
                 similarity = self.engine.embedding_similarity(
                     embeddings[left_id],
@@ -790,9 +748,7 @@ class VoiceDesigner:
             # Reporting the max across *all* pairs would be dominated by pairs
             # that are objectively contrasted and therefore suppressed, hiding
             # whether the rounds are helping.
-            "max_similarity": max(
-                (float(d.speaker_similarity) for d in similar), default=0.0
-            ),
+            "max_similarity": max((float(d.speaker_similarity) for d in similar), default=0.0),
         }
 
     @staticmethod
@@ -815,13 +771,9 @@ class VoiceDesigner:
             left, right = diagnostic.left_voice_id, diagnostic.right_voice_id
             similarity = float(diagnostic.speaker_similarity)
             if left in voices_generated:
-                voices_generated[left].warnings.append(
-                    f"{stale}{right} (speaker similarity {similarity:.3f})."
-                )
+                voices_generated[left].warnings.append(f"{stale}{right} (speaker similarity {similarity:.3f}).")
             if right in voices_generated:
-                voices_generated[right].warnings.append(
-                    f"{stale}{left} (speaker similarity {similarity:.3f})."
-                )
+                voices_generated[right].warnings.append(f"{stale}{left} (speaker similarity {similarity:.3f}).")
 
     def _redesign_for_distinctness(
         self,
@@ -841,18 +793,12 @@ class VoiceDesigner:
 
         Returns the ids that were actually regenerated.
         """
-        targets = [
-            char_id
-            for char_id in collisions
-            if char_id in request.characters
-        ]
+        targets = [char_id for char_id in collisions if char_id in request.characters]
         if not targets:
             return set()
 
         regenerated: set[str] = set()
-        with self._voice_design_service(
-            check_cancelled, round_label=f"distinctness round {round_index}"
-        ):
+        with self._voice_design_service(check_cancelled, round_label=f"distinctness round {round_index}"):
             for position, char_id in enumerate(targets, start=1):
                 check_cancelled()
                 character = request.characters[char_id]
@@ -864,11 +810,7 @@ class VoiceDesigner:
                     "different timbre, while keeping the stated age, gender and "
                     "character intent intact. Do not caricature the voice."
                 )
-                contrasted = character.model_copy(
-                    update={
-                        "voice_description": character.voice_description + contrast
-                    }
-                )
+                contrasted = character.model_copy(update={"voice_description": character.voice_description + contrast})
                 cand_id = self._candidate_id(char_id, 1)
                 try:
                     self.library.delete_voice(request.project_id, cand_id)
@@ -876,20 +818,15 @@ class VoiceDesigner:
                         request.project_id,
                         cand_id,
                         contrasted,
-                        design_fingerprint=request.design_fingerprints.get(
-                            char_id, ""
-                        ),
+                        design_fingerprint=request.design_fingerprints.get(char_id, ""),
                     )
                 except Exception as exc:
                     # A failed redesign must not lose the voice we already had.
-                    logger.warning(
-                        "Distinctness redesign failed for '%s': %s", char_id, exc
-                    )
+                    logger.warning("Distinctness redesign failed for '%s': %s", char_id, exc)
                     continue
 
                 result.warnings.append(
-                    f"Automatically redesigned in distinctness round "
-                    f"{round_index} to separate it from {collided_with}."
+                    f"Automatically redesigned in distinctness round {round_index} to separate it from {collided_with}."
                 )
                 existing = voices_generated[char_id]
                 if existing.candidates:
@@ -901,9 +838,7 @@ class VoiceDesigner:
                 existing.sample_rate = result.sample_rate
                 existing.transcription_wer = result.transcription_wer
 
-                metrics, acoustic_warnings = self._acoustic_diagnostics(
-                    Path(result.file), contrasted
-                )
+                metrics, acoustic_warnings = self._acoustic_diagnostics(Path(result.file), contrasted)
                 result.acoustic_metrics = metrics
                 result.warnings.extend(acoustic_warnings)
                 existing.acoustic_metrics = metrics
@@ -934,12 +869,8 @@ class VoiceDesigner:
         left_range = float(left_metrics.get("f0_range_hz", 0.0) or 0.0)
         right_range = float(right_metrics.get("f0_range_hz", 0.0) or 0.0)
         range_delta = abs(left_range - right_range)
-        left_centroid = float(
-            left_metrics.get("spectral_centroid_hz", 0.0) or 0.0
-        )
-        right_centroid = float(
-            right_metrics.get("spectral_centroid_hz", 0.0) or 0.0
-        )
+        left_centroid = float(left_metrics.get("spectral_centroid_hz", 0.0) or 0.0)
+        right_centroid = float(right_metrics.get("spectral_centroid_hz", 0.0) or 0.0)
         centroid_delta = abs(left_centroid - right_centroid)
 
         pitch_similarity = 1.0 - min(pitch_delta / 180.0, 1.0)
@@ -953,13 +884,8 @@ class VoiceDesigner:
         )
         composite = max(-1.0, min(1.0, composite))
 
-        objectively_contrasted = (
-            pitch_delta >= 40.0 and centroid_delta >= 350.0
-        )
-        similar = (
-            speaker_similarity >= warning_threshold
-            and not objectively_contrasted
-        )
+        objectively_contrasted = pitch_delta >= 40.0 and centroid_delta >= 350.0
+        similar = speaker_similarity >= warning_threshold and not objectively_contrasted
         return CastPairDiagnostic(
             left_voice_id=left_id,
             right_voice_id=right_id,
@@ -969,12 +895,9 @@ class VoiceDesigner:
             pitch_range_delta_hz=range_delta,
             spectral_centroid_delta_hz=centroid_delta,
             status="similar" if similar else "distinct",
-            warning_suppressed=bool(
-                speaker_similarity >= warning_threshold and objectively_contrasted
-            ),
+            warning_suppressed=bool(speaker_similarity >= warning_threshold and objectively_contrasted),
             suppression_reason=(
-                "speaker embedding is similar, but both pitch and spectral "
-                "centroid are materially separated"
+                "speaker embedding is similar, but both pitch and spectral centroid are materially separated"
                 if speaker_similarity >= warning_threshold and objectively_contrasted
                 else None
             ),
@@ -997,14 +920,9 @@ class VoiceDesigner:
         rms = float(np.sqrt(np.mean(np.square(audio)))) if audio.size else 0.0
         dc_offset = float(abs(np.mean(audio))) if audio.size else 0.0
         duration = float(len(audio) / sample_rate) if sample_rate else 0.0
-        clipping_fraction = (
-            float(np.mean(np.abs(audio) >= 0.999)) if audio.size else 0.0
-        )
+        clipping_fraction = float(np.mean(np.abs(audio) >= 0.999)) if audio.size else 0.0
         silence_threshold = max(0.002, rms * 0.10)
-        silence_ratio = (
-            float(np.mean(np.abs(audio) < silence_threshold))
-            if audio.size else 1.0
-        )
+        silence_ratio = float(np.mean(np.abs(audio) < silence_threshold)) if audio.size else 1.0
         warnings: list[str] = []
         voiced_f0: Any = np.array([], dtype=np.float32)
         if audio.size >= 2048:
@@ -1018,42 +936,24 @@ class VoiceDesigner:
                 voiced_f0 = f0[np.isfinite(f0)]
             except Exception as exc:
                 logger.debug("Pitch diagnostic failed for %s: %s", audio_path, exc)
-        median_f0 = (
-            float(np.median(voiced_f0)) if voiced_f0.size else 0.0
-        )
+        median_f0 = float(np.median(voiced_f0)) if voiced_f0.size else 0.0
         f0_p10 = float(np.percentile(voiced_f0, 10)) if voiced_f0.size else 0.0
         f0_p90 = float(np.percentile(voiced_f0, 90)) if voiced_f0.size else 0.0
         spectral_centroid = 0.0
         spectral_flatness = 0.0
         if audio.size >= 2048:
             try:
-                spectral_centroid = float(
-                    np.median(
-                        librosa.feature.spectral_centroid(
-                            y=audio, sr=sample_rate
-                        )
-                    )
-                )
-                spectral_flatness = float(
-                    np.median(librosa.feature.spectral_flatness(y=audio))
-                )
+                spectral_centroid = float(np.median(librosa.feature.spectral_centroid(y=audio, sr=sample_rate)))
+                spectral_flatness = float(np.median(librosa.feature.spectral_flatness(y=audio)))
             except Exception as exc:
                 logger.debug("Spectral diagnostic failed for %s: %s", audio_path, exc)
-        gender = (
-            character.gender.value
-            if isinstance(character.gender, Gender)
-            else str(character.gender)
-        ).lower()
+        gender = (character.gender.value if isinstance(character.gender, Gender) else str(character.gender)).lower()
         age = character.age_range.lower()
         if "child" not in age and "young" not in age:
             if gender == "male" and median_f0 > 240.0:
-                warnings.append(
-                    "Pitch is unusually high for the requested adult male design; review this voice."
-                )
+                warnings.append("Pitch is unusually high for the requested adult male design; review this voice.")
             elif gender == "female" and 0.0 < median_f0 < 105.0:
-                warnings.append(
-                    "Pitch is unusually low for the requested adult female design; review this voice."
-                )
+                warnings.append("Pitch is unusually low for the requested adult female design; review this voice.")
         if peak >= 0.999:
             warnings.append("Reference preview reaches digital full scale; check clipping.")
         if rms < 0.005:
@@ -1107,6 +1007,7 @@ class VoiceDesigner:
         test_sentence = self._build_test_sentence(char_id, character)
 
         import uuid
+
         base_path = self.library.get_voice_path(project_id, char_id)
         output_path = base_path.with_name(f"{base_path.stem}_{uuid.uuid4().hex[:8]}{base_path.suffix}")
 
@@ -1118,6 +1019,7 @@ class VoiceDesigner:
         )
 
         import requests
+
         resp = requests.post(
             "http://127.0.0.1:8101/voices/design",
             json={
@@ -1134,6 +1036,7 @@ class VoiceDesigner:
 
         # Try to read the file to get duration and sample rate
         import soundfile as sf
+
         audio, sr = sf.read(str(output_path))
         duration_seconds = len(audio) / sr
 

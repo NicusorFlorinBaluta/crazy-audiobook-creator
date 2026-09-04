@@ -187,4 +187,3 @@ def test_current_activity_formats_progress_message_with_book_chapter_titles() ->
     # pipeline.js formats live progress messages using book chapter names
     assert "chapterDetailsMap = new Map(data.chapter_details.map(d => [d.number, d.title]));" in pipeline
     assert "${phaseName} — ${bookTitle}: ${m[3]}" in pipeline
-

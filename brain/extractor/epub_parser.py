@@ -49,15 +49,13 @@ FRONT_MATTER_TITLE_PATTERNS = [
 ]
 
 # Compatibility export for callers/tests that inspect the complete catalog.
-SKIP_TITLE_PATTERNS = (
-    TOC_TITLE_PATTERNS
-    + APPENDIX_TITLE_PATTERNS
-    + FRONT_MATTER_TITLE_PATTERNS
-)
+SKIP_TITLE_PATTERNS = TOC_TITLE_PATTERNS + APPENDIX_TITLE_PATTERNS + FRONT_MATTER_TITLE_PATTERNS
 
 # Patterns for character reference material (glossary, dramatis personae, character list)
 REFERENCE_TITLE_PATTERNS = [
-    re.compile(r"(?i)\b(glossary|dramatis\s+personae|character\s+list|cast\s+of\s+characters|list\s+of\s+characters|names\s+and\s+terms)\b"),
+    re.compile(
+        r"(?i)\b(glossary|dramatis\s+personae|character\s+list|cast\s+of\s+characters|list\s+of\s+characters|names\s+and\s+terms)\b"
+    ),
     re.compile(r"(?i)\bappendix\b.*(?:characters|names|dramatis|glossary|people|cast)"),
 ]
 
@@ -73,7 +71,7 @@ CHAPTER_HEADING_PATTERNS = [
     re.compile(r"(?i)^prologue\b", re.MULTILINE),
     re.compile(r"(?i)^epilogue\b", re.MULTILINE),
     re.compile(r"(?i)^interlude\b", re.MULTILINE),
-    re.compile(r"^\d+\.\s+", re.MULTILINE),   # "1. Title"
+    re.compile(r"^\d+\.\s+", re.MULTILINE),  # "1. Title"
 ]
 
 
@@ -110,13 +108,9 @@ class EpubParser:
             return False
         if self.skip_toc and any(p.search(title) for p in TOC_TITLE_PATTERNS):
             return True
-        if self.skip_appendices and any(
-            p.search(title) for p in APPENDIX_TITLE_PATTERNS
-        ):
+        if self.skip_appendices and any(p.search(title) for p in APPENDIX_TITLE_PATTERNS):
             return True
-        if self.skip_front_matter and any(
-            p.search(title) for p in FRONT_MATTER_TITLE_PATTERNS
-        ):
+        if self.skip_front_matter and any(p.search(title) for p in FRONT_MATTER_TITLE_PATTERNS):
             return True
         if self.skip_preface and any(p.search(title) for p in PREFACE_TITLE_PATTERNS):
             return True
@@ -175,16 +169,24 @@ class EpubParser:
         semantic_set = set(semantics)
         reference_semantics = {"glossary", "bibliography"}
         exclude_semantics = {
-            "toc", "navigation", "cover", "titlepage", "copyright",
-            "dedication", "acknowledgments", "colophon", "index",
+            "toc",
+            "navigation",
+            "cover",
+            "titlepage",
+            "copyright",
+            "dedication",
+            "acknowledgments",
+            "colophon",
+            "index",
         }
         narrative_semantics = {
-            "chapter", "prologue", "epilogue", "bodymatter", "part",
+            "chapter",
+            "prologue",
+            "epilogue",
+            "bodymatter",
+            "part",
         }
-        if self.skip_appendices and (
-            self._is_reference_title(title)
-            or semantic_set.intersection(reference_semantics)
-        ):
+        if self.skip_appendices and (self._is_reference_title(title) or semantic_set.intersection(reference_semantics)):
             decision, confidence, reason = "reference", 0.98, "Reference-material title or EPUB semantics"
         elif semantic_set.intersection(exclude_semantics):
             decision, confidence, reason = "exclude", 0.98, "Non-narrative EPUB semantics"
@@ -241,12 +243,7 @@ class EpubParser:
             for key in ("epub:type", "role", "class"):
                 value = tag.attrs.get(key)
                 values.extend(value if isinstance(value, list) else [value] if value else [])
-            tokens = {
-                token
-                for value in values
-                for token in re.split(r"[\s_-]+", str(value).casefold())
-                if token
-            }
+            tokens = {token for value in values for token in re.split(r"[\s_-]+", str(value).casefold()) if token}
             if tag.name == "aside" or tokens.intersection(markers):
                 tag.decompose()
 
@@ -349,9 +346,7 @@ class EpubParser:
             for item in candidates or sections[:1]:
                 item["review_required"] = True
                 item.setdefault("anomalies", []).append("zero_extracted_chapters")
-                item["reason"] = (
-                    f"{item.get('reason', 'Local classification')}; extraction produced no chapters"
-                )
+                item["reason"] = f"{item.get('reason', 'Local classification')}; extraction produced no chapters"
 
         self.last_audit["anomalies"] = {
             "total_spine_words": total_spine_words,
@@ -374,11 +369,7 @@ class EpubParser:
             candidates = set()
             for tag in explicit + edge_blocks:
                 text = tag.get_text(" ", strip=True)
-                if (
-                    1 <= len(text.split()) <= 8
-                    and len(text) <= 80
-                    and not self._looks_narrative_title(text)
-                ):
+                if 1 <= len(text.split()) <= 8 and len(text) <= 80 and not self._looks_narrative_title(text):
                     candidates.add(text.casefold())
             documents.append(candidates)
         counts = Counter(line for document in documents for line in document)
@@ -417,9 +408,7 @@ class EpubParser:
 
     def _extract_metadata(self, book: epub.EpubBook, epub_path: Path) -> BookMetadata:
         """Extract book metadata from EPUB."""
-        title = self._normalize_book_title(
-            self._get_meta(book, "title") or epub_path.stem
-        )
+        title = self._normalize_book_title(self._get_meta(book, "title") or epub_path.stem)
         author = self._get_meta(book, "creator") or "Unknown"
         language = self._get_meta(book, "language") or "en"
 
@@ -536,9 +525,7 @@ class EpubParser:
             for anchor in soup.find_all("a", href=True):
                 values = [anchor.attrs.get("epub:type"), anchor.attrs.get("role")]
                 tokens = {
-                    token
-                    for value in values if value
-                    for token in re.split(r"[\s_-]+", str(value).casefold()) if token
+                    token for value in values if value for token in re.split(r"[\s_-]+", str(value).casefold()) if token
                 }
                 if not tokens:
                     continue
@@ -582,18 +569,20 @@ class EpubParser:
         for item_id, linear in spine_entries:
             item = items_by_id.get(item_id)
             if item is None:
-                self.last_audit["sections"].append({
-                    "item_id": str(item_id),
-                    "href": "",
-                    "title": str(item_id),
-                    "word_count": 0,
-                    "semantics": [],
-                    "decision": "exclude",
-                    "confidence": 0.0,
-                    "reason": "Spine item could not be resolved from the EPUB manifest",
-                    "review_required": True,
-                    "linear": str(linear).casefold() != "no",
-                })
+                self.last_audit["sections"].append(
+                    {
+                        "item_id": str(item_id),
+                        "href": "",
+                        "title": str(item_id),
+                        "word_count": 0,
+                        "semantics": [],
+                        "decision": "exclude",
+                        "confidence": 0.0,
+                        "reason": "Spine item could not be resolved from the EPUB manifest",
+                        "review_required": True,
+                        "linear": str(linear).casefold() != "no",
+                    }
+                )
                 continue
 
             html_content = item.get_content().decode("utf-8", errors="replace")
@@ -609,21 +598,21 @@ class EpubParser:
                 doc_title,
                 navigation_semantics.get(href_key, set()),
             )
-            classification["title_source"] = (
-                "markup" if markup_title else "navigation" if doc_title else "filename"
-            )
+            classification["title_source"] = "markup" if markup_title else "navigation" if doc_title else "filename"
             classification["linear"] = str(linear).casefold() != "no"
             if (
                 str(linear).casefold() == "no"
                 and item_id not in self._section_overrides
                 and classification["decision"] == "include"
             ):
-                classification.update({
-                    "decision": "exclude",
-                    "confidence": 0.86,
-                    "reason": "EPUB spine marks this document non-linear",
-                    "review_required": classification["word_count"] >= 300,
-                })
+                classification.update(
+                    {
+                        "decision": "exclude",
+                        "confidence": 0.86,
+                        "reason": "EPUB spine marks this document non-linear",
+                        "review_required": classification["word_count"] >= 300,
+                    }
+                )
             self.last_audit["sections"].append(classification)
             classification["extracted_word_count"] = 0
             classification["coverage_ratio"] = 0.0
@@ -670,11 +659,7 @@ class EpubParser:
                     chapters = self._split_by_patterns(soup)
 
             reference_material.update(ref_sections)
-            if (
-                not chapters
-                and self.chapter_detection != "none"
-                and not ref_sections
-            ):
+            if not chapters and self.chapter_detection != "none" and not ref_sections:
                 text = self._extract_text(soup)
                 if text.strip():
                     classification["extracted_word_count"] = len(text.split())
@@ -690,31 +675,21 @@ class EpubParser:
                     )
                 raw_chapters.extend(chapters)
                 classification["extracted_word_count"] = sum(
-                    len(str(chapter.get("text") or "").split())
-                    for chapter in chapters
+                    len(str(chapter.get("text") or "").split()) for chapter in chapters
                 )
 
             classified_words = int(classification.get("word_count", 0) or 0)
-            extracted_words = int(
-                classification.get("extracted_word_count", 0) or 0
-            )
-            classification["coverage_ratio"] = (
-                round(extracted_words / classified_words, 4)
-                if classified_words
-                else 1.0
-            )
+            extracted_words = int(classification.get("extracted_word_count", 0) or 0)
+            classification["coverage_ratio"] = round(extracted_words / classified_words, 4) if classified_words else 1.0
             if (
                 classification.get("decision") == "include"
                 and classified_words >= self.min_chapter_words
                 and extracted_words == 0
             ):
                 classification["review_required"] = True
-                classification.setdefault("anomalies", []).append(
-                    "included_document_without_extracted_text"
-                )
+                classification.setdefault("anomalies", []).append("included_document_without_extracted_text")
                 classification["reason"] = (
-                    f"{classification.get('reason', 'Included locally')}; "
-                    "included document produced no narrative text"
+                    f"{classification.get('reason', 'Included locally')}; included document produced no narrative text"
                 )
                 classification["drop_reason"] = "included_without_extracted_text"
 
@@ -873,9 +848,7 @@ class EpubParser:
             if element.name == "div" and element.find(list(block_names - {"div"})):
                 continue
             if element.name != "div" and any(
-                isinstance(parent, Tag)
-                and parent.name in {"p", "blockquote", "pre"}
-                for parent in element.parents
+                isinstance(parent, Tag) and parent.name in {"p", "blockquote", "pre"} for parent in element.parents
             ):
                 continue
             text = self._extract_element_text(element)
@@ -924,10 +897,7 @@ class EpubParser:
 
             word_count = len(text.split())
 
-            if (
-                word_count < self.min_chapter_words
-                and not self._looks_narrative_title(title_raw)
-            ):
+            if word_count < self.min_chapter_words and not self._looks_narrative_title(title_raw):
                 pending_short.append((title_raw, text))
                 logger.info(
                     "Preserving short section '%s' (%d words) for adjacent merge",
@@ -944,9 +914,7 @@ class EpubParser:
 
             # Split chapters that are too long
             if word_count > self.max_chapter_words:
-                sub_chapters = self._split_long_chapter(
-                    raw["title"], text, chapter_number
-                )
+                sub_chapters = self._split_long_chapter(raw["title"], text, chapter_number)
                 finalized.extend(sub_chapters)
                 chapter_number += len(sub_chapters)
                 continue
@@ -978,24 +946,26 @@ class EpubParser:
             if finalized:
                 previous = finalized[-1]
                 merged = previous.text + "\n\n" + suffix
-                finalized[-1] = previous.model_copy(update={
-                    "text": merged,
-                    "word_count": len(merged.split()),
-                })
+                finalized[-1] = previous.model_copy(
+                    update={
+                        "text": merged,
+                        "word_count": len(merged.split()),
+                    }
+                )
             elif suffix.strip():
-                finalized.append(ExtractedChapter(
-                    number=1,
-                    title=pending_short[0][0] or "Full Text",
-                    source_heading=pending_short[0][0],
-                    text=suffix,
-                    word_count=len(suffix.split()),
-                ))
+                finalized.append(
+                    ExtractedChapter(
+                        number=1,
+                        title=pending_short[0][0] or "Full Text",
+                        source_heading=pending_short[0][0],
+                        text=suffix,
+                        word_count=len(suffix.split()),
+                    )
+                )
 
         # If no chapters were found, treat the entire content as one chapter
         if not finalized and raw_chapters:
-            all_text = "\n\n".join(
-                self.cleaner.clean(r["text"]) for r in raw_chapters if r["text"]
-            )
+            all_text = "\n\n".join(self.cleaner.clean(r["text"]) for r in raw_chapters if r["text"])
             if all_text.strip():
                 logger.warning("No chapter boundaries detected — treating entire book as one chapter")
                 finalized.append(
@@ -1010,9 +980,7 @@ class EpubParser:
 
         return finalized
 
-    def _split_long_chapter(
-        self, title: str, text: str, start_number: int
-    ) -> list[ExtractedChapter]:
+    def _split_long_chapter(self, title: str, text: str, start_number: int) -> list[ExtractedChapter]:
         """Split a chapter that exceeds max_chapter_words."""
         paragraphs = [part.strip() for part in re.split(r"\n\s*\n", text) if part.strip()]
         chunks: list[str] = []

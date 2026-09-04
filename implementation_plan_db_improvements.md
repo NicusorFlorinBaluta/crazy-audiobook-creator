@@ -137,6 +137,7 @@ for i in range(len(gate)):  # 6 million iterations per chapter
 ```python
 # Vectorized IIR-style envelope follower
 from scipy.signal import lfilter
+
 attack_coeff = 1.0 / max(1, attack_samples)
 release_coeff = 1.0 / max(1, release_samples)
 # Use lfilter for single-pass envelope smoothing

@@ -36,9 +36,7 @@ def _segment_latency_summary(
 ) -> dict[str, Any]:
     items = list(segments)
     synthesis = [
-        float(item["synthesis_seconds"])
-        for item in items
-        if isinstance(item.get("synthesis_seconds"), (int, float))
+        float(item["synthesis_seconds"]) for item in items if isinstance(item.get("synthesis_seconds"), (int, float))
     ]
     rtfs = [
         float(item["synthesis_audio_rtf"])
@@ -78,10 +76,7 @@ def _tts_segment_summary(
     generation: Iterable[dict[str, Any]],
 ) -> dict[str, Any]:
     segments = [
-        item
-        for record in generation
-        for item in (record.get("segment_metrics") or [])
-        if isinstance(item, dict)
+        item for record in generation for item in (record.get("segment_metrics") or []) if isinstance(item, dict)
     ]
     if not segments:
         return {}
@@ -89,63 +84,29 @@ def _tts_segment_summary(
     fresh = [item for item in segments if not item.get("synthesis_cache_hit")]
     cached = [item for item in segments if item.get("synthesis_cache_hit")]
     length_groups = {
-        "short_0_80": [
-            item
-            for item in fresh
-            if _safe_int(item.get("text_characters")) <= 80
-        ],
-        "medium_81_260": [
-            item
-            for item in fresh
-            if 80 < _safe_int(item.get("text_characters")) <= 260
-        ],
-        "long_261_plus": [
-            item
-            for item in fresh
-            if _safe_int(item.get("text_characters")) > 260
-        ],
+        "short_0_80": [item for item in fresh if _safe_int(item.get("text_characters")) <= 80],
+        "medium_81_260": [item for item in fresh if 80 < _safe_int(item.get("text_characters")) <= 260],
+        "long_261_plus": [item for item in fresh if _safe_int(item.get("text_characters")) > 260],
     }
-    roles = sorted(
-        {
-            str(item.get("speaker_role"))
-            for item in fresh
-            if item.get("speaker_role")
-        }
-    )
+    roles = sorted({str(item.get("speaker_role")) for item in fresh if item.get("speaker_role")})
     substage_totals: defaultdict[str, float] = defaultdict(float)
     for item in fresh:
         for key, value in item.items():
-            if (
-                key.endswith("_seconds")
-                and key.startswith(("tts_", "retry_tts_"))
-                and isinstance(value, (int, float))
-            ):
+            if key.endswith("_seconds") and key.startswith(("tts_", "retry_tts_")) and isinstance(value, (int, float)):
                 substage_totals[key] += float(value)
 
     return {
         "all": _segment_latency_summary(segments),
         "fresh": _segment_latency_summary(fresh),
         "cached": _segment_latency_summary(cached),
-        "by_text_length": {
-            key: _segment_latency_summary(value)
-            for key, value in length_groups.items()
-        },
+        "by_text_length": {key: _segment_latency_summary(value) for key, value in length_groups.items()},
         "by_speaker_role": {
-            role: _segment_latency_summary(
-                item for item in fresh if item.get("speaker_role") == role
-            )
-            for role in roles
+            role: _segment_latency_summary(item for item in fresh if item.get("speaker_role") == role) for role in roles
         },
         "by_model_state": {
-            "cold": _segment_latency_summary(
-                item
-                for item in fresh
-                if _safe_int(item.get("tts_cold_model_loads")) > 0
-            ),
+            "cold": _segment_latency_summary(item for item in fresh if _safe_int(item.get("tts_cold_model_loads")) > 0),
             "warm": _segment_latency_summary(
-                item
-                for item in fresh
-                if _safe_int(item.get("tts_cold_model_loads")) == 0
+                item for item in fresh if _safe_int(item.get("tts_cold_model_loads")) == 0
             ),
         },
         "substage_totals_seconds": dict(sorted(substage_totals.items())),
@@ -158,9 +119,7 @@ def read_metrics(path: str | Path) -> list[dict[str, Any]]:
     metric_path = Path(path)
     if not metric_path.is_file():
         return records
-    for raw_line in metric_path.read_text(
-        encoding="utf-8", errors="replace"
-    ).splitlines():
+    for raw_line in metric_path.read_text(encoding="utf-8", errors="replace").splitlines():
         try:
             value = json.loads(raw_line)
         except json.JSONDecodeError:
@@ -170,9 +129,7 @@ def read_metrics(path: str | Path) -> list[dict[str, Any]]:
     return records
 
 
-def latest_chapter_records(
-    records: Iterable[dict[str, Any]], event: str
-) -> list[dict[str, Any]]:
+def latest_chapter_records(records: Iterable[dict[str, Any]], event: str) -> list[dict[str, Any]]:
     """Select the final successful-looking record for each chapter."""
     latest: dict[int, dict[str, Any]] = {}
     for record in records:
@@ -260,12 +217,8 @@ def _llm_call_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
         "prefill_seconds": round(prefill_seconds, 6),
         "decode_seconds": round(decode_seconds, 6),
         "model_load_seconds": round(load_seconds, 6),
-        "prefill_tokens_per_second": (
-            round(prompt_tokens / prefill_seconds, 2) if prefill_seconds > 0 else 0.0
-        ),
-        "decode_tokens_per_second": (
-            round(generated_tokens / decode_seconds, 2) if decode_seconds > 0 else 0.0
-        ),
+        "prefill_tokens_per_second": (round(prompt_tokens / prefill_seconds, 2) if prefill_seconds > 0 else 0.0),
+        "decode_tokens_per_second": (round(generated_tokens / decode_seconds, 2) if decode_seconds > 0 else 0.0),
         "prefill_share_of_compute": (
             round(prefill_seconds / (prefill_seconds + decode_seconds), 4)
             if (prefill_seconds + decode_seconds) > 0
@@ -282,11 +235,7 @@ def _llm_call_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
             # ~1.0 means the shared system prompt is re-evaluated every chunk.
             # Well below 1.0 means prefix reuse is working.
             "later_to_first_ratio": reuse_ratio,
-            "reuse_detected": (
-                bool(reuse_ratio is not None and reuse_ratio < 0.75)
-                if later_in_chapter
-                else None
-            ),
+            "reuse_detected": (bool(reuse_ratio is not None and reuse_ratio < 0.75) if later_in_chapter else None),
         },
     }
 
@@ -298,17 +247,11 @@ def summarize_metrics(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
         {
             "director_mode": str(
                 record.get("director_mode")
-                or (
-                    "two_pass"
-                    if _safe_float(record.get("pass1_seconds")) > 0
-                    else "unknown"
-                )
+                or ("two_pass" if _safe_float(record.get("pass1_seconds")) > 0 else "unknown")
             ),
             "pass1_seconds": _safe_float(record.get("pass1_seconds")),
             "pass2_seconds": _safe_float(record.get("pass2_seconds")),
-            "reconciliation_seconds": _safe_float(
-                record.get("reconciliation_seconds")
-            ),
+            "reconciliation_seconds": _safe_float(record.get("reconciliation_seconds")),
             "total_seconds": _safe_float(record.get("total_seconds")),
             "chapters": _safe_int(record.get("chapters")),
             "segments": _safe_int(record.get("segments")),

@@ -19,14 +19,13 @@ def main() -> int:
     parser.add_argument("--project", required=True)
     parser.add_argument("--plans", default="350:40,550:60")
     args = parser.parse_args()
-    book = json.loads(
-        (ROOT / "brain" / "projects" / args.project / "book.json").read_text(encoding="utf-8")
-    )
+    book = json.loads((ROOT / "brain" / "projects" / args.project / "book.json").read_text(encoding="utf-8"))
     result = []
     for raw in args.plans.split(","):
         words, fragments = (int(value) for value in raw.split(":"))
         generator = ScriptGenerator(
-            ollama=None, chunk_size_words=words,
+            ollama=None,
+            chunk_size_words=words,
             max_fragments_per_chunk=fragments,
         )
         chapter_calls = []
@@ -39,15 +38,17 @@ def main() -> int:
             for chunk in chunks:
                 chunk_fragments.append(len(chunk))
                 chunk_words.append(sum(len(item.text.split()) for item in chunk))
-        result.append({
-            "chunk_size_words": words,
-            "max_fragments": fragments,
-            "total_calls": sum(chapter_calls),
-            "calls_by_chapter": chapter_calls,
-            "maximum_chunk_words": max(chunk_words),
-            "maximum_chunk_fragments": max(chunk_fragments),
-            "average_chunk_words": sum(chunk_words) / len(chunk_words),
-        })
+        result.append(
+            {
+                "chunk_size_words": words,
+                "max_fragments": fragments,
+                "total_calls": sum(chapter_calls),
+                "calls_by_chapter": chapter_calls,
+                "maximum_chunk_words": max(chunk_words),
+                "maximum_chunk_fragments": max(chunk_fragments),
+                "average_chunk_words": sum(chunk_words) / len(chunk_words),
+            }
+        )
     print(json.dumps(result, indent=2))
     return 0
 

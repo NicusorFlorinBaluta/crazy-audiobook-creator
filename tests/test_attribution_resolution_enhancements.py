@@ -93,7 +93,7 @@ class DialogueSpeakerResolutionTests(unittest.TestCase):
                     voice_description="young and energetic",
                     aliases=[],
                 ),
-            }
+            },
         )
         self.allowed_speakers = {"narrator", "sixth_of_dusk", "vathi", "starling"}
 
@@ -164,9 +164,7 @@ class DialogueSpeakerResolutionTests(unittest.TestCase):
     def test_pronoun_alias_is_not_treated_as_named_evidence(self) -> None:
         registry = self.registry.model_copy(deep=True)
         registry.characters["starling"].aliases.append("She")
-        exact, kind, gender = ScriptGenerator._dialogue_tag_evidence(
-            "She said quietly.", registry
-        )
+        exact, kind, gender = ScriptGenerator._dialogue_tag_evidence("She said quietly.", registry)
         self.assertIsNone(exact)
         self.assertEqual(kind, "pronoun_gender")
         self.assertEqual(gender, Gender.FEMALE)
@@ -275,12 +273,8 @@ class ScriptApiTests(unittest.IsolatedAsyncioTestCase):
                 {"id": "ch01_0002", "speaker": "narrator", "text": '"Hello," he said.'},
             ],
         }
-        (self.scripts_dir / "chapter_001.json").write_text(
-            json.dumps(chapter_data), encoding="utf-8"
-        )
-        (self.project_dir / "book_script.json").write_text(
-            json.dumps({"chapters": [chapter_data]}), encoding="utf-8"
-        )
+        (self.scripts_dir / "chapter_001.json").write_text(json.dumps(chapter_data), encoding="utf-8")
+        (self.project_dir / "book_script.json").write_text(json.dumps({"chapters": [chapter_data]}), encoding="utf-8")
         (self.project_dir / "characters.json").write_text(
             json.dumps(
                 {
@@ -316,15 +310,11 @@ class ScriptApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(res["status"], "success")
 
         # Verify chapter file
-        ch_data = json.loads(
-            (self.scripts_dir / "chapter_001.json").read_text(encoding="utf-8")
-        )
+        ch_data = json.loads((self.scripts_dir / "chapter_001.json").read_text(encoding="utf-8"))
         self.assertEqual(ch_data["lines"][1]["speaker"], "vathi")
 
         # Verify book_script.json
-        merged = json.loads(
-            (self.project_dir / "book_script.json").read_text(encoding="utf-8")
-        )
+        merged = json.loads((self.project_dir / "book_script.json").read_text(encoding="utf-8"))
         self.assertEqual(merged["chapters"][0]["lines"][1]["speaker"], "vathi")
 
     async def test_regenerate_chapter_cleans_script_fingerprint_and_job_state(self) -> None:
@@ -335,9 +325,7 @@ class ScriptApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse((self.scripts_dir / "chapter_001.json").exists())
 
         # Chapter 1 fingerprint removed
-        fp_data = json.loads(
-            (self.project_dir / ".fingerprints.json").read_text(encoding="utf-8")
-        )
+        fp_data = json.loads((self.project_dir / ".fingerprints.json").read_text(encoding="utf-8"))
         self.assertNotIn("1", fp_data.get("chapters", {}))
         self.assertIn("2", fp_data.get("chapters", {}))
 

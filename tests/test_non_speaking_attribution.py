@@ -1,4 +1,5 @@
 """Unit tests for generic speaker attribution fixes, tag syntax resolution, and test chapters."""
+
 from __future__ import annotations
 
 import unittest
@@ -27,53 +28,88 @@ class NonSpeakingAttributionTests(unittest.TestCase):
             book_author="Test Author",
             characters={
                 "narrator": Character(
-                    id="narrator", name="Narrator", gender=Gender.MALE,
-                    age_range="adult", voice_description="narrator voice",
+                    id="narrator",
+                    name="Narrator",
+                    gender=Gender.MALE,
+                    age_range="adult",
+                    voice_description="narrator voice",
                 ),
                 "dusk": Character(
-                    id="dusk", name="Dusk", gender=Gender.MALE,
-                    age_range="30s", voice_description="measured male voice",
+                    id="dusk",
+                    name="Dusk",
+                    gender=Gender.MALE,
+                    age_range="30s",
+                    voice_description="measured male voice",
                 ),
                 "vathi": Character(
-                    id="vathi", name="Vathi", gender=Gender.FEMALE,
-                    age_range="30s", voice_description="crisp female voice",
+                    id="vathi",
+                    name="Vathi",
+                    gender=Gender.FEMALE,
+                    age_range="30s",
+                    voice_description="crisp female voice",
                 ),
                 "starling": Character(
-                    id="starling", name="Starling", gender=Gender.FEMALE,
-                    age_range="20s", voice_description="energetic female voice",
+                    id="starling",
+                    name="Starling",
+                    gender=Gender.FEMALE,
+                    age_range="20s",
+                    voice_description="energetic female voice",
                 ),
                 "ed": Character(
-                    id="ed", name="Ed", gender=Gender.MALE,
-                    age_range="20s", voice_description="cheerful male voice",
+                    id="ed",
+                    name="Ed",
+                    gender=Gender.MALE,
+                    age_range="20s",
+                    voice_description="cheerful male voice",
                 ),
                 "ruen": Character(
-                    id="ruen", name="Ruen", gender=Gender.MALE,
-                    age_range="40s", voice_description="scholarly male voice",
+                    id="ruen",
+                    name="Ruen",
+                    gender=Gender.MALE,
+                    age_range="40s",
+                    voice_description="scholarly male voice",
                 ),
                 "kokerlii": Character(
-                    id="kokerlii", name="Kokerlii", gender=Gender.OTHER,
-                    age_range="N/A", voice_description="non-human bird entity",
+                    id="kokerlii",
+                    name="Kokerlii",
+                    gender=Gender.OTHER,
+                    age_range="N/A",
+                    voice_description="non-human bird entity",
                 ),
                 "sak": Character(
-                    id="sak", name="Sak", gender=Gender.OTHER,
-                    age_range="N/A", voice_description="non-human bird entity",
+                    id="sak",
+                    name="Sak",
+                    gender=Gender.OTHER,
+                    age_range="N/A",
+                    voice_description="non-human bird entity",
                 ),
                 "mother_frond": Character(
-                    id="mother_frond", name="Mother Frond", gender=Gender.FEMALE,
-                    age_range="60s", voice_description="elderly wise female voice",
+                    id="mother_frond",
+                    name="Mother Frond",
+                    gender=Gender.FEMALE,
+                    age_range="60s",
+                    voice_description="elderly wise female voice",
                 ),
                 "aslan": Character(
-                    id="aslan", name="Aslan", gender=Gender.MALE,
-                    age_range="adult", voice_description="deep resonant lion voice",
+                    id="aslan",
+                    name="Aslan",
+                    gender=Gender.MALE,
+                    age_range="adult",
+                    voice_description="deep resonant lion voice",
                 ),
                 "meeker": Character(
-                    id="meeker", name="Meeker", gender=Gender.OTHER,
-                    age_range="N/A", voice_description="telepathic creature voice",
+                    id="meeker",
+                    name="Meeker",
+                    gender=Gender.OTHER,
+                    age_range="N/A",
+                    voice_description="telepathic creature voice",
                 ),
             },
         )
 
-    def _make_book_and_script(self, source_text: str, line_speaker_map: dict[int, str]) -> tuple[ExtractedBook, list[ScriptChapter]]:
+    def _make_book_and_script(
+        self, source_text: str, line_speaker_map: dict[int, str]
+    ) -> tuple[ExtractedBook, list[ScriptChapter]]:
         fragments = ScriptGenerator._split_into_fragment_spans(source_text)
         lines: list[ScriptLine] = []
         for idx, frag in enumerate(fragments):
@@ -184,7 +220,7 @@ class NonSpeakingAttributionTests(unittest.TestCase):
         """Chapter 26 pattern: dialogue misattributed to Starling instead of Ed."""
         source = (
             '"Look over there," Starling whispered. '
-            '"But it\'s so beautiful!" Ed said, squeezing Starling\'s arm out of glee. '
+            "\"But it's so beautiful!\" Ed said, squeezing Starling's arm out of glee. "
             '"Can you believe we found one?"'
         )
         # Fragment 0 is "Look over there,", fragment 2 is "But it's so beautiful!", fragment 4 is "Can you believe..."
@@ -202,11 +238,7 @@ class NonSpeakingAttributionTests(unittest.TestCase):
 
     def test_sync_dialogue_counts_updates_registry(self) -> None:
         """sync_dialogue_counts accurately updates character dialogue counts."""
-        source = (
-            '"Hello," Dusk said. '
-            '"Hi," Vathi replied. '
-            '"Goodbye," Dusk said.'
-        )
+        source = '"Hello," Dusk said. "Hi," Vathi replied. "Goodbye," Dusk said.'
         book, scripts = self._make_book_and_script(source, {0: "dusk", 2: "vathi", 4: "dusk"})
 
         ScriptGenerator.sync_dialogue_counts(scripts, self.registry)
@@ -216,11 +248,10 @@ class NonSpeakingAttributionTests(unittest.TestCase):
         self.assertEqual(self.registry.characters["sak"].dialogue_count, 0)
         self.assertEqual(self.registry.characters["kokerlii"].dialogue_count, 0)
 
-
     def test_chapter_004_vocative_address(self) -> None:
         """Chapter 4 pattern: Mother Frond addressing Sak in dialogue is not Sak's speech."""
         source = (
-            'Mother Frond turned to the bird. '
+            "Mother Frond turned to the bird. "
             '"What have you been showing your master these days, Sak?" '
             '"Guide him well."'
         )

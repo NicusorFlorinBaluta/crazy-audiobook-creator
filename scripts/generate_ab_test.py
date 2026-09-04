@@ -38,7 +38,7 @@ def generate_ab_test():
             voice_reference_path=str(voice_ref),
             emotion_instruction="neutral",
             speed=1.0,
-            output_path=str(out_path)
+            output_path=str(out_path),
         )
 
     print("\nGenerating SCENE-AWARE (Dynamic Prosody)...")
@@ -53,10 +53,11 @@ def generate_ab_test():
             voice_reference_path=str(voice_ref),
             emotion_instruction=line.emotion,
             speed=line.speed,
-            output_path=str(out_path)
+            output_path=str(out_path),
         )
 
     print(f"\nA/B test generated successfully in {ab_dir.absolute()}!")
+
 
 if __name__ == "__main__":
     generate_ab_test()

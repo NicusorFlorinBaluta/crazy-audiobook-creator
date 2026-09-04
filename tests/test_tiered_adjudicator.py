@@ -62,6 +62,7 @@ def sample_registry() -> CharacterRegistry:
 # Guardrail 1: Fuzzy Evidence Quote Verification
 # =====================================================================
 
+
 def test_fuzzy_quote_in_context_exact():
     scene = "Dusk glanced at the dark cavern. 'What cave?' he asked Colonel Dajer."
     quote = "'What cave?' he asked"
@@ -76,7 +77,6 @@ def test_fuzzy_quote_in_context_smart_quotes_and_dashes():
     quote = "\u201cWhat cave?\u201d he asked"
     passed, detail = _fuzzy_quote_in_context(quote, scene)
     assert passed is True
-
 
 
 def test_fuzzy_quote_in_context_minor_paraphrase():
@@ -98,6 +98,7 @@ def test_fuzzy_quote_in_context_fabricated():
 # =====================================================================
 # Guardrail 2: Gender / Pronoun Consistency Check
 # =====================================================================
+
 
 def test_gender_pronoun_consistency_valid(sample_registry):
     passed, detail = _check_gender_pronoun_consistency(
@@ -146,6 +147,7 @@ def test_gender_pronoun_consistency_overconfidence_benchmark(sample_registry):
 # Guardrail 3: Canonical Alias Resolution
 # =====================================================================
 
+
 def test_resolve_speaker_alias_exact_id(sample_registry):
     cid, detail = _resolve_speaker_alias("dusk", sample_registry)
     assert cid == "dusk"
@@ -176,8 +178,9 @@ def test_resolve_speaker_alias_unknown(sample_registry):
 # JSON Extraction Helper
 # =====================================================================
 
+
 def test_extract_json_markdown_fence():
-    text = "Here is the result:\n```json\n{\"speaker_id\": \"dusk\", \"confidence\": 0.98}\n```\nDone."
+    text = 'Here is the result:\n```json\n{"speaker_id": "dusk", "confidence": 0.98}\n```\nDone.'
     data = _extract_json(text)
     assert data["speaker_id"] == "dusk"
     assert data["confidence"] == 0.98
@@ -192,6 +195,7 @@ def test_extract_json_raw():
 # =====================================================================
 # Detector Tests
 # =====================================================================
+
 
 def test_detect_consecutive_collapse():
     # Two dialogue lines assigned to the same speaker, one is short / question
@@ -211,7 +215,9 @@ def test_detect_narrator_separated_collapse():
     # Dialogue speaker A -> narrator -> Dialogue speaker A (question)
     lines = [
         ScriptLine(line_id="ch01_0001", speaker="dajer", text='"Do you know about the cave?"', dialogue_kind="spoken"),
-        ScriptLine(line_id="ch01_0002", speaker="narrator", text='Dusk stared at him in disbelief.', dialogue_kind=None),
+        ScriptLine(
+            line_id="ch01_0002", speaker="narrator", text="Dusk stared at him in disbelief.", dialogue_kind=None
+        ),
         ScriptLine(line_id="ch01_0003", speaker="dajer", text='"What cave?"', dialogue_kind="spoken"),
     ]
     chapter = ScriptChapter(chapter_number=1, chapter_title="Chapter 1", lines=lines)
@@ -223,9 +229,23 @@ def test_detect_narrator_separated_collapse():
 def test_detect_clean_alternation_not_flagged():
     # Clean alternation between Dajer and Dusk with good confidence
     lines = [
-        ScriptLine(line_id="ch01_0001", speaker="dajer", text='"Do you know about the cave?"', dialogue_kind="spoken", speaker_confidence=0.95),
-        ScriptLine(line_id="ch01_0002", speaker="dusk", text='"What cave?"', dialogue_kind="spoken", speaker_confidence=0.98),
-        ScriptLine(line_id="ch01_0003", speaker="dajer", text='"The one near the ridge."', dialogue_kind="spoken", speaker_confidence=0.95),
+        ScriptLine(
+            line_id="ch01_0001",
+            speaker="dajer",
+            text='"Do you know about the cave?"',
+            dialogue_kind="spoken",
+            speaker_confidence=0.95,
+        ),
+        ScriptLine(
+            line_id="ch01_0002", speaker="dusk", text='"What cave?"', dialogue_kind="spoken", speaker_confidence=0.98
+        ),
+        ScriptLine(
+            line_id="ch01_0003",
+            speaker="dajer",
+            text='"The one near the ridge."',
+            dialogue_kind="spoken",
+            speaker_confidence=0.95,
+        ),
     ]
     chapter = ScriptChapter(chapter_number=1, chapter_title="Chapter 1", lines=lines)
     suspicious = detect_suspicious_turns([chapter])
@@ -236,7 +256,13 @@ def test_detect_clean_alternation_not_flagged():
 
 def test_detect_low_confidence_flagged():
     lines = [
-        ScriptLine(line_id="ch01_0001", speaker="dajer", text='"Do you know about the cave?"', dialogue_kind="spoken", speaker_confidence=0.50),
+        ScriptLine(
+            line_id="ch01_0001",
+            speaker="dajer",
+            text='"Do you know about the cave?"',
+            dialogue_kind="spoken",
+            speaker_confidence=0.50,
+        ),
     ]
     chapter = ScriptChapter(chapter_number=1, chapter_title="Chapter 1", lines=lines)
     suspicious = detect_suspicious_turns([chapter], min_confidence=0.70)
@@ -249,6 +275,7 @@ def test_detect_low_confidence_flagged():
 # =====================================================================
 # Guardrail 4: Reciprocal Turn Consistency Check
 # =====================================================================
+
 
 def test_reciprocal_turn_guardrail_reverts_same_speaker_qa_pair(sample_registry):
     lines = [
@@ -290,7 +317,6 @@ def test_reciprocal_turn_guardrail_reverts_same_speaker_qa_pair(sample_registry)
             evidence_quote="cave",
             guardrail_results={},
         ),
-
     ]
 
     chapter_map = {39: chapter}
@@ -379,5 +405,3 @@ def test_chapter_scoping_ignores_bare_generic_descriptors():
     scoped_specific = ScriptGenerator._get_chapter_scoped_speakers(text_specific, registry)
 
     assert "armored_alien" in scoped_specific
-
-

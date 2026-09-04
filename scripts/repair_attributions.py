@@ -48,10 +48,14 @@ def main():
     parser.add_argument("--chapter", type=int, default=None, help="Target a specific chapter number (e.g. 39)")
     parser.add_argument("--start-chapter", type=int, default=None, help="Start chapter number (inclusive, e.g. 40)")
     parser.add_argument("--end-chapter", type=int, default=None, help="End chapter number (inclusive, e.g. 63)")
-    parser.add_argument("--dry-run", action="store_true", help="Preview proposed attribution fixes without modifying scripts")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Preview proposed attribution fixes without modifying scripts"
+    )
     parser.add_argument("--apply", action="store_true", help="Write changes to disk")
     parser.add_argument("--escalate-gemini", action="store_true", help="Escalate unresolved Tier 1 lines to Gemini API")
-    parser.add_argument("--local-conf", type=float, default=0.85, help="Confidence threshold for Tier 1 local Qwen auto-accept")
+    parser.add_argument(
+        "--local-conf", type=float, default=0.85, help="Confidence threshold for Tier 1 local Qwen auto-accept"
+    )
     args = parser.parse_args()
 
     # Default to dry-run if apply not specified
@@ -79,7 +83,6 @@ def main():
         logger.error("Missing script(s)/ or characters.json in %s", project_path)
         sys.exit(1)
 
-
     # Load registry
     registry = CharacterRegistry.model_validate_json(chars_path.read_text(encoding="utf-8"))
     logger.info("Loaded registry with %d characters from %s", len(registry.characters), chars_path)
@@ -106,7 +109,6 @@ def main():
             logger.warning("Failed to parse %s: %s", sf.name, exc)
 
     logger.info("Loaded %d chapter script(s) for audit/repair", len(chapter_scripts))
-
 
     # Detect suspicious turns
     suspicious = detect_suspicious_turns(chapter_scripts)
@@ -150,7 +152,9 @@ def main():
         local_auto_accept=args.local_conf,
     )
 
-    print(f"\nProcessing {len(chapter_scripts)} chapter(s) (dry_run={dry_run}, local_threshold={args.local_conf}, escalate_gemini={args.escalate_gemini})...\n")
+    print(
+        f"\nProcessing {len(chapter_scripts)} chapter(s) (dry_run={dry_run}, local_threshold={args.local_conf}, escalate_gemini={args.escalate_gemini})...\n"
+    )
 
     all_results = []
     total_suspicious = 0
@@ -185,7 +189,8 @@ def main():
 
         # Print fixes for this chapter
         ch_repairs = [
-            r for r in ch_report.results
+            r
+            for r in ch_report.results
             if r.resolver_tier == "local_qwen" and r.resolved_speaker and r.resolved_speaker != r.original_speaker
         ]
         total_repairs += len(ch_repairs)
@@ -193,7 +198,9 @@ def main():
             print(f"  Repairs in Chapter {ch_num} ({len(ch_repairs)}):")
             for r in ch_repairs:
                 status_icon = "APPLIED" if not dry_run else "PREVIEW"
-                print(f"    [{status_icon}] {r.line_id}: '{r.original_speaker}' -> '{r.resolved_speaker}' (conf={r.confidence:.2f}) | {r.text[:45]!r}")
+                print(
+                    f"    [{status_icon}] {r.line_id}: '{r.original_speaker}' -> '{r.resolved_speaker}' (conf={r.confidence:.2f}) | {r.text[:45]!r}"
+                )
         else:
             print(f"  No speaker changes in Chapter {ch_num} (all existing attributions verified)")
 
@@ -233,6 +240,7 @@ def main():
     # Update metadata and book script if applied
     if not dry_run:
         from brain.director.script_generator import ScriptGenerator
+
         ScriptGenerator.sync_dialogue_counts(chapter_scripts, registry)
         atomic_write_text(chars_path, registry.model_dump_json(indent=2))
         logger.info("Updated characters.json with synced dialogue counts.")
@@ -254,18 +262,20 @@ def main():
 
         # Write final report
         report_path = project_path / "external_validation" / "tiered_attribution_report.json"
-        atomic_write_json(report_path, {
-            "summary": {
-                "total_suspicious": total_suspicious,
-                "local_resolved": total_local_resolved,
-                "escalated_to_tier2": total_escalated,
-                "total_repairs": total_repairs,
-                "dry_run": False,
+        atomic_write_json(
+            report_path,
+            {
+                "summary": {
+                    "total_suspicious": total_suspicious,
+                    "local_resolved": total_local_resolved,
+                    "escalated_to_tier2": total_escalated,
+                    "total_repairs": total_repairs,
+                    "dry_run": False,
+                },
+                "results": [r.to_dict() for r in all_results],
             },
-            "results": [r.to_dict() for r in all_results],
-        })
+        )
         print(f"\nFinal attribution report written to {report_path}")
-
 
 
 if __name__ == "__main__":

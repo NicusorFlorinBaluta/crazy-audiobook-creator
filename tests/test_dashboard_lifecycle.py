@@ -131,28 +131,29 @@ class DashboardLifecycleTests(unittest.IsolatedAsyncioTestCase):
             embedded_cover = project_dir / "embedded.jpg"
             embedded_cover.write_bytes(b"embedded")
             book_path = project_dir / "book.json"
-            book_path.write_text(json.dumps({
-                "metadata": {
-                    "title": "Original Title",
-                    "author": "Original Author",
-                    "language": "en",
-                    "description": "Embedded EPUB description",
-                    "cover_image_path": str(embedded_cover),
-                },
-                "chapters": [],
-            }), encoding="utf-8")
+            book_path.write_text(
+                json.dumps(
+                    {
+                        "metadata": {
+                            "title": "Original Title",
+                            "author": "Original Author",
+                            "language": "en",
+                            "description": "Embedded EPUB description",
+                            "cover_image_path": str(embedded_cover),
+                        },
+                        "chapters": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
 
             with (
                 patch.object(dashboard, "_project_dir", return_value=project_dir),
                 patch.object(MetadataFetcher, "fetch", return_value=fetched) as fetch,
             ):
                 preview = dashboard._fetch_metadata_sync("sample")
-                automatic = dashboard._fetch_metadata_sync(
-                    "sample", apply=True, only_missing=True
-                )
-                automatically_saved = json.loads(
-                    book_path.read_text(encoding="utf-8")
-                )["metadata"]
+                automatic = dashboard._fetch_metadata_sync("sample", apply=True, only_missing=True)
+                automatically_saved = json.loads(book_path.read_text(encoding="utf-8"))["metadata"]
                 applied = dashboard._fetch_metadata_sync("sample", apply=True)
 
             self.assertFalse(preview["cached"])
@@ -165,9 +166,7 @@ class DashboardLifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(saved["source_title"], "Original Title")
             self.assertEqual(saved["source_author"], "Original Author")
             self.assertEqual(saved["cover_image_path"], str(embedded_cover))
-            self.assertEqual(
-                automatically_saved["description"], "Embedded EPUB description"
-            )
+            self.assertEqual(automatically_saved["description"], "Embedded EPUB description")
             self.assertEqual(saved["description"], "Provider description")
             self.assertEqual(saved["genre"], "Mystery")
             self.assertEqual(saved["metadata_provider_id"], "volume-1")
@@ -186,14 +185,19 @@ class DashboardLifecycleTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             project_dir = Path(directory)
             book_path = project_dir / "book.json"
-            book_path.write_text(json.dumps({
-                "metadata": {
-                    "title": "EPUB title",
-                    "author": "EPUB author",
-                    "language": "en",
-                },
-                "chapters": [],
-            }), encoding="utf-8")
+            book_path.write_text(
+                json.dumps(
+                    {
+                        "metadata": {
+                            "title": "EPUB title",
+                            "author": "EPUB author",
+                            "language": "en",
+                        },
+                        "chapters": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
 
             with (
                 patch.object(dashboard, "_project_dir", return_value=project_dir),
@@ -211,9 +215,7 @@ class DashboardLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 )
                 applied = dashboard._fetch_metadata_sync("sample", apply=True)
 
-            fetch_volume.assert_called_once_with(
-                "chosen-volume", "Manual title", "Manual author"
-            )
+            fetch_volume.assert_called_once_with("chosen-volume", "Manual title", "Manual author")
             self.assertEqual(preview["provider_id"], "chosen-volume")
             self.assertTrue(applied["applied"])
             metadata = json.loads(book_path.read_text(encoding="utf-8"))["metadata"]
@@ -240,9 +242,7 @@ class DashboardLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
             with (
                 patch.object(dashboard, "_project_dir", return_value=project_dir),
-                patch.object(
-                    dashboard, "_workspace_project_dir", return_value=workspace_dir
-                ),
+                patch.object(dashboard, "_workspace_project_dir", return_value=workspace_dir),
                 patch.object(dashboard.shutil, "which", return_value="ffmpeg"),
                 patch.object(dashboard.subprocess, "run", side_effect=fake_run) as run,
             ):
@@ -280,9 +280,7 @@ class DashboardLifecycleTests(unittest.IsolatedAsyncioTestCase):
             )
             with (
                 patch.object(dashboard, "_project_dir", return_value=project_dir),
-                patch.object(
-                    dashboard, "_workspace_project_dir", return_value=project_dir
-                ),
+                patch.object(dashboard, "_workspace_project_dir", return_value=project_dir),
             ):
                 response = await dashboard.download_audiobook("book")
 
@@ -306,11 +304,13 @@ class DashboardLifecycleTests(unittest.IsolatedAsyncioTestCase):
         request.json.return_value = {
             "enabled": True,
             "timezone": "Europe/Bucharest",
-            "windows": [{
-                "days": ["Sunday", "Monday"],
-                "start": "08:00",
-                "end": "18:00",
-            }],
+            "windows": [
+                {
+                    "days": ["Sunday", "Monday"],
+                    "start": "08:00",
+                    "end": "18:00",
+                }
+            ],
         }
         with (
             patch.object(dashboard, "_replace_yaml_section") as replace,
@@ -566,9 +566,7 @@ class DashboardLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(dashboard, "running_tasks", {}),
                 patch.object(dashboard, "_project_dir", return_value=project_dir),
             ):
-                response = await dashboard.get_pipeline_status(
-                    "voice-cast-reconcile-test"
-                )
+                response = await dashboard.get_pipeline_status("voice-cast-reconcile-test")
 
         self.assertNotIn("voice_cast", response)
         self.assertEqual(
@@ -619,14 +617,8 @@ class DashboardLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     ),
                     encoding="utf-8",
                 )
-                (workspace_dir / "segments" / "ch01_0000.wav").write_bytes(
-                    b"partial"
-                )
-                manifest_path = (
-                    project_dir
-                    / "manifests"
-                    / "chapter_001.segments.json"
-                )
+                (workspace_dir / "segments" / "ch01_0000.wav").write_bytes(b"partial")
+                manifest_path = project_dir / "manifests" / "chapter_001.segments.json"
                 manifest_path.write_text(
                     json.dumps(
                         {
@@ -645,18 +637,14 @@ class DashboardLifecycleTests(unittest.IsolatedAsyncioTestCase):
                         "running_tasks",
                         {"partial-generation-test": active_task},
                     ),
-                    patch.object(
-                        dashboard, "_project_dir", return_value=project_dir
-                    ),
+                    patch.object(dashboard, "_project_dir", return_value=project_dir),
                     patch.object(
                         dashboard,
                         "_workspace_project_dir",
                         return_value=workspace_dir,
                     ),
                 ):
-                    partial = await dashboard.get_pipeline_status(
-                        "partial-generation-test"
-                    )
+                    partial = await dashboard.get_pipeline_status("partial-generation-test")
                     self.assertEqual(partial["generated_chapters"], [])
                     self.assertEqual(
                         partial["chapter_details"][0]["progress_percent"],
@@ -680,9 +668,7 @@ class DashboardLifecycleTests(unittest.IsolatedAsyncioTestCase):
                         ),
                         encoding="utf-8",
                     )
-                    complete = await dashboard.get_pipeline_status(
-                        "partial-generation-test"
-                    )
+                    complete = await dashboard.get_pipeline_status("partial-generation-test")
                     self.assertEqual(complete["generated_chapters"], [])
                     self.assertEqual(
                         complete["chapter_details"][0]["progress_percent"],
@@ -692,9 +678,7 @@ class DashboardLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     # Only the pipeline's full dependency/hash reconciler may
                     # promote the durable state to complete.
                     queue.state["generated_chapters"] = [1]
-                    reconciled = await dashboard.get_pipeline_status(
-                        "partial-generation-test"
-                    )
+                    reconciled = await dashboard.get_pipeline_status("partial-generation-test")
                     self.assertEqual(reconciled["generated_chapters"], [1])
                     self.assertEqual(
                         reconciled["chapter_details"][0]["progress_percent"],
@@ -741,9 +725,7 @@ class DashboardLifecycleTests(unittest.IsolatedAsyncioTestCase):
             {"retried", "warning"},
         )
         self.assertEqual(len(response["attempts"]), 2)
-        self.assertNotIn(
-            "routine", {item["line_id"] for item in response["attempts"]}
-        )
+        self.assertNotIn("routine", {item["line_id"] for item in response["attempts"]})
 
     async def test_quality_endpoint_archives_results_outside_current_generation(self) -> None:
         class FakeQueue:
@@ -757,15 +739,17 @@ class DashboardLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
             @staticmethod
             def get_quality_report(project_id):
-                return [{
-                    "line_id": "old-line",
-                    "chapter_number": 1,
-                    "attempt": 1,
-                    "status": "pass",
-                    "wer": 0.0,
-                    "quality_score": 1.0,
-                    "details": {"selected": True},
-                }]
+                return [
+                    {
+                        "line_id": "old-line",
+                        "chapter_number": 1,
+                        "attempt": 1,
+                        "status": "pass",
+                        "wer": 0.0,
+                        "quality_score": 1.0,
+                        "details": {"selected": True},
+                    }
+                ]
 
         with patch.object(dashboard, "job_queue", FakeQueue()):
             response = await dashboard.get_quality_report("book")
@@ -789,23 +773,27 @@ class DashboardLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
             @staticmethod
             def get_review_items(project_id):
-                return [{
-                    "item_type": "segment",
-                    "item_id": "current-line",
-                    "disposition": "unreviewed",
-                }]
+                return [
+                    {
+                        "item_type": "segment",
+                        "item_id": "current-line",
+                        "disposition": "unreviewed",
+                    }
+                ]
 
             @staticmethod
             def get_quality_report(project_id):
-                return [{
-                    "line_id": "current-line",
-                    "chapter_number": 2,
-                    "attempt": 1,
-                    "status": "flagged",
-                    "wer": 0.1,
-                    "quality_score": 0.7,
-                    "details": {"selected": True, "manual_review_required": True},
-                }]
+                return [
+                    {
+                        "line_id": "current-line",
+                        "chapter_number": 2,
+                        "attempt": 1,
+                        "status": "flagged",
+                        "wer": 0.1,
+                        "quality_score": 0.7,
+                        "details": {"selected": True, "manual_review_required": True},
+                    }
+                ]
 
         with patch.object(dashboard, "job_queue", FakeQueue()):
             response = await dashboard.get_quality_report("book")
@@ -908,16 +896,21 @@ class DashboardLifecycleTests(unittest.IsolatedAsyncioTestCase):
             sample = voice_dir / "narrator-abcd.wav"
             sample.write_bytes(b"RIFF" + b"0" * 1200)
             (voice_dir / "voices.json").write_text(
-                json.dumps({"voices": {"narrator": {
-                    "file": str(sample), "name": "The Narrator",
-                }}}),
+                json.dumps(
+                    {
+                        "voices": {
+                            "narrator": {
+                                "file": str(sample),
+                                "name": "The Narrator",
+                            }
+                        }
+                    }
+                ),
                 encoding="utf-8",
             )
             with (
                 patch.object(dashboard, "_voice_project_dir", return_value=voice_dir),
-                patch.object(
-                    dashboard, "_require_job", return_value={"title": "A Book: One?"}
-                ),
+                patch.object(dashboard, "_require_job", return_value={"title": "A Book: One?"}),
                 patch.object(
                     dashboard,
                     "_load_or_build_voice_cast",
@@ -999,9 +992,7 @@ class DashboardLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     ),
                 )
 
-            overrides = json.loads(
-                (project_dir / "character_overrides.json").read_text(encoding="utf-8")
-            )
+            overrides = json.loads((project_dir / "character_overrides.json").read_text(encoding="utf-8"))
             self.assertEqual(overrides["characters"]["speaker"]["gender"], "female")
             self.assertEqual(result["affected_chapters"], [2, 7])
             self.assertTrue(result["requires_voice_regeneration"])
@@ -1033,36 +1024,38 @@ class DashboardLifecycleTests(unittest.IsolatedAsyncioTestCase):
             base.write_bytes(b"RIFF" + b"1" * 1200)
             candidate.write_bytes(b"RIFF" + b"2" * 1200)
             (voice_dir / "voices.json").write_text(
-                json.dumps({"voices": {
-                    "child": {"file": str(base), "source_type": "generated"},
-                    "child_cand2": {
-                        "file": str(candidate),
-                        "source_type": "generated",
-                        "ref_text": "A reusable reference.",
-                    },
-                }}),
+                json.dumps(
+                    {
+                        "voices": {
+                            "child": {"file": str(base), "source_type": "generated"},
+                            "child_cand2": {
+                                "file": str(candidate),
+                                "source_type": "generated",
+                                "ref_text": "A reusable reference.",
+                            },
+                        }
+                    }
+                ),
                 encoding="utf-8",
             )
-            cast = {"voices": {
-                "child": {
-                    "name": "Child Male",
-                    "owner_character_id": "child",
-                    "assigned_characters": ["child"],
-                },
-                "child_cand2": {
-                    "name": "Candidate 2",
-                    "owner_character_id": "child",
-                    "assigned_characters": [],
-                },
-            }}
+            cast = {
+                "voices": {
+                    "child": {
+                        "name": "Child Male",
+                        "owner_character_id": "child",
+                        "assigned_characters": ["child"],
+                    },
+                    "child_cand2": {
+                        "name": "Candidate 2",
+                        "owner_character_id": "child",
+                        "assigned_characters": [],
+                    },
+                }
+            }
             with (
                 patch.object(dashboard, "_voice_project_dir", return_value=voice_dir),
-                patch.object(
-                    dashboard, "_require_job", return_value={"title": "A Book"}
-                ),
-                patch.object(
-                    dashboard, "_load_or_build_voice_cast", return_value=cast
-                ),
+                patch.object(dashboard, "_require_job", return_value={"title": "A Book"}),
+                patch.object(dashboard, "_load_or_build_voice_cast", return_value=cast),
             ):
                 response = await dashboard.download_all_project_voices("book")
                 response_all = await dashboard.download_all_project_voices("book", all_variants=True)
@@ -1071,9 +1064,7 @@ class DashboardLifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.headers["x-voice-sample-count"], "1")
             with zipfile.ZipFile(io.BytesIO(response.body)) as bundle:
                 names = set(bundle.namelist())
-                self.assertIn(
-                    "A Book - Child Male - voice-reference.wav", names
-                )
+                self.assertIn("A Book - Child Male - voice-reference.wav", names)
                 self.assertNotIn(
                     "A Book - Child Male - Candidate 2 - voice-reference.wav",
                     names,
@@ -1084,9 +1075,7 @@ class DashboardLifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response_all.headers["x-voice-sample-count"], "2")
             with zipfile.ZipFile(io.BytesIO(response_all.body)) as bundle_all:
                 names_all = set(bundle_all.namelist())
-                self.assertIn(
-                    "A Book - Child Male - voice-reference.wav", names_all
-                )
+                self.assertIn("A Book - Child Male - voice-reference.wav", names_all)
                 self.assertIn(
                     "A Book - Child Male - Candidate 2 - voice-reference.wav",
                     names_all,
@@ -1166,9 +1155,7 @@ class DashboardLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 result = await dashboard.regenerate_project_voice(
                     "book",
                     "narrator_male",
-                    dashboard.VoiceRegenerationRequest(
-                        voice_description="A warm, composed audiobook narrator voice"
-                    ),
+                    dashboard.VoiceRegenerationRequest(voice_description="A warm, composed audiobook narrator voice"),
                 )
 
         self.assertEqual(result["status"], "success")

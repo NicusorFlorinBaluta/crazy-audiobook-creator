@@ -31,20 +31,79 @@ logger = logging.getLogger(__name__)
 CHARACTER_ANALYSIS_REVISION = 4
 
 _GENERIC_ROLE_DESCRIPTORS = {
-    "stranger", "alien", "soldier", "guard", "captain", "officer",
-    "attendant", "voice", "figure", "traveler", "shadow", "visitor",
-    "servant", "priest", "doctor", "elder", "crewman", "fellow",
-    "man", "woman", "boy", "girl", "child", "person", "someone", "speaker",
-    "individual", "human", "entity", "presence", "inhabitant", "citizen",
-    "driver", "pilot", "merchant", "trader", "bystander", "passerby",
-    "guest", "host", "friend", "enemy", "leader", "chief", "master",
-    "worker", "assistant", "aide", "deputy", "agent", "scout",
+    "stranger",
+    "alien",
+    "soldier",
+    "guard",
+    "captain",
+    "officer",
+    "attendant",
+    "voice",
+    "figure",
+    "traveler",
+    "shadow",
+    "visitor",
+    "servant",
+    "priest",
+    "doctor",
+    "elder",
+    "crewman",
+    "fellow",
+    "man",
+    "woman",
+    "boy",
+    "girl",
+    "child",
+    "person",
+    "someone",
+    "speaker",
+    "individual",
+    "human",
+    "entity",
+    "presence",
+    "inhabitant",
+    "citizen",
+    "driver",
+    "pilot",
+    "merchant",
+    "trader",
+    "bystander",
+    "passerby",
+    "guest",
+    "host",
+    "friend",
+    "enemy",
+    "leader",
+    "chief",
+    "master",
+    "worker",
+    "assistant",
+    "aide",
+    "deputy",
+    "agent",
+    "scout",
 }
 
 _UNSAFE_CHARACTER_ALIASES = {
-    "a", "an", "and", "the", "of", "narrator", "she", "he", "it",
-    "they", "him", "her", "his", "hers", "them", "male", "female",
-    "character", "unidentified",
+    "a",
+    "an",
+    "and",
+    "the",
+    "of",
+    "narrator",
+    "she",
+    "he",
+    "it",
+    "they",
+    "him",
+    "her",
+    "his",
+    "hers",
+    "them",
+    "male",
+    "female",
+    "character",
+    "unidentified",
 } | _GENERIC_ROLE_DESCRIPTORS
 
 # Load prompt template
@@ -199,6 +258,7 @@ class CharacterAnalyzer:
         )
 
         import time as _time
+
         t0 = _time.time()
 
         # Format any author-provided reference material (Glossary, Dramatis Personae, Character Lists)
@@ -237,9 +297,7 @@ class CharacterAnalyzer:
             )
             raw_characters = raw_result.get("characters", {})
             if isinstance(raw_characters, dict):
-                raw_characters = self._consolidate_accumulated_characters(
-                    raw_characters
-                )
+                raw_characters = self._consolidate_accumulated_characters(raw_characters)
                 raw_result["characters"] = self._adjudicate_name_candidates(
                     raw_characters,
                     book,
@@ -247,7 +305,10 @@ class CharacterAnalyzer:
             registry = self._parse_registry(raw_result, book.metadata.title, book.metadata.author)
         else:
             # Iterative multi-pass chapter-by-chapter analysis for long books
-            logger.info("[CharacterAnalyzer] Long book detected (total_chars=%d) — running iterative multi-pass analysis", total_chars)
+            logger.info(
+                "[CharacterAnalyzer] Long book detected (total_chars=%d) — running iterative multi-pass analysis",
+                total_chars,
+            )
             accumulated_chars: dict[str, dict] = {}
             book_title = book.metadata.title
             book_author = book.metadata.author
@@ -259,10 +320,7 @@ class CharacterAnalyzer:
                 if checkpoint_path.exists():
                     try:
                         ckpt_data = json.loads(checkpoint_path.read_text(encoding="utf-8"))
-                        if (
-                            not checkpoint_fingerprint
-                            or ckpt_data.get("fingerprint") != checkpoint_fingerprint
-                        ):
+                        if not checkpoint_fingerprint or ckpt_data.get("fingerprint") != checkpoint_fingerprint:
                             raise ValueError("checkpoint dependencies changed")
                         accumulated_chars = ckpt_data.get("accumulated_chars", {})
                         tone_desc = ckpt_data.get("tone_desc", "")
@@ -313,8 +371,7 @@ class CharacterAnalyzer:
 
                 try:
                     logger.info(
-                        "[CharacterAnalyzer] Analyzing unit %d/%d: chapter %d "
-                        "part %d '%s'...",
+                        "[CharacterAnalyzer] Analyzing unit %d/%d: chapter %d part %d '%s'...",
                         idx + 1,
                         len(analysis_units),
                         ch.number,
@@ -342,18 +399,13 @@ class CharacterAnalyzer:
                         if not isinstance(cinfo, dict):
                             continue
                         norm_id = self._normalize_id(cid)
-                        display_key = self._normalize_id(
-                            str(cinfo.get("name", norm_id))
-                        )
+                        display_key = self._normalize_id(str(cinfo.get("name", norm_id)))
                         canonical_id = next(
                             (
                                 existing_id
                                 for existing_id, existing in accumulated_chars.items()
                                 if existing_id == norm_id
-                                or self._normalize_id(
-                                    str(existing.get("name", existing_id))
-                                )
-                                == display_key
+                                or self._normalize_id(str(existing.get("name", existing_id))) == display_key
                             ),
                             norm_id,
                         )
@@ -363,9 +415,7 @@ class CharacterAnalyzer:
                             existing = accumulated_chars[canonical_id]
                             existing["dialogue_count"] = self._safe_dialogue_count(
                                 existing.get("dialogue_count", 0)
-                            ) + self._safe_dialogue_count(
-                                cinfo.get("dialogue_count", 0)
-                            )
+                            ) + self._safe_dialogue_count(cinfo.get("dialogue_count", 0))
                             existing["personality_traits"] = list(
                                 dict.fromkeys(
                                     list(existing.get("personality_traits", []))
@@ -378,16 +428,13 @@ class CharacterAnalyzer:
                                 preserved_count = existing["dialogue_count"]
                                 preserved_traits = existing["personality_traits"]
                                 accumulated_chars[canonical_id] = cinfo
-                                accumulated_chars[canonical_id][
-                                    "dialogue_count"
-                                ] = preserved_count
-                                accumulated_chars[canonical_id][
-                                    "personality_traits"
-                                ] = preserved_traits
+                                accumulated_chars[canonical_id]["dialogue_count"] = preserved_count
+                                accumulated_chars[canonical_id]["personality_traits"] = preserved_traits
 
                     if checkpoint_path:
                         try:
                             from shared.artifacts import atomic_write_json
+
                             atomic_write_json(
                                 checkpoint_path,
                                 {
@@ -400,10 +447,7 @@ class CharacterAnalyzer:
                         except Exception as ckpt_err:
                             logger.debug("[CharacterAnalyzer] Checkpoint save failed: %s", ckpt_err)
                 except Exception as e:
-                    raise RuntimeError(
-                        f"Character analysis failed for chapter {ch.number}, "
-                        f"part {part_index}"
-                    ) from e
+                    raise RuntimeError(f"Character analysis failed for chapter {ch.number}, part {part_index}") from e
 
             # Consolidate only identities explicitly linked through aliases or
             # exact display names. Name containment is candidate evidence for
@@ -456,10 +500,7 @@ class CharacterAnalyzer:
                 continue
             name = char.name or cid
             search_terms = list(dict.fromkeys([name, cid.replace("_", " "), *(char.aliases or [])]))
-            search_terms = [
-                t for t in search_terms
-                if len(t) >= 3 and t.lower() not in _UNSAFE_CHARACTER_ALIASES
-            ]
+            search_terms = [t for t in search_terms if len(t) >= 3 and t.lower() not in _UNSAFE_CHARACTER_ALIASES]
             pattern = (
                 re.compile(rf"\b(?:{'|'.join(re.escape(t) for t in search_terms)})\b", re.IGNORECASE)
                 if search_terms
@@ -494,9 +535,7 @@ class CharacterAnalyzer:
     ) -> CharacterRegistry:
         """Apply only configured, confidence-aware, source-grounded enrichment."""
         if self.external_validator is None or project_dir is None:
-            logger.info(
-                "[CharacterAnalyzer] External character augmentation is not configured."
-            )
+            logger.info("[CharacterAnalyzer] External character augmentation is not configured.")
             return registry
 
         dossier = self._build_character_evidence_dossier(registry, book)
@@ -546,6 +585,7 @@ class CharacterAnalyzer:
         reference_audit_path: Path | str,
     ) -> None:
         from shared.artifacts import atomic_write_json
+
         ref_text = "\n".join(book.reference_material.values()) if book.reference_material else ""
         accepted = []
         rejected = []
@@ -565,17 +605,8 @@ class CharacterAnalyzer:
                 cid = patch.get("character_id")
                 evidence = " ".join(str(patch.get("evidence") or "").split())
                 confidence = float(patch.get("confidence", 0.0) or 0.0)
-                grounded = (
-                    len(evidence) >= 12
-                    and evidence.casefold()
-                    in " ".join(ref_text.split()).casefold()
-                )
-                if (
-                    cid in registry.characters
-                    and cid != "narrator"
-                    and confidence >= 0.9
-                    and grounded
-                ):
+                grounded = len(evidence) >= 12 and evidence.casefold() in " ".join(ref_text.split()).casefold()
+                if cid in registry.characters and cid != "narrator" and confidence >= 0.9 and grounded:
                     char = registry.characters[cid]
                     if patch.get("revised_voice_description"):
                         char.voice_description = patch["revised_voice_description"]
@@ -587,17 +618,21 @@ class CharacterAnalyzer:
                         char.speaking_style = patch["speaking_style"]
                     accepted.append(patch)
                 else:
-                    rejected.append({
-                        **patch,
-                        "reason": (
-                            "unknown_or_unproven_character"
-                            if cid not in registry.characters or cid == "narrator"
-                            else "low_confidence_or_ungrounded_evidence"
-                        ),
-                    })
+                    rejected.append(
+                        {
+                            **patch,
+                            "reason": (
+                                "unknown_or_unproven_character"
+                                if cid not in registry.characters or cid == "narrator"
+                                else "low_confidence_or_ungrounded_evidence"
+                            ),
+                        }
+                    )
             audit_data = {"status": "completed", "accepted": accepted, "rejected": rejected}
         except Exception:
-            logger.warning("[CharacterAnalyzer] Supplemental reference augmentation unavailable: supplement unavailable")
+            logger.warning(
+                "[CharacterAnalyzer] Supplemental reference augmentation unavailable: supplement unavailable"
+            )
             audit_data = {"status": "unavailable", "accepted": [], "rejected": []}
         atomic_write_json(Path(reference_audit_path), audit_data)
 
@@ -683,9 +718,9 @@ class CharacterAnalyzer:
         """
         # Match quoted dialogue (straight, curly, and single typographic)
         pattern = re.compile(
-            r'(?:([\w\s,;:]+\s+)?'
+            r"(?:([\w\s,;:]+\s+)?"
             r'(?:"[^"\n]{3,}?"|\u201c[^\u201d\n]{3,}?\u201d|\u2018[^\u2019\n]{3,}?\u2019)'
-            r'(?:\s*[\w\s,;:]+)?)',
+            r"(?:\s*[\w\s,;:]+)?)",
             re.UNICODE,
         )
         excerpts: list[str] = []
@@ -702,9 +737,7 @@ class CharacterAnalyzer:
 
     def _prepare_book_text(self, book: ExtractedBook) -> str:
         """Prepare book text for single-pass analysis."""
-        total_text = "\n\n---\n\n".join(
-            f"## {ch.title}\n\n{ch.text}" for ch in book.chapters
-        )
+        total_text = "\n\n---\n\n".join(f"## {ch.title}\n\n{ch.text}" for ch in book.chapters)
         logger.info(
             "[CharacterAnalyzer] Single-pass analysis (%.1f KB) — sending full book text",
             len(total_text) / 1024,
@@ -766,9 +799,7 @@ class CharacterAnalyzer:
             c_norm = c.lower().replace("_", " ").strip()
             if not c or len(c) < 2 or c_norm in seen:
                 return
-            if c_norm in _UNSAFE_CHARACTER_ALIASES or c_norm in {
-                "mr", "mrs", "ms", "dr"
-            }:
+            if c_norm in _UNSAFE_CHARACTER_ALIASES or c_norm in {"mr", "mrs", "ms", "dr"}:
                 return
             seen.add(c_norm)
             aliases.append(c)
@@ -794,7 +825,8 @@ class CharacterAnalyzer:
             add_alias(of_match.group(1))
 
         words = [
-            w for w in re.split(r"[\s_]+", name_clean)
+            w
+            for w in re.split(r"[\s_]+", name_clean)
             if len(w) >= 3
             and w.lower() not in _UNSAFE_CHARACTER_ALIASES
             and w.lower() not in {"for", "with", "from", "into"}
@@ -804,7 +836,8 @@ class CharacterAnalyzer:
             add_alias(words[-1])
 
         id_words = [
-            w for w in char_id.split("_")
+            w
+            for w in char_id.split("_")
             if len(w) >= 3
             and w.lower() not in _UNSAFE_CHARACTER_ALIASES
             and w.lower() not in {"for", "with", "from", "into"}
@@ -840,9 +873,40 @@ class CharacterAnalyzer:
 
             # Parse gender with robust normalizer
             gender_str = str(char_data.get("gender", "other")).lower().strip()
-            if gender_str in ("male", "man", "boy", "he", "him", "his", "masculine", "gentleman", "sir", "father", "son", "brother", "husband", "lord", "king"):
+            if gender_str in (
+                "male",
+                "man",
+                "boy",
+                "he",
+                "him",
+                "his",
+                "masculine",
+                "gentleman",
+                "sir",
+                "father",
+                "son",
+                "brother",
+                "husband",
+                "lord",
+                "king",
+            ):
                 gender = Gender.MALE
-            elif gender_str in ("female", "woman", "girl", "she", "her", "feminine", "lady", "ma'am", "mother", "daughter", "sister", "wife", "queen", "loremother") or re.search(r"\b(female|woman|girl|lady|she|her|mother|daughter)\b", gender_str):
+            elif gender_str in (
+                "female",
+                "woman",
+                "girl",
+                "she",
+                "her",
+                "feminine",
+                "lady",
+                "ma'am",
+                "mother",
+                "daughter",
+                "sister",
+                "wife",
+                "queen",
+                "loremother",
+            ) or re.search(r"\b(female|woman|girl|lady|she|her|mother|daughter)\b", gender_str):
                 gender = Gender.FEMALE
             elif re.search(r"\b(male|man|boy|he|his|him|father|son)\b", gender_str):
                 gender = Gender.MALE
@@ -924,21 +988,14 @@ class CharacterAnalyzer:
                 self.max_unique_voices,
             )
             ranked = sorted(
-                (
-                    character
-                    for character in characters.values()
-                    if character.id != "narrator"
-                ),
+                (character for character in characters.values() if character.id != "narrator"),
                 key=lambda character: (
                     character.dialogue_count,
                     len(character.voice_description),
                 ),
                 reverse=True,
             )
-            selected_order = ["narrator"] + [
-                character.id
-                for character in ranked[: self.max_unique_voices - 1]
-            ]
+            selected_order = ["narrator"] + [character.id for character in ranked[: self.max_unique_voices - 1]]
             important = set(selected_order)
             # NOTE: a per-gender `representatives` map used to be built here so
             # an overflow character could share a *compatible major character's*
@@ -1008,9 +1065,7 @@ class CharacterAnalyzer:
         )
         pattern = re.compile(
             r"(?:\"[^\"\n]+\"|\u201c[^\u201d\n]+\u201d)\s*"
-            r"(?:,\s*)?(?:the|a)\s+(boy|girl|man|woman)\s+(?:"
-            + speech_verbs
-            + r")\b",
+            r"(?:,\s*)?(?:the|a)\s+(boy|girl|man|woman)\s+(?:" + speech_verbs + r")\b",
             re.IGNORECASE,
         )
         counts: dict[str, int] = {}
@@ -1049,9 +1104,7 @@ class CharacterAnalyzer:
                 voice_description=description,
                 speaking_style="Natural dialogue matching the source context",
                 dialogue_count=count,
-                test_sentence=(
-                    "I know what I saw, and I can explain it if you listen."
-                ),
+                test_sentence=("I know what I saw, and I can explain it if you listen."),
             )
             logger.warning(
                 "[CharacterAnalyzer] Added explicit unnamed speaker '%s' from %d source tag(s)",
@@ -1061,9 +1114,7 @@ class CharacterAnalyzer:
         return registry
 
     @staticmethod
-    def _consolidate_accumulated_characters(
-        accumulated_chars: dict[str, dict[str, Any]]
-    ) -> dict[str, dict[str, Any]]:
+    def _consolidate_accumulated_characters(accumulated_chars: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
         """Merge only explicit aliases and exact normalized display names.
 
         Substring/suffix matching is intentionally forbidden: ``king`` and
@@ -1093,18 +1144,10 @@ class CharacterAnalyzer:
                     for value in cinfo2.get("aliases", [])
                     if str(value).strip()
                 }
-                name1 = CharacterAnalyzer._normalize_id(
-                    str(cinfo1.get("name", cid1))
-                )
-                name2 = CharacterAnalyzer._normalize_id(
-                    str(cinfo2.get("name", cid2))
-                )
+                name1 = CharacterAnalyzer._normalize_id(str(cinfo1.get("name", cid1)))
+                name2 = CharacterAnalyzer._normalize_id(str(cinfo2.get("name", cid2)))
                 explicitly_linked = (
-                    cid2 in aliases1
-                    or name2 in aliases1
-                    or cid1 in aliases2
-                    or name1 in aliases2
-                    or name1 == name2
+                    cid2 in aliases1 or name2 in aliases1 or cid1 in aliases2 or name1 in aliases2 or name1 == name2
                 )
                 target_id = variant_id = None
                 target_info = variant_info = None
@@ -1117,9 +1160,7 @@ class CharacterAnalyzer:
                     elif count2 > count1:
                         target_id, variant_id = cid2, cid1
                         target_info, variant_info = cinfo2, cinfo1
-                    elif (len(cid1.split("_")), len(cid1)) >= (
-                        len(cid2.split("_")), len(cid2)
-                    ):
+                    elif (len(cid1.split("_")), len(cid1)) >= (len(cid2.split("_")), len(cid2)):
                         target_id, variant_id = cid1, cid2
                         target_info, variant_info = cinfo1, cinfo2
                     else:
@@ -1134,13 +1175,11 @@ class CharacterAnalyzer:
                         target_id,
                         target_info.get("name"),
                     )
-                    target_info["dialogue_count"] = (
-                        target_info.get("dialogue_count", 0)
-                        + variant_info.get("dialogue_count", 0)
+                    target_info["dialogue_count"] = target_info.get("dialogue_count", 0) + variant_info.get(
+                        "dialogue_count", 0
                     )
-                    target_info["mention_count"] = (
-                        target_info.get("mention_count", 0)
-                        + variant_info.get("mention_count", 0)
+                    target_info["mention_count"] = target_info.get("mention_count", 0) + variant_info.get(
+                        "mention_count", 0
                     )
                     existing_aliases = set(target_info.get("aliases", []))
                     existing_aliases.add(variant_info.get("name", variant_id))
@@ -1163,6 +1202,7 @@ class CharacterAnalyzer:
         with the short name. This tolerates imperfect citation formatting without
         turning name containment alone into merge evidence.
         """
+
         def _distinctive_tokens(cid: str, data: dict[str, Any]) -> set[str]:
             tokens: set[str] = set()
             name_words = re.split(r"[\s_]+", str(data.get("name", cid)))
@@ -1194,7 +1234,7 @@ class CharacterAnalyzer:
                 continue
             left_parts = left.split("_")
             left_tokens = tokens_by_id[left]
-            for right in ids[index + 1:]:
+            for right in ids[index + 1 :]:
                 if right == "narrator":
                     continue
                 right_parts = right.split("_")
@@ -1202,15 +1242,8 @@ class CharacterAnalyzer:
 
                 # Criterion 1: Suffix ID match (e.g. pwent <-> thibbledorf_pwent)
                 suffix_match = (
-                    (
-                        len(left_parts) < len(right_parts)
-                        and right_parts[-len(left_parts):] == left_parts
-                    )
-                    or (
-                        len(right_parts) < len(left_parts)
-                        and left_parts[-len(right_parts):] == right_parts
-                    )
-                )
+                    len(left_parts) < len(right_parts) and right_parts[-len(left_parts) :] == left_parts
+                ) or (len(right_parts) < len(left_parts) and left_parts[-len(right_parts) :] == right_parts)
 
                 # Criterion 2: Distinctive non-generic token overlap (e.g. "Sixth" in Sixth of Dusk <-> "Sixth" in Drominadian)
                 shared_tokens = left_tokens & right_tokens
@@ -1282,8 +1315,7 @@ class CharacterAnalyzer:
             "are not proof. Return JSON with a `decisions` array containing "
             "left_id, right_id, same_character, and evidence. For a true "
             "decision, evidence must be a verbatim source excerpt that "
-            "establishes both names refer to one entity.\n\n"
-            + json.dumps(payload, ensure_ascii=False)
+            "establishes both names refer to one entity.\n\n" + json.dumps(payload, ensure_ascii=False)
         )
         try:
             raw = self.ollama.generate_json(
@@ -1316,10 +1348,7 @@ class CharacterAnalyzer:
                 continue
             evidence = " ".join(str(decision.get("evidence", "")).split())
             normalized_context = " ".join(contexts[pair].split()).casefold()
-            cited_verbatim = (
-                len(evidence) >= 12
-                and evidence.casefold() in normalized_context
-            )
+            cited_verbatim = len(evidence) >= 12 and evidence.casefold() in normalized_context
             derived_evidence = self._find_short_name_continuation(
                 characters[pair[0]],
                 characters[pair[1]],
@@ -1333,8 +1362,7 @@ class CharacterAnalyzer:
                 continue
             if not cited_verbatim:
                 logger.info(
-                    "Accepting identity merge %s/%s from verified short-name "
-                    "continuation: %s",
+                    "Accepting identity merge %s/%s from verified short-name continuation: %s",
                     *pair,
                     derived_evidence,
                 )
@@ -1346,17 +1374,18 @@ class CharacterAnalyzer:
             elif count_right > count_left:
                 target, variant = right, left
             else:
-                target, variant = max(
-                    (left, right),
-                    key=lambda value: (len(value.split("_")), len(value)),
-                ), min(
-                    (left, right),
-                    key=lambda value: (len(value.split("_")), len(value)),
+                target, variant = (
+                    max(
+                        (left, right),
+                        key=lambda value: (len(value.split("_")), len(value)),
+                    ),
+                    min(
+                        (left, right),
+                        key=lambda value: (len(value.split("_")), len(value)),
+                    ),
                 )
             aliases = list(characters[target].get("aliases", []))
-            aliases.extend(
-                [variant, str(characters[variant].get("name", variant))]
-            )
+            aliases.extend([variant, str(characters[variant].get("name", variant))])
             characters[target]["aliases"] = list(dict.fromkeys(aliases))
 
         return self._consolidate_accumulated_characters(characters)

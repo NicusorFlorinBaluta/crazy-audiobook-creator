@@ -24,10 +24,7 @@ FILE_PATH = Path(
         "voice_library/sample_book-1/child_female.wav",
     )
 )
-TRANSCRIPT = (
-    "She walked through the moonlit garden, listening as fallen leaves "
-    "whispered beneath each careful step."
-)
+TRANSCRIPT = "She walked through the moonlit garden, listening as fallen leaves whispered beneath each careful step."
 
 
 @unittest.skipUnless(RUN_LIVE, "set RUN_LIVE_UPLOAD_E2E=1 for live API tests")
@@ -66,9 +63,7 @@ class VoiceUploadLiveTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
 
     def test_mismatched_transcript_is_rejected(self) -> None:
-        response = self._upload(
-            "This is completely different text that should fail."
-        )
+        response = self._upload("This is completely different text that should fail.")
         self.assertNotEqual(response.status_code, 200, response.text)
 
 

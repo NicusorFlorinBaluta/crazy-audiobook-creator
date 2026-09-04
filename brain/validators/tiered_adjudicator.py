@@ -50,15 +50,11 @@ def _has_speech_tag(reason: str, evidence: str) -> bool:
     return bool(_EXPLICIT_SPEECH_TAG_PATTERN.search(combined))
 
 
-
-
 def _normalize_text(s: str) -> str:
     s = re.sub(r'["\'\u201c\u201d\u2018\u2019\u00ab\u00bb`]', '"', s)
     s = re.sub(r"[\u2014\u2013\u2212]", "-", s)
     s = re.sub(r"\s+", " ", s)
     return s.strip().casefold()
-
-
 
 
 def _fuzzy_quote_in_context(evidence_quote: str, scene_text: str) -> tuple[bool, str]:
@@ -104,11 +100,7 @@ def _check_gender_pronoun_consistency(
     if not char or not char.gender:
         return True, "unknown_or_unregistered_gender"
 
-    gender_val = (
-        char.gender.value.lower()
-        if hasattr(char.gender, "value")
-        else str(char.gender).lower()
-    )
+    gender_val = char.gender.value.lower() if hasattr(char.gender, "value") else str(char.gender).lower()
     if gender_val not in ("male", "female"):
         return True, "neutral_or_other_gender"
 
@@ -143,7 +135,7 @@ def _resolve_speaker_alias(raw_speaker: str, registry: CharacterRegistry) -> tup
         if clean == c_name or clean == c_name.replace(" ", "_"):
             matches.add(cid)
             continue
-        for alias in (c.aliases or []):
+        for alias in c.aliases or []:
             a_clean = str(alias).strip().casefold()
             if len(a_clean.split()) == 1 and a_clean in _GENERIC_ROLE_DESCRIPTORS:
                 continue
@@ -152,9 +144,7 @@ def _resolve_speaker_alias(raw_speaker: str, registry: CharacterRegistry) -> tup
                 break
         if len(clean) >= 4 and clean not in _GENERIC_ROLE_DESCRIPTORS:
             cid_parts = [
-                p.casefold()
-                for p in cid.split("_")
-                if len(p) >= 4 and p.casefold() not in _GENERIC_ROLE_DESCRIPTORS
+                p.casefold() for p in cid.split("_") if len(p) >= 4 and p.casefold() not in _GENERIC_ROLE_DESCRIPTORS
             ]
             if clean in cid_parts:
                 matches.add(cid)
@@ -247,11 +237,7 @@ class TieredAttributionAdjudicator:
         Lines meeting all guardrails and confidence >= local_auto_accept are resolved.
         Lines failing any check are marked for Tier 2 escalation.
         """
-        lines_by_id: dict[str, ScriptLine] = {
-            line.line_id: line
-            for chapter in chapters
-            for line in chapter.lines
-        }
+        lines_by_id: dict[str, ScriptLine] = {line.line_id: line for chapter in chapters for line in chapter.lines}
         chapter_map: dict[int, ScriptChapter] = {c.chapter_number: c for c in chapters}
 
         results: list[AdjudicationResult] = []
@@ -291,15 +277,17 @@ class TieredAttributionAdjudicator:
                     line.attribution_resolver = "local_qwen_micro"
                     line.attribution_review_required = False
                     line.attribution_review_reason = ""
-                    line.attribution_confidence_history.append({
-                        "resolver": "local_qwen_micro",
-                        "model": getattr(self.ollama, "model", DEFAULT_OLLAMA_MODEL),
-                        "decision": "resolved",
-                        "speaker_id": res.resolved_speaker,
-                        "confidence": res.confidence,
-                        "reason": res.reason,
-                        "evidence": res.evidence_quote,
-                    })
+                    line.attribution_confidence_history.append(
+                        {
+                            "resolver": "local_qwen_micro",
+                            "model": getattr(self.ollama, "model", DEFAULT_OLLAMA_MODEL),
+                            "decision": "resolved",
+                            "speaker_id": res.resolved_speaker,
+                            "confidence": res.confidence,
+                            "reason": res.reason,
+                            "evidence": res.evidence_quote,
+                        }
+                    )
                     logger.info(
                         "[TieredAttribution] Repaired %s (%s -> %s, conf=%.2f): %s",
                         res.line_id,
@@ -313,18 +301,18 @@ class TieredAttributionAdjudicator:
                 if not dry_run:
                     line.attribution_review_required = True
                     line.speaker_confidence = min(float(line.speaker_confidence or 0.0), 0.54)
-                    line.attribution_review_reason = (
-                        f"Tier 1 micro-adjudication escalated: {res.reason}"
-                    )[:4000]
-                    line.attribution_confidence_history.append({
-                        "resolver": "local_qwen_micro",
-                        "model": getattr(self.ollama, "model", DEFAULT_OLLAMA_MODEL),
-                        "decision": "abstain",
-                        "speaker_id": res.resolved_speaker,
-                        "confidence": res.confidence,
-                        "reason": res.reason,
-                        "evidence": res.evidence_quote,
-                    })
+                    line.attribution_review_reason = (f"Tier 1 micro-adjudication escalated: {res.reason}")[:4000]
+                    line.attribution_confidence_history.append(
+                        {
+                            "resolver": "local_qwen_micro",
+                            "model": getattr(self.ollama, "model", DEFAULT_OLLAMA_MODEL),
+                            "decision": "abstain",
+                            "speaker_id": res.resolved_speaker,
+                            "confidence": res.confidence,
+                            "reason": res.reason,
+                            "evidence": res.evidence_quote,
+                        }
+                    )
 
         if not dry_run and local_resolved_count > 0:
             ScriptGenerator.sync_dialogue_counts(chapters, self.registry)
@@ -339,8 +327,10 @@ class TieredAttributionAdjudicator:
         report = AdjudicationReport(results=results, summary=summary)
 
         # Write preview / report
-        preview_path = project_dir / "external_validation" / (
-            "tiered_attribution_preview.json" if dry_run else "tiered_attribution_report.json"
+        preview_path = (
+            project_dir
+            / "external_validation"
+            / ("tiered_attribution_preview.json" if dry_run else "tiered_attribution_report.json")
         )
         try:
             preview_path.parent.mkdir(parents=True, exist_ok=True)
@@ -369,17 +359,15 @@ class TieredAttributionAdjudicator:
         for cid in sorted(active_ids):
             char = self.registry.characters.get(cid)
             if char:
-                gender_str = (
-                    char.gender.value
-                    if hasattr(char.gender, "value")
-                    else str(char.gender)
+                gender_str = char.gender.value if hasattr(char.gender, "value") else str(char.gender)
+                scene_characters.append(
+                    {
+                        "id": cid,
+                        "name": char.name,
+                        "gender": gender_str,
+                        "aliases": char.aliases or [],
+                    }
                 )
-                scene_characters.append({
-                    "id": cid,
-                    "name": char.name,
-                    "gender": gender_str,
-                    "aliases": char.aliases or [],
-                })
 
         # Format surrounding lines
         context_lines_formatted = []
@@ -485,9 +473,7 @@ class TieredAttributionAdjudicator:
         if not gender_passed:
             escalate_reasons.append(gender_detail)
         if confidence < self.local_auto_accept:
-            escalate_reasons.append(
-                f"Confidence {confidence:.2f} < threshold {self.local_auto_accept:.2f}"
-            )
+            escalate_reasons.append(f"Confidence {confidence:.2f} < threshold {self.local_auto_accept:.2f}")
         full_reason = "; ".join(escalate_reasons) or reason
 
         return AdjudicationResult(
@@ -513,11 +499,10 @@ class TieredAttributionAdjudicator:
 
         for chapter_number, chapter in chapter_map.items():
             dialogue_lines = [
-                line for line in chapter.lines
-                if line.speaker != "narrator" and (
-                    line.dialogue_kind == "spoken"
-                    or line.text.strip().startswith(('"', "“", "‘", "'", "—", "–"))
-                )
+                line
+                for line in chapter.lines
+                if line.speaker != "narrator"
+                and (line.dialogue_kind == "spoken" or line.text.strip().startswith(('"', "“", "‘", "'", "—", "–")))
             ]
 
             for i in range(len(dialogue_lines) - 1):
@@ -558,7 +543,9 @@ class TieredAttributionAdjudicator:
                         # If both are untagged, invalidate local_qwen and escalate to Gemini!
                         if cur_res and cur_res.resolver_tier == "local_qwen":
                             cur_res.resolver_tier = "gemini_api"
-                            cur_res.reason += " [Rejected by Guardrail 4: Untagged reciprocal Q&A same-speaker conflict]"
+                            cur_res.reason += (
+                                " [Rejected by Guardrail 4: Untagged reciprocal Q&A same-speaker conflict]"
+                            )
                             cur_res.guardrail_results["reciprocal_turn"] = {
                                 "passed": False,
                                 "detail": f"Untagged same-speaker conflict with {nxt.line_id}",
@@ -569,7 +556,9 @@ class TieredAttributionAdjudicator:
                             )
                         if nxt_res and nxt_res.resolver_tier == "local_qwen":
                             nxt_res.resolver_tier = "gemini_api"
-                            nxt_res.reason += " [Rejected by Guardrail 4: Untagged reciprocal Q&A same-speaker conflict]"
+                            nxt_res.reason += (
+                                " [Rejected by Guardrail 4: Untagged reciprocal Q&A same-speaker conflict]"
+                            )
                             nxt_res.guardrail_results["reciprocal_turn"] = {
                                 "passed": False,
                                 "detail": f"Untagged same-speaker conflict with {cur.line_id}",
@@ -578,4 +567,3 @@ class TieredAttributionAdjudicator:
                                 "[TieredAttribution] Guardrail 4 rejected local resolution on %s",
                                 nxt.line_id,
                             )
-

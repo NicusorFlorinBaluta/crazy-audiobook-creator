@@ -33,13 +33,9 @@ class _FakeStreamResponse:
         return None
 
     def iter_lines(self):
-        yield json.dumps(
-            {"message": {"content": "first"}, "done": False}
-        )
+        yield json.dumps({"message": {"content": "first"}, "done": False})
         self.owner.cancel_current()
-        yield json.dumps(
-            {"message": {"content": "second"}, "done": False}
-        )
+        yield json.dumps({"message": {"content": "second"}, "done": False})
 
 
 class _FakeHttpClient:
@@ -194,10 +190,12 @@ class OllamaLifecycleTests(unittest.TestCase):
             max_retries=2,
         )
         client._client.close()
-        fake = _ModelSelectionHttpClient([
-            "deepseek-r1:32b",
-            "qwen2.5:32b",
-        ])
+        fake = _ModelSelectionHttpClient(
+            [
+                "deepseek-r1:32b",
+                "qwen2.5:32b",
+            ]
+        )
         client._client = fake
 
         self.assertEqual(client.generate("test"), "selected")
@@ -270,13 +268,17 @@ class OllamaLifecycleTests(unittest.TestCase):
             think=False,
         )
         client._client.close()
-        fake = _RecordingHttpClient([
-            json.dumps({
-                "message": {"content": '{"ok": true}'},
-                "done": True,
-                "done_reason": "stop",
-            })
-        ])
+        fake = _RecordingHttpClient(
+            [
+                json.dumps(
+                    {
+                        "message": {"content": '{"ok": true}'},
+                        "done": True,
+                        "done_reason": "stop",
+                    }
+                )
+            ]
+        )
         client._client = fake
 
         self.assertEqual(client.generate_json("test"), {"ok": True})
@@ -287,10 +289,9 @@ class OllamaLifecycleTests(unittest.TestCase):
     def test_stream_is_aborted_if_server_ignores_output_limit(self) -> None:
         client = OllamaClient(max_output_tokens=3, max_retries=1)
         client._client.close()
-        client._client = _RecordingHttpClient([
-            json.dumps({"message": {"content": "x"}, "done": False})
-            for _ in range(4)
-        ])
+        client._client = _RecordingHttpClient(
+            [json.dumps({"message": {"content": "x"}, "done": False}) for _ in range(4)]
+        )
 
         with self.assertRaisesRegex(
             OllamaGenerationLimitError,
@@ -310,9 +311,7 @@ class OllamaLifecycleTests(unittest.TestCase):
             max_retries=1,
         )
         client._client.close()
-        client._client = _RecordingHttpClient([
-            json.dumps({"message": {"content": "x"}, "done": False})
-        ])
+        client._client = _RecordingHttpClient([json.dumps({"message": {"content": "x"}, "done": False})])
 
         with (
             patch(
@@ -339,15 +338,17 @@ class OllamaLifecycleTests(unittest.TestCase):
             max_retries=1,
         )
         client._client.close()
-        client._client = _RecordingHttpClient([
-            json.dumps({
-                "message": {
-                    "content": "abcdefghijklmnopqrstuvwxyz0123456789!"
-                },
-                "done": False,
-            })
-            for _ in range(200)
-        ])
+        client._client = _RecordingHttpClient(
+            [
+                json.dumps(
+                    {
+                        "message": {"content": "abcdefghijklmnopqrstuvwxyz0123456789!"},
+                        "done": False,
+                    }
+                )
+                for _ in range(200)
+            ]
+        )
 
         with self.assertRaisesRegex(
             OllamaGenerationLimitError,
@@ -392,11 +393,13 @@ class OllamaLifecycleTests(unittest.TestCase):
             "schedule": {
                 "enabled": True,
                 "timezone": "Europe/Bucharest",
-                "windows": [{
-                    "days": ["Monday"],
-                    "start": "00:00",
-                    "end": "00:01",
-                }],
+                "windows": [
+                    {
+                        "days": ["Monday"],
+                        "start": "00:00",
+                        "end": "00:01",
+                    }
+                ],
             }
         }
         pipeline._pause_at_boundary = MagicMock()

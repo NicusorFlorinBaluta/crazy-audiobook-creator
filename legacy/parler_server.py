@@ -14,11 +14,13 @@ logger = logging.getLogger("parler_server")
 
 app = FastAPI(title="Parler TTS Microservice")
 
+
 class VoiceDesignRequest(BaseModel):
     prompt: str
     text: str
     output_path: str
     duration_seconds: float = 10.0
+
 
 # Globals for lazy loading
 model = None
@@ -27,6 +29,7 @@ tokenizer = None
 
 def get_device():
     return "cuda:0" if torch.cuda.is_available() else "cpu"
+
 
 @app.on_event("startup")
 def load_model():
@@ -49,16 +52,22 @@ def load_model():
         ParlerTTSForConditionalGeneration._prepare_model_inputs = _prepare_model_inputs
 
         orig_prepare_encoder = ParlerTTSForConditionalGeneration._prepare_text_encoder_kwargs_for_generation
+
         def _prepare_text_encoder_kwargs_for_generation(self, inputs_tensor, model_kwargs, *args, **kwargs):
             res = orig_prepare_encoder(self, inputs_tensor, model_kwargs, *args, **kwargs)
             res.pop("input_ids", None)
             return res
-        ParlerTTSForConditionalGeneration._prepare_text_encoder_kwargs_for_generation = _prepare_text_encoder_kwargs_for_generation
+
+        ParlerTTSForConditionalGeneration._prepare_text_encoder_kwargs_for_generation = (
+            _prepare_text_encoder_kwargs_for_generation
+        )
 
         from transformers.generation import GenerationMixin
 
         if GenerationMixin not in ParlerTTSForConditionalGeneration.__bases__:
-            ParlerTTSForConditionalGeneration.__bases__ = ParlerTTSForConditionalGeneration.__bases__ + (GenerationMixin,)
+            ParlerTTSForConditionalGeneration.__bases__ = ParlerTTSForConditionalGeneration.__bases__ + (
+                GenerationMixin,
+            )
 
         def _prepare_attention_mask_for_generation(self, *args, **kwargs):
             for a in args:
@@ -82,10 +91,14 @@ def load_model():
                     model_kwargs["cache_position"] = torch.arange(0, cur_len.shape[-1], device=cur_len.device)
                 else:
                     dev = device if device is not None else get_device()
-                    model_kwargs["cache_position"] = torch.arange(0, cur_len if isinstance(cur_len, int) else 1, device=dev)
+                    model_kwargs["cache_position"] = torch.arange(
+                        0, cur_len if isinstance(cur_len, int) else 1, device=dev
+                    )
             return model_kwargs
 
-        def _expand_inputs_for_generation(self, input_ids=None, expand_size=1, is_encoder_decoder=False, **model_kwargs):
+        def _expand_inputs_for_generation(
+            self, input_ids=None, expand_size=1, is_encoder_decoder=False, **model_kwargs
+        ):
             model_kwargs.pop("input_ids", None)
             if expand_size > 1:
                 if input_ids is not None:
@@ -104,10 +117,15 @@ def load_model():
             def __init__(self, cache, is_key=True):
                 self.cache = cache
                 self.is_key = is_key
+
             def __getitem__(self, idx):
                 if hasattr(self.cache, "layers") and idx < len(self.cache.layers):
                     layer = self.cache.layers[idx]
-                    return getattr(layer, "keys", getattr(layer, "key", None)) if self.is_key else getattr(layer, "values", getattr(layer, "value", None))
+                    return (
+                        getattr(layer, "keys", getattr(layer, "key", None))
+                        if self.is_key
+                        else getattr(layer, "values", getattr(layer, "value", None))
+                    )
                 if hasattr(self.cache, "self_attention_cache"):
                     return KeyCacheProxy(self.cache.self_attention_cache, self.is_key)[idx]
                 return None
@@ -118,9 +136,12 @@ def load_model():
         EncoderDecoderCache.value_cache = property(lambda self: KeyCacheProxy(self, False))
 
         from transformers import PreTrainedModel
+
         PreTrainedModel._prepare_attention_mask_for_generation = _prepare_attention_mask_for_generation
         PreTrainedModel._get_initial_cache_position = _get_initial_cache_position
-        ParlerTTSForConditionalGeneration._prepare_attention_mask_for_generation = _prepare_attention_mask_for_generation
+        ParlerTTSForConditionalGeneration._prepare_attention_mask_for_generation = (
+            _prepare_attention_mask_for_generation
+        )
         GenerationMixin._prepare_attention_mask_for_generation = _prepare_attention_mask_for_generation
         ParlerTTSForConditionalGeneration._get_initial_cache_position = _get_initial_cache_position
         GenerationMixin._get_initial_cache_position = _get_initial_cache_position
@@ -130,6 +151,7 @@ def load_model():
         model = ParlerTTSForConditionalGeneration.from_pretrained(model_name, torch_dtype=dtype).to(device)
 
         from transformers import GenerationConfig
+
         GenerationConfig.disable_compile = True
         GenerationConfig._pad_token_tensor = property(lambda self: torch.tensor(1024, device=get_device()))
         GenerationConfig._eos_token_tensor = property(lambda self: torch.tensor(1024, device=get_device()))
@@ -140,6 +162,7 @@ def load_model():
         model.generation_config.disable_compile = True
 
         orig_prep_gen = ParlerTTSForConditionalGeneration.prepare_inputs_for_generation
+
         def prepare_inputs_for_generation(self, *args, **kwargs):
             try:
                 return orig_prep_gen(self, *args, **kwargs)
@@ -151,15 +174,16 @@ def load_model():
 
         ParlerTTSForConditionalGeneration.prepare_inputs_for_generation = prepare_inputs_for_generation
         import types
+
         model._prepare_attention_mask_for_generation = types.MethodType(_prepare_attention_mask_for_generation, model)
         model._get_initial_cache_position = types.MethodType(_get_initial_cache_position, model)
         model._expand_inputs_for_generation = types.MethodType(_expand_inputs_for_generation, model)
-
 
         tokenizer = AutoTokenizer.from_pretrained(model_name)
         logger.info("Parler-TTS loaded successfully!")
     except Exception as e:
         logger.error(f"Failed to load Parler-TTS: {e}")
+
 
 @app.post("/voices/design")
 def design_voice(request: VoiceDesignRequest):
@@ -201,14 +225,18 @@ def design_voice(request: VoiceDesignRequest):
         return {"status": "success", "file": str(out_path)}
     except Exception as e:
         import traceback
+
         tb = traceback.format_exc()
         logger.error(f"Error designing voice:\n{tb}")
         raise HTTPException(status_code=500, detail=f"{e}\n{tb}")
+
 
 @app.get("/health")
 def health():
     return {"status": "ok", "model_loaded": model is not None}
 
+
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="127.0.0.1", port=8101)

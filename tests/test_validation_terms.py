@@ -244,9 +244,7 @@ class ValidationTermsTests(unittest.TestCase):
             )
             rows = [
                 json.loads(line)
-                for line in (project_dir / "performance_metrics.jsonl")
-                .read_text(encoding="utf-8")
-                .splitlines()
+                for line in (project_dir / "performance_metrics.jsonl").read_text(encoding="utf-8").splitlines()
             ]
 
         self.assertEqual(len(rows), 1)

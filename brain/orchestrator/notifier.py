@@ -52,10 +52,20 @@ class HANotifier:
         notify_service: str | None = None,
         dashboard_url: str | None = None,
     ):
-        self.base_url = (base_url if base_url is not None else os.getenv("HA_BASE_URL", "http://192.168.50.194:8123")).rstrip("/")
+        self.base_url = (
+            base_url if base_url is not None else os.getenv("HA_BASE_URL", "http://192.168.50.194:8123")
+        ).rstrip("/")
         self.api_token = api_token if api_token is not None else os.getenv("HA_API_TOKEN", "")
-        self.notify_service = (notify_service if notify_service is not None else os.getenv("HA_NOTIFY_SERVICE", "crazywiz_notification_group")).replace("notify.", "")
-        self.dashboard_url = dashboard_url if dashboard_url is not None else os.getenv("DASHBOARD_PUBLIC_URL", "https://crazyha.mywire.org/audiobook/")
+        self.notify_service = (
+            notify_service
+            if notify_service is not None
+            else os.getenv("HA_NOTIFY_SERVICE", "crazywiz_notification_group")
+        ).replace("notify.", "")
+        self.dashboard_url = (
+            dashboard_url
+            if dashboard_url is not None
+            else os.getenv("DASHBOARD_PUBLIC_URL", "https://crazyha.mywire.org/audiobook/")
+        )
 
         # Deduplication cache: key -> timestamp
         self._sent_cache: dict[str, float] = {}
@@ -106,7 +116,7 @@ class HANotifier:
                 "channel": "Audiobook Notifications",
                 "notification_icon": "mdi:book-open-page-variant",
                 "visibility": "public",
-            }
+            },
         }
 
         req = urllib.request.Request(
@@ -136,6 +146,7 @@ class HANotifier:
     def notify_async(self, payload: NotificationPayload) -> None:
         """Non-blocking fire-and-forget notification delivery."""
         import threading
+
         thread = threading.Thread(target=self.send_notification_sync, args=(payload,), daemon=True)
         thread.start()
 
@@ -149,7 +160,9 @@ class HANotifier:
         item_count: int = 0,
         item_ids: list[str] | None = None,
     ) -> None:
-        reason_msg = reason or (f"{item_count} item(s) require review before proceeding." if item_count > 0 else "Action required.")
+        reason_msg = reason or (
+            f"{item_count} item(s) require review before proceeding." if item_count > 0 else "Action required."
+        )
         title = f"🔍 Review Required: {project_title}" if item_count > 0 else f"🎭 Action Required: {project_title}"
         payload = NotificationPayload(
             event_type=NotificationEventType.REVIEW_REQUIRED,
@@ -174,7 +187,9 @@ class HANotifier:
         )
         self.notify_async(payload)
 
-    def notify_generation_error(self, project_id: str, project_title: str, error_message: str, chapter: int | None = None) -> None:
+    def notify_generation_error(
+        self, project_id: str, project_title: str, error_message: str, chapter: int | None = None
+    ) -> None:
         ch_str = f" in Chapter {chapter}" if chapter else ""
         payload = NotificationPayload(
             event_type=NotificationEventType.GENERATION_ERROR,
@@ -187,8 +202,16 @@ class HANotifier:
         )
         self.notify_async(payload)
 
-    def notify_delivery_published(self, project_id: str, project_title: str, part_title: str, chapters: list[int]) -> None:
-        ch_list = f"Chapters {chapters[0]}-{chapters[-1]}" if len(chapters) > 1 else f"Chapter {chapters[0]}" if chapters else ""
+    def notify_delivery_published(
+        self, project_id: str, project_title: str, part_title: str, chapters: list[int]
+    ) -> None:
+        ch_list = (
+            f"Chapters {chapters[0]}-{chapters[-1]}"
+            if len(chapters) > 1
+            else f"Chapter {chapters[0]}"
+            if chapters
+            else ""
+        )
         payload = NotificationPayload(
             event_type=NotificationEventType.DELIVERY_PUBLISHED,
             project_id=project_id,
@@ -200,7 +223,9 @@ class HANotifier:
         )
         self.notify_async(payload)
 
-    def notify_full_book_ready(self, project_id: str, project_title: str, total_chapters: int, total_duration_seconds: float) -> None:
+    def notify_full_book_ready(
+        self, project_id: str, project_title: str, total_chapters: int, total_duration_seconds: float
+    ) -> None:
         hours = int(total_duration_seconds // 3600)
         minutes = int((total_duration_seconds % 3600) // 60)
         dur_str = f"{hours}h {minutes}m" if hours > 0 else f"{minutes}m"

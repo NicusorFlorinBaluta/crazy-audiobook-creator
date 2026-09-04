@@ -13,9 +13,8 @@ repos:
     hooks:
       - id: ruff
         args: [--fix]
-      # `ruff-format` is intentionally omitted until the repository has been
-      # reformatted once in a dedicated commit; enabling it here first would
-      # make every unrelated commit carry formatting churn.
+      # Enabled 2026-09-04, after the one-off reformatting commit.
+      - id: ruff-format
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
