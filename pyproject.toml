@@ -71,7 +71,7 @@ ignore = [
     # Real signal, but too many existing sites to fix in one pass without
     # risking behaviour. Reduce these over time; do not add entries without a
     # comment explaining the count and the plan.
-    "BLE001",  # blind except (201): narrowing incrementally, worst first.
+    "BLE001",  # blind except (208): narrowing incrementally, worst first.
                # nas_syncer was done on 2026-09-04 -- every swallow there
                # now logs, because a silent one meant a delivery had
                # quietly not happened. Count rose from ~198 as new code
