@@ -58,6 +58,7 @@ cleaned up, so some paths inside them no longer resolve.
 | [improvement-plan-post-e2e-2026-08-09.md](improvement-plan-post-e2e-2026-08-09.md) | Plan reconciling the pre-E2E review against the 2026-08-09 evidence. |
 | [home-assistant-integration-plan.md](home-assistant-integration-plan.md) | Plan for the Home Assistant audiobook dashboard. |
 | [e2e_benchmark_metrics.md](e2e_benchmark_metrics.md) | Performance and quality improvement plan, 2026-08-03. |
+| [pipeline-validation-2026-09-05.md](pipeline-validation-2026-09-05.md) | Full pipeline validated to a published .m4b; the prefix-cache question answered. |
 | [e2e-run-2026-09-04.md](e2e-run-2026-09-04.md) | Four defects a green suite could not see: a null-shape fixture, a checkpoint spent too early, a port kill, an unattributed pause. |
 | [e2e-run-2026-08-11.md](e2e-run-2026-08-11.md) | Clean release-candidate full-book run. |
 | [e2e-run-2026-08-09.md](e2e-run-2026-08-09.md) | First successful full-book run on Windows. |
