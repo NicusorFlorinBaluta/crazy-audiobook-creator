@@ -379,8 +379,20 @@ async def get_book_detail(project_id: str, request: Request) -> dict[str, Any]:
         if chars_file.is_file():
             try:
                 cdata = json.loads(chars_file.read_text(encoding="utf-8"))
-                for c in cdata.get("characters", []):
-                    if c.get("id") == "narrator" or c.get("name", "").lower() == "narrator":
+                # `characters` is a mapping of id -> entry, so iterating it
+                # yields the ids. This read `for c in cdata.get("characters")`
+                # and then `c.get(...)`, which raised AttributeError on every
+                # book that has ever existed -- silently, because the handler
+                # caught Exception. Narrowing that handler turned it into a
+                # 500 on the Android app's book-detail call, which is how it
+                # was finally found.
+                entries = cdata.get("characters") or {}
+                if isinstance(entries, dict):
+                    entries = list(entries.values())
+                for c in entries:
+                    if not isinstance(c, dict):
+                        continue
+                    if c.get("id") == "narrator" or str(c.get("name") or "").lower() == "narrator":
                         narrator = c.get("speaker_name") or c.get("voice_name") or c.get("name")
                         break
             except (OSError, UnicodeDecodeError, ValueError, KeyError, TypeError) as exc:

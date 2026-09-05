@@ -602,3 +602,72 @@ class MobileApiTests(unittest.TestCase):
 
             if project_dir.exists():
                 shutil.rmtree(project_dir)
+
+
+class NarratorLookupTests(unittest.TestCase):
+    """The Android book-detail call must find the narrator in a real registry.
+
+    `characters.json` stores `characters` as a mapping of id -> entry, so
+    iterating it yields the ids. The lookup did `for c in cdata["characters"]`
+    and then `c.get("id")`, which raises AttributeError on a string -- on every
+    book that has ever existed. The handler caught Exception, so the app simply
+    received no narrator name and nothing said why.
+
+    Found on 2026-09-05 when narrowing that handler turned the silent failure
+    into an HTTP 500 on `api/mobile/v1/books/{projectId}`.
+    """
+
+    def _detail(self, characters, tmp):
+        import asyncio
+        from types import SimpleNamespace
+
+        import brain.dashboard.api.mobile as mobile
+
+        project_dir = Path(tmp) / "proj"
+        project_dir.mkdir(parents=True, exist_ok=True)
+        (project_dir / "characters.json").write_text(json.dumps({"characters": characters}), encoding="utf-8")
+        (project_dir / "book.json").write_text(
+            json.dumps({"title": "T", "chapters": [{"number": 1, "title": "One"}]}), encoding="utf-8"
+        )
+
+        class FakeQueue:
+            def get_job(self, project_id):
+                return {"project_id": project_id, "status": "complete", "title": "T"}
+
+            def list_jobs(self):
+                return [self.get_job("proj")]
+
+        request = SimpleNamespace(
+            app=SimpleNamespace(state=SimpleNamespace(job_queue=FakeQueue())),
+            client=SimpleNamespace(host="127.0.0.1"),
+            headers={},
+        )
+        with patch.object(mobile.shared_paths, "PROJECTS_DIR", Path(tmp)):
+            return asyncio.run(mobile.get_book_detail("proj", request))
+
+    def test_narrator_is_found_when_characters_is_a_mapping(self) -> None:
+        """The shape every real characters.json actually uses."""
+        with tempfile.TemporaryDirectory() as tmp:
+            detail = self._detail(
+                {
+                    "narrator": {"id": "narrator", "name": "Narrator", "speaker_name": "House Reader"},
+                    "starling": {"id": "starling", "name": "Starling"},
+                },
+                tmp,
+            )
+        self.assertEqual(detail.get("narrator"), "House Reader")
+
+    def test_narrator_is_found_when_characters_is_a_list(self) -> None:
+        """The shape the original code assumed; must keep working."""
+        with tempfile.TemporaryDirectory() as tmp:
+            detail = self._detail(
+                [{"id": "narrator", "name": "Narrator", "voice_name": "Reader"}],
+                tmp,
+            )
+        self.assertEqual(detail.get("narrator"), "Reader")
+
+    def test_a_registry_of_junk_does_not_fail_the_request(self) -> None:
+        """Book detail must degrade, not 500, on an unexpected registry."""
+        with tempfile.TemporaryDirectory() as tmp:
+            detail = self._detail(["not", "a", "mapping"], tmp)
+        self.assertIn("chapters", detail)
