@@ -1,3 +1,4 @@
+import os
 import re
 import unittest
 from pathlib import Path
@@ -100,11 +101,19 @@ class DashboardBasePathTests(unittest.TestCase):
         target = FRONTEND / "js" / "app.js"
         before = _frontend_build()
         original = target.read_bytes()
+        # The build string folds in file mtimes, so putting the bytes back is
+        # not enough -- the restoring write moves the mtime and the value stays
+        # changed for the rest of the process. That made this test corrupt its
+        # siblings: FRONTEND_BUILD is computed once at import, and the test
+        # asserting it equals a fresh _frontend_build() then failed depending
+        # on run order.
+        stat = target.stat()
         try:
             target.write_bytes(original + b"// version probe\n")
             self.assertNotEqual(before, _frontend_build())
         finally:
             target.write_bytes(original)
+            os.utime(target, ns=(stat.st_atime_ns, stat.st_mtime_ns))
         self.assertEqual(before, _frontend_build(), "restore did not return the original value")
 
     def test_embedded_frontend_disables_stale_browser_caching(self):
