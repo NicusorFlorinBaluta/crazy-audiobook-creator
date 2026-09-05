@@ -1604,7 +1604,7 @@ class Pipeline:
                         from shared.artifacts import atomic_write_text
 
                         atomic_write_text(merged_script, json.dumps(merged_data, indent=2, ensure_ascii=False))
-                except Exception as exc:
+                except (OSError, UnicodeDecodeError, ValueError, KeyError, TypeError) as exc:
                     logger.warning(
                         "Could not prune chapter %s from %s; the merged script keeps the failed chapter: %s",
                         chapter_num,
@@ -3488,7 +3488,7 @@ class Pipeline:
             with metrics_path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(metric, ensure_ascii=False, sort_keys=True) + "\n")
                 handle.flush()
-        except Exception as exc:
+        except (OSError, ValueError, TypeError) as exc:
             logger.warning("Could not persist performance metric: %s", exc)
 
     def _reconcile_artifacts(
@@ -3526,7 +3526,7 @@ class Pipeline:
                 continue
             try:
                 stored_manifest = json.loads(segment_info_file.read_text(encoding="utf-8"))
-            except Exception as exc:
+            except (OSError, UnicodeDecodeError, ValueError, KeyError, TypeError) as exc:
                 logger.warning(
                     "Could not read %s; chapter %s counts as ungenerated and its audio will be re-rendered: %s",
                     segment_info_file,
@@ -3564,7 +3564,7 @@ class Pipeline:
                 continue
             try:
                 master_info = json.loads(master_info_file.read_text(encoding="utf-8"))
-            except Exception as exc:
+            except (OSError, UnicodeDecodeError, ValueError, KeyError, TypeError) as exc:
                 logger.warning(
                     "Could not read %s; chapter %s will be re-mastered: %s",
                     master_info_file,
