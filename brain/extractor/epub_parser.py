@@ -467,7 +467,7 @@ class EpubParser:
             cover_path.write_bytes(cover_item.get_content())
             logger.info("Extracted cover image: %s", cover_path.name)
             return cover_path
-        except Exception as e:
+        except OSError as e:
             logger.warning("Failed to extract cover image: %s", e)
             return None
 

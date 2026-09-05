@@ -114,7 +114,7 @@ async def retry_external_validation(
                     }
                     for cid, c in char_map.items()
                 }
-            except Exception as exc:
+            except (OSError, UnicodeDecodeError, ValueError, KeyError, TypeError) as exc:
                 logger.warning("Could not read characters for retry: %s", exc)
 
         # Load chapter scripts
@@ -128,7 +128,7 @@ async def retry_external_validation(
                 continue
             try:
                 chapter_scripts.append(ScriptChapter.model_validate_json(path.read_text(encoding="utf-8")))
-            except Exception as exc:
+            except (OSError, UnicodeDecodeError, ValueError, KeyError, TypeError) as exc:
                 logger.warning("Could not read script %s for validation retry: %s", path.name, exc)
 
         if not chapter_scripts:
@@ -141,7 +141,7 @@ async def retry_external_validation(
             for hp in (health_path, global_health_path):
                 try:
                     hp.unlink(missing_ok=True)
-                except Exception as exc:
+                except OSError as exc:
                     logger.warning(
                         "Could not remove %s; the external-validation circuit breaker stays tripped: %s", hp, exc
                     )
@@ -172,7 +172,7 @@ async def retry_external_validation(
         if book_script_path.is_file():
             try:
                 existing_book_script = json.loads(book_script_path.read_text(encoding="utf-8"))
-            except Exception:
+            except (OSError, UnicodeDecodeError, ValueError, KeyError, TypeError):
                 existing_book_script = {}
         existing_book_script["chapters"] = book_script_chapters
         existing_book_script["total_lines"] = total_lines

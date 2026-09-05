@@ -338,7 +338,7 @@ def _attach_cover(
             result.cover_width,
             result.cover_height,
         ) = _download_cover(client, image_url)
-    except Exception as exc:
+    except (ValueError, TypeError, AttributeError) as exc:
         result.warnings.append(f"Cover was rejected: {exc}")
         logger.warning("Rejected Google Books cover: %s", exc)
 
@@ -432,7 +432,7 @@ class MetadataFetcher:
                 )
                 _attach_cover(result, item, client)
                 return result
-        except Exception as exc:
+        except (httpx.HTTPError, OSError, ValueError, KeyError, TypeError) as exc:
             safe_error = _provider_error_message(exc)
             # Never log the raw HTTP exception: its URL may contain the API key.
             logger.warning("Google Books metadata lookup failed: %s", safe_error)
@@ -505,7 +505,7 @@ class MetadataFetcher:
                     query_author=query_author,
                     results=results,
                 )
-        except Exception as exc:
+        except (httpx.HTTPError, OSError, ValueError, KeyError, TypeError) as exc:
             safe_error = _provider_error_message(exc)
             logger.warning("Google Books manual search failed: %s", safe_error)
             return MetadataSearchResults(
@@ -558,7 +558,7 @@ class MetadataFetcher:
                 )
                 _attach_cover(result, item, client)
                 return result
-        except Exception as exc:
+        except (httpx.HTTPError, OSError, ValueError, KeyError, TypeError) as exc:
             safe_error = _provider_error_message(exc)
             logger.warning("Google Books selected-volume fetch failed: %s", safe_error)
             return FetchedMetadata(
