@@ -71,7 +71,7 @@ ignore = [
     # Real signal, but too many existing sites to fix in one pass without
     # risking behaviour. Reduce these over time; do not add entries without a
     # comment explaining the count and the plan.
-    "BLE001",  # blind except (154, from ~208): narrowing incrementally.
+    "BLE001",  # blind except (142, from ~208): narrowing incrementally.
                #
                # Every one of these already logs -- the silent subset went with
                # S110, see below -- so what is left is breadth, not silence.
@@ -84,7 +84,8 @@ ignore = [
                # pronunciation.py (7), ollama_client.py (4),
                # audio_effects.py (4), whisper_validator.py (4),
                # routers/pronunciations.py (3), character_analyzer.py (4),
-               # script_generator.py (2). The convention is to name what
+               # script_generator.py (2), main.py (12 of 36). The
+               # convention is to name what
                # the guarded call can actually raise, generously:
                #
                #   reading someone else's file  (OSError, UnicodeDecodeError,

@@ -263,7 +263,7 @@ async def _shutdown_dashboard_process(delay_seconds: float = 0.35) -> None:
         sentinel_path = shared_paths.PROJECTS_DIR / ".dashboard_shutdown"
         sentinel_path.parent.mkdir(parents=True, exist_ok=True)
         sentinel_path.write_text("shutdown", encoding="utf-8")
-    except Exception as exc:
+    except OSError as exc:
         logger.warning(
             "Could not write the shutdown sentinel; the next start will report this clean shutdown as an unexpected drop: %s",
             exc,
@@ -405,7 +405,7 @@ def _get_script_summary(project_id: str) -> dict[int, tuple[bool, int, str]]:
             if ch_num is not None:
                 lines = data.get("lines", [])
                 result[int(ch_num)] = (len(lines) > 0, len(lines), str(data.get("chapter_title") or ""))
-        except Exception as exc:
+        except (OSError, UnicodeDecodeError, ValueError, KeyError, TypeError) as exc:
             logger.warning("Could not read %s; the dashboard will show this chapter as unscripted: %s", path, exc)
 
     cache_service.set(
@@ -708,7 +708,7 @@ async def lifespan(app: FastAPI):
     if was_graceful_shutdown:
         try:
             sentinel_path.unlink()
-        except Exception as exc:
+        except OSError as exc:
             logger.warning(
                 "Could not clear the shutdown sentinel; the next unexpected crash will be reported as a clean shutdown: %s",
                 exc,
@@ -1162,16 +1162,16 @@ def _safe_delete_tree(path: Path) -> bool:
     if path.is_dir():
         try:
             shutil.rmtree(path, onexc=_remove_readonly)
-        except Exception:
+        except OSError:
             try:
                 shutil.rmtree(path, ignore_errors=True)
-            except Exception as exc:
+            except OSError as exc:
                 logger.warning("Could not fully delete directory %s: %s", path, exc)
     else:
         try:
             os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
             path.unlink(missing_ok=True)
-        except Exception as exc:
+        except OSError as exc:
             logger.warning("Could not delete file %s: %s", path, exc)
     return not path.exists() and not path.is_symlink()
 
@@ -1509,7 +1509,7 @@ def _automatic_extraction_review_pending(
         for section in data.get("sections", []):
             if section.get("review_required") and not section.get("external_validation_attempted"):
                 return True
-    except Exception as exc:
+    except (OSError, UnicodeDecodeError, ValueError, KeyError, TypeError) as exc:
         logger.warning(
             "Could not read %s; external validation will look unattempted for this project: %s", audit_path, exc
         )
@@ -1961,7 +1961,7 @@ async def stream_chapter_audio(project_id: str, chapter_num: int, format: str = 
                 try:
                     bdata = json.loads(book_json.read_text(encoding="utf-8"))
                     chapters = bdata.get("chapters", [])
-                except Exception as exc:
+                except (OSError, UnicodeDecodeError, ValueError, KeyError, TypeError) as exc:
                     logger.warning(
                         "Could not read %s; the finished book will be listed with no chapters: %s", book_json, exc
                     )
@@ -1999,7 +1999,7 @@ async def stream_chapter_audio(project_id: str, chapter_num: int, format: str = 
                         project_id,
                         chapter_num,
                     )
-                except Exception as e:
+                except (OSError, subprocess.SubprocessError, ValueError) as e:
                     logger.warning("Could not extract chapter slice from m4b: %s", e)
 
             if aac_file.exists():
@@ -2046,7 +2046,7 @@ async def stream_chapter_audio(project_id: str, chapter_num: int, format: str = 
                     FFMPEG_STREAM_TIMEOUT_SECONDS,
                 )
                 aac_file = ch_file
-            except Exception as e:
+            except (OSError, subprocess.SubprocessError, ValueError) as e:
                 logger.warning("AAC transcoding failed, falling back to WAV: %s", e)
                 aac_file = ch_file
 
@@ -2150,7 +2150,7 @@ async def get_pipeline_status(project_id: str):
                 for idx, ch in enumerate(b_chaps, 1):
                     if isinstance(ch, dict) and ch.get("title"):
                         book_chapter_titles[idx] = ch["title"]
-            except Exception as exc:
+            except (OSError, UnicodeDecodeError, ValueError, KeyError, TypeError) as exc:
                 logger.warning(
                     "Could not read %s; the dashboard will show placeholder metadata and no chapter titles: %s",
                     book_json_path,
@@ -2239,7 +2239,7 @@ async def get_pipeline_status(project_id: str):
                         if log_file.exists():
                             try:
                                 logs = log_file.read_text(encoding="utf-8", errors="ignore").splitlines()[-100:]
-                            except Exception as exc:
+                            except (OSError, UnicodeDecodeError, ValueError, KeyError, TypeError) as exc:
                                 logger.debug(
                                     "Could not read %s for chunk progress; the chapter will show no chunk counter: %s",
                                     log_file,
