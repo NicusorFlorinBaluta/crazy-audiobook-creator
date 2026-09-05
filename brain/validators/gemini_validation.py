@@ -487,6 +487,10 @@ class GeminiWebClient:
 
     def __init__(self, config: dict[str, Any]):
         self.config = config
+        # How long to queue for the shared browser profile. One adjudication
+        # runs ~83s, so the default allows a couple of them to drain ahead of
+        # us before we call the profile stuck.
+        self._profile_wait_seconds = float(config.get("profile_wait_seconds", 240))
 
     @property
     def available(self) -> bool:
@@ -530,9 +534,34 @@ class GeminiWebClient:
         response_selector = str(self.config.get("response_selector", "message-content"))
         timeout_ms = int(float(self.config.get("timeout_seconds", 180)) * 1000)
 
+        # Queue behind an in-flight conversation rather than failing.
+        #
+        # `acquire()` does not block, so a second caller used to fail instantly
+        # with "already in use". Three such failures trip the provider circuit
+        # into a 900s cooldown, so 117 recorded contention failures produced
+        # 499 further rejections and sent work to manual review that this tier
+        # could have resolved. A browser adjudication takes ~83s, so waiting is
+        # cheap by comparison; the bound keeps a genuinely wedged profile
+        # visible instead of hanging the run.
         lock = SingleInstanceLock(_lock_name("gemini-browser", profile_dir))
-        if not lock.acquire():
-            raise ExternalValidationError("Gemini browser profile is already in use")
+        wait_started = time.monotonic()
+        wait_deadline = wait_started + self._profile_wait_seconds
+        announced = False
+        while not lock.acquire(quiet=True):
+            if not announced:
+                logger.info(
+                    "Waiting up to %.0fs for the Gemini browser profile; another adjudication holds it",
+                    self._profile_wait_seconds,
+                )
+                announced = True
+            if time.monotonic() >= wait_deadline:
+                raise ExternalValidationError(
+                    "Gemini browser profile is still in use after "
+                    f"{self._profile_wait_seconds:.0f}s; another adjudication is holding it"
+                )
+            time.sleep(2.0)
+        if announced:
+            logger.info("Gemini browser profile acquired after %.0fs", time.monotonic() - wait_started)
         try:
             with sync_playwright() as playwright:
                 context = playwright.chromium.launch_persistent_context(

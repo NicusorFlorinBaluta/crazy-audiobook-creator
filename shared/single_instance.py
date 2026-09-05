@@ -13,8 +13,14 @@ class SingleInstanceLock:
         self.lock_file = Path(os.getenv("TEMP", ".")) / lock_name
         self.handle = None
 
-    def acquire(self) -> bool:
-        """Acquire process lock. Returns True if acquired, False if another instance is running."""
+    def acquire(self, *, quiet: bool = False) -> bool:
+        """Acquire process lock. Returns True if acquired, False if another instance is running.
+
+        `quiet` drops the contention message to debug. Use it only when the
+        caller is intentionally polling and will report the wait itself --
+        otherwise a queued caller emits one warning per attempt and drowns the
+        log in a message that is not, for it, a problem.
+        """
         try:
             self.lock_file.parent.mkdir(parents=True, exist_ok=True)
             # Do not truncate another process's PID before attempting the lock.
@@ -36,7 +42,12 @@ class SingleInstanceLock:
             self.handle.flush()
             return True
         except OSError as e:
-            logger.warning("Another instance is already running (lock file: %s, error: %s)", self.lock_file, e)
+            logger.log(
+                logging.DEBUG if quiet else logging.WARNING,
+                "Another instance is already running (lock file: %s, error: %s)",
+                self.lock_file,
+                e,
+            )
             if self.handle:
                 try:
                     self.handle.close()

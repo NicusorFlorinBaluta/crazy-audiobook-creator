@@ -1086,21 +1086,23 @@ async function checkAndRenderGeminiRetryBanner(projectId, items = []) {
         const status = await res.json();
         const health = status.provider_health || {};
         
+        const quota = status.quota || {};
         let maxCooldown = 0;
         let rateLimited = false;
-        let dailyBudgetExhausted = false;
 
-        for (const [provider, pData] of Object.entries(health)) {
+        for (const [, pData] of Object.entries(health)) {
             const cd = Number(pData.cooldown_remaining_seconds || 0);
             if (cd > maxCooldown) maxCooldown = cd;
             const err = String(pData.last_error || '').toLowerCase();
-            if (err.includes('safety budget') || err.includes('50/50')) {
-                dailyBudgetExhausted = true;
-            }
             if (err.includes('429') || err.includes('quota') || err.includes('rate limit') || err.includes('cooling down') || pData.circuit_open) {
                 rateLimited = true;
             }
         }
+
+        // The daily budget is a fact the server reports, not something to infer
+        // from an error message. The old check looked for the literal "50/50",
+        // which never matched the 450-request flash-lite limit.
+        const dailyBudgetExhausted = Boolean(quota.any_exhausted);
 
         const autoCheck = document.getElementById('gemini-auto-retry-check');
         const desc = document.getElementById('gemini-retry-description');
@@ -1116,9 +1118,9 @@ async function checkAndRenderGeminiRetryBanner(projectId, items = []) {
             banner.classList.remove('hidden');
             if (autoCheck) autoCheck.checked = false;
             if (desc) {
-                desc.textContent = `Gemini daily API budget reached (50/50). Automatic retries are paused. You can retry now (falls back to Gemini Web) or review the remaining ${unresolvedAttributions.length} dialogue turns manually below.`;
+                desc.textContent = `Gemini daily API budget reached (${describeQuotaUsage(quota)}). Resets ${describeQuotaReset(quota)}. Automatic retries are paused; you can retry now, which falls back to Gemini Web, or review the remaining ${unresolvedAttributions.length} dialogue turns manually below.`;
             }
-            if (timerEl) timerEl.textContent = 'Paused';
+            if (timerEl) timerEl.textContent = formatDuration(Number(quota.resets_in_seconds || 0)) || 'Paused';
             if (geminiRetryTimer) { clearInterval(geminiRetryTimer); geminiRetryTimer = null; }
             return;
         }
@@ -1137,14 +1139,15 @@ async function checkAndRenderGeminiRetryBanner(projectId, items = []) {
         if (rateLimited || (unresolvedAttributions.length > 0 && maxCooldown > 0)) {
             banner.classList.remove('hidden');
             if (desc) {
-                desc.textContent = `Gemini reached its rate limit on ${unresolvedAttributions.length} dialogue turns. You can wait for quota reset (${maxCooldown || 30}s), retry now, or review items manually.`;
+                const wait = formatDuration(maxCooldown || 30);
+                desc.textContent = `Gemini is backing off on ${unresolvedAttributions.length} dialogue turns; the provider circuit reopens in ${wait}. Daily budget ${describeQuotaUsage(quota)}. You can wait, retry now, or review items manually.`;
             }
             geminiCooldownSeconds = maxCooldown > 0 ? maxCooldown : 30;
             startGeminiCooldownCountdown(projectId);
         } else if (unresolvedAttributions.length > 0 && !banner.dataset.dismissed) {
             banner.classList.remove('hidden');
             if (desc) {
-                desc.textContent = `${unresolvedAttributions.length} dialogue turns require resolution. You can run Gemini triage/adjudication now or review manually below.`;
+                desc.textContent = `${unresolvedAttributions.length} dialogue turns require resolution. Daily budget ${describeQuotaUsage(quota)}. You can run Gemini triage/adjudication now or review manually below.`;
             }
             if (timerEl) timerEl.textContent = 'Ready';
         } else {
@@ -1153,6 +1156,44 @@ async function checkAndRenderGeminiRetryBanner(projectId, items = []) {
     } catch (err) {
         console.warn('Could not check external validation health', err);
     }
+}
+
+// Turn a span of seconds into something an operator can act on. A bare "71809s"
+// or a "Paused" with no number are both unusable when the question is whether
+// to wait or to go and review by hand.
+function formatDuration(seconds) {
+    const total = Math.max(0, Math.round(Number(seconds) || 0));
+    if (!total) return '';
+    if (total < 60) return `${total}s`;
+    const mins = Math.floor(total / 60) % 60;
+    const hours = Math.floor(total / 3600);
+    if (hours) return `${hours}h ${mins.toString().padStart(2, '0')}m`;
+    const secs = total % 60;
+    return `${mins}m ${secs.toString().padStart(2, '0')}s`;
+}
+
+// "31/450 flash-lite, 1/50 flash" -- the models are named so an exhausted
+// cheap tier is not mistaken for an exhausted expensive one.
+function describeQuotaUsage(quota) {
+    const models = (quota && quota.models) || {};
+    const parts = Object.entries(models).map(([name, m]) => {
+        const short = String(name).replace(/^gemini-[\d.]+-/, '');
+        return `${m.used}/${m.limit} ${short}`;
+    });
+    return parts.length ? parts.join(', ') : 'unknown';
+}
+
+// The budget rolls over at midnight America/Los_Angeles, where Google resets
+// quota -- not at local midnight, so state the local clock time as well.
+function describeQuotaReset(quota) {
+    const seconds = Number((quota && quota.resets_in_seconds) || 0);
+    const iso = quota && quota.resets_at;
+    const span = formatDuration(seconds);
+    if (!iso) return span ? `in ${span}` : 'shortly';
+    const when = new Date(iso);
+    if (Number.isNaN(when.getTime())) return span ? `in ${span}` : 'shortly';
+    const local = when.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    return span ? `in ${span} (${local} your time)` : `at ${local}`;
 }
 
 function startGeminiCooldownCountdown(projectId) {

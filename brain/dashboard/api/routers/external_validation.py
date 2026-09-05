@@ -10,8 +10,10 @@ import asyncio
 import json
 import logging
 import os
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException
 
@@ -33,6 +35,49 @@ async def get_external_validation_events(project_id: str):
     return {
         "events": runtime.job_queue.get_external_validation_events(project_id),
         "calibration": runtime.job_queue.external_validation_calibration(project_id),
+    }
+
+
+def _api_quota_snapshot(api_config: dict[str, Any]) -> dict[str, Any]:
+    """Report per-model daily usage and the exact moment it resets.
+
+    `_UsageBudget` keys its state by the current date in America/Los_Angeles,
+    which is where Google resets quota, so the next reset is midnight in that
+    zone -- not local midnight, and not UTC.
+    """
+    limits = {str(k): int(v) for k, v in dict(api_config.get("daily_request_budgets", {})).items()}
+    zone = ZoneInfo("America/Los_Angeles")
+    now = datetime.now(zone)
+    resets_at = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+
+    used: dict[str, int] = {}
+    usage_path = shared_paths.PROJECTS_DIR / ".gemini_api_usage.json"
+    if usage_path.is_file():
+        try:
+            state = json.loads(usage_path.read_text(encoding="utf-8"))
+            # A stale day means the budget has already rolled over.
+            if state.get("day") == now.date().isoformat():
+                used = {str(k): int(v) for k, v in dict(state.get("models", {})).items()}
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            used = {}
+
+    models = {}
+    for model, limit in limits.items():
+        spent = int(used.get(model, 0))
+        models[model] = {
+            "used": spent,
+            "limit": limit,
+            "remaining": max(0, limit - spent),
+            "exhausted": limit > 0 and spent >= limit,
+        }
+
+    return {
+        "day": now.date().isoformat(),
+        "timezone": "America/Los_Angeles",
+        "resets_at": resets_at.isoformat(),
+        "resets_in_seconds": max(0, int((resets_at - now).total_seconds())),
+        "models": models,
+        "any_exhausted": any(m["exhausted"] for m in models.values()),
     }
 
 
@@ -69,6 +114,7 @@ async def get_external_validation_status(project_id: str):
             "persistent_conversations": purposes,
         },
         "provider_health": (runtime.pipeline.external_validator.health_snapshot() if runtime.pipeline else {}),
+        "quota": _api_quota_snapshot(api if isinstance(api, dict) else {}),
         "calibration": runtime.job_queue.external_validation_calibration(project_id),
     }
 
