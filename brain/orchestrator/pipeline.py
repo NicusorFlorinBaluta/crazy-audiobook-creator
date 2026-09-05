@@ -1603,7 +1603,7 @@ class Pipeline:
                         merged_data["chapters"] = [
                             c for c in merged_data["chapters"] if c.get("chapter_number") != chapter_num
                         ]
-                        from brain.utils.file_utils import atomic_write_text
+                        from shared.artifacts import atomic_write_text
 
                         atomic_write_text(merged_script, json.dumps(merged_data, indent=2, ensure_ascii=False))
                 except Exception as exc:
