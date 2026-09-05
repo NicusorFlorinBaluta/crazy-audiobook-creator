@@ -337,7 +337,7 @@ class CharacterAnalyzer:
                             start_unit_idx + 1,
                             len(accumulated_chars),
                         )
-                    except Exception as exc:
+                    except (OSError, UnicodeDecodeError, ValueError, KeyError, TypeError) as exc:
                         logger.warning("[CharacterAnalyzer] Could not load checkpoint %s: %s", checkpoint_path, exc)
                         accumulated_chars = {}
                         start_unit_idx = 0
@@ -452,7 +452,7 @@ class CharacterAnalyzer:
                                     "tone_desc": tone_desc,
                                 },
                             )
-                        except Exception as ckpt_err:
+                        except (OSError, ValueError, TypeError) as ckpt_err:
                             logger.debug("[CharacterAnalyzer] Checkpoint save failed: %s", ckpt_err)
                 except Exception as e:
                     raise RuntimeError(f"Character analysis failed for chapter {ch.number}, part {part_index}") from e
@@ -522,7 +522,7 @@ class CharacterAnalyzer:
         if checkpoint_path is not None and checkpoint_path.exists():
             try:
                 checkpoint_path.unlink(missing_ok=True)
-            except Exception as exc:
+            except OSError as exc:
                 logger.warning(
                     "Could not delete the checkpoint %s; a later run may resume from stale state: %s",
                     checkpoint_path,
@@ -854,7 +854,7 @@ class CharacterAnalyzer:
                     "trace": result.get("trace", []),
                 },
             )
-        except Exception:
+        except (OSError, ValueError, TypeError):
             logger.warning("Could not write the cast identity audit", exc_info=True)
 
     def _augment_characters_with_gemini(

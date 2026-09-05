@@ -750,7 +750,7 @@ class ScriptGenerator:
                 ):
                     return False
                 assert_script_covers_source(script, chapter.text)
-            except Exception:
+            except (OSError, UnicodeDecodeError, ValueError, KeyError, TypeError):
                 return False
         return True
 
@@ -887,7 +887,7 @@ class ScriptGenerator:
                         if progress_callback:
                             progress_callback(script)
                         continue
-                    except Exception as e:
+                    except (OSError, UnicodeDecodeError, ValueError, KeyError, TypeError) as e:
                         logger.warning("Failed to load existing script %s, regenerating. Error: %s", script_path, e)
 
             if chapter_start_callback:
