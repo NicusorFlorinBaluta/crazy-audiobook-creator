@@ -1882,6 +1882,19 @@ class Pipeline:
                 len(deterministic_after["repaired"]),
             )
 
+        # Attribution can resolve a line to a generic speaker that Pass 2 never
+        # saw -- the Gemini tiers answer "a crowd shouts this", which is not
+        # any individual character. Pass 2 provisions those as it writes each
+        # chapter, so a speaker arriving this late had no cast entry and no
+        # voice. Re-run the same pass now that attribution has settled.
+        provisioned = self.script_generator.provision_generic_speakers(chapter_scripts, registry)
+        if provisioned:
+            logger.info(
+                "[Attribution] Provisioned %d generic speaker(s) introduced after Pass 2: %s",
+                len(provisioned),
+                ", ".join(provisioned),
+            )
+
         total_lines = 0
         for script in chapter_scripts:
             script_path = scripts_dir / f"chapter_{script.chapter_number:03d}.json"

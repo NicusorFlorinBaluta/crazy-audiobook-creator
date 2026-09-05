@@ -2737,6 +2737,26 @@ class ScriptGenerator:
             chunks.append(current)
         return chunks
 
+    def provision_generic_speakers(
+        self,
+        scripts: list[ScriptChapter],
+        registry: CharacterRegistry,
+    ) -> list[str]:
+        """Give every generic speaker used by these scripts a cast entry.
+
+        Pass 2 already does this per chapter as it writes them. Attribution
+        runs later and can resolve a line to a generic speaker Pass 2 never
+        saw -- a crowd, an unnamed minor character -- so the pipeline calls
+        this again once attribution has settled. Without it the line names a
+        speaker that has no registry entry and therefore no voice.
+
+        Returns the ids added, so the caller can say what happened.
+        """
+        before = set(registry.characters)
+        for script in scripts:
+            self._detect_new_characters(script, registry)
+        return sorted(set(registry.characters) - before)
+
     def _detect_new_characters(
         self,
         script: ScriptChapter,
