@@ -1,5 +1,7 @@
 # Configuration
 
+**Status:** Reference — Describes current behaviour. Keep it accurate when the code changes.
+
 The running configuration lives in `brain/config.yaml` and `voice/config.yaml`. Paths are resolved from the repository root unless stated otherwise.
 
 ## `brain/config.yaml`
@@ -14,17 +16,25 @@ The running configuration lives in `brain/config.yaml` and `voice/config.yaml`. 
 | `auto_start` | Start a pipeline-owned Ollama server when the configured endpoint is unavailable |
 | `executable` | Ollama executable used by the managed server |
 | `models_dir` | Existing Ollama model store passed as `OLLAMA_MODELS` |
-| `vulkan_visible_devices` | Vulkan device IDs exposed to managed Ollama, such as `0` for the discrete GPU |
+| `gpu_backend` | Backend for the managed Ollama server: `vulkan` or `rocm`. Both isolate the discrete GPU; on RDNA3 the ROCm/hipBLAS backend is usually markedly faster at *prompt processing*, and `flash_attention` only takes effect there. Screen a change with `scripts/benchmark_script_chunks.py` |
+| `visible_devices` | GPU device IDs exposed to managed Ollama, such as `0` for the discrete GPU. Applied as `GGML_VK_VISIBLE_DEVICES` (vulkan) or `HIP_VISIBLE_DEVICES`/`ROCR_VISIBLE_DEVICES` (rocm). `vulkan_visible_devices` is still read for backward compatibility |
+| `num_parallel` | Ollama server slots; keep at `1`. Ollama otherwise autodetects (commonly 4), which reserves KV cache **per slot** -- 4 x 16384 tokens on a 27B model can push layers off the GPU despite `num_gpu=99` -- and lets sequential chunk requests land on different slots, defeating prefix-cache reuse of the system prompt. That prompt is byte-identical for every chunk within a chapter, so re-evaluating it per chunk is pure waste |
+| `kv_cache_type` | Quantized KV cache (`q8_0`, `q4_0`); requires `flash_attention: true`. Frees VRAM so a 27B model stays fully offloaded at a 16k context. Empty uses Ollama's `f16` default |
+| `keep_alive` | Model idle-unload window passed as `OLLAMA_KEEP_ALIVE`. The pipeline unloads explicitly at stage boundaries, so this only avoids an unnecessary ~45 s reload if a stage stalls |
 | `startup_timeout_seconds` | Maximum wait for the managed server and configured model |
-| `context_window` | Per-request context tokens; reduce cautiously when VRAM is tight |
+| `context_window` | Per-request context tokens; size from measured prompt plus response headroom, then reduce cautiously when VRAM is tight |
 | `temperature_pass1` | Character-analysis temperature |
 | `temperature_pass2` | Script-annotation temperature |
 | `top_p` | Sampling nucleus |
 | `timeout` | Request timeout in seconds |
 | `max_retries` | Ollama transport/JSON retry budget |
+| `max_retry_seconds` | Total time budget for failed attempts and retry backoff |
+| `max_output_tokens` | Server and client-side output ceiling for one generation |
+| `max_generation_seconds` | Total wall-clock ceiling for one continuously active generation |
+| `repetition_window_chars`, `repetition_count` | Exact periodic-tail loop detector (maximum searched period and required repetitions); set the window to `0` only to disable it |
 | `unload_after_scripting` | Release the Ollama model before loading Qwen TTS on the same GPU |
 
-The application fingerprints the configured model and prompt. Changing them causes dependent script artifacts to be rebuilt. The default workstation configuration uses an isolated loopback port so a separately running Ollama desktop service cannot change its GPU placement. It never selects an arbitrary installed model: only entries in `fallback_models` may replace the primary model, and the checked-in configuration intentionally leaves that list empty.
+The application fingerprints the configured model and prompt. Changing them causes dependent script artifacts to be rebuilt. The default workstation configuration uses an isolated loopback port so a separately running Ollama desktop service cannot change its GPU placement. It never selects an arbitrary installed model: only entries in `fallback_models` may replace the primary model, and the checked-in configuration intentionally leaves that list empty. JSON calls also enable Ollama's structured JSON mode. Output count, total generation time, and repeated-tail detection independently terminate a response that fails to stop normally; diagnostics record only counts and the termination reason, not book text.
 
 ### `voice_server`
 
@@ -52,30 +62,75 @@ Controls front-matter/TOC/appendix filtering, reference material ingestion, and 
 | `max_chapter_words` | Target maximum chapter length before safe subdivision |
 | `chapter_detection` | Boundary detection strategy (`auto`, `heading`, `pattern`, `none`) |
 
+Short narrative headings such as prologues and interludes are retained even
+below `min_chapter_words`; other short fragments merge into an adjacent chapter
+instead of being discarded. Long chapters split at paragraph or sentence
+boundaries. Repeated running headers are removed only after exact cross-document
+detection—uppercase story text is not treated as a header.
+
 **Reference Material (Glossary & Dramatis Personae)**:
 When `skip_appendices` is enabled, sections titled *Glossary*, *Dramatis Personae*, *Character List*, or *Cast of Characters* are extracted into `ExtractedBook.reference_material`. They are excluded from narration and supplied as bounded, supplemental input to the Stage ② Character Analyzer; direct narrative evidence takes precedence if they conflict.
 
+Reference material is applied only after narrative speaker discovery. The model
+may propose a richer voice description, traits, aliases, or a missing speaking
+style for an existing speaker, but every automatic patch needs confidence of at
+least 0.90 and a verbatim excerpt from the bounded reference corpus. Unknown
+character IDs, unsupported evidence, incomplete descriptions, and gender
+conflicts are rejected and audited. If this optional pass is unavailable,
+narrative character analysis continues unchanged.
+
 ### `script`
 
+- `joint_analysis`: experimental combined character discovery and attribution.
+  Production keeps this `false`, completing and fingerprinting a book-wide cast
+  before scripts may select speakers. This costs an additional analysis pass but
+  prevents an early generic identity from becoming the only candidate available
+  to scripting and external validation.
 - Segment bounds: `max_segment_sentences`, `min_segment_words`
 - Default delivery: `default_speed`
 - Pause requests: narrator, dialogue, scene, chapter, and paragraph values in milliseconds
 - Voice assignment: `max_unique_voices`, `minor_character_threshold`, `group_minor_characters`
-- LLM batching: `chunk_size_words`
+- LLM batching: `chunk_size_words` and `max_fragments_per_chunk`; both limits
+  are enforced independently, including on short but dialogue-dense chapters.
+  The validated Qwen 3.8 production profile uses 60 fragments with 16K context;
+  8K remained structurally valid in the benchmark but became slower and much
+  more verbose on a 60-fragment response. Larger batches still split adaptively
+  on generation safeguards, so this is a ceiling rather than a forced size.
+- Reasoning control: `ollama.think` is sent explicitly to thinking-capable
+  models. Structured audiobook metadata uses `false` to avoid hidden reasoning
+  tokens consuming context and wall time.
+- Runaway recovery: `adaptive_split_enabled`, `adaptive_split_max_depth`, and
+  `adaptive_split_min_fragments`. A generation-limit failure retries smaller
+  contiguous ranges before conservative fallback.
+- Experimental metadata: `dialogue_focused_schema` enables sparse schema v5.
+  Keep it `false` until a representative quality benchmark is approved.
 - TTS-call grouping: `group_utterances`, `utterance_target_chars`, and `utterance_max_words`
 
 `chunk_overlap_words` is retained for configuration compatibility but current source-fragment batching is non-overlapping by design.
 Grouping merges only adjacent fragments with the same speaker, voice, and FX. It never crosses a blank paragraph and preserves all source fragment IDs and the exact combined source span.
+Speaker candidates are calculated from the complete chapter once and reused by
+every fragment batch. Joint discovery checkpoints its registry after each
+chapter, and saved script metadata fingerprints only chapter-relevant speakers.
+After scripting, attached registered-name tags are repaired deterministically.
+An external resolver response is rejected when its rationale names one identity
+but returns another or maps that name to a generic speaker. The final attribution
+audit is enforced before voice bootstrapping; unresolved contradictions park the
+project in review without generating voices or audio.
 
 ### Incremental delivery
 
 Incremental delivery is project state, configured from project creation or the
 dashboard. `enabled` turns part publication on and `batch_size` accepts 1–20
-chapters. Manual chapter selection and incremental delivery are mutually
-exclusive because published boundaries must represent the full ordered book.
+chapters. Changes made during an active run are saved for the next run; the
+current publication plan and fingerprint remain immutable through completion.
+chapters. Manual chapter selection and incremental delivery can be used
+together: when a subset is selected, parts and the combined export contain
+only those chapters in canonical book order. With no manual selection, the
+delivery plan covers the full book.
 After the first publication, the enabled state and batch size are locked until
-delivery artifacts are reset. A graceful pause request is honored only between
-parts. Stale or hash-invalid parts are never offered as downloads.
+delivery artifacts are reset; the selected chapter boundaries are locked by the
+same rule. A graceful pause request is honored only between parts. Stale or
+hash-invalid parts are never offered as downloads.
 
 ### `dashboard`
 
@@ -84,12 +139,24 @@ parts. Stale or hash-invalid parts are never offered as downloads.
 | `host`, `port` | Dashboard bind address |
 | `cors_origins` | Exact browser origins allowed |
 | `api_token` | Optional token for peers outside trusted LANs |
-| `trusted_lan_cidrs` | TCP-peer CIDRs allowed without an application token |
+| `trusted_lan_cidrs` | TCP-peer CIDRs allowed without an application token. **Omitting the key falls back to every RFC1918 range plus the Tailscale CGNAT range** (`10/8`, `172.16/12`, `192.168/16`, `100.64/10`, `fc00::/7`, `fe80::/10`), which is almost always wider than intended. An empty list disables token-free LAN access entirely, leaving loopback plus a token. Invalid CIDRs fail at startup rather than being discarded |
 | `max_upload_size_mb` | Compressed upload limit |
 | `max_epub_expanded_mb` | Total expanded EPUB limit |
 
 Loopback and configured trusted-LAN peers may use the dashboard without an
 application token. Authorization uses the socket peer, not `X-Forwarded-For`.
+
+**A reverse proxy connects from its own address.** If nginx on this LAN proxies
+the dashboard to the public internet, that proxy address is inside
+`trusted_lan_cidrs`, so every internet request arriving through it is authorized
+as a trusted LAN peer and this application performs no authentication of its
+own. Set `CRAZY_AUDIOBOOK_DASHBOARD_TOKEN` and have the proxy inject
+`X-API-Token` if the public endpoint must be authenticated by the application
+rather than only by the proxy.
+
+Binding to a non-loopback host is refused at import time unless either a token
+or an explicit `trusted_lan_cidrs` list is configured. That check runs however
+the app is started, including `uvicorn brain.dashboard.api.main:app`.
 Public remote access should still be placed behind authenticated Home Assistant
 or a reverse proxy and protected by firewall rules.
 
@@ -124,18 +191,18 @@ is never returned to the dashboard, and should be restricted to the Books API.
 When Google returns `429`, the lookup does not amplify it with immediate
 retries and reports any numeric `Retry-After` value to the user.
 
-### `external_validation`
+### `external_validation` and Gemini Services
 
-Ambiguous speaker attribution and subjective audio warnings use a confidence-
-aware escalation ladder:
+Character gender & voice augmentation (Pass 1 and Joint modes), ambiguous extraction,
+speaker attribution, and subjective audio warnings use Gemini:
 
-1. local deterministic/director result;
-2. batched Gemini Flash Lite API triage;
-3. stronger Gemini Flash API adjudication;
+1. local deterministic/director result & whole-book evidence dossier;
+2. batched Gemini 3.5 Flash Lite API triage (`gemini-3.5-flash-lite`);
+3. stronger Gemini 3.5 Flash API adjudication & character augmentation (`gemini-3.5-flash`);
 4. Gemini web Pro in a persistent project conversation;
 5. dashboard review when no result reaches `auto_accept_confidence`.
 
-Attribution and audio QA have separate saved web conversations for every
+Extraction, attribution, and audio QA have separate saved web conversations for every
 project. Their URLs are stored under `external_validation/browser_state.json`.
 The browser profile is shared only for authentication; book conversations are
 never shared between projects. A purpose chat rolls over only after
@@ -171,6 +238,36 @@ reuse the saved attribution/audio conversations. If Google requires a fresh
 login, changes its page selectors, or presents an anti-automation challenge,
 the fallback fails closed into dashboard review; it does not attempt to bypass
 the challenge.
+
+#### `external_validation.cast_adjudication`
+
+Whole-cast duplicate detection, run once after book-wide character analysis.
+
+| Key | Meaning |
+|---|---|
+| `enabled` | Run the pass at all |
+| `roster_model` | Stage one: reads the cast roster (names only, no book text) and proposes duplicate pairs |
+| `adjudication_model` | Stage two: decides a proposed pair against verbatim excerpts |
+| `min_confidence` | Bar a merge must clear, default `0.95`. Higher than an attribute enrichment because a merge gives two characters one voice for a whole book |
+| `require_approval` | `false` (default) applies qualifying merges and records everything in `cast_identity_audit.json`. `true` holds them for approval instead -- safer, but the evidence is verbatim source text, so approving means reading spoilers |
+
+The same pass also recovers **unlinked speaker aliases**: names attributed with
+a speech verb that no registry entry answers to. Measured case -- "Zak" appears
+38 times in a real book and speaks repeatedly, while the registry held
+Zaknafein with no such alias, leaving every attribution unresolvable. Only the
+`alias` verdict is applied; `new_character` and `not_a_person` are recorded
+without acting on them.
+
+All three calls escalate `gemini_api_triage` -> `gemini_api_adjudication` ->
+`gemini_web`, so a daily-quota 429 falls back to the persistent browser session
+rather than disabling the pass.
+
+Every proposal is filtered through local deterministic vetoes the model cannot
+override: the narrator is never merged, explicit genders must not disagree, ids
+differing only by a positional or numeric marker are refused, the citation must
+be verbatim, and the *conjunction veto* refuses any pair the source ever names
+side by side. See
+[decisions/2026-09-04-whole-cast-duplicate-detection.md](decisions/2026-09-04-whole-cast-duplicate-detection.md).
 
 ### `pipeline`
 
@@ -239,7 +336,9 @@ The reference-voice test sentences in this file are informational; the canonical
 | `max_retries` | Additional attempts for fail/flag outcomes |
 | `keep_tts_and_whisper_resident` | Keep both models inside one chapter's retry loop; Whisper is still released at the chapter boundary |
 | `risk_aware_first_attempt` | Listening-approved clarity policy for very short emphatic lines; longer dialogue and ordinary narration remain unchanged |
-| `speaker_similarity_threshold` | Minimum Qwen speaker-encoder cosine similarity |
+| `speaker_similarity_threshold` | Minimum Qwen speaker-encoder cosine similarity between a generated line and its own reference |
+| `voice_profile_similarity_warning` | Cosine similarity at or above which two *different cast members* are judged too close to tell apart. Lower is stricter. Distinct from `speaker_similarity_threshold` above, which compares a line to its own reference |
+| `voice_distinctness_rounds` | Extra design/compare rounds spent separating voices that collide at the threshold above. Default `2`, clamped to `0`–`5`. Each round re-boots the VoiceDesign subprocess and redesigns only the colliding voices with a brief naming who they collided with, then re-measures. `0` restores report-only behaviour. See [decisions/2026-09-04-voice-distinctness-convergence.md](decisions/2026-09-04-voice-distinctness-convergence.md) |
 | `clipping_threshold` | Maximum sample peak in dBFS |
 | `max_silence_seconds` | Longest permitted internal silence |
 | `prosody.*` | Nonblocking monotone-warning enablement and explicit duration/pitch/dynamic-range thresholds; changes invalidate validation cache |
@@ -317,6 +416,36 @@ URLs, schedules, thresholds, attention backends, and validator backends fail
 fast with a combined actionable error. `scripts/runtime_preflight.py` reports
 the resolved Python/packages, FFmpeg, TTS attention backend, Whisper backend,
 model, device, and VAD mode without importing a GPU model.
+
+### GPU allocator environment
+
+Every process that loads a Torch model is started with:
+
+```
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+PYTORCH_HIP_ALLOC_CONF=expandable_segments:True
+```
+
+set via `setdefault`, so an operator override always wins. The value lives in
+`shared/constants.py` (`TORCH_ALLOC_CONF`), is applied by
+`apply_torch_alloc_conf()` in `brain/orchestrator/pipeline.py` when the managed
+Voice Server subprocess is launched, and is duplicated as a literal in
+`start_app.pyw` — which is deliberately dependency-free, so a test asserts the
+two stay in sync.
+
+The evidence is in `voice_crash.log`, which recorded three crashes reading:
+
+> HIP out of memory. Tried to allocate 3.39 GiB. GPU 0 has a total capacity of
+> 23.98 GiB **of which 23.33 GiB is free.**
+
+raised inside `transformers.modeling_utils.caching_allocator_warmup`. Failing a
+3.4 GiB allocation with 23 GiB free is caching-allocator fragmentation, not
+exhaustion — and the error text names this setting as the remedy. The Voice
+service loads, unloads and reloads Qwen3-TTS, the VoiceDesign helper and
+Whisper within one process at every stage boundary, which is precisely the
+pattern that fragments the allocator's arena. ROCm reads the HIP name and
+upstream Torch the CUDA name; both are set so the value survives a Torch
+upgrade that changes which one wins.
 
 `tts.adaptive_max_new_tokens` is experimental and disabled by default. It must
 not be promoted until the fixed TTS fixture proves that its bounded cap and

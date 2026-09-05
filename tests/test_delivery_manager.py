@@ -235,9 +235,7 @@ class DeliveryManagerTests(unittest.TestCase):
                 self.dm.publish_delivery(batch, second_temp, 11.0, {}, "", "Book")
 
         self.assertTrue((self.dm.deliveries_dir / first.artifact).is_file())
-        self.assertFalse(
-            (self.dm.deliveries_dir / "Book - Part 01 - Chapters 1-r2.m4b").exists()
-        )
+        self.assertFalse((self.dm.deliveries_dir / "Book - Part 01 - Chapters 1-r2.m4b").exists())
         self.assertEqual(self.dm.load_index().deliveries[0].revision, 1)
 
     def test_delivery_history_retains_newest_two_archives(self) -> None:
@@ -306,18 +304,19 @@ class DeliveryManagerTests(unittest.TestCase):
             self.dm.resolve_artifact("../outside.m4b", require_file=False)
 
     def test_plan_dependency_change_marks_publication_stale(self) -> None:
-        index, batches = self.dm.ensure_plan(
-            [1, 2], 2, script_dependency_fingerprint="scripts-v1"
-        )
+        index, batches = self.dm.ensure_plan([1, 2], 2, script_dependency_fingerprint="scripts-v1")
         temp = self.project_dir / "part.m4b"
         temp.write_bytes(b"valid audio")
         self.dm.publish_delivery(
-            batches[0], temp, 10.0, {"1": "h1", "2": "h2"}, "metadata", "Book",
+            batches[0],
+            temp,
+            10.0,
+            {"1": "h1", "2": "h2"},
+            "metadata",
+            "Book",
             plan_fingerprint=index.plan_fingerprint,
         )
-        changed, _ = self.dm.ensure_plan(
-            [1, 2], 2, script_dependency_fingerprint="scripts-v2"
-        )
+        changed, _ = self.dm.ensure_plan([1, 2], 2, script_dependency_fingerprint="scripts-v2")
         self.assertEqual(changed.deliveries[0].status, "stale")
 
     def test_locked_plan_rejects_incomplete_master_dependencies(self) -> None:

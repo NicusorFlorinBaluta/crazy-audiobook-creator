@@ -54,12 +54,14 @@ class AudioAssembler:
             return {
                 "audio": np.array([], dtype=np.float32),
                 "sample_rate": self.sample_rate,
+                "timeline": [],
             }
 
         logger.info("Assembling %d segments (announcement=%s)...", len(segments), announcement_audio is not None)
 
         parts: list[np.ndarray] = []
         join_diagnostics: list[dict[str, Any]] = []
+        timeline: list[dict[str, Any]] = []
 
         # Chapter start silence (1.0s standard audiobook start)
         parts.append(self._silence(self.chapter_start_silence_ms))
@@ -78,22 +80,19 @@ class AudioAssembler:
         previous_audio: np.ndarray | None = None
         previous_line_id = ""
         previous_utterance_group_id: str | None = None
+        total_samples = sum(len(p) for p in parts)
+
         for i, segment in enumerate(segments):
             utterance_group_id = getattr(segment, "utterance_group_id", None)
-            same_utterance_group = (
-                utterance_group_id is not None
-                and utterance_group_id == previous_utterance_group_id
-            )
+            same_utterance_group = utterance_group_id is not None and utterance_group_id == previous_utterance_group_id
             # One timing owner: adjacent pause directives are combined with
             # max(), never added together. Chapter edges are owned here.
             pause_before = getattr(segment, "pause_before_ms", 0)
-            gap_before = (
-                0
-                if i == 0 or same_utterance_group
-                else max(previous_pause_after, pause_before)
-            )
+            gap_before = 0 if i == 0 or same_utterance_group else max(previous_pause_after, pause_before)
             if gap_before > 0:
-                parts.append(self._silence(gap_before))
+                silence_part = self._silence(gap_before)
+                parts.append(silence_part)
+                total_samples += len(silence_part)
                 previous_was_audio = False
 
             # Load audio segment
@@ -114,42 +113,62 @@ class AudioAssembler:
             if sr != self.sample_rate:
                 try:
                     import librosa
+
                     audio = librosa.resample(audio, orig_sr=sr, target_sr=self.sample_rate)
                 except ImportError:
                     logger.warning("librosa not available for resampling")
 
             audio = audio.astype(np.float32)
+            current_line_id = str(getattr(segment, "line_id", i))
             if previous_audio is not None:
                 diagnostic = self._join_diagnostic(
                     previous_line_id=previous_line_id,
-                    current_line_id=str(getattr(segment, "line_id", i)),
+                    current_line_id=current_line_id,
                     previous=previous_audio,
                     current=audio,
                     gap_ms=gap_before,
                 )
                 diagnostic["utterance_group_id"] = utterance_group_id
                 diagnostic["crossfade_applied"] = bool(
-                    self.crossfade_ms > 0
-                    and previous_was_audio
-                    and not same_utterance_group
+                    self.crossfade_ms > 0 and previous_was_audio and not same_utterance_group
                 )
                 join_diagnostics.append(diagnostic)
 
             # Cross-fade with previous segment
-            if (
+            crossfade_applied = (
                 self.crossfade_ms > 0
                 and previous_was_audio
                 and not same_utterance_group
                 and len(parts) > 0
                 and len(parts[-1]) > 0
-            ):
+            )
+            if crossfade_applied:
+                fade_samples = min(
+                    int(self.sample_rate * self.crossfade_ms / 1000),
+                    len(parts[-1]),
+                    len(audio),
+                )
+                start_sample = max(0, total_samples - fade_samples)
                 audio = self._apply_crossfade(parts[-1], audio)
+            else:
+                start_sample = total_samples
 
             parts.append(audio)
+            total_samples += len(audio)
+            end_sample = total_samples
+
+            timeline.append(
+                {
+                    "line_id": current_line_id,
+                    "start_ms": int(round((start_sample / self.sample_rate) * 1000)),
+                    "end_ms": int(round((end_sample / self.sample_rate) * 1000)),
+                }
+            )
+
             previous_was_audio = True
             previous_pause_after = getattr(segment, "pause_after_ms", 500)
             previous_audio = audio.copy()
-            previous_line_id = str(getattr(segment, "line_id", i))
+            previous_line_id = current_line_id
             previous_utterance_group_id = utterance_group_id
 
         # The final script pause and chapter outro are alternatives, not
@@ -168,9 +187,8 @@ class AudioAssembler:
             "audio": assembled,
             "sample_rate": self.sample_rate,
             "join_diagnostics": join_diagnostics,
-            "join_warnings": sum(
-                item["status"] == "warning" for item in join_diagnostics
-            ),
+            "join_warnings": sum(item["status"] == "warning" for item in join_diagnostics),
+            "timeline": timeline,
         }
 
     @staticmethod
@@ -183,6 +201,7 @@ class AudioAssembler:
         gap_ms: int,
     ) -> dict[str, Any]:
         """Measure one boundary without changing or rejecting the audio."""
+
         def rms_dbfs(audio: np.ndarray) -> float:
             if audio.size == 0:
                 return -100.0
@@ -193,9 +212,7 @@ class AudioAssembler:
         current_rms = rms_dbfs(current)
         loudness_delta = abs(previous_rms - current_rms)
         boundary_jump = (
-            abs(float(current[0]) - float(previous[-1]))
-            if previous.size and current.size and gap_ms == 0
-            else 0.0
+            abs(float(current[0]) - float(previous[-1])) if previous.size and current.size and gap_ms == 0 else 0.0
         )
         reasons: list[str] = []
         if loudness_delta > 8.0:

@@ -9,13 +9,14 @@ Reads the full book text and produces a Character Registry with:
 
 from __future__ import annotations
 
-import logging
 import json
+import logging
 import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from brain.director import cast_identity
 from brain.director.ollama_client import OllamaClient
 from shared.constants import Gender
 from shared.models import (
@@ -28,14 +29,83 @@ logger = logging.getLogger(__name__)
 
 # Included in project dependency fingerprints. Increment whenever deterministic
 # post-processing changes the contents or meaning of a character registry.
-CHARACTER_ANALYSIS_REVISION = 3
+CHARACTER_ANALYSIS_REVISION = 4
+
+_GENERIC_ROLE_DESCRIPTORS = {
+    "stranger",
+    "alien",
+    "soldier",
+    "guard",
+    "captain",
+    "officer",
+    "attendant",
+    "voice",
+    "figure",
+    "traveler",
+    "shadow",
+    "visitor",
+    "servant",
+    "priest",
+    "doctor",
+    "elder",
+    "crewman",
+    "fellow",
+    "man",
+    "woman",
+    "boy",
+    "girl",
+    "child",
+    "person",
+    "someone",
+    "speaker",
+    "individual",
+    "human",
+    "entity",
+    "presence",
+    "inhabitant",
+    "citizen",
+    "driver",
+    "pilot",
+    "merchant",
+    "trader",
+    "bystander",
+    "passerby",
+    "guest",
+    "host",
+    "friend",
+    "enemy",
+    "leader",
+    "chief",
+    "master",
+    "worker",
+    "assistant",
+    "aide",
+    "deputy",
+    "agent",
+    "scout",
+}
 
 _UNSAFE_CHARACTER_ALIASES = {
-    "a", "an", "and", "the", "of", "narrator", "she", "he", "it",
-    "they", "him", "her", "his", "hers", "them", "male", "female",
-    "character", "unidentified", "man", "woman", "boy", "girl",
-    "person", "someone", "speaker",
-}
+    "a",
+    "an",
+    "and",
+    "the",
+    "of",
+    "narrator",
+    "she",
+    "he",
+    "it",
+    "they",
+    "him",
+    "her",
+    "his",
+    "hers",
+    "them",
+    "male",
+    "female",
+    "character",
+    "unidentified",
+} | _GENERIC_ROLE_DESCRIPTORS
 
 # Load prompt template
 _PROMPT_DIR = Path(__file__).parent / "prompts"
@@ -66,13 +136,18 @@ _SYSTEM_PROMPT = """You are an expert audiobook director and strict data extract
 - A named or personified place/object is not a speaking character unless the
   text explicitly attributes spoken dialogue to that entity. Thoughts,
   descriptions, invocations, and figurative personification are not dialogue.
-- Animal noises (e.g. chirping, barking, roaring, squawking) and mental 
-  impressions do NOT count as spoken dialogue. An animal is only a character 
+- Animal noises (e.g. chirping, barking, roaring, squawking) and mental
+  impressions do NOT count as spoken dialogue. An animal is only a character
   if it speaks actual linguistic words in quotes.
 
-### Character ID Guidelines
+### Gender Resolution Guidelines
+- Determine canonical gender (`male` or `female`) by actively scanning surrounding narrative text for explicit pronouns (`he`, `him`, `his`, `himself`, `man`, `boy`, `father`, `son`, `brother`, `husband`, `sir`, `lord` vs `she`, `her`, `hers`, `herself`, `woman`, `girl`, `mother`, `daughter`, `sister`, `wife`, `lady`).
+- Do NOT mark a named character as `other` if surrounding narrative text uses `he` or `she`.
+- Use `other` ONLY for true non-gendered collective entities, swarms, or when zero gender indicators exist in the entire text.
+
+### Character ID & Narrator Guidelines
 - CRITICAL: Use the character's actual name as the character_id in snake_case.
-  For example: "starling", "sixth_of_dusk", "mother_frond".
+  For example: "starling", "sixth_of_dusk", "mother_frond", "breezy".
 - Do NOT use generic IDs like "character_1", "character_2", "char_a".
 - For unnamed speakers, use a descriptive ID: "child_female", "old_merchant",
   "guard_captain".
@@ -81,6 +156,7 @@ _SYSTEM_PROMPT = """You are an expert audiobook director and strict data extract
 - Never merge identities merely because one name contains another. Family
   members, ranks, shared surnames, and similarly titled characters remain
   distinct unless the supplied text explicitly establishes identity.
+- NARRATOR VS IN-WORLD CHARACTERS: The "narrator" entry is strictly the audiobook reader role for unquoted narrative prose. NEVER add in-world character names or aliases to "narrator". If the book is written in the first person or includes POV journal entries/reflections (e.g. Breezy, Katniss, Percy), the protagonist MUST have their own distinct character card (e.g. "breezy") for their spoken dialogue turns.
 
 ### Voice Description Guidelines
 
@@ -116,7 +192,7 @@ CRITICAL REMINDER: You MUST output ONLY valid JSON matching the Output Schema be
       "gender": "male|female",
       "age_range": "string",
       "personality_traits": ["trait1", "trait2"],
-      "aliases": ["explicit nickname or title"],
+      "aliases": [],
       "voice_description": "detailed voice description for TTS",
       "speaking_style": "how the narrator typically speaks",
       "test_sentence": "An INVENTED 15 to 25 word sentence showcasing the narrator's pacing and tone. DO NOT use fantasy names, places, or complex jargon."
@@ -126,6 +202,7 @@ CRITICAL REMINDER: You MUST output ONLY valid JSON matching the Output Schema be
       "gender": "male|female|other",
       "age_range": "string",
       "personality_traits": ["trait1", "trait2"],
+      "aliases": ["nickname or alternative name"],
       "voice_description": "detailed voice description for TTS",
       "speaking_style": "how this character typically speaks",
       "test_sentence": "An INVENTED 15 to 25 word line of dialogue showcasing their personality. DO NOT use fantasy names, places, or complex jargon.",
@@ -150,14 +227,21 @@ class CharacterAnalyzer:
         ollama: OllamaClient,
         temperature: float = 0.3,
         genre: str = "fantasy",
-        max_unique_voices: int = 20,
+        max_unique_voices: int = 0,
         single_pass_threshold: int = 15_000,
+        external_validator: Any | None = None,
+        config: dict[str, Any] | None = None,
     ):
         self.ollama = ollama
         self.temperature = temperature
         self.genre = genre
         self.max_unique_voices = max_unique_voices
         self.single_pass_threshold = single_pass_threshold
+        self.external_validator = external_validator
+        # Cast adjudication reads `external_validation.cast_adjudication`.
+        # It defaults to empty rather than being required, so an analyzer built
+        # without config behaves as "no approval gate" instead of raising.
+        self.config: dict[str, Any] = config or {}
 
     def analyze(
         self,
@@ -165,6 +249,9 @@ class CharacterAnalyzer:
         check_callback: Callable[[], None] | None = None,
         checkpoint_path: Path | str | None = None,
         checkpoint_fingerprint: str = "",
+        reference_audit_path: Path | str | None = None,
+        project_dir: Path | str | None = None,
+        progress_callback: Callable[[float, str, int, int, int], None] | None = None,
     ) -> CharacterRegistry:
         """Analyze a book and produce a character registry, using multi-pass for long books."""
         total_chars = sum(len(ch.text) for ch in book.chapters)
@@ -177,6 +264,7 @@ class CharacterAnalyzer:
         )
 
         import time as _time
+
         t0 = _time.time()
 
         # Format any author-provided reference material (Glossary, Dramatis Personae, Character Lists)
@@ -200,12 +288,11 @@ class CharacterAnalyzer:
                     "[CharacterAnalyzer] Using %d reference section(s) to seed character analysis",
                     len(guide_parts),
                 )
-
         if total_chars <= self.single_pass_threshold:
             # Single pass for standard books (fits within Qwen 32k context)
+            if progress_callback:
+                progress_callback(0.0, "Pass 1 Character Discovery: analyzing full book...", 1, 1, 1)
             book_text = self._prepare_book_text(book)
-            if reference_summary:
-                book_text = reference_summary + "\n\n" + book_text
             system_prompt = _SYSTEM_PROMPT.format(genre=self.genre)
             prompt = _USER_PROMPT.format(book_text=book_text)
 
@@ -216,9 +303,7 @@ class CharacterAnalyzer:
             )
             raw_characters = raw_result.get("characters", {})
             if isinstance(raw_characters, dict):
-                raw_characters = self._consolidate_accumulated_characters(
-                    raw_characters
-                )
+                raw_characters = self._consolidate_accumulated_characters(raw_characters)
                 raw_result["characters"] = self._adjudicate_name_candidates(
                     raw_characters,
                     book,
@@ -226,7 +311,10 @@ class CharacterAnalyzer:
             registry = self._parse_registry(raw_result, book.metadata.title, book.metadata.author)
         else:
             # Iterative multi-pass chapter-by-chapter analysis for long books
-            logger.info("[CharacterAnalyzer] Long book detected (total_chars=%d) — running iterative multi-pass analysis", total_chars)
+            logger.info(
+                "[CharacterAnalyzer] Long book detected (total_chars=%d) — running iterative multi-pass analysis",
+                total_chars,
+            )
             accumulated_chars: dict[str, dict] = {}
             book_title = book.metadata.title
             book_author = book.metadata.author
@@ -238,10 +326,7 @@ class CharacterAnalyzer:
                 if checkpoint_path.exists():
                     try:
                         ckpt_data = json.loads(checkpoint_path.read_text(encoding="utf-8"))
-                        if (
-                            not checkpoint_fingerprint
-                            or ckpt_data.get("fingerprint") != checkpoint_fingerprint
-                        ):
+                        if not checkpoint_fingerprint or ckpt_data.get("fingerprint") != checkpoint_fingerprint:
                             raise ValueError("checkpoint dependencies changed")
                         accumulated_chars = ckpt_data.get("accumulated_chars", {})
                         tone_desc = ckpt_data.get("tone_desc", "")
@@ -252,7 +337,7 @@ class CharacterAnalyzer:
                             start_unit_idx + 1,
                             len(accumulated_chars),
                         )
-                    except Exception as exc:
+                    except (OSError, UnicodeDecodeError, ValueError, KeyError, TypeError) as exc:
                         logger.warning("[CharacterAnalyzer] Could not load checkpoint %s: %s", checkpoint_path, exc)
                         accumulated_chars = {}
                         start_unit_idx = 0
@@ -292,14 +377,22 @@ class CharacterAnalyzer:
 
                 try:
                     logger.info(
-                        "[CharacterAnalyzer] Analyzing unit %d/%d: chapter %d "
-                        "part %d '%s'...",
+                        "[CharacterAnalyzer] Analyzing unit %d/%d: chapter %d part %d '%s'...",
                         idx + 1,
                         len(analysis_units),
                         ch.number,
                         part_index,
                         ch.title,
                     )
+                    if progress_callback:
+                        pct = round((idx / len(analysis_units)) * 100.0, 1)
+                        msg = f"Pass 1 Character Discovery: unit {idx + 1} of {len(analysis_units)} (Ch {ch.number}: {ch.title})"
+                        try:
+                            progress_callback(pct, msg, ch.number, idx + 1, len(analysis_units))
+                        except Exception as exc:
+                            logger.debug(
+                                "Progress callback raised during character discovery; the run continues: %s", exc
+                            )
                     raw_ch = self.ollama.generate_json(
                         ch_prompt,
                         temperature=self.temperature,
@@ -314,18 +407,13 @@ class CharacterAnalyzer:
                         if not isinstance(cinfo, dict):
                             continue
                         norm_id = self._normalize_id(cid)
-                        display_key = self._normalize_id(
-                            str(cinfo.get("name", norm_id))
-                        )
+                        display_key = self._normalize_id(str(cinfo.get("name", norm_id)))
                         canonical_id = next(
                             (
                                 existing_id
                                 for existing_id, existing in accumulated_chars.items()
                                 if existing_id == norm_id
-                                or self._normalize_id(
-                                    str(existing.get("name", existing_id))
-                                )
-                                == display_key
+                                or self._normalize_id(str(existing.get("name", existing_id))) == display_key
                             ),
                             norm_id,
                         )
@@ -335,9 +423,7 @@ class CharacterAnalyzer:
                             existing = accumulated_chars[canonical_id]
                             existing["dialogue_count"] = self._safe_dialogue_count(
                                 existing.get("dialogue_count", 0)
-                            ) + self._safe_dialogue_count(
-                                cinfo.get("dialogue_count", 0)
-                            )
+                            ) + self._safe_dialogue_count(cinfo.get("dialogue_count", 0))
                             existing["personality_traits"] = list(
                                 dict.fromkeys(
                                     list(existing.get("personality_traits", []))
@@ -350,16 +436,13 @@ class CharacterAnalyzer:
                                 preserved_count = existing["dialogue_count"]
                                 preserved_traits = existing["personality_traits"]
                                 accumulated_chars[canonical_id] = cinfo
-                                accumulated_chars[canonical_id][
-                                    "dialogue_count"
-                                ] = preserved_count
-                                accumulated_chars[canonical_id][
-                                    "personality_traits"
-                                ] = preserved_traits
+                                accumulated_chars[canonical_id]["dialogue_count"] = preserved_count
+                                accumulated_chars[canonical_id]["personality_traits"] = preserved_traits
 
                     if checkpoint_path:
                         try:
                             from shared.artifacts import atomic_write_json
+
                             atomic_write_json(
                                 checkpoint_path,
                                 {
@@ -369,13 +452,10 @@ class CharacterAnalyzer:
                                     "tone_desc": tone_desc,
                                 },
                             )
-                        except Exception as ckpt_err:
+                        except (OSError, ValueError, TypeError) as ckpt_err:
                             logger.debug("[CharacterAnalyzer] Checkpoint save failed: %s", ckpt_err)
                 except Exception as e:
-                    raise RuntimeError(
-                        f"Character analysis failed for chapter {ch.number}, "
-                        f"part {part_index}"
-                    ) from e
+                    raise RuntimeError(f"Character analysis failed for chapter {ch.number}, part {part_index}") from e
 
             # Consolidate only identities explicitly linked through aliases or
             # exact display names. Name containment is candidate evidence for
@@ -396,24 +476,568 @@ class CharacterAnalyzer:
             }
             registry = self._parse_registry(final_raw, book_title, book_author)
 
-            if checkpoint_path and checkpoint_path.exists():
-                try:
-                    checkpoint_path.unlink(missing_ok=True)
-                except Exception:
-                    pass
-
         registry = self._ensure_explicit_unnamed_speakers(registry, book)
+        # Duplicates are folded BEFORE augmentation and voice assignment: there
+        # is no point enriching, or casting a voice for, an entry that is about
+        # to be absorbed into another.
+        try:
+            registry = self._adjudicate_cast_identity(
+                registry,
+                book,
+                Path(project_dir) if project_dir else None,
+            )
+        except Exception as exc:
+            # Duplicate detection is advisory. The pipeline produced usable
+            # books before it existed and must keep doing so when it breaks --
+            # a roster with a duplicate in it is a far better outcome than a
+            # failed run. The internal try covers only the Gemini call, so
+            # everything around it (roster construction, config, alias
+            # recovery) reached the pipeline as a hard failure until an e2e
+            # run stopped here on a missing attribute.
+            logger.warning(
+                "[CharacterAnalyzer] Cast identity adjudication failed; using the "
+                "roster as discovered, with any duplicates left in: %s",
+                exc,
+                exc_info=True,
+            )
+        registry = self._augment_characters_with_gemini(
+            registry,
+            book,
+            Path(project_dir) if project_dir else None,
+        )
         self._assign_voice_ids(registry.characters)
 
-        elapsed = _time.time() - t0
-        logger.info(
-            "[CharacterAnalyzer] Pass 1 complete in %.1fs | %d characters: %s",
-            elapsed,
-            len(registry.characters),
-            list(registry.characters.keys()),
-        )
+        if reference_audit_path and getattr(book, "reference_material", None):
+            self._write_reference_audit(registry, book, reference_audit_path)
+
+        # Only now is the checkpoint spent. It used to be deleted the moment
+        # Pass 1 parsed its registry, with adjudication, augmentation and voice
+        # assignment still to come -- so a failure in any of those threw away
+        # the entire discovery pass and the next run re-ran every unit from
+        # one. An e2e run hit exactly that: it died after unit 9 of 9 and
+        # restarted at unit 1. Discovery is the expensive half of scripting,
+        # so the checkpoint has to outlive everything that can still fail.
+        if isinstance(checkpoint_path, str):
+            checkpoint_path = Path(checkpoint_path)
+        if checkpoint_path is not None and checkpoint_path.exists():
+            try:
+                checkpoint_path.unlink(missing_ok=True)
+            except OSError as exc:
+                logger.warning(
+                    "Could not delete the checkpoint %s; a later run may resume from stale state: %s",
+                    checkpoint_path,
+                    exc,
+                )
 
         return registry
+
+    def _build_character_evidence_dossier(
+        self,
+        registry: CharacterRegistry,
+        book: ExtractedBook,
+    ) -> dict[str, Any]:
+        """Collect whole-book narrative evidence, dialogue samples, and pronoun counts for all characters."""
+        all_text = "\n".join(ch.text for ch in book.chapters)
+        dossier: dict[str, Any] = {}
+        for cid, char in registry.characters.items():
+            if cid == "narrator":
+                continue
+            name = char.name or cid
+            search_terms = list(dict.fromkeys([name, cid.replace("_", " "), *(char.aliases or [])]))
+            search_terms = [t for t in search_terms if len(t) >= 3 and t.lower() not in _UNSAFE_CHARACTER_ALIASES]
+            pattern = (
+                re.compile(rf"\b(?:{'|'.join(re.escape(t) for t in search_terms)})\b", re.IGNORECASE)
+                if search_terms
+                else re.compile(rf"\b{re.escape(name)}\b", re.IGNORECASE)
+            )
+            contexts: list[str] = []
+            for m in pattern.finditer(all_text):
+                start = max(0, m.start() - 150)
+                end = min(len(all_text), m.end() + 150)
+                snippet = all_text[start:end].replace("\n", " ").strip()
+                contexts.append(snippet)
+
+            combined = " ".join(contexts[:15])
+            he_count = len(re.findall(r"\b(he|his|him|himself|man|boy)\b", combined, re.IGNORECASE))
+            she_count = len(re.findall(r"\b(she|her|hers|herself|woman|girl)\b", combined, re.IGNORECASE))
+
+            dossier[cid] = {
+                "current_name": name,
+                "current_gender": char.gender.value if hasattr(char.gender, "value") else str(char.gender),
+                "current_age": char.age_range,
+                "current_description": char.voice_description,
+                "pronoun_counts": {"he_him": he_count, "she_her": she_count},
+                "evidence_snippets": contexts[:4],
+            }
+        return dossier
+
+    def _adjudicate_cast_identity(
+        self,
+        registry: CharacterRegistry,
+        book: ExtractedBook,
+        project_dir: Path | None = None,
+    ) -> CharacterRegistry:
+        """Fold duplicate registry entries found by whole-cast adjudication.
+
+        `_adjudicate_name_candidates` above only ever *sees* pairs that share a
+        distinctive token or an id suffix. Measured on a real 57-character
+        cast, that is 24 of 1,540 pairs -- 1.6%. A character recorded once as
+        "Zaknafein" and again as "the weapons master" shares nothing lexical,
+        so no candidate is proposed and the duplicate reaches casting as a
+        second voice with its own reference clip.
+
+        This pass closes that gap by handing the whole roster to the external
+        adjudicator. Everything it returns is then filtered through
+        `cast_identity.merge_veto`, which is local, deterministic, and cannot
+        be overridden by the model -- most importantly the conjunction veto,
+        which refuses any pair the source ever names side by side.
+
+        Merges are applied automatically when they clear the confidence bar and
+        every veto. `cast_adjudication.require_approval` turns that into a
+        review gate instead, at the cost of putting source excerpts in front of
+        the operator.
+        """
+        external = self.external_validator
+        if external is None or project_dir is None:
+            return registry
+        if not getattr(external, "cast_adjudication_enabled", False):
+            return registry
+
+        characters = registry.characters
+        if len(characters) < 2:
+            return registry
+
+        source_text = "\n".join(chapter.text for chapter in book.chapters)
+        roster = {
+            cid: {
+                "name": char.name or cid,
+                "aliases": list(char.aliases or []),
+                "gender": char.gender.value if hasattr(char.gender, "value") else str(char.gender),
+                "age_range": char.age_range,
+                "dialogue_count": int(getattr(char, "dialogue_count", 0) or 0),
+            }
+            for cid, char in characters.items()
+            if cid != "narrator"
+        }
+
+        require_approval = bool(
+            (self.config.get("external_validation", {}).get("cast_adjudication", {}) or {}).get(
+                "require_approval", False
+            )
+        )
+
+        applied_aliases = self._recover_unlinked_speakers(
+            external, project_dir, characters, roster, source_text, require_approval
+        )
+        if applied_aliases:
+            # A recovered alias changes what the roster answers to, so refresh
+            # it before duplicate detection reads it.
+            for record in applied_aliases:
+                entry = roster.get(record["character_id"])
+                if entry is not None and record["alias"] not in entry["aliases"]:
+                    entry["aliases"].append(record["alias"])
+
+        def evidence_for(left_id: str, right_id: str) -> list[str]:
+            return self._pair_evidence_snippets(left_id, right_id, characters, source_text)
+
+        try:
+            result = external.adjudicate_cast(
+                project_dir=project_dir,
+                roster=roster,
+                evidence_for=evidence_for,
+            )
+        except Exception as exc:
+            logger.warning("[CharacterAnalyzer] Cast identity adjudication failed: %s", exc)
+            # Leave evidence. Without this the project shows an absent audit,
+            # which is exactly what a clean run with no duplicates also shows.
+            self._write_cast_identity_audit(
+                project_dir,
+                {"merges": [], "review": [], "trace": [{"outcome": "failed", "reason": str(exc)[:600]}]},
+                [],
+                [],
+                require_approval,
+                applied_aliases,
+                outcome="failed",
+            )
+            return registry
+
+        applied: list[dict[str, Any]] = []
+        refused: list[dict[str, Any]] = []
+        for proposal in result.get("merges", []):
+            left, right = proposal["left_id"], proposal["right_id"]
+            primary, duplicate = cast_identity.choose_primary(left, right, characters)
+            veto = cast_identity.merge_veto(primary, duplicate, characters, source_text)
+            if veto:
+                logger.info("[CharacterAnalyzer] Refused merge %s <- %s: %s", primary, duplicate, veto)
+                refused.append({**proposal, "veto": veto})
+                continue
+            if require_approval:
+                refused.append({**proposal, "veto": "held for operator approval"})
+                continue
+            applied.append(cast_identity.apply_merge(primary, duplicate, characters))
+
+        # Always write it, including for a clean roster. An absent audit used
+        # to mean "no duplicates", "disabled" or "could not reach the model"
+        # indifferently; only the last of those wants attention.
+        self._write_cast_identity_audit(
+            project_dir,
+            result,
+            applied,
+            refused,
+            require_approval,
+            applied_aliases,
+        )
+        if applied:
+            logger.info(
+                "[CharacterAnalyzer] Cast identity: merged %d duplicate character(s)",
+                len(applied),
+            )
+        return registry
+
+    def _recover_unlinked_speakers(
+        self,
+        external: Any,
+        project_dir: Path,
+        characters: dict[str, Any],
+        roster: dict[str, dict[str, Any]],
+        source_text: str,
+        require_approval: bool,
+    ) -> list[dict[str, Any]]:
+        """Attach aliases for names that speak but match no registry entry.
+
+        The measured case: "Zak" appears 38 times in a real book and speaks
+        repeatedly, while the registry holds Zaknafein with aliases
+        ["the weapons master", "Zaknafein"]. Nothing links them, so every
+        "Zak said" is unresolvable at attribution time.
+
+        Only the `alias` verdict is acted on. `new_character` and
+        `not_a_person` are recorded and left alone: adding or removing a
+        character is a bigger change than annotating one, and there is no
+        measured case for either yet.
+        """
+        if not hasattr(external, "adjudicate_unlinked_speakers"):
+            return []
+        candidates = cast_identity.find_unlinked_speakers(source_text, characters)
+        if not candidates:
+            return []
+
+        logger.info(
+            "[CharacterAnalyzer] %d name(s) speak but match no registry entry: %s",
+            len(candidates),
+            ", ".join(f"{n} x{c}" for n, c in list(candidates.items())[:6]),
+        )
+
+        def evidence_for(name: str) -> list[str]:
+            return self._name_evidence_snippets(name, source_text)
+
+        try:
+            result = external.adjudicate_unlinked_speakers(
+                project_dir=project_dir,
+                candidates=candidates,
+                roster=roster,
+                evidence_for=evidence_for,
+            )
+        except Exception as exc:
+            logger.warning("[CharacterAnalyzer] Unlinked speaker adjudication failed: %s", exc)
+            return []
+
+        applied: list[dict[str, Any]] = []
+        for record in result.get("aliases", []):
+            alias, target = record.get("name", ""), record.get("character_id", "")
+            veto = cast_identity.alias_veto(alias, target, characters, source_text)
+            if veto:
+                logger.info("[CharacterAnalyzer] Refused alias '%s' for '%s': %s", alias, target, veto)
+                continue
+            if require_approval:
+                logger.info("[CharacterAnalyzer] Holding alias '%s' for '%s' for approval", alias, target)
+                continue
+            applied.append(cast_identity.apply_alias(alias, target, characters))
+        return applied
+
+    @staticmethod
+    def _name_evidence_snippets(name: str, source_text: str, limit: int = 5) -> list[str]:
+        """Passages where a candidate name is used, for grounding its verdict."""
+        pattern = re.compile(rf"\b{re.escape(name)}\b")
+        snippets: list[str] = []
+        for match in pattern.finditer(source_text):
+            start = max(0, match.start() - 240)
+            end = min(len(source_text), match.end() + 240)
+            snippet = source_text[start:end].replace("\n", " ").strip()
+            if snippet and snippet not in snippets:
+                snippets.append(snippet)
+            if len(snippets) >= limit:
+                break
+        return snippets
+
+    @staticmethod
+    def _pair_evidence_snippets(
+        left_id: str,
+        right_id: str,
+        characters: dict[str, Any],
+        source_text: str,
+        limit: int = 6,
+    ) -> list[str]:
+        """Passages where both entries are named, for grounding a merge claim.
+
+        Passages mentioning *both* are what settles identity: an apposition
+        ("Jarlaxle, whom she called Uncle Jax") states it outright. Falls back
+        to a couple of single-name passages so the adjudicator can still answer
+        "distinct" rather than being forced to abstain for want of context.
+        """
+
+        def terms_for(cid: str) -> list[str]:
+            char = characters.get(cid)
+            name = getattr(char, "name", None) or cid
+            aliases = list(getattr(char, "aliases", []) or [])
+            out = []
+            for raw in [str(name), cid.replace("_", " "), *[str(a) for a in aliases]]:
+                term = raw.strip()
+                if len(term) >= 3 and term.lower() not in _UNSAFE_CHARACTER_ALIASES and term not in out:
+                    out.append(term)
+            return out
+
+        left_terms, right_terms = terms_for(left_id), terms_for(right_id)
+        if not left_terms or not right_terms:
+            return []
+
+        left_pattern = re.compile(r"\b(?:" + "|".join(re.escape(t) for t in left_terms) + r")\b", re.IGNORECASE)
+        right_pattern = re.compile(r"\b(?:" + "|".join(re.escape(t) for t in right_terms) + r")\b", re.IGNORECASE)
+
+        both: list[str] = []
+        singles: list[str] = []
+        for match in left_pattern.finditer(source_text):
+            start = max(0, match.start() - 260)
+            end = min(len(source_text), match.end() + 260)
+            snippet = source_text[start:end].replace("\n", " ").strip()
+            if not snippet:
+                continue
+            if right_pattern.search(snippet):
+                if snippet not in both:
+                    both.append(snippet)
+                if len(both) >= limit:
+                    return both
+            elif len(singles) < 2 and snippet not in singles:
+                singles.append(snippet)
+        return (both + singles)[:limit]
+
+    @staticmethod
+    def _write_cast_identity_audit(
+        project_dir: Path,
+        result: dict[str, Any],
+        applied: list[dict[str, Any]],
+        refused: list[dict[str, Any]],
+        require_approval: bool,
+        applied_aliases: list[dict[str, Any]] | None = None,
+        outcome: str = "completed",
+    ) -> None:
+        """Record every decision, including the refusals and why.
+
+        Written to the project directory rather than surfaced in the review
+        inbox: the evidence is verbatim book text, and an operator who has not
+        read the book should be able to opt out of seeing it.
+        """
+        from shared.artifacts import atomic_write_json
+
+        try:
+            atomic_write_json(
+                project_dir / "cast_identity_audit.json",
+                {
+                    "schema_version": 2,
+                    # "completed" means the adjudicator answered, whether or
+                    # not it proposed anything. "failed" means it never did.
+                    "outcome": outcome,
+                    "require_approval": require_approval,
+                    "applied": applied,
+                    "recovered_aliases": list(applied_aliases or []),
+                    "refused": refused,
+                    "held_for_review": result.get("review", []),
+                    "trace": result.get("trace", []),
+                },
+            )
+        except (OSError, ValueError, TypeError):
+            logger.warning("Could not write the cast identity audit", exc_info=True)
+
+    def _augment_characters_with_gemini(
+        self,
+        registry: CharacterRegistry,
+        book: ExtractedBook,
+        project_dir: Path | None = None,
+    ) -> CharacterRegistry:
+        """Apply only configured, confidence-aware, source-grounded enrichment."""
+        if self.external_validator is None or project_dir is None:
+            logger.info("[CharacterAnalyzer] External character augmentation is not configured.")
+            return registry
+
+        dossier = self._build_character_evidence_dossier(registry, book)
+        if not dossier:
+            return registry
+
+        try:
+            result = self.external_validator.augment_characters(
+                project_dir=project_dir,
+                dossier=dossier,
+            )
+            for cid, char_patch in result.get("accepted", {}).items():
+                if cid not in registry.characters or cid == "narrator":
+                    continue
+                char = registry.characters[cid]
+                gender_str = str(char_patch.get("gender", "")).lower()
+                if char.gender == Gender.OTHER and gender_str == "male":
+                    char.gender = Gender.MALE
+                elif char.gender == Gender.OTHER and gender_str == "female":
+                    char.gender = Gender.FEMALE
+
+                if char_patch.get("age_range"):
+                    char.age_range = char_patch["age_range"]
+                if char_patch.get("voice_description"):
+                    char.voice_description = char_patch["voice_description"]
+                if char_patch.get("speaking_style"):
+                    char.speaking_style = char_patch["speaking_style"]
+                if char_patch.get("personality_traits"):
+                    char.personality_traits = char_patch["personality_traits"]
+                if char_patch.get("test_sentence"):
+                    char.test_sentence = char_patch["test_sentence"]
+
+            if result.get("review"):
+                logger.info(
+                    "[CharacterAnalyzer] Deferred %d uncertain character enrichments to review",
+                    len(result["review"]),
+                )
+        except Exception as exc:
+            logger.warning("[CharacterAnalyzer] Gemini character augmentation encountered an error: %s", exc)
+
+        return registry
+
+    def _write_reference_audit(
+        self,
+        registry: CharacterRegistry,
+        book: ExtractedBook,
+        reference_audit_path: Path | str,
+    ) -> None:
+        from shared.artifacts import atomic_write_json
+
+        ref_text = "\n".join(book.reference_material.values()) if book.reference_material else ""
+        accepted = []
+        rejected = []
+        try:
+            prompt = (
+                "AUTHOR REFERENCE:\n" + ref_text + "\n\n"
+                "Extract canonical updates only for registered characters. "
+                "Every patch must include confidence from 0 to 1 and an evidence "
+                "string copied verbatim from AUTHOR REFERENCE. Abstain by omitting "
+                "a character when evidence is absent. Direct narrative character "
+                "identity remains authoritative. Registered characters: "
+                + ", ".join(cid for cid in registry.characters if cid != "narrator")
+            )
+            raw = self.ollama.generate_json(prompt, temperature=0.0)
+            patches = raw.get("patches", []) if isinstance(raw, dict) else []
+            for patch in patches:
+                cid = patch.get("character_id")
+                evidence = " ".join(str(patch.get("evidence") or "").split())
+                confidence = float(patch.get("confidence", 0.0) or 0.0)
+                grounded = len(evidence) >= 12 and evidence.casefold() in " ".join(ref_text.split()).casefold()
+                if cid in registry.characters and cid != "narrator" and confidence >= 0.9 and grounded:
+                    char = registry.characters[cid]
+                    if patch.get("revised_voice_description"):
+                        char.voice_description = patch["revised_voice_description"]
+                    if patch.get("aliases"):
+                        char.aliases = sorted(set(char.aliases + patch["aliases"]))
+                    if patch.get("personality_traits"):
+                        char.personality_traits = patch["personality_traits"]
+                    if patch.get("speaking_style"):
+                        char.speaking_style = patch["speaking_style"]
+                    accepted.append(patch)
+                else:
+                    rejected.append(
+                        {
+                            **patch,
+                            "reason": (
+                                "unknown_or_unproven_character"
+                                if cid not in registry.characters or cid == "narrator"
+                                else "low_confidence_or_ungrounded_evidence"
+                            ),
+                        }
+                    )
+            audit_data = {"status": "completed", "accepted": accepted, "rejected": rejected}
+        except Exception:
+            logger.warning(
+                "[CharacterAnalyzer] Supplemental reference augmentation unavailable: supplement unavailable"
+            )
+            audit_data = {"status": "unavailable", "accepted": [], "rejected": []}
+        atomic_write_json(Path(reference_audit_path), audit_data)
+
+    def create_joint_seed_registry(self, book: ExtractedBook) -> CharacterRegistry:
+        """Create initial character registry for joint director pass."""
+        narrator = Character(
+            id="narrator",
+            name="Narrator",
+            gender=Gender.OTHER,
+            age_range="adult",
+            voice_description="male speaker, 40s age. low pitch, moderate volume, measured speed. Standard American accent. clear texture, high clarity, natural fluency. warm emotion, authoritative tone, thoughtful personality.",
+            speaking_style="Flowing descriptive prose, unhurried",
+            test_sentence="The forest was old, its roots deep in the forgotten history of the world.",
+        )
+        reg = CharacterRegistry(
+            book_title=book.metadata.title,
+            book_author=book.metadata.author,
+            characters={"narrator": narrator},
+        )
+        return self._ensure_explicit_unnamed_speakers(reg, book)
+
+    def finalize_joint_registry(
+        self,
+        registry: CharacterRegistry,
+        book: ExtractedBook,
+        check_callback: Callable[[], None] | None = None,
+        reference_audit_path: Path | str | None = None,
+        project_dir: Path | str | None = None,
+    ) -> tuple[CharacterRegistry, dict[str, str]]:
+        """Reconcile and consolidate discovered characters from joint director pass."""
+        remap = {cid: cid for cid in registry.characters}
+        reconciled_chars: dict[str, Character] = {}
+
+        # Sort characters so longer / alias-owning characters take precedence
+        sorted_chars = sorted(
+            registry.characters.values(),
+            key=lambda c: (c.id == "narrator", len(c.name), len(c.aliases)),
+            reverse=True,
+        )
+        for char in sorted_chars:
+            if char.id == "narrator":
+                reconciled_chars["narrator"] = char
+                continue
+            matched = False
+            for target_id, target_char in list(reconciled_chars.items()):
+                if target_id == "narrator":
+                    continue
+                if (
+                    char.name in target_char.aliases
+                    or any(a.lower() == char.name.lower() for a in target_char.aliases)
+                    or char.id in target_char.aliases
+                ):
+                    remap[char.id] = target_id
+                    matched = True
+                    break
+            if not matched:
+                reconciled_chars[char.id] = char
+
+        reconciled = CharacterRegistry(
+            book_title=registry.book_title,
+            book_author=registry.book_author,
+            genre=registry.genre,
+            tone=registry.tone,
+            characters=reconciled_chars,
+        )
+        reconciled = self._ensure_explicit_unnamed_speakers(reconciled, book)
+        reconciled = self._augment_characters_with_gemini(
+            reconciled,
+            book,
+            Path(project_dir) if project_dir else None,
+        )
+        self._assign_voice_ids(reconciled.characters)
+        if reference_audit_path and getattr(book, "reference_material", None):
+            self._write_reference_audit(reconciled, book, reference_audit_path)
+        return reconciled, remap
 
     @staticmethod
     def _extract_dialogue_lines(text: str, max_chars: int = 2000) -> str:
@@ -424,9 +1048,9 @@ class CharacterAnalyzer:
         """
         # Match quoted dialogue (straight, curly, and single typographic)
         pattern = re.compile(
-            r'(?:([\w\s,;:]+\s+)?'
+            r"(?:([\w\s,;:]+\s+)?"
             r'(?:"[^"\n]{3,}?"|\u201c[^\u201d\n]{3,}?\u201d|\u2018[^\u2019\n]{3,}?\u2019)'
-            r'(?:\s*[\w\s,;:]+)?)',
+            r"(?:\s*[\w\s,;:]+)?)",
             re.UNICODE,
         )
         excerpts: list[str] = []
@@ -443,9 +1067,7 @@ class CharacterAnalyzer:
 
     def _prepare_book_text(self, book: ExtractedBook) -> str:
         """Prepare book text for single-pass analysis."""
-        total_text = "\n\n---\n\n".join(
-            f"## {ch.title}\n\n{ch.text}" for ch in book.chapters
-        )
+        total_text = "\n\n---\n\n".join(f"## {ch.title}\n\n{ch.text}" for ch in book.chapters)
         logger.info(
             "[CharacterAnalyzer] Single-pass analysis (%.1f KB) — sending full book text",
             len(total_text) / 1024,
@@ -507,9 +1129,7 @@ class CharacterAnalyzer:
             c_norm = c.lower().replace("_", " ").strip()
             if not c or len(c) < 2 or c_norm in seen:
                 return
-            if c_norm in _UNSAFE_CHARACTER_ALIASES or c_norm in {
-                "mr", "mrs", "ms", "dr"
-            }:
+            if c_norm in _UNSAFE_CHARACTER_ALIASES or c_norm in {"mr", "mrs", "ms", "dr"}:
                 return
             seen.add(c_norm)
             aliases.append(c)
@@ -535,7 +1155,8 @@ class CharacterAnalyzer:
             add_alias(of_match.group(1))
 
         words = [
-            w for w in re.split(r"[\s_]+", name_clean)
+            w
+            for w in re.split(r"[\s_]+", name_clean)
             if len(w) >= 3
             and w.lower() not in _UNSAFE_CHARACTER_ALIASES
             and w.lower() not in {"for", "with", "from", "into"}
@@ -545,7 +1166,8 @@ class CharacterAnalyzer:
             add_alias(words[-1])
 
         id_words = [
-            w for w in char_id.split("_")
+            w
+            for w in char_id.split("_")
             if len(w) >= 3
             and w.lower() not in _UNSAFE_CHARACTER_ALIASES
             and w.lower() not in {"for", "with", "from", "into"}
@@ -581,11 +1203,40 @@ class CharacterAnalyzer:
 
             # Parse gender with robust normalizer
             gender_str = str(char_data.get("gender", "other")).lower().strip()
-            if gender_str in ("male", "man", "boy", "he", "him", "his", "masculine", "gentleman", "sir", "father", "son", "brother", "husband", "lord", "king"):
+            if gender_str in (
+                "male",
+                "man",
+                "boy",
+                "he",
+                "him",
+                "his",
+                "masculine",
+                "gentleman",
+                "sir",
+                "father",
+                "son",
+                "brother",
+                "husband",
+                "lord",
+                "king",
+            ):
                 gender = Gender.MALE
-            elif gender_str in ("female", "woman", "girl", "she", "her", "feminine", "lady", "ma'am", "mother", "daughter", "sister", "wife", "queen", "loremother"):
-                gender = Gender.FEMALE
-            elif re.search(r"\b(female|woman|girl|lady|she|her|mother|daughter)\b", gender_str):
+            elif gender_str in (
+                "female",
+                "woman",
+                "girl",
+                "she",
+                "her",
+                "feminine",
+                "lady",
+                "ma'am",
+                "mother",
+                "daughter",
+                "sister",
+                "wife",
+                "queen",
+                "loremother",
+            ) or re.search(r"\b(female|woman|girl|lady|she|her|mother|daughter)\b", gender_str):
                 gender = Gender.FEMALE
             elif re.search(r"\b(male|man|boy|he|his|him|father|son)\b", gender_str):
                 gender = Gender.MALE
@@ -659,46 +1310,40 @@ class CharacterAnalyzer:
         )
 
     def _assign_voice_ids(self, characters: dict[str, Character]) -> None:
-        """Apply the unique-voice cap after all deterministic role discovery."""
-        if len(characters) > self.max_unique_voices:
+        """Apply unique voice IDs, capping to generic archetypes only if a positive limit is configured."""
+        if self.max_unique_voices and self.max_unique_voices > 0 and len(characters) > self.max_unique_voices:
             logger.info(
                 "[CharacterAnalyzer] Capping %d → %d unique voices",
                 len(characters),
                 self.max_unique_voices,
             )
             ranked = sorted(
-                (
-                    character
-                    for character in characters.values()
-                    if character.id != "narrator"
-                ),
+                (character for character in characters.values() if character.id != "narrator"),
                 key=lambda character: (
                     character.dialogue_count,
                     len(character.voice_description),
                 ),
                 reverse=True,
             )
-            selected_order = ["narrator"] + [
-                character.id
-                for character in ranked[: self.max_unique_voices - 1]
-            ]
+            selected_order = ["narrator"] + [character.id for character in ranked[: self.max_unique_voices - 1]]
             important = set(selected_order)
-            representatives: dict[Gender, list[str]] = {
-                gender: [
-                    character_id
-                    for character_id in selected_order
-                    if characters[character_id].gender == gender
-                ]
-                for gender in Gender
-            }
+            # NOTE: a per-gender `representatives` map used to be built here so
+            # an overflow character could share a *compatible major character's*
+            # voice. It was never read: the loop below assigns the dedicated
+            # `minor_female`/`minor_male` archetypes (or the narrator) instead.
+            # docs/architecture.md still describes the older behaviour; the
+            # archetype fallback is what actually ships.
             for character_id, character in characters.items():
                 if character_id in important:
                     character.voice_id = character_id
                     continue
-                same_gender = representatives.get(character.gender, [])
-                character.voice_id = (
-                    same_gender[0] if same_gender else "narrator"
-                )
+                # Minor overflow characters fall back to generic minor archetypes, NEVER the lead protagonist
+                if character.gender == Gender.FEMALE:
+                    character.voice_id = "minor_female" if "minor_female" in characters else "narrator"
+                elif character.gender == Gender.MALE:
+                    character.voice_id = "minor_male" if "minor_male" in characters else "narrator"
+                else:
+                    character.voice_id = "narrator"
         else:
             for character_id, character in characters.items():
                 character.voice_id = character_id
@@ -750,9 +1395,7 @@ class CharacterAnalyzer:
         )
         pattern = re.compile(
             r"(?:\"[^\"\n]+\"|\u201c[^\u201d\n]+\u201d)\s*"
-            r"(?:,\s*)?(?:the|a)\s+(boy|girl|man|woman)\s+(?:"
-            + speech_verbs
-            + r")\b",
+            r"(?:,\s*)?(?:the|a)\s+(boy|girl|man|woman)\s+(?:" + speech_verbs + r")\b",
             re.IGNORECASE,
         )
         counts: dict[str, int] = {}
@@ -791,9 +1434,7 @@ class CharacterAnalyzer:
                 voice_description=description,
                 speaking_style="Natural dialogue matching the source context",
                 dialogue_count=count,
-                test_sentence=(
-                    "I know what I saw, and I can explain it if you listen."
-                ),
+                test_sentence=("I know what I saw, and I can explain it if you listen."),
             )
             logger.warning(
                 "[CharacterAnalyzer] Added explicit unnamed speaker '%s' from %d source tag(s)",
@@ -803,9 +1444,7 @@ class CharacterAnalyzer:
         return registry
 
     @staticmethod
-    def _consolidate_accumulated_characters(
-        accumulated_chars: dict[str, dict[str, Any]]
-    ) -> dict[str, dict[str, Any]]:
+    def _consolidate_accumulated_characters(accumulated_chars: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
         """Merge only explicit aliases and exact normalized display names.
 
         Substring/suffix matching is intentionally forbidden: ``king`` and
@@ -835,27 +1474,23 @@ class CharacterAnalyzer:
                     for value in cinfo2.get("aliases", [])
                     if str(value).strip()
                 }
-                name1 = CharacterAnalyzer._normalize_id(
-                    str(cinfo1.get("name", cid1))
-                )
-                name2 = CharacterAnalyzer._normalize_id(
-                    str(cinfo2.get("name", cid2))
-                )
+                name1 = CharacterAnalyzer._normalize_id(str(cinfo1.get("name", cid1)))
+                name2 = CharacterAnalyzer._normalize_id(str(cinfo2.get("name", cid2)))
                 explicitly_linked = (
-                    cid2 in aliases1
-                    or name2 in aliases1
-                    or cid1 in aliases2
-                    or name1 in aliases2
-                    or name1 == name2
+                    cid2 in aliases1 or name2 in aliases1 or cid1 in aliases2 or name1 in aliases2 or name1 == name2
                 )
                 target_id = variant_id = None
                 target_info = variant_info = None
                 if explicitly_linked:
-                    # Prefer the more descriptive canonical ID. Input order is
-                    # only a deterministic tie breaker.
-                    if (len(cid1.split("_")), len(cid1)) >= (
-                        len(cid2.split("_")), len(cid2)
-                    ):
+                    count1 = cinfo1.get("dialogue_count", 0) + cinfo1.get("mention_count", 0)
+                    count2 = cinfo2.get("dialogue_count", 0) + cinfo2.get("mention_count", 0)
+                    if count1 > count2:
+                        target_id, variant_id = cid1, cid2
+                        target_info, variant_info = cinfo1, cinfo2
+                    elif count2 > count1:
+                        target_id, variant_id = cid2, cid1
+                        target_info, variant_info = cinfo2, cinfo1
+                    elif (len(cid1.split("_")), len(cid1)) >= (len(cid2.split("_")), len(cid2)):
                         target_id, variant_id = cid1, cid2
                         target_info, variant_info = cinfo1, cinfo2
                     else:
@@ -870,18 +1505,16 @@ class CharacterAnalyzer:
                         target_id,
                         target_info.get("name"),
                     )
-                    target_info["dialogue_count"] = (
-                        target_info.get("dialogue_count", 0)
-                        + variant_info.get("dialogue_count", 0)
+                    target_info["dialogue_count"] = target_info.get("dialogue_count", 0) + variant_info.get(
+                        "dialogue_count", 0
                     )
-                    target_info["mention_count"] = (
-                        target_info.get("mention_count", 0)
-                        + variant_info.get("mention_count", 0)
+                    target_info["mention_count"] = target_info.get("mention_count", 0) + variant_info.get(
+                        "mention_count", 0
                     )
                     existing_aliases = set(target_info.get("aliases", []))
                     existing_aliases.add(variant_info.get("name", variant_id))
                     existing_aliases.add(variant_id)
-                    target_info["aliases"] = sorted(list(existing_aliases))
+                    target_info["aliases"] = sorted(existing_aliases)
                     merged_into[variant_id] = target_id
 
         return {k: v for k, v in accumulated_chars.items() if k not in merged_into}
@@ -899,23 +1532,53 @@ class CharacterAnalyzer:
         with the short name. This tolerates imperfect citation formatting without
         turning name containment alone into merge evidence.
         """
+
+        def _distinctive_tokens(cid: str, data: dict[str, Any]) -> set[str]:
+            tokens: set[str] = set()
+            name_words = re.split(r"[\s_]+", str(data.get("name", cid)))
+            for w in name_words:
+                w_clean = w.lower().strip("'\".,;:-")
+                if (
+                    len(w_clean) >= 3
+                    and w_clean not in _UNSAFE_CHARACTER_ALIASES
+                    and w_clean not in _GENERIC_ROLE_DESCRIPTORS
+                ):
+                    tokens.add(w_clean)
+            for a in data.get("aliases", []):
+                for w in re.split(r"[\s_]+", str(a)):
+                    w_clean = w.lower().strip("'\".,;:-")
+                    if (
+                        len(w_clean) >= 3
+                        and w_clean not in _UNSAFE_CHARACTER_ALIASES
+                        and w_clean not in _GENERIC_ROLE_DESCRIPTORS
+                    ):
+                        tokens.add(w_clean)
+            return tokens
+
         ids = sorted(characters)
         candidate_pairs: list[tuple[str, str]] = []
+        tokens_by_id = {cid: _distinctive_tokens(cid, characters[cid]) for cid in ids}
+
         for index, left in enumerate(ids):
             if left == "narrator":
                 continue
             left_parts = left.split("_")
-            for right in ids[index + 1:]:
+            left_tokens = tokens_by_id[left]
+            for right in ids[index + 1 :]:
                 if right == "narrator":
                     continue
                 right_parts = right.split("_")
-                if (
-                    len(left_parts) < len(right_parts)
-                    and right_parts[-len(left_parts):] == left_parts
-                ) or (
-                    len(right_parts) < len(left_parts)
-                    and left_parts[-len(right_parts):] == right_parts
-                ):
+                right_tokens = tokens_by_id[right]
+
+                # Criterion 1: Suffix ID match (e.g. pwent <-> thibbledorf_pwent)
+                suffix_match = (
+                    len(left_parts) < len(right_parts) and right_parts[-len(left_parts) :] == left_parts
+                ) or (len(right_parts) < len(left_parts) and left_parts[-len(right_parts) :] == right_parts)
+
+                # Criterion 2: Distinctive non-generic token overlap (e.g. "Sixth" in Sixth of Dusk <-> "Sixth" in Drominadian)
+                shared_tokens = left_tokens & right_tokens
+
+                if suffix_match or shared_tokens:
                     candidate_pairs.append((left, right))
         if not candidate_pairs:
             return characters
@@ -930,6 +1593,22 @@ class CharacterAnalyzer:
                 left.replace("_", " "),
                 right.replace("_", " "),
             }
+            for a in characters[left].get("aliases", []):
+                a_clean = str(a).strip()
+                if (
+                    len(a_clean) >= 3
+                    and a_clean.lower() not in _UNSAFE_CHARACTER_ALIASES
+                    and a_clean.lower() not in _GENERIC_ROLE_DESCRIPTORS
+                ):
+                    terms.add(a_clean)
+            for a in characters[right].get("aliases", []):
+                a_clean = str(a).strip()
+                if (
+                    len(a_clean) >= 3
+                    and a_clean.lower() not in _UNSAFE_CHARACTER_ALIASES
+                    and a_clean.lower() not in _GENERIC_ROLE_DESCRIPTORS
+                ):
+                    terms.add(a_clean)
             snippets: list[str] = []
             for term in sorted(terms, key=len, reverse=True):
                 if len(term) < 3:
@@ -966,8 +1645,7 @@ class CharacterAnalyzer:
             "are not proof. Return JSON with a `decisions` array containing "
             "left_id, right_id, same_character, and evidence. For a true "
             "decision, evidence must be a verbatim source excerpt that "
-            "establishes both names refer to one entity.\n\n"
-            + json.dumps(payload, ensure_ascii=False)
+            "establishes both names refer to one entity.\n\n" + json.dumps(payload, ensure_ascii=False)
         )
         try:
             raw = self.ollama.generate_json(
@@ -1000,10 +1678,7 @@ class CharacterAnalyzer:
                 continue
             evidence = " ".join(str(decision.get("evidence", "")).split())
             normalized_context = " ".join(contexts[pair].split()).casefold()
-            cited_verbatim = (
-                len(evidence) >= 12
-                and evidence.casefold() in normalized_context
-            )
+            cited_verbatim = len(evidence) >= 12 and evidence.casefold() in normalized_context
             derived_evidence = self._find_short_name_continuation(
                 characters[pair[0]],
                 characters[pair[1]],
@@ -1017,23 +1692,30 @@ class CharacterAnalyzer:
                 continue
             if not cited_verbatim:
                 logger.info(
-                    "Accepting identity merge %s/%s from verified short-name "
-                    "continuation: %s",
+                    "Accepting identity merge %s/%s from verified short-name continuation: %s",
                     *pair,
                     derived_evidence,
                 )
             left, right = pair
-            target, variant = max(
-                (left, right),
-                key=lambda value: (len(value.split("_")), len(value)),
-            ), min(
-                (left, right),
-                key=lambda value: (len(value.split("_")), len(value)),
-            )
+            count_left = characters[left].get("dialogue_count", 0) + characters[left].get("mention_count", 0)
+            count_right = characters[right].get("dialogue_count", 0) + characters[right].get("mention_count", 0)
+            if count_left > count_right:
+                target, variant = left, right
+            elif count_right > count_left:
+                target, variant = right, left
+            else:
+                target, variant = (
+                    max(
+                        (left, right),
+                        key=lambda value: (len(value.split("_")), len(value)),
+                    ),
+                    min(
+                        (left, right),
+                        key=lambda value: (len(value.split("_")), len(value)),
+                    ),
+                )
             aliases = list(characters[target].get("aliases", []))
-            aliases.extend(
-                [variant, str(characters[variant].get("name", variant))]
-            )
+            aliases.extend([variant, str(characters[variant].get("name", variant))])
             characters[target]["aliases"] = list(dict.fromkeys(aliases))
 
         return self._consolidate_accumulated_characters(characters)

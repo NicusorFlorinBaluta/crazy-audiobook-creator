@@ -15,13 +15,13 @@ The main entry point for the Ubuntu TTS server that handles:
 
 from __future__ import annotations
 
-import logging
 import asyncio
+import logging
 import os
+import secrets
 import threading
 import time
-from contextlib import asynccontextmanager
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -32,32 +32,30 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 os.environ.setdefault("ROCM_SDK_TARGET_FAMILY", "custom")
 
-from voice.tts_server.qwen3_engine import Qwen3TTSEngine
-from voice.tts_server.voice_designer import VoiceDesigner
-from voice.tts_server.voice_library import VoiceLibraryManager
-from voice.validator.whisper_validator import WhisperValidator
-from voice.validator.audio_analyzer import AudioAnalyzer
-from voice.validator.validation_loop import GenerationCancelled, ValidationLoop
-from voice.mastering.assembler import AudioAssembler
-from voice.mastering.normalizer import LoudnessNormalizer
-from voice.mastering.m4b_exporter import M4BExporter
+from shared import paths as shared_paths
+from shared.config_validation import validate_voice_config
 from shared.models import (
     BootstrapVoicesRequest,
     BootstrapVoicesResponse,
+    ExportM4BRequest,
+    ExportM4BResponse,
     GenerateChapterRequest,
-    GenerateChapterResponse,
     GenerateLineRequest,
     GenerateLineResponse,
     MasterChapterRequest,
     MasterChapterResponse,
-    ExportM4BRequest,
-    ExportM4BResponse,
     ValidateRequest,
-    QualityResult,
     VoiceHealthResponse,
-    ChapterQualityReport,
 )
-from shared.config_validation import validate_voice_config
+from voice.mastering.assembler import AudioAssembler
+from voice.mastering.m4b_exporter import M4BExporter
+from voice.mastering.normalizer import LoudnessNormalizer
+from voice.tts_server.qwen3_engine import Qwen3TTSEngine
+from voice.tts_server.voice_designer import VoiceDesigner
+from voice.tts_server.voice_library import VoiceLibraryManager
+from voice.validator.audio_analyzer import AudioAnalyzer
+from voice.validator.validation_loop import GenerationCancelled, ValidationLoop
+from voice.validator.whisper_validator import WhisperValidator
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +82,14 @@ run_state_lock = threading.Lock()
 # WebSocket connections for progress updates
 ws_connections: list[WebSocket] = []
 
+# Acquiring the per-project run slot. The initial poll covers the normal case
+# where a previous request is finishing its teardown; the takeover timeout
+# bounds how long a new request will wait for a cancelled incumbent to actually
+# release the slot before the request is refused with 503.
+RUN_SLOT_POLL_ATTEMPTS = 25
+RUN_SLOT_POLL_INTERVAL_SECONDS = 0.2
+RUN_SLOT_TAKEOVER_TIMEOUT_SECONDS = 60
+
 
 @contextmanager
 def gpu_job():
@@ -100,7 +106,17 @@ def gpu_job():
 
 
 def _workspace() -> Path:
-    return Path(config.get("storage", {}).get("workspace_dir", "workspace")).resolve()
+    """Resolve the workspace root independently of the working directory.
+
+    A relative `storage.workspace_dir` is resolved against the repository root,
+    not the CWD, so the Brain and Voice services cannot disagree about where
+    audio intermediates live when they are started from different directories.
+    An absolute value is honoured as given.
+    """
+    configured = Path(config.get("storage", {}).get("workspace_dir", "workspace"))
+    if not configured.is_absolute():
+        configured = shared_paths.REPO_ROOT / configured
+    return configured.resolve()
 
 
 def _directory_size_bytes(root: Path) -> int:
@@ -126,13 +142,13 @@ def _enforce_workspace_quota() -> None:
     if max_gb <= 0:
         return
     used_bytes = _directory_size_bytes(_workspace())
-    limit_bytes = max_gb * 1024 ** 3
+    limit_bytes = max_gb * 1024**3
     if used_bytes >= limit_bytes:
         raise HTTPException(
             status_code=507,
             detail=(
                 f"Voice workspace quota reached "
-                f"({used_bytes / 1024 ** 3:.1f}/{max_gb:.1f} GiB). "
+                f"({used_bytes / 1024**3:.1f}/{max_gb:.1f} GiB). "
                 "Remove old intermediates before generating more audio."
             ),
         )
@@ -188,7 +204,7 @@ def load_config(config_path: str = "voice/config.yaml") -> dict[str, Any]:
     """Load configuration from YAML file."""
     path = Path(config_path)
     if path.exists():
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             return validate_voice_config(yaml.safe_load(f) or {})
     logger.warning("Config not found: %s — using defaults", path)
     return {}
@@ -206,14 +222,17 @@ async def lifespan(app: FastAPI):
     config = load_config()
 
     from shared.single_instance import SingleInstanceLock
+
     lock = SingleInstanceLock("voice_server.lock")
     if not lock.acquire():
         logger.error("Another Voice Server instance is already running! Exiting.")
         import sys
+
         sys.exit(1)
 
     # Initialize components
     from voice.tts_server.embedding_store import EmbeddingStore
+
     embedding_store = EmbeddingStore(db_path="voice_cache.db")
 
     tts_cfg = config.get("tts", {})
@@ -251,16 +270,11 @@ async def lifespan(app: FastAPI):
             "voice_design_model",
             "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
         ),
-        voice_design_test_sentences=tts_cfg.get(
-            "voice_design_test_sentences", {}
-        ),
+        voice_design_test_sentences=tts_cfg.get("voice_design_test_sentences", {}),
         wer_threshold=val_cfg.get("wer_threshold", 0.20),
-        similarity_warning_threshold=val_cfg.get(
-            "voice_profile_similarity_warning", 0.97
-        ),
-        acoustic_regeneration_attempts=val_cfg.get(
-            "voice_profile_acoustic_regenerations", 1
-        ),
+        similarity_warning_threshold=val_cfg.get("voice_profile_similarity_warning", 0.97),
+        acoustic_regeneration_attempts=val_cfg.get("voice_profile_acoustic_regenerations", 1),
+        distinctness_rounds=val_cfg.get("voice_distinctness_rounds", 2),
     )
     audio_analyzer = AudioAnalyzer(
         noise_threshold=val_cfg.get("artifact_noise_threshold", -50),
@@ -280,12 +294,8 @@ async def lifespan(app: FastAPI):
             "speaker_similarity_threshold",
             0.55,
         ),
-        keep_models_resident=val_cfg.get(
-            "keep_tts_and_whisper_resident", False
-        ),
-        risk_aware_first_attempt=val_cfg.get(
-            "risk_aware_first_attempt", False
-        ),
+        keep_models_resident=val_cfg.get("keep_tts_and_whisper_resident", False),
+        risk_aware_first_attempt=val_cfg.get("risk_aware_first_attempt", False),
         emotion_wer_allowance=val_cfg.get("emotion_wer_allowance", 0.0),
         prosody_config=val_cfg.get("prosody", {}),
     )
@@ -319,11 +329,7 @@ async def lifespan(app: FastAPI):
         while True:
             await asyncio.sleep(min(30, max(5, idle_seconds)))
             try:
-                if (
-                    idle_seconds > 0
-                    and active_gpu_jobs == 0
-                    and time.time() - last_activity >= idle_seconds
-                ):
+                if idle_seconds > 0 and active_gpu_jobs == 0 and time.time() - last_activity >= idle_seconds:
                     with gpu_job_lock:
                         if active_gpu_jobs == 0 and engine and engine.is_loaded:
                             engine.unload()
@@ -370,13 +376,42 @@ app.add_middleware(
 )
 
 
+VOICE_TOKEN_ENV_VAR = "CRAZY_AUDIOBOOK_VOICE_TOKEN"
+
+
+def configured_voice_token(override: dict[str, Any] | None = None) -> str:
+    """Return the runtime token without requiring secrets in tracked YAML.
+
+    Mirrors the dashboard's ``CRAZY_AUDIOBOOK_DASHBOARD_TOKEN`` handling so the
+    Voice server's token can also be supplied by environment rather than being
+    committed to ``voice/config.yaml``.
+
+    ``override`` lets ``main()`` resolve against a config loaded from a custom
+    ``--config`` path, before the module-level globals are populated.
+    """
+    from_env = os.environ.get(VOICE_TOKEN_ENV_VAR, "").strip()
+    if from_env:
+        return from_env
+    sources = (
+        override or {},
+        config,
+        _import_config,
+    )
+    for source in sources:
+        token = str(source.get("server", {}).get("api_token", "") or "").strip()
+        if token:
+            return token
+    return ""
+
+
 @app.middleware("http")
 async def require_api_token(request: Request, call_next):
-    token = config.get("server", {}).get("api_token", "") or _import_config.get(
-        "server", {}
-    ).get("api_token", "")
+    token = configured_voice_token()
     if token and request.url.path != "/health":
-        if request.headers.get("X-API-Token") != token:
+        presented = request.headers.get("X-API-Token") or ""
+        # Constant-time comparison: a plain `!=` leaks token content through
+        # response timing. The dashboard already uses `compare_digest`.
+        if not secrets.compare_digest(token, presented):
             return JSONResponse({"detail": "Invalid API token"}, status_code=401)
     return await call_next(request)
 
@@ -400,15 +435,9 @@ async def health_check() -> VoiceHealthResponse:
         vram_peak_reserved_gb=vram.get("vram_peak_reserved_gb", 0.0),
         model_loaded=engine.model_name if engine and engine.is_loaded else "none",
         attention_backend=engine.attn_implementation if engine else "",
-        validator_backend=(
-            validator.whisper.backend if validator else ""
-        ),
-        validator_model=(
-            validator.whisper.model_name if validator else ""
-        ),
-        validator_vad_filter=(
-            bool(validator.whisper.vad_filter) if validator else False
-        ),
+        validator_backend=(validator.whisper.backend if validator else ""),
+        validator_model=(validator.whisper.model_name if validator else ""),
+        validator_vad_filter=(bool(validator.whisper.vad_filter) if validator else False),
         uptime_seconds=time.time() - start_time,
     )
 
@@ -416,6 +445,16 @@ async def health_check() -> VoiceHealthResponse:
 @app.post("/voices/bootstrap")
 def bootstrap_voices(request: BootstrapVoicesRequest) -> BootstrapVoicesResponse:
     """Generate voice reference clips for all characters."""
+    return _run_voice_bootstrap(request)
+
+
+def _run_voice_bootstrap(
+    request: BootstrapVoicesRequest,
+    *,
+    progress_callback=None,
+    cancel_check=None,
+) -> BootstrapVoicesResponse:
+    """Run one serialized bootstrap request with guaranteed model cleanup."""
     if not designer or not engine:
         raise HTTPException(status_code=503, detail="Server not initialized")
     with gpu_job():
@@ -423,15 +462,85 @@ def bootstrap_voices(request: BootstrapVoicesRequest) -> BootstrapVoicesResponse
         # together.
         engine.unload()
         try:
-            return designer.bootstrap_voices(request)
+            return designer.bootstrap_voices(
+                request,
+                progress_callback=progress_callback,
+                cancel_check=cancel_check,
+            )
         except Exception as e:
             import traceback
+
             with open("voice_crash.log", "a") as f:
                 f.write(f"Crash in bootstrap_voices: {e}\n{traceback.format_exc()}\n")
             raise
         finally:
             if designer.validator and designer.validator.is_loaded:
                 designer.validator.unload()
+
+
+@app.post("/voices/bootstrap/stream")
+def bootstrap_voices_stream(
+    request: BootstrapVoicesRequest,
+    fast_req: Request,
+):
+    """Bootstrap voices with NDJSON phase progress and disconnect handling."""
+    if not designer or not engine:
+        raise HTTPException(status_code=503, detail="Server not initialized")
+
+    import json
+    import queue
+
+    cancellation = threading.Event()
+    with run_state_lock:
+        if request.project_id in active_project_runs:
+            raise HTTPException(
+                status_code=409,
+                detail="A voice request is already active for this project",
+            )
+        active_project_runs[request.project_id] = cancellation
+    events: queue.Queue[dict[str, Any]] = queue.Queue()
+
+    def on_progress(message: dict[str, Any]) -> None:
+        payload = {"project_id": request.project_id, **message}
+        events.put({"type": "progress", "data": payload})
+        _progress_from_worker(payload)
+
+    def worker() -> None:
+        try:
+            result = _run_voice_bootstrap(
+                request,
+                progress_callback=on_progress,
+                cancel_check=cancellation.is_set,
+            )
+            events.put({"type": "result", "data": result.model_dump()})
+        except Exception as exc:
+            logger.exception("Voice bootstrap stream failed")
+            events.put({"type": "error", "error": "exception", "detail": str(exc)})
+        finally:
+            with run_state_lock:
+                if active_project_runs.get(request.project_id) is cancellation:
+                    active_project_runs.pop(request.project_id, None)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    async def event_generator():
+        try:
+            while True:
+                if await fast_req.is_disconnected():
+                    cancellation.set()
+                    break
+                try:
+                    message = await asyncio.to_thread(events.get, True, 1.0)
+                    yield json.dumps(message) + "\n"
+                    if message.get("type") in {"result", "error"}:
+                        break
+                except queue.Empty:
+                    yield "\n"
+        finally:
+            if await fast_req.is_disconnected():
+                cancellation.set()
+
+    return StreamingResponse(event_generator(), media_type="application/x-ndjson")
 
 
 @app.post("/voices/regenerate")
@@ -445,6 +554,7 @@ def regenerate_voice(
         raise HTTPException(status_code=503, detail="Server not initialized")
 
     from shared.models import Character
+
     character = Character(
         id=character_id,
         name=character_id.replace("_", " ").title(),
@@ -478,11 +588,7 @@ def generate_line(request: GenerateLineRequest) -> GenerateLineResponse:
         raise HTTPException(status_code=503, detail="Server not initialized")
 
     t0 = time.time()
-    output_path = (
-        _safe_workspace_project(request.project_id)
-        / "segments"
-        / f"{request.line.line_id}.wav"
-    )
+    output_path = _safe_workspace_project(request.project_id) / "segments" / f"{request.line.line_id}.wav"
 
     logger.info(
         "[VoiceServer] Synthesizing line %s (speaker='%s', text_len=%d, emotion='%s')",
@@ -551,16 +657,59 @@ def generate_chapter(request: GenerateChapterRequest, fast_req: Request):
     _safe_workspace_project(request.project_id)
     _enforce_workspace_quota()
     cancellation = threading.Event()
-    with run_state_lock:
-        if request.project_id in active_project_runs:
-            raise HTTPException(
-                status_code=409,
-                detail="A chapter request is already active for this project",
-            )
-        active_project_runs[request.project_id] = cancellation
+    acquired = False
+    for _ in range(RUN_SLOT_POLL_ATTEMPTS):
+        with run_state_lock:
+            if request.project_id not in active_project_runs:
+                active_project_runs[request.project_id] = cancellation
+                acquired = True
+                break
+        time.sleep(RUN_SLOT_POLL_INTERVAL_SECONDS)
 
-    import queue
+    if not acquired:
+        # Signal the incumbent run and wait for it to actually release the
+        # slot. Previously the registry entry was overwritten immediately, so a
+        # second worker started and then blocked on `gpu_job_lock` for however
+        # long the incumbent took to reach a cancellation boundary -- streaming
+        # nothing but keepalive newlines the whole time, with no diagnostic.
+        with run_state_lock:
+            old_cancellation = active_project_runs.get(request.project_id)
+        if old_cancellation is not None:
+            old_cancellation.set()
+            logger.info(
+                "[VoiceServer] Requested cancellation of the in-flight run for "
+                "'%s'; waiting up to %ss for it to release the slot",
+                request.project_id,
+                RUN_SLOT_TAKEOVER_TIMEOUT_SECONDS,
+            )
+
+        # The incumbent worker's `finally` removes its own registry entry, and
+        # it can only match because this path no longer overwrites the entry
+        # out from under it. So an empty slot is the single acquire condition.
+        deadline = time.monotonic() + RUN_SLOT_TAKEOVER_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            with run_state_lock:
+                if request.project_id not in active_project_runs:
+                    active_project_runs[request.project_id] = cancellation
+                    acquired = True
+                    break
+            time.sleep(RUN_SLOT_POLL_INTERVAL_SECONDS)
+
+        if not acquired:
+            # Refuse rather than silently queueing behind a job that will not
+            # stop. The caller can retry once the incumbent finishes.
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    f"A generation run for '{request.project_id}' is still "
+                    f"finishing after {RUN_SLOT_TAKEOVER_TIMEOUT_SECONDS}s. "
+                    "Cancellation was requested; retry once it releases."
+                ),
+            )
+
     import json
+    import queue
+
     q = queue.Queue()
 
     def _stream_progress(msg: dict[str, Any]) -> None:
@@ -571,12 +720,13 @@ def generate_chapter(request: GenerateChapterRequest, fast_req: Request):
         torch_module = None
         try:
             import torch
+
             if torch.cuda.is_available():
                 torch.cuda.reset_peak_memory_stats()
                 torch_module = torch
         except Exception as exc:
             logger.debug("Peak VRAM reset unavailable: %s", exc)
-            
+
         try:
             with gpu_job():
                 result = validator.process_chapter(
@@ -596,8 +746,8 @@ def generate_chapter(request: GenerateChapterRequest, fast_req: Request):
             if torch_module is not None:
                 try:
                     result.peak_vram_gb = torch_module.cuda.max_memory_allocated() / 1e9
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Could not read peak VRAM; the response will report none: %s", exc)
             elapsed = time.time() - t0
             logger.info(
                 "[VoiceServer] Chapter %d finished in %.2fs: %d/%d lines generated, %d failed",
@@ -611,7 +761,7 @@ def generate_chapter(request: GenerateChapterRequest, fast_req: Request):
         except GenerationCancelled as exc:
             q.put({"type": "error", "error": "cancelled", "detail": str(exc)})
         except Exception as exc:
-            logger.error("Generation error: %s", exc)
+            logger.exception("Generation error: %s", exc)
             q.put({"type": "error", "error": "exception", "detail": str(exc)})
         finally:
             with run_state_lock:
@@ -632,7 +782,7 @@ def generate_chapter(request: GenerateChapterRequest, fast_req: Request):
                     if msg.get("type") in ("result", "error"):
                         break
                 except queue.Empty:
-                    yield "\n" # keepalive
+                    yield "\n"  # keepalive
         finally:
             if await fast_req.is_disconnected():
                 cancellation.set()
@@ -648,9 +798,7 @@ def validate_segment(request: ValidateRequest) -> dict:
     audio_path = Path(request.audio_file).resolve()
     allowed_roots = [
         _workspace(),
-        Path(
-            config.get("storage", {}).get("voice_library_dir", "voice_library")
-        ).resolve(),
+        Path(config.get("storage", {}).get("voice_library_dir", "voice_library")).resolve(),
     ]
     if not any(audio_path.is_relative_to(root) for root in allowed_roots):
         raise HTTPException(status_code=403, detail="Audio path is outside allowed storage")
@@ -690,14 +838,9 @@ def master_chapter(request: MasterChapterRequest) -> MasterChapterResponse:
         if not narrator_ref.is_file():
             raise HTTPException(
                 status_code=422,
-                detail=(
-                    "Selected narrator voice is required for chapter "
-                    f"announcements: {request.narrator_voice_id}"
-                ),
+                detail=(f"Selected narrator voice is required for chapter announcements: {request.narrator_voice_id}"),
             )
-        announcement_text = request.chapter_title.strip() or (
-            f"Chapter {request.chapter_number}"
-        )
+        announcement_text = request.chapter_title.strip() or (f"Chapter {request.chapter_number}")
         with gpu_job():
             announcement_audio = engine.generate_speech(
                 text=announcement_text,
@@ -739,6 +882,7 @@ def master_chapter(request: MasterChapterRequest) -> MasterChapterResponse:
         file_size_mb=output_path.stat().st_size / (1024 * 1024),
         join_warnings=int(assembled.get("join_warnings", 0)),
         join_diagnostics=assembled.get("join_diagnostics", []),
+        timeline=assembled.get("timeline", []),
     )
 
 
@@ -763,7 +907,7 @@ def export_m4b(request: ExportM4BRequest) -> ExportM4BResponse:
         cover = Path(request.cover_art).resolve()
         project_roots = [
             _safe_workspace_project(request.project_id),
-            _safe_storage_project(Path("brain/projects"), request.project_id),
+            _safe_storage_project(shared_paths.PROJECTS_DIR, request.project_id),
         ]
         if not any(cover.is_relative_to(root) for root in project_roots):
             raise HTTPException(status_code=403, detail="Cover path is outside project storage")
@@ -784,7 +928,7 @@ def export_m4b(request: ExportM4BRequest) -> ExportM4BResponse:
 def download_file(project_id: str, path: str):
     """Download a file from the workspace."""
     project_dir = _safe_workspace_project(project_id)
-    
+
     file_path = (project_dir / path).resolve()
     if not file_path.is_relative_to(project_dir):
         raise HTTPException(status_code=403, detail="Access denied")
@@ -841,22 +985,43 @@ async def cancel_project(project_id: str):
 
 
 @app.post("/unload")
-async def unload_models():
-    """Unload all TTS and Whisper models from GPU VRAM instantly."""
+def unload_models():
+    """Unload all TTS and Whisper models from GPU VRAM instantly.
+
+    Deliberately a synchronous endpoint using a *non-blocking* lock acquire.
+
+    ``gpu_job()`` holds ``gpu_job_lock`` for the entire duration of a chapter
+    generation, which can be many minutes. An ``async def`` handler that
+    blocked on that lock would stall the uvicorn event loop and freeze
+    ``/health``, ``/cancel/{project_id}`` and ``/ws/progress`` along with it --
+    precisely the endpoints an operator needs in order to release the lock.
+    That also made the 409 below unreachable, because the busy check sat behind
+    the very acquire that a busy job blocks.
+
+    Failing fast instead keeps cancellation reachable and makes "busy" an
+    explicit, actionable response.
+    """
     global engine, validator
-    unloaded = []
-    with gpu_job_lock:
+    if not gpu_job_lock.acquire(blocking=False):
+        raise HTTPException(
+            status_code=409,
+            detail="Models are busy; cancel the project and wait for acknowledgement",
+        )
+    try:
         if active_gpu_jobs:
             raise HTTPException(
                 status_code=409,
                 detail="Models are busy; cancel the project and wait for acknowledgement",
             )
+        unloaded = []
         if engine:
             engine.unload()
             unloaded.append("qwen3_tts")
         if validator and validator.whisper.is_loaded:
             validator.whisper.unload()
             unloaded.append("whisper")
+    finally:
+        gpu_job_lock.release()
     logger.info("[VoiceServer] Unloaded models on request: %s", unloaded)
     return {"status": "unloaded", "models": unloaded}
 
@@ -869,6 +1034,7 @@ async def unload_models():
 def main():
     """Run the Voice server."""
     import argparse
+
     import uvicorn
 
     parser = argparse.ArgumentParser(description="Crazy Audiobook Creator — Voice Server")
@@ -882,10 +1048,11 @@ def main():
 
     host = args.host or server_cfg.get("host", "127.0.0.1")
     port = args.port or server_cfg.get("port", 8100)
-    token = server_cfg.get("api_token", "")
-    if host not in ("127.0.0.1", "localhost", "::1") and not token:
+    if host not in ("127.0.0.1", "localhost", "::1") and not configured_voice_token(cfg):
         raise RuntimeError(
-            "Refusing to bind Voice Server beyond loopback without server.api_token"
+            "Refusing to bind Voice Server beyond loopback without a token. "
+            f"Set server.api_token in voice/config.yaml or {VOICE_TOKEN_ENV_VAR} "
+            "in the environment."
         )
 
     logging.basicConfig(

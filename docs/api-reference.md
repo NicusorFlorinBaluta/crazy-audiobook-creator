@@ -1,5 +1,7 @@
 # API Reference
 
+**Status:** Reference — Describes current behaviour. Keep it accurate when the code changes.
+
 The application has two local FastAPI services:
 
 - Dashboard/Brain: `http://127.0.0.1:8000`
@@ -22,7 +24,7 @@ FastAPI’s generated OpenAPI schema at `/docs` is the definitive field-level re
 | `POST` | `/api/projects` | Upload an EPUB as multipart field `file` |
 | `GET` | `/api/projects/{project_id}` | Get stored state |
 | `DELETE` | `/api/projects/{project_id}` | Delete stopped project state, artifacts, and voice references |
-| `GET` | `/api/projects/{project_id}/status` | State plus per-chapter progress |
+| `GET` | `/api/projects/{project_id}/status` | State, compact cast summary, and per-chapter progress (full cast intentionally omitted) |
 
 Uploads must have an `.epub` suffix, remain under the configured compressed/expanded limits, and pass ZIP traversal/compression checks.
 
@@ -31,7 +33,7 @@ Uploads must have an `.epub` suffix, remain under the configured compressed/expa
 | Method | Route | Purpose |
 |---|---|---|
 | `POST` | `/api/projects/{project_id}/start` | Start/resume the project |
-| `POST` | `/api/projects/{project_id}/stop` | Immediately interrupt work and release app-owned services |
+| `POST` | `/api/projects/{project_id}/stop` | Immediately interrupt work and release app-owned services; `?resume_on_schedule=true` parks it for the next configured work window when currently outside working hours |
 | `POST` | `/api/projects/{project_id}/reset` | Reset to extracting, scripting, bootstrapping, voice_review, generating, validating, mastering, or exporting |
 | `POST` | `/api/projects/{project_id}/voice-review/approve` | Approve speaking voice cast and continue audio generation |
 | `POST` | `/api/projects/{project_id}/request-deploy` | Park at the next chapter boundary |
@@ -64,9 +66,9 @@ Accepts `{"stage": "<stage_name>"}` where `<stage_name>` is one of 8 supported s
 - **`scripting`**: Clears script JSONs and character cast, keeping extracted EPUB text. Forces fresh LLM character analysis.
 - **`bootstrapping`**: Clears `voice_cast.json`, marks reference generation as forced, and regenerates voice profiles on resume.
 - **`voice_review`**: Resets `voice_review_status` to `"pending"` and sets `active_stage = voice_review`, re-opening the Voice Review banner in the UI.
-- **`generating`**: Clears generated segment WAV files and resets `mastered_chapters = []`. Keeps script and voice cast intact.
-- **`validating`**: Preserves segment WAVs, changes the validation revision, removes segment/master manifests, and re-runs Whisper/speaker/audio checks without re-synthesizing unchanged lines.
-- **`mastering`**: Clears `mastered/` WAV files and `.m4b` export. Re-runs ffmpeg/sox chapter mastering.
+- **`generating`**: Clears generated segment WAV files, segment/master manifests, current audio-quality/review evidence, and mastered chapter WAVs. Keeps script and voice cast intact.
+- **`validating`**: Preserves segment WAVs, changes the validation revision, removes segment/master manifests and current audio-quality/review evidence, then re-runs Whisper/speaker/audio checks without re-synthesizing unchanged lines.
+- **`mastering`**: Clears current mastered chapter WAVs under `workspace/{project_id}/chapters`, master manifests, join-review evidence, and `.m4b` export. Re-runs ffmpeg/sox chapter mastering.
 - **`exporting`**: Removes `.m4b` export file to re-run M4B packaging.
 
 ### Chapter selection
@@ -98,16 +100,31 @@ Analysis and scripting remain book-wide. Selection controls generation, masterin
 | `GET` | `/api/projects/{project_id}/voices/download-all` | Download all prepared character and narrator references as a ZIP |
 | `GET` | `/api/projects/{project_id}/voices/{voice_id}/preview` | Stream a reference-voice WAV |
 | `PATCH` | `/api/projects/{project_id}/characters/{character_id}/voice` | Reassign a character to a voice |
+| `PATCH` | `/api/projects/{project_id}/characters/{character_id}/profile` | Save a persistent human correction to voice-relevant character metadata and invalidate only dependent chapters |
 | `POST` | `/api/projects/{project_id}/voices/{voice_id}/regenerate` | Redesign and validate one reference voice |
 | `POST` | `/api/projects/{project_id}/voices/{voice_id}/upload` | Import a recorded reference plus exact transcript |
 | `POST` | `/api/projects/{project_id}/voice-review/approve` | Approve a new project's cast and optionally continue |
-| `GET` | `/api/projects/{project_id}/quality` | Aggregate quality results |
+| `GET` | `/api/projects/{project_id}/quality` | Aggregate current-generation quality results, noteworthy final attempts, retried-line history, and stale-result count |
 | `GET` | `/api/projects/{project_id}/logs` | Recent project log lines |
 | `GET` | `/api/projects/{project_id}/logs/stream` | SSE project log stream |
 | `POST` | `/api/projects/{project_id}/fetch-metadata` | Explicit Google Books lookup |
 | `POST` | `/api/projects/{project_id}/search-metadata` | Ranked manual Google Books title/author search |
 | `GET` | `/api/projects/{project_id}/metadata-candidate/cover` | Preview the cached matched cover |
 | `GET` | `/api/projects/{project_id}/cover` | Display the project's current cover |
+| `GET` | `/api/projects/{project_id}/stream` | Stream the full M4B with HTTP byte ranges |
+| `GET` | `/api/projects/{project_id}/stream/chapter/{number}` | Stream chapter audio with on-demand transparent 128k AAC compression |
+
+### Mobile Companion API (`/api/mobile/v1`)
+
+The Mobile Companion API powers the **CrazyVoice** Android app with compatibility discovery, incremental catalog browsing, chapter navigation, and two-way progress syncing. `server-info` is public; every catalog, manifest, media, download, and progress route uses the dashboard LAN/token authorization policy described above. Remote clients send `X-API-Token`.
+
+| Method | Route | Purpose |
+|---|---|---|
+| `GET` | `/api/mobile/v1/server-info` | Server status and client compatibility info |
+| `GET` | `/api/mobile/v1/catalog` | Catalog overview (`?status=all\|mastered\|in_progress`) with cover URLs, delivery badges, and durations |
+| `GET` | `/api/mobile/v1/books/{project_id}` | Full book detail with rich chapter manifests, narrator, series, and exact start/end millisecond offsets |
+| `POST` | `/api/mobile/v1/books/{project_id}/progress` | Persist mobile playback progress (chapter, timestamp, speed, completion) |
+| `GET` | `/api/mobile/v1/books/{project_id}/progress` | Retrieve latest saved playback position for seamless cross-device resume |
 
 Project IDs and all resolved files are constrained beneath the project/workspace roots.
 
@@ -167,8 +184,8 @@ The Brain normally calls these routes. Direct callers must use project-relative 
 | Method | Route | Purpose |
 |---|---|---|
 | `GET` | `/health` | Service/model/GPU health |
-| `POST` | `/cancel/{project_id}` | Mark active project generation cancelled |
-| `POST` | `/unload` | Unload models after the active GPU operation |
+| `POST` | `/cancel/{project_id}` | Mark active project generation cancelled. Never blocks on the GPU lock, so it remains answerable while a chapter is running |
+| `POST` | `/unload` | Unload models. Returns `409` immediately while a GPU job is active rather than waiting: a chapter holds the GPU lock for minutes, and a blocking wait here would freeze `/cancel`, `/health` and `/ws/progress` — the endpoints needed to release it. Cancel first, then unload |
 | `WS` | `/ws/progress` | Generation progress stream |
 
 ### Voice references
@@ -220,7 +237,21 @@ Chapter generation accepts:
 }
 ```
 
-`POST /generate/chapter` returns `application/x-ndjson`. Each line is an object with `type = progress`, `result`, or `error`. Progress data includes `phase` (`synthesis` or `validation`), `line_id`, `completed`, `total`, `percent`, `cache_hit`, and `attempt`. A client disconnect cooperatively cancels the run; a second overlapping request for the same project returns `409`.
+`POST /generate/chapter` returns `application/x-ndjson`. Each line is an object with `type = progress`, `result`, or `error`. Progress data includes `phase` (`synthesis` or `validation`), `line_id`, `completed`, `total`, `percent`, `cache_hit`, and `attempt`. A client disconnect cooperatively cancels the run.
+
+A second overlapping request for the same project first polls briefly for the
+run slot, then signals the in-flight run to cancel and waits a bounded period
+for it to release. If the incumbent has not released by then the request
+returns `503` with the reason, rather than silently queueing behind a job that
+may not stop. Retry once the incumbent finishes.
+
+`POST /voices/bootstrap/stream` uses the same NDJSON envelope for long-running
+voice preparation. Its privacy-safe progress data contains only `phase`,
+`completed`, `total`, and a generic message; it never includes reference text.
+Phases are `loading_voice_design`, `designing_references`,
+`validating_transcripts`, `measuring_references`, `comparing_cast`, and
+`complete`. The non-streaming `/voices/bootstrap` endpoint remains available
+for compatibility.
 
 The terminal result includes `generated_line_ids`, `failed_line_ids`, and every `quality_results` attempt. `validation_terms` comes from character and pronunciation dictionaries and only scopes fuzzy fantasy-name matching. Success requires an exact one-to-one match with the request’s unique script line IDs. A partial/misaligned response is not a successful chapter.
 
@@ -241,7 +272,7 @@ Mastering fails on any missing, empty, or unreadable expected segment. Export fa
 - `404`: project or artifact not found
 - `409`: already running, cancellation, or conflicting GPU lifecycle action
 - `500`: generation, validation, mastering, or export failure
-- `503`: service/model unavailable
+- `503`: service/model unavailable, or a generation run for the project has not yet released its slot
 
 Clients should treat only an explicit success response with complete artifact IDs as completion; HTTP success plus a partial line set is not sufficient.
 
@@ -257,7 +288,7 @@ Clients should treat only an explicit success response with complete artifact ID
 | `GET` | `/api/projects/{id}/quality/review` | Join warnings and low-confidence/rejected segment audio with saved dispositions |
 | `POST` | `/api/projects/{id}/quality/review` | Save a review disposition; segment `regenerate` safely invalidates only that WAV and its dependent chapter outputs |
 | `GET` | `/api/projects/{id}/segments/{line_id}/audio` | Stream one segment for local quality review |
-| `GET` | `/api/projects/{id}/external-validation/status` | Read Gemini API/browser readiness and persistent-chat purposes without secrets or URLs |
+| `GET` | `/api/projects/{id}/external-validation/status` | Read Gemini API/browser dependency/profile readiness and persistent-chat purposes without secrets or URLs |
 | `GET` | `/api/projects/{id}/voices/{voice_id}/download` | Download a reusable reference WAV named with its book and character |
 
 Quality attempts include `selected`. This identifies the artifact that was

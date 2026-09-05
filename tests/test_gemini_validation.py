@@ -6,7 +6,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from brain.orchestrator.pipeline import Pipeline
-from brain.validators.gemini_validation import GeminiValidationService
+from brain.validators.gemini_validation import (
+    ExtractionBatch,
+    GeminiApiClient,
+    GeminiValidationService,
+    _extract_json,
+    _gemini_response_schema,
+)
 from shared.constants import ValidationStatus
 from shared.models import QualityResult, ScriptChapter, ScriptLine
 
@@ -37,6 +43,7 @@ def _service(root: Path) -> GeminiValidationService:
             "enabled": True,
             "auto_accept_confidence": 0.9,
             "manual_review_confidence": 0.75,
+            "character_augmentation": {"enabled": True},
             "api": {
                 "enabled": True,
                 "triage_model": "lite",
@@ -49,20 +56,117 @@ def _service(root: Path) -> GeminiValidationService:
 
 
 class GeminiAttributionValidationTests(unittest.TestCase):
+    def test_web_json_parser_accepts_trailing_explanation(self) -> None:
+        self.assertEqual(
+            _extract_json('{"decisions": []}\nDone.'),
+            {"decisions": []},
+        )
+
+    def test_gemini_schema_inlines_pydantic_definitions(self) -> None:
+        schema = _gemini_response_schema(ExtractionBatch.model_json_schema())
+        encoded = str(schema)
+        self.assertNotIn("$defs", encoded)
+        self.assertNotIn("$ref", encoded)
+        self.assertEqual(
+            schema["properties"]["decisions"]["items"]["type"],
+            "object",
+        )
+
+    def test_extraction_uses_high_confidence_api_result_and_bounded_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            service = _service(root)
+            service.api = _FakeApi(
+                [
+                    {
+                        "decisions": [
+                            {
+                                "item_id": "appendix-1",
+                                "decision": "include",
+                                "confidence": 0.96,
+                                "reason": "The appendix is continuous narrative.",
+                            }
+                        ]
+                    }
+                ]
+            )
+            service.web = _FakeWeb()
+            result = service.resolve_extraction_sections(
+                project_dir=root,
+                sections=[
+                    {
+                        "item_id": "appendix-1",
+                        "href": "appendix.xhtml",
+                        "title": "Appendix: The Trial",
+                        "word_count": 2400,
+                        "semantics": ["appendix"],
+                        "decision": "exclude",
+                        "confidence": 0.7,
+                        "classifier_excerpt": "x" * 900,
+                    }
+                ],
+            )
+            self.assertEqual(result["decisions"]["appendix-1"]["decision"], "include")
+            prompt = service.api.calls[0]["prompt"]
+            self.assertLess(prompt.count("x"), 500)
+            self.assertEqual(service.web.calls, [])
+
+    def test_extraction_browser_fallback_reuses_extraction_conversation_purpose(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            service = _service(root)
+            abstain = {
+                "decisions": [
+                    {
+                        "item_id": "section-1",
+                        "decision": "abstain",
+                        "confidence": 0.7,
+                        "reason": "Unclear.",
+                    }
+                ]
+            }
+            service.api = _FakeApi([abstain, abstain])
+            service.web = _FakeWeb(
+                [
+                    {
+                        "decisions": [
+                            {
+                                "item_id": "section-1",
+                                "decision": "reference",
+                                "confidence": 0.95,
+                                "reason": "Glossary-like reference material.",
+                            }
+                        ]
+                    }
+                ]
+            )
+            result = service.resolve_extraction_sections(
+                project_dir=root,
+                sections=[{"item_id": "section-1", "title": "Names", "word_count": 800}],
+            )
+            self.assertEqual(result["decisions"]["section-1"]["decision"], "reference")
+            self.assertEqual(service.web.calls[0][1], "extraction_v1")
+
     def test_high_confidence_api_decision_resolves_and_records_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             service = _service(root)
-            service.api = _FakeApi([{
-                "decisions": [{
-                    "item_id": "ch01_0001",
-                    "decision": "resolved",
-                    "speaker_id": "alice",
-                    "confidence": 0.97,
-                    "reason": "The attached speech tag names Alice.",
-                    "evidence": "Alice said",
-                }]
-            }])
+            service.api = _FakeApi(
+                [
+                    {
+                        "decisions": [
+                            {
+                                "item_id": "ch01_0001",
+                                "decision": "resolved",
+                                "speaker_id": "alice",
+                                "confidence": 0.97,
+                                "reason": "The attached speech tag names Alice.",
+                                "evidence": "Alice said",
+                            }
+                        ]
+                    }
+                ]
+            )
             service.web = _FakeWeb()
             line = ScriptLine(
                 line_id="ch01_0001",
@@ -88,16 +192,76 @@ class GeminiAttributionValidationTests(unittest.TestCase):
             self.assertEqual(line.attribution_confidence_history[-1]["confidence"], 0.97)
             self.assertTrue((root / "external_validation" / "attribution.json").is_file())
 
+    def test_named_identity_cannot_be_auto_mapped_to_generic_speaker(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            invalid = {
+                "decisions": [
+                    {
+                        "item_id": "ch01_0001",
+                        "decision": "resolved",
+                        "speaker_id": "minor_female",
+                        "confidence": 1.0,
+                        "reason": "The line is attributed to Tuka.",
+                        "evidence": '"Wait," Tuka said.',
+                    }
+                ]
+            }
+            service = _service(root)
+            service.api = _FakeApi([invalid, invalid])
+            service.web = _FakeWeb([invalid])
+            line = ScriptLine(
+                line_id="ch01_0001",
+                speaker="minor_female",
+                speaker_confidence=0.3,
+                attribution_review_required=True,
+                attribution_review_reason="Missing named candidate",
+                text='"Wait," Tuka said.',
+            )
+
+            summary = service.resolve_attributions(
+                project_dir=root,
+                chapters=[
+                    ScriptChapter(
+                        chapter_number=1,
+                        chapter_title="One",
+                        lines=[line],
+                    )
+                ],
+                character_ids={"narrator", "minor_female"},
+                character_context={
+                    "narrator": {"id": "narrator", "name": "Narrator"},
+                    "minor_female": {
+                        "id": "minor_female",
+                        "name": "Unnamed Woman",
+                    },
+                },
+            )
+
+            self.assertEqual(summary["resolved"], 0)
+            self.assertEqual(summary["manual_review"], 1)
+            self.assertTrue(line.attribution_review_required)
+            self.assertEqual(line.speaker, "minor_female")
+            self.assertIn(
+                "different or missing character",
+                line.attribution_review_reason,
+            )
+            self.assertTrue(all("validation_error" in entry for entry in line.attribution_confidence_history[1:]))
+
     def test_inconclusive_api_stages_use_persistent_web_purpose_then_stay_manual(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            low = lambda confidence: {"decisions": [{
-                "item_id": "ch01_0001",
-                "decision": "abstain",
-                "speaker_id": None,
-                "confidence": confidence,
-                "reason": "Insufficient source evidence.",
-            }]}
+            low = lambda confidence: {
+                "decisions": [
+                    {
+                        "item_id": "ch01_0001",
+                        "decision": "abstain",
+                        "speaker_id": None,
+                        "confidence": confidence,
+                        "reason": "Insufficient source evidence.",
+                    }
+                ]
+            }
             service = _service(root)
             service.api = _FakeApi([low(0.55), low(0.7)])
             service.web = _FakeWeb([low(0.72)])
@@ -118,7 +282,193 @@ class GeminiAttributionValidationTests(unittest.TestCase):
             self.assertTrue(line.attribution_review_required)
             self.assertEqual(len(line.attribution_confidence_history), 4)
             self.assertEqual(line.attribution_confidence_history[0]["resolver"], "local")
-            self.assertEqual(service.web.calls[0][1], "attribution")
+            self.assertEqual(service.web.calls[0][1], "attribution_v2")
+
+    def test_attribution_batches_and_candidates_stay_chapter_local(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            service = _service(root)
+            service.api = _FakeApi(
+                [
+                    {
+                        "decisions": [
+                            {
+                                "item_id": "ch01_0001",
+                                "decision": "resolved",
+                                "speaker_id": "alice",
+                                "confidence": 0.96,
+                                "reason": "Alice is named.",
+                                "evidence": "Alice said",
+                            }
+                        ]
+                    },
+                    {
+                        "decisions": [
+                            {
+                                "item_id": "ch02_0001",
+                                "decision": "resolved",
+                                "speaker_id": "bob",
+                                "confidence": 0.96,
+                                "reason": "Bob is named.",
+                                "evidence": "Bob said",
+                            }
+                        ]
+                    },
+                ]
+            )
+            service.web = _FakeWeb()
+            chapters = [
+                ScriptChapter(
+                    chapter_number=1,
+                    chapter_title="One",
+                    lines=[
+                        ScriptLine(
+                            line_id="ch01_0001",
+                            speaker="narrator",
+                            attribution_review_required=True,
+                            text='"Wait," Alice said.',
+                        )
+                    ],
+                ),
+                ScriptChapter(
+                    chapter_number=2,
+                    chapter_title="Two",
+                    lines=[
+                        ScriptLine(
+                            line_id="ch02_0001",
+                            speaker="narrator",
+                            attribution_review_required=True,
+                            text='"Go," Bob said.',
+                        )
+                    ],
+                ),
+            ]
+            result = service.resolve_attributions(
+                project_dir=root,
+                chapters=chapters,
+                character_ids={"narrator", "alice", "bob"},
+                character_context={
+                    "alice": {"id": "alice", "name": "Alice", "aliases": []},
+                    "bob": {"id": "bob", "name": "Bob", "aliases": []},
+                    "narrator": {"id": "narrator", "name": "Narrator", "aliases": []},
+                },
+            )
+            self.assertEqual(result["resolved"], 2)
+            self.assertEqual(len(service.api.calls), 2)
+            self.assertIn('"alice"', service.api.calls[0]["prompt"])
+            self.assertNotIn('"bob"', service.api.calls[0]["prompt"])
+            self.assertIn('"bob"', service.api.calls[1]["prompt"])
+            self.assertNotIn('"alice"', service.api.calls[1]["prompt"])
+
+    def test_existing_chapter_speaker_remains_an_allowed_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            service = _service(root)
+            service.api = _FakeApi(
+                [
+                    {
+                        "decisions": [
+                            {
+                                "item_id": "ch01_0002",
+                                "decision": "resolved",
+                                "speaker_id": "alice",
+                                "confidence": 0.97,
+                                "reason": "The turn alternates back to Alice.",
+                                "evidence": "Alice owns the preceding side of the exchange.",
+                            }
+                        ]
+                    }
+                ]
+            )
+            service.web = _FakeWeb()
+            chapter = ScriptChapter(
+                chapter_number=1,
+                chapter_title="One",
+                lines=[
+                    ScriptLine(
+                        line_id="ch01_0001",
+                        speaker="alice",
+                        text='"I understand."',
+                    ),
+                    ScriptLine(
+                        line_id="ch01_0002",
+                        speaker="minor_female",
+                        speaker_confidence=0.4,
+                        attribution_review_required=True,
+                        text='"Then we agree."',
+                    ),
+                    ScriptLine(
+                        line_id="ch01_0003",
+                        speaker="narrator",
+                        text="Bob left the room.",
+                    ),
+                ],
+            )
+
+            result = service.resolve_attributions(
+                project_dir=root,
+                chapters=[chapter],
+                character_ids={"narrator", "alice", "bob", "minor_female"},
+                character_context={
+                    "alice": {"id": "alice", "name": "Alice", "aliases": []},
+                    "bob": {"id": "bob", "name": "Bob", "aliases": []},
+                    "narrator": {"id": "narrator", "name": "Narrator", "aliases": []},
+                    "minor_female": {
+                        "id": "minor_female",
+                        "name": "Unnamed Woman",
+                        "aliases": [],
+                    },
+                },
+            )
+
+            self.assertEqual(result["resolved"], 1)
+            self.assertEqual(chapter.lines[1].speaker, "alice")
+            self.assertIn('"alice"', service.api.calls[0]["prompt"])
+
+    def test_character_augmentation_requires_verbatim_grounding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            service = _service(root)
+            ungrounded = {
+                "decisions": [
+                    {
+                        "character_id": "alice",
+                        "decision": "update",
+                        "confidence": 0.99,
+                        "reason": "Inferred",
+                        "evidence": ["This sentence is not in the source."],
+                        "gender": "female",
+                        "voice_description": "bright precise voice",
+                    }
+                ]
+            }
+            grounded = {
+                "decisions": [
+                    {
+                        "character_id": "alice",
+                        "decision": "update",
+                        "confidence": 0.96,
+                        "reason": "Grounded",
+                        "evidence": ["Alice answered in a clear, deliberate voice."],
+                        "gender": "female",
+                        "voice_description": "bright precise voice",
+                    }
+                ]
+            }
+            service.api = _FakeApi([ungrounded, grounded])
+            service.web = _FakeWeb()
+            result = service.augment_characters(
+                project_dir=root,
+                dossier={
+                    "alice": {
+                        "current_gender": "other",
+                        "evidence_snippets": ["Alice answered in a clear, deliberate voice."],
+                    }
+                },
+            )
+            self.assertIn("alice", result["accepted"])
+            self.assertEqual(result["review"], [])
+            self.assertTrue((root / "character_augmentation_audit.json").is_file())
 
 
 class GeminiAudioValidationTests(unittest.TestCase):
@@ -152,13 +502,17 @@ class GeminiAudioValidationTests(unittest.TestCase):
             audio = root / "line.wav"
             audio.write_bytes(b"RIFF")
             service = _service(root)
-            service.api = _FakeApi([{
-                "item_id": "line",
-                "decision": "accept",
-                "confidence": 0.96,
-                "reason": "Speech is clear and natural.",
-                "defects": [],
-            }])
+            service.api = _FakeApi(
+                [
+                    {
+                        "item_id": "line",
+                        "decision": "accept",
+                        "confidence": 0.96,
+                        "reason": "Speech is clear and natural.",
+                        "defects": [],
+                    }
+                ]
+            )
             service.web = _FakeWeb()
             result = QualityResult(
                 line_id="line",
@@ -220,6 +574,186 @@ class GeminiAudioValidationTests(unittest.TestCase):
 
             self.assertEqual(regenerate, {"line"})
             self.assertEqual(manual, {"line"})
+
+
+class GeminiApiClientPacingTests(unittest.TestCase):
+    def test_client_respects_request_interval(self) -> None:
+        from unittest.mock import MagicMock, patch
+
+        with tempfile.TemporaryDirectory() as directory:
+            client = GeminiApiClient(
+                {
+                    "enabled": True,
+                    "request_interval_seconds": 0.05,
+                    "max_attempts": 2,
+                },
+                Path(directory),
+            )
+            client.api_key = "test_key"
+
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = {"candidates": [{"content": {"parts": [{"text": '{"decision": "accept"}'}]}}]}
+
+            with patch("httpx.post", return_value=mock_resp) as mock_post, patch("time.sleep") as mock_sleep:
+                client._last_request_time = 100.0
+                with patch("time.monotonic", side_effect=[100.01, 100.05, 100.1, 100.1]):
+                    res = client.generate_json(
+                        model="gemini-3.5-flash-lite",
+                        prompt="test prompt",
+                        schema={"type": "object"},
+                    )
+                    self.assertEqual(res, {"decision": "accept"})
+                    mock_sleep.assert_called_once()
+                    self.assertAlmostEqual(mock_sleep.call_args[0][0], 0.04, places=2)
+
+    def test_client_honors_retry_after_on_429(self) -> None:
+        from unittest.mock import MagicMock, patch
+
+        with tempfile.TemporaryDirectory() as directory:
+            client = GeminiApiClient(
+                {
+                    "enabled": True,
+                    "request_interval_seconds": 0.0,
+                    "max_attempts": 3,
+                },
+                Path(directory),
+            )
+            client.api_key = "test_key"
+
+            resp_429 = MagicMock()
+            resp_429.status_code = 429
+            resp_429.headers = {"Retry-After": "5"}
+
+            resp_200 = MagicMock()
+            resp_200.status_code = 200
+            resp_200.json.return_value = {"candidates": [{"content": {"parts": [{"text": '{"ok": true}'}]}}]}
+
+            with patch("httpx.post", side_effect=[resp_429, resp_200]), patch("time.sleep") as mock_sleep:
+                res = client.generate_json(
+                    model="gemini-3.5-flash-lite",
+                    prompt="test prompt",
+                    schema={"type": "object"},
+                )
+                self.assertEqual(res, {"ok": True})
+                mock_sleep.assert_called_once_with(5.0)
+
+
+class GeminiResponseSchemaTests(unittest.TestCase):
+    """What `generateContent` will and will not accept in a responseSchema.
+
+    Measured against gemini-3.5-flash and -flash-lite on 2026-09-04: any
+    schema carrying `maxItems` is rejected with a bare `400 INVALID_ARGUMENT`,
+    as an integer or as a string, even though the key appears in the published
+    subset. Found by bisecting a failing schema one key at a time after a cast
+    adjudication call 400ed in a live run.
+
+    The damage was not limited to the new cast passes. `CharacterAugmentationBatch`
+    carries `maxItems` too and predates them, so its API tier had been failing
+    and silently escalating for as long as it has existed.
+    """
+
+    def _keys(self, node, found=None):
+        found = set() if found is None else found
+        if isinstance(node, dict):
+            for key, value in node.items():
+                found.add(key)
+                self._keys(value, found)
+        elif isinstance(node, list):
+            for value in node:
+                self._keys(value, found)
+        return found
+
+    def test_no_shipped_schema_reaches_the_api_with_maxitems(self) -> None:
+        from brain.validators import gemini_validation as module
+
+        offenders = []
+        for name in dir(module):
+            model = getattr(module, name)
+            if not isinstance(model, type) or not hasattr(model, "model_json_schema"):
+                continue
+            if not name.endswith(("Batch", "Decision")):
+                continue
+            converted = module._gemini_response_schema(model.model_json_schema())
+            present = self._keys(converted) & {"maxItems", "minItems"}
+            # A property literally named maxItems would be a false positive;
+            # none exists, and this keeps the failure message honest.
+            if present:
+                offenders.append(f"{name}: {sorted(present)}")
+        self.assertEqual(offenders, [], f"these would be rejected with 400: {offenders}")
+
+    def test_the_converter_strips_the_bounds_but_keeps_the_shape(self) -> None:
+        from brain.validators.gemini_validation import _gemini_response_schema
+
+        converted = _gemini_response_schema(
+            {
+                "type": "object",
+                "properties": {
+                    "items": {
+                        "type": "array",
+                        "maxItems": 60,
+                        "minItems": 1,
+                        "items": {"$ref": "#/$defs/Thing"},
+                    }
+                },
+                "required": ["items"],
+                "$defs": {
+                    "Thing": {
+                        "type": "object",
+                        "title": "Thing",
+                        "properties": {"name": {"type": "string", "maxLength": 600}},
+                    }
+                },
+            }
+        )
+        self.assertNotIn("maxItems", converted["properties"]["items"])
+        self.assertNotIn("minItems", converted["properties"]["items"])
+        # The reference is still inlined and the rest survives: maxLength is
+        # accepted by the API, and dropping constraints wholesale would be a
+        # different and worse change.
+        thing = converted["properties"]["items"]["items"]
+        self.assertEqual(thing["properties"]["name"]["maxLength"], 600)
+        self.assertNotIn("title", thing)
+        self.assertEqual(converted["required"], ["items"])
+
+    def test_the_bounds_are_still_enforced_where_it_counts(self) -> None:
+        """Stripping the hint must not stop the model from being validated.
+
+        The API never guaranteed the bound anyway. Pydantic does, on the way
+        back in, which is the only place it was ever load-bearing.
+        """
+        from pydantic import ValidationError
+
+        from brain.validators.gemini_validation import CastRosterBatch
+
+        too_many = {"proposals": [{"left_id": "a", "right_id": "b", "confidence": 0.9, "reason": "x"}] * 61}
+        with self.assertRaises(ValidationError):
+            CastRosterBatch.model_validate(too_many)
+
+
+class EscalationFailureReportingTests(unittest.TestCase):
+    """A failure has to say enough to act on."""
+
+    def test_the_summary_keeps_the_response_body(self) -> None:
+        from brain.validators.gemini_validation import _failure_summary
+
+        exc = Exception(
+            "Client error '400 Bad Request' for url 'https://x'\n"
+            "For more information check: https://mdn\n"
+            '; response={ "error": { "status": "INVALID_ARGUMENT" } }'
+        )
+        summary = _failure_summary(exc)
+        self.assertIn("INVALID_ARGUMENT", summary, "the body is the part worth keeping")
+        self.assertNotIn("\n", summary, "must stay one log line")
+
+    def test_a_rejected_request_is_not_reported_as_an_outage(self) -> None:
+        from brain.validators.gemini_validation import _is_malformed_request
+
+        self.assertTrue(_is_malformed_request("400 Bad Request INVALID_ARGUMENT"))
+        self.assertTrue(_is_malformed_request("404 Not Found"))
+        # A rate limit is exactly when escalating is correct, so it is not a bug.
+        self.assertFalse(_is_malformed_request("429 Too Many Requests"))
+        self.assertFalse(_is_malformed_request("503 Service Unavailable"))
 
 
 if __name__ == "__main__":

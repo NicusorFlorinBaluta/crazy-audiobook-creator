@@ -89,7 +89,7 @@ class ValidationTermsTests(unittest.TestCase):
                 "King of the Pantheon": "King-of-the-Pan-thee-on",
             },
         )
-        self.assertEqual(spoken, "King-of-the-Pan-thee-on.")
+        self.assertEqual(spoken, "King of the Pan thee on.")
 
     def test_pronunciation_override_preserves_authored_text(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -119,7 +119,7 @@ class ValidationTermsTests(unittest.TestCase):
         self.assertEqual(prepared[0].text, "Patji watched Patji's shore.")
         self.assertEqual(
             prepared[0].spoken_text,
-            "Pah-chee watched Pah-chee's shore.",
+            "Pah chee watched Pah chee's shore.",
         )
 
     def test_longest_pronunciation_phrase_is_applied_first(self) -> None:
@@ -151,7 +151,7 @@ class ValidationTermsTests(unittest.TestCase):
                 project_dir,
             )
 
-        self.assertEqual(prepared[0].spoken_text, "King-of-the-Pan-thee-on.")
+        self.assertEqual(prepared[0].spoken_text, "King of the Pan thee on.")
 
     def test_invalid_pronunciation_entry_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -244,9 +244,7 @@ class ValidationTermsTests(unittest.TestCase):
             )
             rows = [
                 json.loads(line)
-                for line in (project_dir / "performance_metrics.jsonl")
-                .read_text(encoding="utf-8")
-                .splitlines()
+                for line in (project_dir / "performance_metrics.jsonl").read_text(encoding="utf-8").splitlines()
             ]
 
         self.assertEqual(len(rows), 1)

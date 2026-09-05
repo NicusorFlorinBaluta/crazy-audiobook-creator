@@ -27,6 +27,7 @@ window.PipelineManager = (() => {
 
     let pipelineDisclosureProject = null;
     let pipelineDisclosureInitialized = false;
+    let chapterDetailsMap = new Map();
 
     function init() {
         renderTracker();
@@ -89,6 +90,10 @@ window.PipelineManager = (() => {
                 ) {
                     el.classList.add('active');
                     
+                    if (data && Array.isArray(data.chapter_details)) {
+                        chapterDetailsMap = new Map(data.chapter_details.map(d => [d.number, d.title]));
+                    }
+
                     // Compute percentage based on real metrics from the pipeline state!
                     if (data && percentEl) {
                         let pct = null;
@@ -99,8 +104,17 @@ window.PipelineManager = (() => {
                             || Array.from({length: totalCh}, (_, index) => index + 1);
                         const selectedSet = new Set(selected);
                         const batchTotal = selectedSet.size || totalCh;
+                        const canonicalProgress = data.progress || null;
+                        const canonicalStage = String(
+                            canonicalProgress?.stage || ''
+                        ).toUpperCase();
                         
-                        if (stage === 'SCRIPTING' && data.scripted_chapters) {
+                        if (
+                            canonicalStage === stage
+                            && Number.isFinite(canonicalProgress?.percent)
+                        ) {
+                            pct = canonicalProgress.percent;
+                        } else if (stage === 'SCRIPTING' && data.scripted_chapters) {
                             pct = Number.isFinite(data.work_progress?.stagePercent)
                                 ? data.work_progress.stagePercent
                                 : (
@@ -152,24 +166,14 @@ window.PipelineManager = (() => {
         }
     }
 
-    let _etaState = { startMs: 0, lastPct: 0, phaseKey: '' };
-
     function updateLiveProgress(data) {
         if (!data || !data.message) {
             els.live.classList.remove('active');
             els.live.innerHTML = '';
-            _etaState = { startMs: 0, lastPct: 0, phaseKey: '' };
             return;
         }
 
-        const now = Date.now();
         const percent = Number.isFinite(data.percent) ? data.percent : 0;
-        const phaseKey = data.phase || data.stage || 'work';
-        if (phaseKey !== _etaState.phaseKey || percent < _etaState.lastPct) {
-            _etaState = { startMs: now, lastPct: percent, phaseKey };
-        } else {
-            _etaState.lastPct = percent;
-        }
 
         let etaStr = '';
         if (Number.isFinite(data.eta_seconds)) {
@@ -177,19 +181,24 @@ window.PipelineManager = (() => {
             etaStr = remainingSec > 60
                 ? ` ~${Math.ceil(remainingSec / 60)} min remaining`
                 : ` ~${remainingSec} sec remaining`;
-        } else if (_etaState.startMs && data.percent > 0 && data.percent < 100) {
-            const elapsed = now - _etaState.startMs;
-            const msPerPercent = elapsed / data.percent;
-            const remainingPercent = 100 - data.percent;
-            const remainingMs = remainingPercent * msPerPercent;
-            
-            if (elapsed > 3000) { // Wait 3s before showing ETA
-                const remainingSec = Math.round(remainingMs / 1000);
-                if (remainingSec > 60) {
-                    etaStr = ` ~${Math.ceil(remainingSec / 60)} min remaining`;
-                } else {
-                    etaStr = ` ~${remainingSec} sec remaining`;
-                }
+        }
+
+        let displayMessage = data.message || 'Processing...';
+        if (data.message) {
+            const map = chapterDetailsMap.size > 0
+                ? chapterDetailsMap
+                : new Map((window.state?.currentProject?.chapter_details || []).map(d => [d.number, d.title]));
+            const m = data.message.match(/^(synthesis|validation|scripting|mastering|generating)\s+chapter\s+(\d+):\s*(.*)$/i);
+            if (m) {
+                const phaseName = m[1].charAt(0).toUpperCase() + m[1].slice(1).toLowerCase();
+                const chNum = parseInt(m[2], 10);
+                const bookTitle = map.get(chNum) || `Chapter ${chNum}`;
+                displayMessage = `${phaseName} — ${bookTitle}: ${m[3]}`;
+            } else {
+                displayMessage = displayMessage.replace(/\bchapter\s+(\d+)\b/gi, (match, chStr) => {
+                    const chNum = parseInt(chStr, 10);
+                    return map.get(chNum) || match;
+                });
             }
         }
 
@@ -197,7 +206,7 @@ window.PipelineManager = (() => {
         els.live.innerHTML = `
             <div class="live-dot"></div>
             <div class="live-progress">
-                <div>${escapeHtml(data.message || 'Processing...')} <span class="eta" style="opacity:0.7;font-size:0.9em">${etaStr}</span></div>
+                <div>${escapeHtml(displayMessage)} <span class="eta" style="opacity:0.7;font-size:0.9em">${etaStr}</span></div>
                 <div class="progress-bar">
                     <div class="progress-fill" style="width: ${percent}%"></div>
                 </div>
@@ -247,13 +256,35 @@ window.PipelineManager = (() => {
             els.btnStart.classList.remove('hidden');
             els.btnPause.classList.add('hidden');
             if (selectResetStage) selectResetStage.classList.remove('hidden');
-            
-            if (isDone) {
-                els.btnStart.textContent = '▶ Generate selected chapters again';
-                els.btnStart.title = 'Uses the chapter selection below and preserves the current completed audiobook until new output is ready';
-            } else if (['error', 'paused', 'paused_scheduled', 'deploy_paused', 'voice_review', 'waiting_for_review'].includes(statusLower)) {
+
+            const total = data?.total_chapters || 0;
+            const mastered = new Set(data?.mastered_chapters || []);
+            const rawSelection = data?.generation_chapter_selection;
+            const selected = (rawSelection && Array.isArray(rawSelection))
+                ? rawSelection
+                : (total ? Array.from({length: total}, (_, i) => i + 1) : []);
+            const hasCustomSelection = rawSelection && Array.isArray(rawSelection) && rawSelection.length < total;
+            const unmasteredSelected = selected.filter(ch => !mastered.has(ch));
+
+            if (['error', 'paused', 'paused_scheduled', 'deploy_paused', 'voice_review', 'waiting_for_review'].includes(statusLower)) {
                 els.btnStart.textContent = '▶ Resume Pipeline';
-                els.btnStart.removeAttribute('title');
+                els.btnStart.title = 'A deliberate manual resume can run outside configured working hours for this run only';
+            } else if (hasCustomSelection) {
+                if (unmasteredSelected.length > 0) {
+                    els.btnStart.textContent = '▶ Generate selected chapters';
+                    els.btnStart.title = `Generate ${selected.length} selected chapter${selected.length > 1 ? 's' : ''} (${unmasteredSelected.length} unmastered)`;
+                } else {
+                    els.btnStart.textContent = '▶ Re-generate selected chapters';
+                    els.btnStart.title = `Re-generate ${selected.length} already-mastered chapter${selected.length > 1 ? 's' : ''}`;
+                }
+            } else if (isDone) {
+                if (unmasteredSelected.length > 0) {
+                    els.btnStart.textContent = '▶ Generate remaining chapters';
+                    els.btnStart.title = `Generate remaining ${unmasteredSelected.length} unmastered chapters`;
+                } else {
+                    els.btnStart.textContent = '▶ Re-generate audiobook';
+                    els.btnStart.title = 'Re-generate all chapters of the audiobook';
+                }
             } else {
                 els.btnStart.textContent = '▶ Start Pipeline';
                 els.btnStart.removeAttribute('title');
@@ -262,15 +293,7 @@ window.PipelineManager = (() => {
     }
     
     // Expose HTML escaping utility locally
-    function escapeHtml(unsafe) {
-        if (!unsafe) return '';
-        return unsafe.toString()
-             .replace(/&/g, "&amp;")
-             .replace(/</g, "&lt;")
-             .replace(/>/g, "&gt;")
-             .replace(/"/g, "&quot;")
-             .replace(/'/g, "&#039;");
-    }
+    // escapeHtml now lives in js/dom-utils.js, which loads before this file.
 
     // Run init on load
     document.addEventListener('DOMContentLoaded', init);

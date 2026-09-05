@@ -64,10 +64,13 @@ class GroupingCandidateAnalysisTests(unittest.TestCase):
         self.assertTrue(result["unique_fragment_trace"])
         self.assertEqual(result["source_mismatches"], [])
         self.assertFalse(result["introduced_over_engine_ceiling"])
-        self.assertEqual(result["added_merges"][0]["constituent_line_ids"], [
-            "ch01_0000",
-            "ch01_0001",
-        ])
+        self.assertEqual(
+            result["added_merges"][0]["constituent_line_ids"],
+            [
+                "ch01_0000",
+                "ch01_0001",
+            ],
+        )
 
     def test_preexisting_oversize_line_does_not_fail_candidate_ceiling(self) -> None:
         source = "A" * 501

@@ -1,5 +1,7 @@
 # Quality Assurance
 
+**Status:** Reference — Describes current behaviour. Keep it accurate when the code changes.
+
 Quality control is part of generation, not a reporting-only pass. A chapter cannot be marked generated unless every expected script line has one accepted audio file.
 
 ## Per-line checks
@@ -69,6 +71,28 @@ A cached segment is eligible only when:
 
 The cache is keyed by line identity but validated by dependencies. Editing one line can regenerate only that line; changing a character reference invalidates every dependent line.
 
+### Reproducible synthesis
+
+Synthesis is deterministic, so a cache hit and a regeneration produce the same
+audio rather than merely the same *acceptability*.
+
+The engine samples with `do_sample: true` at `temperature: 0.9`. Each line is
+therefore seeded from its project, line ID, synthesis text, voice, and attempt
+number. Consequences:
+
+- Purging the cache no longer changes the audiobook. Previously "same
+  fingerprint implies same audio" held only because the WAV was cached, not
+  because generation was repeatable.
+- A repaired line regenerated among untouched neighbours reproduces exactly,
+  instead of landing as an independently sampled take with different prosody —
+  a mismatch that WER and speaker similarity both pass.
+- Listening A/B comparisons are repeatable in production, not only in the
+  benchmark harness.
+
+The attempt number is part of the seed deliberately. A validation retry exists
+because the previous take failed; reusing its seed would reproduce that exact
+failure and the retry could never succeed.
+
 ## Speaker consistency
 
 Before metadata is accepted, deterministic evidence rejects contradictions
@@ -91,11 +115,66 @@ bootstrap never requires all models to coexist in VRAM.
 
 The default similarity threshold is a starting point, not a universal calibration. Calibrate it against known-good reference/generated pairs from the actual model and hardware before raising it.
 
+### Within-chapter delivery consistency
+
+Every check above is either per-segment (WER, clipping, duration, pitch CV,
+speaker similarity) or cross-chapter (`cross_chapter_voice_drift`). Neither
+measures whether *adjacent lines in the same chapter* match each other, which
+is the artifact a listener notices first.
+
+`brain/orchestrator/quality_trends.py` therefore also reports, per voice per
+chapter:
+
+| Metric | Meaning |
+|---|---|
+| `pitch_relative_spread` | stdev / median of `pitch_median` across the chapter's accepted lines |
+| `speaking_rate_relative_spread` | same, for characters per audio second |
+| `largest_adjacent_pitch_jump_ratio` | biggest line-to-line pitch change, relative to the chapter median |
+
+These are **warning-only** and never block a release. They are computed
+entirely from measurements already paid for during validation, so they add no
+inference cost. Thresholds are deliberately quiet on the current corpus: the
+useful signal is a *change* in spread between runs, not an absolute level. They
+exist so a future sampling or seeding change has something to be evaluated
+against — see [Scripting quality and performance policy](scripting-quality-performance-policy.md)
+for the promotion protocol.
+
+A chapter with fewer than six measured segments is reported but never warned:
+below that, expressive variation and inconsistency cannot be distinguished.
+
 ## Reference-voice validation
 
 Qwen VoiceDesign creates each reusable reference by speaking a known gender-appropriate sentence from a compiled, metadata-checked direction. After VoiceDesign releases GPU memory, Whisper transcribes the file. References over the bootstrap WER limit are removed and the bootstrap fails rather than registering a mismatched transcript.
 
 The exact spoken test sentence is stored as `ref_text`; it is not inferred from the voice description.
+
+### Cast distinctness convergence
+
+After the references exist, the Base speaker encoder embeds each one and
+compares every pair. A pair at or above `validation.voice_profile_similarity_warning`
+(default `0.985`) is a collision.
+
+This measurement used to be terminal: VoiceDesign had already been unloaded to
+free VRAM for the encoder, so a collision could only ever be reported. A
+52-character cast produced 22 flagged pairs for manual resolution, one of them
+a character at 0.992 against the narrator.
+
+Because VoiceDesign runs as a subprocess, the two models take turns instead.
+Up to `validation.voice_distinctness_rounds` extra rounds (default `2`) re-boot
+it, redesign **only** the colliding voices with a brief naming the specific
+voices they collided with, re-embed just those, and re-measure the whole cast.
+Whatever still collides when the rounds run out is surfaced for manual redesign
+exactly as before, so the loop can improve the outcome but never blocks it.
+
+Redesigned references are transcript-checked in a single Whisper load after the
+rounds finish — a contrast brief moves pitch and speaking rate, which is the
+kind of change that can hurt intelligibility, and the initial WER pass ran
+before any redesign existed.
+
+`BootstrapVoicesResponse.distinctness_rounds` reports per round which voices
+were redesigned and whether the collision count and worst similarity actually
+improved. Read it before assuming the loop is helping. Full rationale in
+[decisions/2026-09-04-voice-distinctness-convergence.md](decisions/2026-09-04-voice-distinctness-convergence.md).
 
 ## Chapter completeness
 
@@ -152,6 +231,76 @@ Before a long book:
 7. Select All and confirm the full export is refused until every chapter is valid, then succeeds.
 
 Unit tests use fake engines and do not replace this model-level smoke test.
+
+## Frontend behaviour tests
+
+`tests/test_dashboard_frontend_ux.py` asserts that specific substrings appear
+in the frontend source. That style breaks when an attribute is reordered and
+passes when the surrounding logic is broken, so it cannot catch a wrong branch
+with intact markup — which is what shipped twice:
+
+- `waiting_for_review` was classified as a terminal status, so it shadowed
+  `active_stage` and the `voice_review` branch of `renderWorkStatus` became
+  unreachable. A project blocked on voice approval was told to "Choose chapters
+  and start the pipeline", which cannot clear a review gate.
+- The attention panel rendered "⚠️ Action required … ⚠️ **0** Action Required
+  items" — a red alarm asserting that nothing is wrong.
+
+`tests/frontend/` covers this class. The harness (`harness.mjs`) loads the real
+`index.html` under jsdom, evaluates the real scripts against it, and calls the
+real render functions; only the network and the WebSocket are stubbed. It waits
+for the document to finish loading *before* injecting the scripts, so app.js's
+`DOMContentLoaded` listener never fires and each test controls exactly what is
+rendered.
+
+```powershell
+npm ci
+npm test
+```
+
+`CAC_FRONTEND_DIR` points the harness at a different copy of the sources. That
+exists so a regression test can be proven to fail against pre-fix code rather
+than passing vacuously — the four regression tests above were verified that way.
+
+## The lint ratchet
+
+`pyproject.toml` ignores a short list of ruff rules that fire in too many
+existing places to fix at once. Each entry carries a count and a plan, and the
+list only ever shrinks. Adding to it needs a comment saying why.
+
+**Cleared so far.** `B023` (loop-variable closure, 31 sites), `B904`, `TRY400`,
+`TRY004`, and `S110`/`S112` -- the last of those being roughly 75 places that
+discarded an exception with no trace at all. Nothing in the project now throws
+away an exception without recording that it happened. The single deliberate
+exception is inside `ProjectLogHandler.emit`, where a logger call would
+re-enter the handler that just failed; it uses the stdlib's `handleError`.
+
+**Still open.** `BLE001` (169, from ~208). These all log now, so what remains
+is breadth rather than silence -- and breadth matters because `except
+Exception` catches the failure you expected *and* the typo you did not. An
+`AttributeError` introduced by a refactor gets swallowed and reported as a
+degraded read instead of failing loudly. That is not hypothetical: on
+2026-09-04 a missing attribute in the cast-adjudication path killed a live run,
+and the same shape one frame away would have been silently absorbed.
+
+When narrowing, name what the guarded call can actually raise, generously:
+
+| What is guarded | Catch |
+| --- | --- |
+| Reading someone else's file | `(OSError, UnicodeDecodeError, ValueError, KeyError, TypeError)` |
+| SQLite and pickle | `(sqlite3.Error, pickle.PickleError, OSError, EOFError, ValueError, TypeError)` |
+| `wave` / `soundfile` | `(OSError, wave.Error, EOFError, ValueError)` |
+
+`ValueError` earns its place in those: `json.JSONDecodeError` is a `ValueError`,
+and so is `int()` or `float()` over a junk field.
+
+Some sites should stay broad, and saying so is part of the job.
+`nas_syncer.py` is the standing example: paramiko raises `SSHException`
+alongside `OSError` and is imported lazily, so the name is not available in an
+`except` clause without making it a hard import. Narrowing to `OSError` alone
+would let an `SSHException` escape in the middle of a delivery, which is worse
+than a broad catch that logs.
+
 ## Verification tiers
 
 Use the cheapest tier that can prove the changed contract:

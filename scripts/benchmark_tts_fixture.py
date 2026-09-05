@@ -9,7 +9,7 @@ import json
 import re
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -20,8 +20,6 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from shared.artifacts import atomic_write_json
-from shared.live_test_guard import add_model_opt_in
 from scripts.benchmark_support import (
     balanced_order,
     dependency_versions,
@@ -30,19 +28,16 @@ from scripts.benchmark_support import (
     sha256_file,
     summarize_tts_runs,
 )
+from shared.artifacts import atomic_write_json
+from shared.live_test_guard import add_model_opt_in
 from voice.tts_server.qwen3_engine import Qwen3TTSEngine
 from voice.tts_server.voice_library import VoiceLibraryManager
 from voice.validator.whisper_validator import WhisperValidator
 
-
 FIXTURES = {
     "short_emphasis": "Wait--listen carefully before you open that door.",
-    "repeated_name": (
-        "Tuka, Tuka, wait for Starling; Starling knows the safer path."
-    ),
-    "ordinary_dialogue": (
-        "I checked the western trail at dawn, and the bridge is still safe."
-    ),
+    "repeated_name": ("Tuka, Tuka, wait for Starling; Starling knows the safer path."),
+    "ordinary_dialogue": ("I checked the western trail at dawn, and the bridge is still safe."),
     "long_narration": (
         "The rain eased at last, and a quiet silver light crossed the valley, "
         "revealing the old road as it curved between dark pines and weathered "
@@ -99,25 +94,16 @@ def main() -> int:
         parser.error("--allow-models is required")
     if args.repetitions < 1:
         parser.error("--repetitions must be positive")
-    if (
-        args.candidate_name == "control"
-        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", args.candidate_name)
-    ):
+    if args.candidate_name == "control" or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", args.candidate_name):
         parser.error("--candidate-name must be a safe non-control identifier")
 
     config_path = ROOT / "voice" / "config.yaml"
     config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     tts = config.get("tts", {})
     validation = config.get("validation", {})
-    library = VoiceLibraryManager(
-        config.get("storage", {}).get("voice_library_dir", "voice_library")
-    )
+    library = VoiceLibraryManager(config.get("storage", {}).get("voice_library_dir", "voice_library"))
     voice_ids = [item.strip() for item in args.voices.split(",") if item.strip()]
-    fixture_ids = [
-        item.strip()
-        for item in args.fixtures.split(",")
-        if item.strip() in FIXTURES
-    ]
+    fixture_ids = [item.strip() for item in args.fixtures.split(",") if item.strip() in FIXTURES]
     if not voice_ids or not fixture_ids:
         parser.error("at least one valid voice and fixture are required")
 
@@ -149,14 +135,12 @@ def main() -> int:
     args.output_json.parent.mkdir(parents=True, exist_ok=True)
     report: dict[str, Any] = {
         "schema_version": 2,
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
         "project": args.project,
         "source_control": git_identity(ROOT),
         "dependencies": dependency_versions(),
         "config_sha256": sha256_file(config_path),
-        "fixture_manifest_sha256": json_fingerprint(
-            {name: FIXTURES[name] for name in fixture_ids}
-        ),
+        "fixture_manifest_sha256": json_fingerprint({name: FIXTURES[name] for name in fixture_ids}),
         "protocol": {
             "warmup": "one unmeasured control generation",
             "order": args.order,
@@ -189,9 +173,7 @@ def main() -> int:
         "fixtures": [
             {
                 "id": name,
-                "text_sha256": hashlib.sha256(
-                    FIXTURES[name].encode("utf-8")
-                ).hexdigest(),
+                "text_sha256": hashlib.sha256(FIXTURES[name].encode("utf-8")).hexdigest(),
                 "characters": len(FIXTURES[name]),
                 "words": len(FIXTURES[name].split()),
             }
@@ -201,9 +183,7 @@ def main() -> int:
             {
                 "id": voice_id,
                 "reference_sha256": sha256_file(values["reference"]),
-                "reference_text_sha256": hashlib.sha256(
-                    values["ref_text"].encode("utf-8")
-                ).hexdigest(),
+                "reference_text_sha256": hashlib.sha256(values["ref_text"].encode("utf-8")).hexdigest(),
             }
             for voice_id, values in voices.items()
         ],
@@ -250,11 +230,7 @@ def main() -> int:
         for voice_id, voice in voices.items():
             for fixture_id in fixture_ids:
                 combo_index += 1
-                combination_pattern = (
-                    args.order
-                    if combo_index % 2
-                    else ("BAAB" if args.order == "ABBA" else "ABBA")
-                )
+                combination_pattern = args.order if combo_index % 2 else ("BAAB" if args.order == "ABBA" else "ABBA")
                 occurrence = {"A": 0, "B": 0}
                 for slot, mode_label in enumerate(
                     balanced_order(args.repetitions, combination_pattern),
@@ -267,17 +243,10 @@ def main() -> int:
                     try:
                         import torch
 
-                        torch.manual_seed(
-                            args.seed + combo_index * 100 + repetition
-                        )
+                        torch.manual_seed(args.seed + combo_index * 100 + repetition)
                     except ImportError:
                         pass
-                    output_path = (
-                        args.output_dir
-                        / voice_id
-                        / fixture_id
-                        / f"{mode_name}-r{repetition}.wav"
-                    )
+                    output_path = args.output_dir / voice_id / fixture_id / f"{mode_name}-r{repetition}.wav"
                     output_path.parent.mkdir(parents=True, exist_ok=True)
                     started = time.perf_counter()
                     engine.generate_speech(
@@ -308,9 +277,7 @@ def main() -> int:
                             )
                         ),
                         "audio_sha256": sha256_file(output_path),
-                        "relative_path": str(
-                            output_path.relative_to(args.output_dir)
-                        ),
+                        "relative_path": str(output_path.relative_to(args.output_dir)),
                         "engine_metrics": dict(engine.last_generation_metrics),
                     }
                     report["runs"].append(run)
@@ -338,17 +305,13 @@ def main() -> int:
                     FIXTURES[run["fixture"]],
                     transcript,
                 )
-                run["transcript_sha256"] = hashlib.sha256(
-                    transcript.encode("utf-8")
-                ).hexdigest()
+                run["transcript_sha256"] = hashlib.sha256(transcript.encode("utf-8")).hexdigest()
                 atomic_write_json(args.output_json, report)
         finally:
             validator.unload()
 
     report["summary"] = {
-        modes[label][0]: summarize_tts_runs(
-            [run for run in report["runs"] if run["mode_label"] == label]
-        )
+        modes[label][0]: summarize_tts_runs([run for run in report["runs"] if run["mode_label"] == label])
         for label in ("A", "B")
     }
     control = report["summary"]["control"]
@@ -360,11 +323,7 @@ def main() -> int:
         and 12 <= fixture_combinations <= 24
     )
     report["decision"] = {
-        "rtf_change_fraction": (
-            candidate["rtf_p50"] / control["rtf_p50"] - 1.0
-            if control["rtf_p50"]
-            else None
-        ),
+        "rtf_change_fraction": (candidate["rtf_p50"] / control["rtf_p50"] - 1.0 if control["rtf_p50"] else None),
         "fixture_combinations": fixture_combinations,
         "corpus_coverage_gate_pass": corpus_gate,
         "promotion_gate_evaluated": not args.skip_validation,
@@ -378,8 +337,7 @@ def main() -> int:
             and candidate["maximum_wer"] is not None
             and candidate["maximum_wer"] <= 0.20
             and candidate["average_wer"] <= control["average_wer"]
-            and candidate["minimum_speaker_similarity"]
-            >= control["minimum_speaker_similarity"] - 0.02
+            and candidate["minimum_speaker_similarity"] >= control["minimum_speaker_similarity"] - 0.02
         )
     atomic_write_json(args.output_json, report)
     print(json.dumps(report, indent=2, ensure_ascii=False))

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable
 
 
 @dataclass(frozen=True)
@@ -100,7 +100,5 @@ def select_reference_text(
         text=text,
         source_line_count=len(chosen) - int(used_seed),
         used_seed_text=used_seed,
-        score=round(total_score / max(1, len(chosen)), 6)
-        if math.isfinite(total_score)
-        else -1_000.0,
+        score=round(total_score / max(1, len(chosen)), 6) if math.isfinite(total_score) else -1_000.0,
     )

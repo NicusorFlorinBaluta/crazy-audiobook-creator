@@ -7,7 +7,7 @@ Crazy Audiobook Creator turns an EPUB into a multi-speaker, chaptered M4B on one
 - Book-wide character analysis before audio generation
 - Source-preserving scripts with exact fragment IDs and source spans
 - Bounded same-speaker utterance grouping to reduce TTS calls without losing source traceability
-- Stable character voices, including deterministic sharing when a book exceeds the voice cap
+- Stable character voices, including deterministic sharing when a book exceeds the voice cap (`script.max_unique_voices`; the checked-in default is `0` = unlimited, so sharing does not engage)
 - Speaking-only casting with checked descriptions, previews, text redesign, and recorded-reference upload
 - Chapter-selectable, resumable audio generation
 - Per-line fingerprint cache that invalidates when text, voice, pronunciation, emotion, speed, or generation settings change
@@ -17,6 +17,7 @@ Crazy Audiobook Creator turns an EPUB into a multi-speaker, chaptered M4B on one
 - Local dashboard with scalable chapter search/filtering, explicit current-work progress, editable working hours, script, character, quality, and log views
 - Reviewed Google Books matching with manual edition search and metadata-only refresh of completed M4B packages
 - Individually named reusable voice-reference downloads plus a complete cast ZIP
+- **CrazyVoice Android App** (source lives in a [separate repository](https://github.com/NicusorFlorinBaluta/crazy-audiobook-player.git); this repo provides its `/api/mobile/v1` backend): remote catalog browsing, transparent 128k AAC chapter streaming, two-way progress synchronization, background offline downloading (with Wi-Fi only toggle), and Android Auto / lockscreen metadata integration
 
 ## Partial-book workflow
 
@@ -52,14 +53,18 @@ The checked-in defaults assume the Python environment at `E:\PyTorch env\my_venv
 .\scripts\setup-voice-server.ps1 -VenvPath "E:\PyTorch env\my_venv"
 
 # Pull the model once; the pipeline starts its isolated Ollama service on demand
-ollama pull qwen2.5:32b
+ollama pull qwen3.8:27b
 & "E:\PyTorch env\my_venv\Scripts\python.exe" -m uvicorn brain.dashboard.api.main:app --host 127.0.0.1 --port 8000
 ```
 
 Open `http://127.0.0.1:8000`. The dashboard starts the local voice service on demand when `voice_server.auto_start` is enabled.
 The checked-in workstation configuration also starts an app-owned Ollama server
-on port 11435 with only Vulkan device 0 (the RX 7900 XTX) visible. This avoids
-Ollama splitting the 32B model across the discrete and integrated GPUs.
+on port 11435 with only device 0 (the RX 7900 XTX) visible, so Ollama cannot
+split the model across the discrete and integrated GPUs. The backend is
+selected by `ollama.gpu_backend` (`vulkan` or `rocm`) and the slot count is
+pinned with `ollama.num_parallel: 1` -- see
+[Configuration](docs/configuration.md) for why the slot count matters to
+prompt-cache reuse.
 The desktop wrapper follows the same single-owner lifecycle; it no longer starts a competing Voice process.
 
 For the Electron shell:
@@ -74,6 +79,7 @@ cd ..
 ## Important behavior
 
 - Qwen3-TTS Base voice cloning does not expose a natural-language per-utterance instruction parameter. The project therefore applies requested speed plus restrained pitch/tone post-processing for emotion cues; it does not claim native clone-mode emotion control.
+  **That post-processing is currently disabled** (`tts.post_processing.enabled: false`) because the librosa phase-vocoder fallback produced echo-like smearing in the 2026-08-09 E2E run; see [audio-echo-incident-2026-08-10.md](docs/audio-echo-incident-2026-08-10.md). Emotion is therefore conveyed by delivery speed and the reference voice alone until a replacement backend passes controlled listening tests.
 - Mastered output targets internal listening quality. It is not an ACX submission validator or an ACX MP3 export pipeline.
 - External metadata lookup is opt-in and contacts Google Books only when requested or explicitly enabled. Manual matches are ranked and reviewed before application. Explicit approval adopts the reviewed title and author while retaining the EPUB identity as provenance; embedded cover art is preserved unless replacement is explicitly approved.
 - Ollama and Voice bind to loopback. The dashboard may bind to the LAN;
@@ -86,22 +92,65 @@ cd ..
 
 ## Documentation
 
+**[docs/README.md](docs/README.md) is the index.** Every document carries a
+**Status** line under its title saying whether it describes current behaviour or
+is a dated historical record, so nothing has to be dated by guesswork.
+
+The reference set:
+
 - [Architecture](docs/architecture.md)
 - [Windows setup](docs/setup-windows.md)
 - [Configuration](docs/configuration.md)
 - [API reference](docs/api-reference.md)
 - [Quality assurance](docs/quality-assurance.md)
+- [Scripting quality and performance policy](docs/scripting-quality-performance-policy.md)
 - [Dashboard guide](docs/dashboard-guide.md)
 - [Voice design](docs/voice-design.md)
 - [Prompt and source-fidelity rules](docs/prompts.md)
-- [Production-readiness changes and next E2E gates](docs/production-readiness-2026-08-02.md)
-- [Full-book release validation and metrics (2026-08-11)](docs/e2e-run-2026-08-11.md)
-- [Earlier full-book E2E and echo incident baseline (2026-08-09)](docs/e2e-run-2026-08-09.md)
-- [Post-E2E prioritized improvement plan (2026-08-09)](docs/improvement-plan-post-e2e-2026-08-09.md)
-- [Post-release performance results and supported benchmarks (2026-08-11)](docs/performance-improvement-plan-post-release-2026-08-11.md)
-- [Deferred model/GPU/listening validation plan (2026-08-10)](docs/live-validation-plan-2026-08-10.md)
+- [Decision records](docs/decisions/README.md) — why the pipeline behaves as it does
 
-`implementation_plan*.md` and the `*chat*history*.md` conversation dumps are historical records, not current specifications. Current behavior is defined by this README, `docs/`, models, and executable tests.
+Run records, incident write-ups and completed plans are indexed under
+*Historical records* in [docs/README.md](docs/README.md). They are evidence, not
+specifications.
+
+`implementation_plan*.md`, `VOICE_APP_CHANGES_PLAN.md`,
+`VOICE_CLIENT_SERVER_PLAN.md` and the `*chat*history*.md` conversation dumps in
+the repository root are historical planning records from earlier two-machine and
+Ubuntu designs; some describe modules that were never written. Current behavior
+is defined by this README, `docs/`, models, and executable tests.
+
+## Development
+
+Static analysis is the first gate, and it is not optional. `pyproject.toml`
+configures `ruff` with the Pyflakes (`F`) rules held at zero, because that is
+the failure class which previously reached production here: duplicate method
+definitions in `ScriptGenerator` with divergent contracts (`F811`), and calls
+to a class that was never written (`F821`). Several thorough manual audits
+missed both.
+
+```powershell
+$python = "E:\PyTorch env\my_venv\Scripts\python.exe"
+& $python -m pip install ruff pre-commit
+& $python -m ruff check .          # must be clean
+& $python -m pre_commit install    # runs the same gate on every commit
+```
+
+`ruff format` is configured but deliberately **not** enforced: it would
+reformat 109 of 177 files, and that diff would bury behavioural changes in
+review. Adopt it in its own commit, then enable the check in
+[.github/workflows/ci.yml](.github/workflows/ci.yml) and
+[.pre-commit-config.yaml](.pre-commit-config.yaml).
+
+Two conventions the linter cannot enforce:
+
+- Resolve paths through `shared/paths.py`, never as bare relative literals. A
+  working-directory-relative config read previously returned `{}` when the
+  process started elsewhere, silently dropping the TTS and validation settings
+  out of the generation fingerprint.
+- Load configuration through `shared.paths.voice_config()` /
+  `brain_config()`, which cache per process. `voice/config.yaml` was previously
+  re-read at seven call sites, so an edit mid-run left subsystems disagreeing
+  within a single chapter.
 
 ## Tests
 
@@ -111,17 +160,32 @@ cd ..
 
 The unit suite does not load the production TTS models. A real end-to-end smoke test still requires the configured Ollama, GPU models, and FFmpeg.
 
-The 2026-08-12 low-resource release check passed 227 tests with 2 intentional
-skips on Windows. The same suite also passed with the optional `whisper`
-package hidden, matching GitHub Actions. Python compilation, JavaScript syntax,
-local documentation links, and `git diff --check` also passed.
+The Python suite currently contains 561 tests. The 2026-09-04 pass recorded
+559 passing with 2 intentional skips; the 5 NAS-sync tests additionally require
+the optional `paramiko` dependency.
+
+There is also a behavioural frontend suite. The dashboard's state-machine logic
+lives in JavaScript, and a wrong branch with intact markup — which shipped
+twice — is invisible to both `node --check` and the source-substring assertions
+in `tests/test_dashboard_frontend_ux.py`. These tests load the real
+`index.html`, evaluate the real scripts against it, and call the real render
+functions:
+
+```powershell
+npm ci
+npm test
+```
+
+CI runs `ruff check`, Python compilation over the repository root, the Python
+suite, JavaScript syntax checks for every frontend script, the frontend
+behaviour suite, local documentation links, and configuration validation.
 
 Low-resource verification and environment inspection can be run separately:
 
 ```powershell
 & "E:\PyTorch env\my_venv\Scripts\python.exe" scripts\runtime_preflight.py --pip-check
 & "E:\PyTorch env\my_venv\Scripts\python.exe" scripts\verify_pipeline.py --tier static
-& "E:\PyTorch env\my_venv\Scripts\python.exe" scripts\summarize_metrics.py brain\projects\PROJECT_ID\performance_metrics.jsonl
+& "E:\PyTorch env\my_venv\Scripts\python.exe" scripts\summarize_metrics.py brain\projects\PROJECT_ID
 ```
 
 Model-backed verification tiers require an explicit `--allow-models` opt-in.

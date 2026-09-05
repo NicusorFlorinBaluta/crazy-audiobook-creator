@@ -8,7 +8,7 @@ import os
 import shutil
 import stat
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -69,7 +69,7 @@ def main() -> int:
     chapter = json.loads(chapter_path.read_text(encoding="utf-8"))
     line_ids = [str(line.get("line_id") or line.get("id")) for line in chapter.get("lines", [])]
 
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     backup = project_dir / "stage_canary_backups" / stamp
     if not args.prepared:
         for root in (REPO_ROOT / "workspace" / args.project_id, project_dir):
@@ -83,14 +83,17 @@ def main() -> int:
         ):
             _move_if_present(path, backup)
 
-    pipeline.job_queue.update_job(args.project_id, {
-        "generated_chapters": [n for n in state.get("generated_chapters", []) if n != args.chapter],
-        "mastered_chapters": [n for n in state.get("mastered_chapters", []) if n != args.chapter],
-        "active_generation_chapter_selection": [args.chapter],
-        "generation_chapter_selection": [args.chapter],
-        "running": True,
-        "error_message": None,
-    })
+    pipeline.job_queue.update_job(
+        args.project_id,
+        {
+            "generated_chapters": [n for n in state.get("generated_chapters", []) if n != args.chapter],
+            "mastered_chapters": [n for n in state.get("mastered_chapters", []) if n != args.chapter],
+            "active_generation_chapter_selection": [args.chapter],
+            "generation_chapter_selection": [args.chapter],
+            "running": True,
+            "error_message": None,
+        },
+    )
 
     lock = SingleInstanceLock("crazy-audiobook-pipeline.lock")
     if not lock.acquire():
@@ -118,23 +121,34 @@ def main() -> int:
         return 0
     except _WaitingForReview as review_pause:
         pipeline._update_stage(args.project_id, PipelineStage.WAITING_FOR_REVIEW)
-        pipeline.job_queue.update_job(args.project_id, {
-            "pause_reason": review_pause.reason,
-            "review_blocking_item_ids": review_pause.item_ids,
-            "error_message": None,
-        })
-        print(json.dumps({
-            "status": "waiting_for_review",
-            "review_blocking_item_ids": review_pause.item_ids,
-            "reason": review_pause.reason,
-        }, indent=2))
+        pipeline.job_queue.update_job(
+            args.project_id,
+            {
+                "pause_reason": review_pause.reason,
+                "review_blocking_item_ids": review_pause.item_ids,
+                "error_message": None,
+            },
+        )
+        print(
+            json.dumps(
+                {
+                    "status": "waiting_for_review",
+                    "review_blocking_item_ids": review_pause.item_ids,
+                    "reason": review_pause.reason,
+                },
+                indent=2,
+            )
+        )
         return 2
     except Exception as exc:
-        pipeline.job_queue.update_job(args.project_id, {
-            "status": PipelineStage.ERROR.value,
-            "active_stage": PipelineStage.ERROR.value,
-            "error_message": str(exc),
-        })
+        pipeline.job_queue.update_job(
+            args.project_id,
+            {
+                "status": PipelineStage.ERROR.value,
+                "active_stage": PipelineStage.ERROR.value,
+                "error_message": str(exc),
+            },
+        )
         raise
     finally:
         pipeline.job_queue.update_job(args.project_id, {"running": False})

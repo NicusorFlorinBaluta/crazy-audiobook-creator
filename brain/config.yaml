@@ -7,36 +7,73 @@ ollama:
   # Use an app-owned port so the pipeline can enforce the discrete Vulkan GPU
   # even when the Ollama desktop service is also running on its default port.
   host: http://127.0.0.1:11435
-  model: qwen2.5:32b
+  model: qwen3.8:27b
   # Never substitute an arbitrary installed model. Add exact Ollama tags here
   # only after validating them for the script-director prompts.
   fallback_models: []
   auto_start: true
   executable: C:\Users\nicus\AppData\Local\Programs\Ollama\ollama.exe
   models_dir: E:\.ollama\models
-  vulkan_visible_devices: '0'     # Vulkan0 = Radeon RX 7900 XTX on this PC
+  # Backend used by the app-owned Ollama server: 'vulkan' or 'rocm'.
+  # Both isolate the discrete GPU; they differ in throughput. On RDNA3 the
+  # ROCm/hipBLAS backend is usually markedly faster at *prompt processing*
+  # (prefill) and is where OLLAMA_FLASH_ATTENTION actually takes effect.
+  #
+  # Measured on 2026-08-23 under Vulkan: 3,635 prompt tokens took 25.41 s
+  # (~143 tok/s prefill) out of 76.73 s of request working time -- 33% of the
+  # request spent on prefill. That is the single largest unscreened scripting
+  # cost. Screen 'rocm' against 'vulkan' with
+  # `scripts/benchmark_script_chunks.py` before promoting a change; compare
+  # prefill tok/s derived from `prompt_eval_duration_ns`.
+  gpu_backend: vulkan
+  visible_devices: '0'            # Device 0 = Radeon RX 7900 XTX on this PC
   flash_attention: true
+  # Slots the Ollama server runs. Keep at 1.
+  #
+  # Ollama otherwise autodetects (commonly 4), which reserves KV cache per slot
+  # -- 4 x 16384 tokens on a 27B model can push layers off the GPU despite
+  # num_gpu=99 -- and lets sequential chunk requests land on different slots,
+  # defeating prefix-cache reuse of the system prompt. That prompt is
+  # byte-identical for every chunk within a chapter, so re-evaluating it per
+  # chunk is pure waste.
+  num_parallel: 1
+  # Quantized KV cache (requires flash_attention). Frees VRAM so a 27B model
+  # stays fully offloaded at a 16k context. Leave empty for Ollama's default
+  # (f16); screen 'q8_0' before promoting.
+  kv_cache_type: ''
+  # The pipeline unloads explicitly at stage boundaries, so a long keep-alive
+  # only avoids paying an unnecessary ~45 s model reload if a stage stalls.
+  keep_alive: 30m
   startup_timeout_seconds: 90
   log_path: brain/projects/ollama-managed.log
   debug: true
   temperature_pass1: 0.3
   temperature_pass2: 0.2
   top_p: 0.9
+  think: false              # Structured audiobook metadata; avoid hidden reasoning-token overhead
   context_window: 16384
   timeout: 600
   max_retries: 3
   max_retry_seconds: 900       # Total budget for failed attempts/backoff; healthy streams may run longer
+  max_output_tokens: 8192      # Hard server/client cap; normal chapter JSON is about 4K tokens
+  max_generation_seconds: 600  # Split oversized metadata batches after 10 minutes
+  repetition_window_chars: 512 # Search for repeating loop periods up to this size...
+  repetition_count: 4          # ...this many consecutive times
   unload_after_scripting: true     # Free GPU memory before Qwen TTS loads
 
 # Managed local Voice service
 voice_server:
   host: http://127.0.0.1:8100
+  # Token the Brain presents to the Voice service. Leave empty for the
+  # supported loopback setup. The Voice service also accepts
+  # CRAZY_AUDIOBOOK_VOICE_TOKEN from the environment so the secret need not be
+  # committed here; set the same value on both sides if you use it.
+  #
+  # There is deliberately no LAN-CIDR allowance for the Voice service: it binds
+  # to loopback and refuses to bind beyond it without a token. (A
+  # `trusted_lan_cidrs` key used to be documented here, but the Voice service
+  # never implemented one, and it read voice/config.yaml rather than this file.)
   api_token: ''
-  # Only the socket peer is considered; X-Forwarded-For cannot grant access.
-  # Home Assistant/nginx and other devices on these LANs may use the API
-  # without an application token.
-  trusted_lan_cidrs:
-  - 192.168.50.0/24
   venv: E:\PyTorch env\my_venv
   # The Windows 3.12 venv launcher misparses its own base path when invoked
   # through the spaced long form. The stable 8.3 path preserves the ROCm env.
@@ -60,6 +97,7 @@ extraction:
   preserve_poetry: true
 # Source-preserving script construction
 script:
+  joint_analysis: false            # Quality-first: finish the book-wide cast before attribution
   max_segment_sentences: 4
   min_segment_words: 3
   default_speed: 1.0
@@ -71,34 +109,68 @@ script:
   expressive_target_chars: 180    # Keep intense/whispered delivery controllable
   expressive_max_words: 30
   speaker_confidence_threshold: 0.55
-  max_fragments_per_chunk: 40
+  max_fragments_per_chunk: 60
+  adaptive_split_enabled: true      # Retry a timed-out batch as smaller contiguous ranges
+  adaptive_split_max_depth: 2       # 60 -> about 30 -> about 15 fragments, then safe fallback
+  adaptive_split_min_fragments: 8   # Avoid tiny recursive requests with little quality upside
+  dialogue_focused_schema: false     # Experimental v5; enable only after quality benchmark promotion
   narrator_pause_ms: 500
   dialogue_pause_ms: 300
   scene_transition_pause_ms: 1500
   chapter_start_pause_ms: 1000
   chapter_end_pause_ms: 2000
   paragraph_pause_ms: 600
-  max_unique_voices: 20
+  max_unique_voices: 0            # 0 = unlimited; every named character gets their own voice
   minor_character_threshold: 3
-  group_minor_characters: true
+  group_minor_characters: false
   chunk_size_words: 1200
   chunk_overlap_words: 0
 # Local dashboard
 dashboard:
   port: 8000
-  # LAN peers must belong to trusted_lan_cidrs; callers outside those ranges
-  # require CRAZY_AUDIOBOOK_DASHBOARD_TOKEN.
   host: 0.0.0.0
+  # Browser origins allowed to read API responses. '*' lets any page a LAN
+  # user visits read this dashboard's data cross-origin, because responses
+  # then carry Access-Control-Allow-Origin: *. List the real origins instead.
   cors_origins:
   - http://127.0.0.1:8000
   - http://localhost:8000
+  - http://192.168.50.44:8000
+  - https://crazyha.mywire.org
   api_token: ''
+  # TCP-peer CIDRs allowed without an application token. Only the real socket
+  # peer is considered; X-Forwarded-For never grants trust.
+  #
+  # Omitting this key falls back to every RFC1918 range plus the Tailscale
+  # CGNAT range, which is almost always wider than intended. An empty list
+  # disables token-free LAN access entirely (loopback plus token only).
+  #
+  # NOTE: a reverse proxy connects from its own address. If nginx on this LAN
+  # proxies the dashboard to the public internet, that proxy address is inside
+  # the range below and every internet request arriving through it is treated
+  # as a trusted LAN peer. Set CRAZY_AUDIOBOOK_DASHBOARD_TOKEN and have the
+  # proxy inject X-API-Token if the public endpoint must be authenticated by
+  # this application rather than only by the proxy.
+  # Tailscale is how Home Assistant reaches this dashboard: its panel points at
+  # a Tailscale address, so a tailnet peer must be trusted or every /api call
+  # from that panel returns 403 and the UI renders an empty project list. The
+  # shipped default includes this range; narrowing the list to the wired LAN on
+  # 2026-09-03 removed it and silently broke the HA panel.
+  #
+  # CGNAT space is only routable inside the tailnet, which Tailscale
+  # authenticates itself, so this is a smaller grant than it looks. It is still
+  # wider than one host -- tighten to the HA peer's /32 if you want the
+  # narrowest boundary.
+  trusted_lan_cidrs:
+  - 192.168.50.0/24
+  - 100.64.0.0/10
   static_dir: dashboard/frontend
   max_upload_size_mb: 100
   max_epub_expanded_mb: 1000
   projects_dir: projects
   max_projects: 50
   auto_cleanup_days: 0
+  auto_resume_in_flight: true
 # External metadata lookup is opt-in
 metadata:
   auto_fetch_external: false
@@ -107,25 +179,70 @@ metadata:
 # API credentials stay in .env. Browser automation uses an isolated persistent
 # Chrome profile and one saved conversation per project/purpose.
 external_validation:
+  # Model tags below were checked against the live provider catalogue on
+  # 2026-09-04: `gemini-3.5-flash` and `gemini-3.5-flash-lite` both resolve.
+  # Config validation enforces structure, not tag existence, so a renamed or
+  # retired model degrades this pass at runtime rather than at startup --
+  # re-check with the provider's models list after any provider announcement.
   enabled: true
   auto_accept_confidence: 0.90
   manual_review_confidence: 0.75
   attribution_batch_size: 20
   max_audio_regenerations: 1
+  # Tiered local-first dialogue attribution auto-fix
+  tiered_attribution:
+    enabled: true
+    local_auto_accept_confidence: 0.85
+    min_detection_confidence: 0.70
+    max_short_response_chars: 80
+    ollama_temperature: 0.1
+    dry_run: false
+
+
+  character_augmentation:
+    enabled: true
+    triage_model: gemini-3.5-flash-lite
+    adjudication_model: gemini-3.5-flash
+  # Whole-cast duplicate detection, run once after book-wide character
+  # analysis. The local identity adjudicator only ever *looks at* pairs that
+  # share a distinctive name token -- measured at 24 of 1,540 pairs (1.6%) on a
+  # 57-character cast -- so a character recorded once by proper name and again
+  # by appellative ("Zaknafein" / "the weapons master") is never even
+  # considered, and reaches casting as a second voice.
+  #
+  # Every proposal is filtered through local, deterministic vetoes that the
+  # model cannot override: the narrator is never merged, explicit genders must
+  # not disagree, the citation must be verbatim, and the conjunction veto
+  # refuses any pair the source ever names side by side ("Ilnezhara and
+  # Tazmikella"). That last one is what keeps twins and siblings apart.
+  cast_adjudication:
+    enabled: true
+    roster_model: gemini-3.5-flash-lite
+    adjudication_model: gemini-3.5-flash
+    # A merge gives two characters one voice for a whole book, so the bar is
+    # higher than for an attribute enrichment.
+    min_confidence: 0.95
+    # false: apply merges that clear the bar and every veto, and record them in
+    #   cast_identity_audit.json. Nothing reaches the review inbox, so no book
+    #   text is put in front of you.
+    # true: hold every merge for approval instead. Safer, but the evidence is
+    #   verbatim source text, so approving means reading spoilers.
+    require_approval: false
   circuit_breaker:
     failure_threshold: 3
-    cooldown_seconds: 900
+    cooldown_seconds: 60
   api:
     enabled: true
     api_key_env: GEMINI_API_KEY
     triage_model: gemini-3.5-flash-lite
-    adjudication_model: gemini-3.6-flash
+    adjudication_model: gemini-3.5-flash
     timeout_seconds: 120
+    request_interval_seconds: 2.0
     max_attempts: 4
     # Leave headroom below the account limits shown in AI Studio.
     daily_request_budgets:
       gemini-3.5-flash-lite: 450
-      gemini-3.6-flash: 18
+      gemini-3.5-flash: 50
   browser:
     enabled: true
     profile_dir: brain/projects/.gemini-browser-profile
@@ -149,6 +266,14 @@ pipeline:
   batch_mode: chapter
 # Automatic safe-boundary working hours
 schedule:
-  enabled: false
+  enabled: true
   timezone: Europe/Bucharest
-  windows: []
+  windows:
+  - days:
+    - Monday
+    - Tuesday
+    - Wednesday
+    - Thursday
+    - Friday
+    start: 09:00
+    end: '19:00'

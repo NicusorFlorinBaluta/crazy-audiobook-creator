@@ -10,8 +10,8 @@ import soundfile as sf
 
 from shared.constants import ValidationStatus
 from shared.models import ScriptLine
-from voice.validator.validation_loop import ValidationLoop
 from voice.tts_server.embedding_store import EmbeddingStore
+from voice.validator.validation_loop import ValidationLoop
 
 
 class FakeEngine:
@@ -98,16 +98,9 @@ class FakeWhisper:
         reference: str,
         hypothesis: str,
     ) -> bool:
-        compact_reference = "".join(
-            char for char in reference.casefold() if char.isalnum()
-        )
-        compact_hypothesis = "".join(
-            char for char in hypothesis.casefold() if char.isalnum()
-        )
-        return bool(
-            compact_reference
-            and compact_reference == compact_hypothesis
-        )
+        compact_reference = "".join(char for char in reference.casefold() if char.isalnum())
+        compact_hypothesis = "".join(char for char in hypothesis.casefold() if char.isalnum())
+        return bool(compact_reference and compact_reference == compact_hypothesis)
 
     @staticmethod
     def _normalize_text(text: str) -> str:
@@ -322,7 +315,7 @@ class ValidationLoopTests(unittest.TestCase):
         line = ScriptLine(
             line_id="ch01_0046",
             speaker="narrator",
-            text="\"UNCLE!\" she shouted.",
+            text='"UNCLE!" she shouted.',
             emotion="panicked shout",
             speed=1.15,
         )
@@ -417,9 +410,7 @@ class ValidationLoopTests(unittest.TestCase):
 
     def test_concatenated_repetitions_are_separated_for_synthesis(self) -> None:
         self.assertEqual(
-            ValidationLoop._prepare_synthesis_text(
-                "\"Letsgoletsgoletsgo!\""
-            ),
+            ValidationLoop._prepare_synthesis_text('"Letsgoletsgoletsgo!"'),
             "\"Let's go, let's go, let's go!\"",
         )
 
@@ -747,11 +738,7 @@ class ValidationLoopTests(unittest.TestCase):
                 ["ch01_0000", "ch01_0001"],
             )
             self.assertEqual(
-                [
-                    message["line_id"]
-                    for message in progress
-                    if message.get("phase") == "synthesis"
-                ],
+                [message["line_id"] for message in progress if message.get("phase") == "synthesis"],
                 ["ch01_0000", "ch01_0001"],
             )
             self.assertEqual(
@@ -816,11 +803,7 @@ class ValidationLoopTests(unittest.TestCase):
             self.assertIn("whisper_transcription", first.timings_seconds)
             self.assertIn("validation_cache_lookup", second.timings_seconds)
             self.assertNotIn("whisper_transcription", second.timings_seconds)
-            measured = sum(
-                value
-                for key, value in first.timings_seconds.items()
-                if key != "total"
-            )
+            measured = sum(value for key, value in first.timings_seconds.items() if key != "total")
             self.assertLessEqual(measured, first.timings_seconds["total"] * 1.1)
 
             third = loop.process_chapter(
@@ -856,8 +839,11 @@ class ValidationLoopTests(unittest.TestCase):
             engine = FakeEngine()
             store = EmbeddingStore(root / "cache.db")
             loop = ValidationLoop(
-                whisper=FakeWhisper(), analyzer=FakeAnalyzer(), engine=engine,
-                library=FakeLibrary(reference), embedding_store=store,
+                whisper=FakeWhisper(),
+                analyzer=FakeAnalyzer(),
+                engine=engine,
+                library=FakeLibrary(reference),
+                embedding_store=store,
             )
             lines = [
                 ScriptLine(line_id="ch01_0000", speaker="narrator", text="hello"),
@@ -870,12 +856,18 @@ class ValidationLoopTests(unittest.TestCase):
 
             with self.assertRaisesRegex(RuntimeError, "injected callback crash"):
                 loop.process_chapter(
-                    project_id="book", chapter_number=1, lines=lines,
-                    workspace=root, progress_callback=crash_after_first_checkpoint,
+                    project_id="book",
+                    chapter_number=1,
+                    lines=lines,
+                    workspace=root,
+                    progress_callback=crash_after_first_checkpoint,
                 )
 
             response = loop.process_chapter(
-                project_id="book", chapter_number=1, lines=lines, workspace=root,
+                project_id="book",
+                chapter_number=1,
+                lines=lines,
+                workspace=root,
             )
 
             self.assertEqual(response.status, "success")

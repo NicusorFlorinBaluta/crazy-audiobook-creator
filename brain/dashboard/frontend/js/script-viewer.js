@@ -44,15 +44,15 @@ window.ScriptViewer = (() => {
     els.scriptLowConfidence?.addEventListener('change', () => renderScriptLines(currentScriptChapter));
 
     els.btnRegenerateChapter?.addEventListener('click', async () => {
-        if (!confirm(`Are you sure you want to regenerate Chapter ${currentScriptChapter}? This will delete the current script for this chapter and require a pipeline run to recreate it.`)) return;
+        const actualChapterNumber = currentData.script?.chapters?.[currentScriptChapter]?.chapter_number || (currentScriptChapter + 1);
+        if (!confirm(`Are you sure you want to regenerate Chapter ${actualChapterNumber}? This will delete the current script for this chapter and require a pipeline run to recreate it.`)) return;
 
         try {
             const projectId = window.state?.currentProjectId;
             if (!projectId) return;
-            const actualChapterNumber = currentData.script?.chapters?.[currentScriptChapter]?.chapter_number || (currentScriptChapter + 1);
             const res = await fetch(`api/projects/${encodeURIComponent(projectId)}/chapters/${actualChapterNumber}/regenerate`, { method: 'POST' });
             if (res.ok) {
-                showToast(`Chapter ${currentScriptChapter} queued for regeneration. Start the pipeline to rebuild it.`, 'success');
+                showToast(`Chapter ${actualChapterNumber} queued for regeneration. Start the pipeline to rebuild it.`, 'success');
                 // Remove the chapter data from memory and UI
                 if (currentData.script && currentData.script.chapters) {
                     currentData.script.chapters[currentScriptChapter] = null;
@@ -154,7 +154,8 @@ window.ScriptViewer = (() => {
     function renderCharacters() {
         const voiceState = currentData.voices;
         const voices = voiceState?.voices || [];
-        const readyVoiceCount = voices.filter(voice => voice.ready).length;
+        const selectedVoices = voices.filter(voice => voice.ready && voice.assigned_characters && voice.assigned_characters.length > 0);
+        const readyVoiceCount = selectedVoices.length;
         if (els.downloadAllVoices) {
             const projectId = window.state?.currentProjectId;
             els.downloadAllVoices.classList.toggle(
@@ -166,6 +167,7 @@ window.ScriptViewer = (() => {
             els.downloadAllVoices.textContent = readyVoiceCount
                 ? `Download all samples (${readyVoiceCount})`
                 : 'Download all samples';
+            els.downloadAllVoices.title = 'Download selected character and narrator references as a ZIP';
         }
         const speakingCharacters = voiceState?.speaking_characters || [];
         const speakerById = new Map(
@@ -199,6 +201,9 @@ window.ScriptViewer = (() => {
         const excluded = voiceState.non_speaking_count || 0;
         const assignedProfileCount = voices.filter(voice => (voice.assigned_characters || []).length > 0).length;
         const alternativeCount = Math.max(0, voices.length - assignedProfileCount);
+        const similarPairCount = (
+            voiceState.quality?.cast_pair_diagnostics || []
+        ).filter(item => item.status === 'similar' && !item.warning_suppressed).length;
         if (els.castingSummary) {
             els.castingSummary.innerHTML = `
                 <div>
@@ -208,6 +213,7 @@ window.ScriptViewer = (() => {
                 <div class="casting-exclusion">
                     ${alternativeCount} optional alternative${alternativeCount === 1 ? '' : 's'} available; ${excluded} non-speaking registry entr${excluded === 1 ? 'y is' : 'ies are'} excluded.
                 </div>
+                ${similarPairCount ? `<div class="casting-warning-summary">${similarPairCount} acoustically similar pair${similarPairCount === 1 ? '' : 's'} require preview and acknowledgement before approval.</div>` : ''}
             `;
         }
         renderVoiceReviewBanner(voiceState);
@@ -307,6 +313,12 @@ window.ScriptViewer = (() => {
             const warningHtml = (mainVoice.warnings || []).map(warning => `
                 <div class="voice-profile-warning">${escapeHtml(warning)}</div>
             `).join('');
+            const designNotesHtml = (mainVoice.design_notes || []).length ? `
+                <details class="voice-profile-notes">
+                    <summary>Design safeguards applied (${mainVoice.design_notes.length})</summary>
+                    ${(mainVoice.design_notes || []).map(note => `<p>${escapeHtml(note)}</p>`).join('')}
+                </details>
+            ` : '';
             const assignmentRows = assigned.map(character => `
                 <div class="voice-assignment-row" data-character-id="${escapeHtml(character.character_id)}">
                     <span class="voice-speaker-name">${escapeHtml(character.name)}</span>
@@ -320,6 +332,33 @@ window.ScriptViewer = (() => {
                     </select>
                     <button class="btn btn-secondary char-voice-save"
                             ${voiceState.editable ? '' : 'disabled'}>Assign</button>
+                    <details class="character-profile-editor">
+                        <summary>Correct character profile</summary>
+                        <div class="character-profile-fields">
+                            <label>Gender
+                                <select class="character-profile-gender" ${voiceState.editable ? '' : 'disabled'}>
+                                    ${['male', 'female', 'other'].map(value => `
+                                        <option value="${value}" ${character.gender === value ? 'selected' : ''}>${value}</option>
+                                    `).join('')}
+                                </select>
+                            </label>
+                            <label>Age range
+                                <input class="character-profile-age" maxlength="80"
+                                       value="${escapeHtml(character.age_range || 'unknown')}"
+                                       ${voiceState.editable ? '' : 'disabled'}>
+                            </label>
+                            <label class="character-profile-wide">Speaking style
+                                <textarea class="character-profile-style" rows="2" maxlength="500"
+                                          ${voiceState.editable ? '' : 'disabled'}>${escapeHtml(character.speaking_style || '')}</textarea>
+                            </label>
+                            <label class="character-profile-wide">Voice description
+                                <textarea class="character-profile-description" rows="3" maxlength="1000"
+                                          ${voiceState.editable ? '' : 'disabled'}>${escapeHtml(character.voice_description || '')}</textarea>
+                            </label>
+                            <button class="btn btn-secondary character-profile-save"
+                                    ${voiceState.editable ? '' : 'disabled'}>Save correction</button>
+                        </div>
+                    </details>
                 </div>
             `).join('');
 
@@ -354,6 +393,7 @@ window.ScriptViewer = (() => {
                     <p>${escapeHtml(mainVoice.description || 'No design direction available.')}</p>
                 </details>
                 ${warningHtml}
+                ${designNotesHtml}
                 ${candidatesHtml}
                 <details class="voice-assignments">
                     <summary>Character assignments (${assigned.length})</summary>
@@ -390,6 +430,15 @@ window.ScriptViewer = (() => {
                 const saveButton = row.querySelector('.char-voice-save');
                 saveButton?.addEventListener('click', () =>
                     saveVoiceAssignment(row.dataset.characterId, select.value, saveButton)
+                );
+                const profileButton = row.querySelector('.character-profile-save');
+                profileButton?.addEventListener('click', () =>
+                    saveCharacterProfile(row.dataset.characterId, {
+                        gender: row.querySelector('.character-profile-gender').value,
+                        age_range: row.querySelector('.character-profile-age').value,
+                        speaking_style: row.querySelector('.character-profile-style').value,
+                        voice_description: row.querySelector('.character-profile-description').value
+                    }, profileButton)
                 );
             });
             const regenerateButton = card.querySelector('.voice-regenerate');
@@ -946,6 +995,19 @@ window.ScriptViewer = (() => {
     async function approveVoiceCast() {
         const projectId = window.state?.currentProjectId;
         if (!projectId) return;
+        const similarPairs = (currentData.voices?.quality?.cast_pair_diagnostics || [])
+            .filter(item => item.status === 'similar' && !item.warning_suppressed);
+        const distinctnessStale = currentData.voices?.quality?.distinctness_status === 'stale';
+        let acknowledgeSimilarPairs = false;
+        if (similarPairs.length || distinctnessStale) {
+            acknowledgeSimilarPairs = window.confirm(
+                (similarPairs.length
+                    ? `${similarPairs.length} voice pair(s) sound unusually similar. `
+                    : 'One or more voices changed after the last distinctness comparison. ') +
+                'Preview the cast before continuing. Continue with this cast anyway?'
+            );
+            if (!acknowledgeSimilarPairs) return;
+        }
         const button = els.voiceReviewBanner?.querySelector('.voice-approve');
         if (button) button.disabled = true;
         try {
@@ -954,7 +1016,10 @@ window.ScriptViewer = (() => {
                 {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({continue_pipeline: true})
+                    body: JSON.stringify({
+                        continue_pipeline: true,
+                        acknowledge_similar_pairs: acknowledgeSimilarPairs
+                    })
                 }
             );
             const data = await response.json().catch(() => ({}));
@@ -992,7 +1057,9 @@ window.ScriptViewer = (() => {
         currentData.script.chapters.forEach((ch, idx) => {
             const opt = document.createElement('option');
             opt.value = idx;
-            opt.textContent = ch.chapter_title ? `${ch.chapter_number || (idx + 1)}: ${ch.chapter_title}` : `Chapter ${ch.chapter_number || (idx + 1)}`;
+            const chNum = ch.chapter_number || (idx + 1);
+            const rawTitle = (ch.chapter_title || '').trim();
+            opt.textContent = rawTitle || `Chapter ${chNum}`;
             els.chapterSelect.appendChild(opt);
         });
         els.chapterSelect.value = 0;
@@ -1089,7 +1156,7 @@ window.ScriptViewer = (() => {
                         ${allSpeakerOptions}
                     </select>
                     <small>${escapeHtml(String(line.line_id || line.id || ''))}</small>
-                    ${line.speaker_confidence == null ? '' : `<small title="Attribution resolver: ${escapeHtml(humanizeToken(line.attribution_resolver || 'local'))}">${Math.round(Number(line.speaker_confidence) * 100)}% Â· ${escapeHtml(humanizeToken(line.attribution_resolver || 'local'))}</small>`}
+                    ${line.speaker_confidence == null ? '' : `<small title="Attribution resolver: ${escapeHtml(humanizeToken(line.attribution_resolver || 'local'))}">${Math.round(Number(line.speaker_confidence) * 100)}% · ${escapeHtml(humanizeToken(line.attribution_resolver || 'local'))}</small>`}
                     ${isLowConfidence ? `<svg viewBox="0 0 24 24" width="14" height="14" stroke="var(--warning-color, orange)" stroke-width="2" fill="none" style="vertical-align: text-bottom;" title="${escapeHtml(reviewTitle)}"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>` : ''}
                 </div>
                 <div class="line-text">
@@ -1131,6 +1198,51 @@ window.ScriptViewer = (() => {
             }
             els.scriptViewer.appendChild(div);
         });
+    }
+
+    async function saveCharacterProfile(characterId, profile, button = null) {
+        const projectId = window.state?.currentProjectId;
+        if (!projectId) return;
+        const payload = Object.fromEntries(
+            Object.entries(profile).map(([key, value]) => [key, value.trim()])
+        );
+        if (!payload.age_range || !payload.voice_description || payload.voice_description.length < 12) {
+            showToast('Provide an age range and a voice description of at least 12 characters', 'warning');
+            return;
+        }
+        const previousText = button?.textContent;
+        if (button) {
+            button.disabled = true;
+            button.textContent = 'Saving...';
+        }
+        try {
+            const response = await fetch(
+                `api/projects/${encodeURIComponent(projectId)}/characters/${encodeURIComponent(characterId)}/profile`,
+                {
+                    method: 'PATCH',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(payload)
+                }
+            );
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(data.detail || 'Could not save character profile');
+            const affected = data.affected_chapters || [];
+            showToast(
+                data.status === 'unchanged'
+                    ? 'Character profile unchanged'
+                    : `Correction saved${data.requires_voice_regeneration ? '; regenerate the voice preview' : ''}${affected.length ? `; ${affected.length} chapter${affected.length === 1 ? '' : 's'} marked stale` : ''}`,
+                'success'
+            );
+            await Promise.all([fetchCharacters(projectId), fetchVoices(projectId)]);
+            renderCharacters();
+        } catch (error) {
+            showToast(error.message, 'error');
+        } finally {
+            if (button?.isConnected) {
+                button.disabled = false;
+                button.textContent = previousText;
+            }
+        }
     }
 
     function jumpToScriptLine(chapterNumber, lineId) {
@@ -1182,7 +1294,8 @@ window.ScriptViewer = (() => {
     }
 
     function renderQuality() {
-        const hasQuality = currentData.quality && Object.keys(currentData.quality).length > 0;
+        const q = currentData.quality || {};
+        const hasQuality = (q.total_segments || 0) > 0 || (q.stale_records || 0) > 0;
         const hasPronunciations = currentData.pronunciations?.candidates?.length > 0;
         const hasJoinReview = currentData.qualityReview?.join_warnings?.length > 0;
         const hasSegmentReview = currentData.qualityReview?.segment_reviews?.length > 0;
@@ -1191,18 +1304,27 @@ window.ScriptViewer = (() => {
             return;
         }
 
-        const q = currentData.quality || {};
         els.qualityOverview.innerHTML = '';
 
-        if (hasQuality) {
+        if ((q.stale_records || 0) > 0) {
+            const notice = document.createElement('div');
+            notice.className = 'quality-stale-notice';
+            notice.innerHTML = `<strong>Previous audio checks are archived</strong><span>${q.stale_records} segment result${q.stale_records === 1 ? '' : 's'} belong to audio outside the current reconciled generation. New results will appear as the selected chapters are generated again.</span>`;
+            els.qualityOverview.appendChild(notice);
+        }
+
+        if (hasQuality && (q.total_segments || 0) > 0) {
             // Segments Total
             addQualityStat('Total Segments', q.total_segments || 0, 'neutral', 'All scripted utterances evaluated in the final run.');
         
         // Pass Rate
         const acceptedSegments = (q.passed_segments || 0) + (q.accepted_with_warning_segments || 0);
-        const passRate = q.total_segments > 0 ? Math.round((acceptedSegments / q.total_segments) * 100) : 0;
-        const passStatus = passRate > 95 ? 'good' : (passRate > 85 ? 'warn' : 'bad');
-        addQualityStat('Accepted Rate', `${passRate}%`, passStatus, 'Segments accepted automatically plus segments accepted with a documented soft warning.');
+        const passRateValue = q.total_segments > 0 ? (acceptedSegments / q.total_segments) * 100 : 0;
+        const passRate = acceptedSegments === q.total_segments && q.total_segments > 0
+            ? '100%'
+            : `${Math.min(99.9, passRateValue).toFixed(1)}%`;
+        const passStatus = passRateValue > 95 ? 'good' : (passRateValue > 85 ? 'warn' : 'bad');
+        addQualityStat('Accepted Rate', passRate, passStatus, 'Segments accepted automatically plus segments accepted with a documented soft warning.');
 
         addQualityStat(
             'Accepted Warnings',
@@ -1246,7 +1368,7 @@ window.ScriptViewer = (() => {
                             <span>Attempt ${item.attempt}</span>
                             <span>WER ${((item.wer || 0) * 100).toFixed(1)}%</span>
                             <span title="Final validator confidence">Confidence ${item.validation_confidence == null ? 'n/a' : `${Math.round(item.validation_confidence * 100)}%`}</span>
-                            ${item.external_validation_provider ? `<span title="${escapeHtml(item.external_validation_reason || '')}">${escapeHtml(humanizeToken(item.external_validation_provider))} Â· ${escapeHtml(humanizeToken(item.external_validation_decision || 'abstain'))}</span>` : ''}
+                            ${item.external_validation_provider ? `<span title="${escapeHtml(item.external_validation_reason || '')}">${escapeHtml(humanizeToken(item.external_validation_provider))} · ${escapeHtml(humanizeToken(item.external_validation_decision || 'abstain'))}</span>` : ''}
                             <span class="quality-reason">${escapeHtml(humanizeToken(item.acceptance_reason))}</span>
                             <details><summary>Reveal transcript and decisions</summary><p>${escapeHtml(item.transcribed_text || 'Transcript unavailable')}</p>${(item.external_validation_history || []).map(step => `<small>${escapeHtml(step.provider || 'local')} · ${escapeHtml(step.decision || 'unknown')} · ${step.confidence == null ? 'n/a' : `${Math.round(step.confidence * 100)}%`} · ${escapeHtml(step.reason || '')}</small>`).join('<br>')}</details>
                             <audio class="quality-attempt-audio" aria-label="Listen to ${escapeHtml(item.line_id)}, final attempt ${item.attempt}" controls preload="metadata" src="${escapeHtml(item.audio_url || '')}"></audio>
@@ -1302,9 +1424,15 @@ window.ScriptViewer = (() => {
         const cards = rows => rows.map(item => `
             <article class="join-review-item segment-review-item" data-item-id="${escapeHtml(item.item_id)}">
                 <div class="join-review-summary">
-                    <strong>Chapter ${item.chapter_number ?? '?'} Â· ${escapeHtml(item.item_id)}</strong>
-                    <span>${escapeHtml(humanizeToken(item.status))} Â· confidence ${item.validation_confidence == null ? 'unavailable' : `${Math.round(item.validation_confidence * 100)}%`}</span>
+                    <strong>Chapter ${item.chapter_number ?? '?'} · ${escapeHtml(item.item_id)}</strong>
+                    <span>${escapeHtml(humanizeToken(item.status))} · confidence ${item.validation_confidence == null ? 'unavailable' : `${Math.round(item.validation_confidence * 100)}%`}</span>
                 </div>
+                ${item.text ? `
+                    <div class="join-review-quote">
+                        <strong>${escapeHtml(item.speaker ? (item.speaker.charAt(0).toUpperCase() + item.speaker.slice(1)) : 'Speaker')}:</strong>
+                        <span>“${escapeHtml(item.text)}”</span>
+                    </div>
+                ` : ''}
                 <p>${escapeHtml(item.reason || 'The validation ladder could not reach a safe automatic decision.')}</p>
                 <p><small>${item.external_validation_provider ? `${escapeHtml(humanizeToken(item.external_validation_provider))} / ${escapeHtml(item.external_validation_model || 'default model')} / ${escapeHtml(humanizeToken(item.external_validation_decision || 'abstain'))}` : 'No external fallback produced a usable decision'}</small></p>
                 <audio aria-label="Review ${escapeHtml(item.item_id)}" controls preload="metadata" src="${escapeHtml(item.audio_url)}"></audio>
@@ -1324,15 +1452,25 @@ window.ScriptViewer = (() => {
             </article>
         `).join('');
         section.innerHTML = `
-            <div class="join-review-heading"><div><strong>Audio requiring your decision</strong><p>Only segments that exhausted automatic confidence checks appear here.</p></div><span>${unreviewed.length} unreviewed</span></div>
-            <div class="join-review-list">${unreviewed.length ? cards(unreviewed) : '<div class="review-complete-message">All escalated audio has been reviewed.</div>'}${reviewed.length ? `<details class="reviewed-joins"><summary>Show reviewed (${reviewed.length})</summary>${cards(reviewed)}</details>` : ''}</div>
+            <details class="quality-section-details segment-review-details" open id="segment-review-details">
+                <summary class="quality-section-summary" role="button">
+                    <div>
+                        <strong>Audio requiring your decision</strong>
+                        <small>Only segments that exhausted automatic confidence checks appear here.</small>
+                    </div>
+                    <span class="quality-summary-badge ${unreviewed.length === 0 ? 'resolved' : ''}">${unreviewed.length} unreviewed</span>
+                </summary>
+                <div class="quality-section-body">
+                    <div class="join-review-list">${unreviewed.length ? cards(unreviewed) : '<div class="review-complete-message">All escalated audio has been reviewed.</div>'}${reviewed.length ? `<details class="reviewed-joins"><summary>Show reviewed (${reviewed.length})</summary>${cards(reviewed)}</details>` : ''}</div>
+                </div>
+            </details>
         `;
         section.querySelectorAll('.segment-review-save').forEach(button => {
             button.addEventListener('click', async () => {
                 const row = button.closest('.segment-review-item');
                 const projectId = window.state?.currentProjectId;
                 button.disabled = true;
-                button.textContent = 'Savingâ€¦';
+                button.textContent = 'Saving…';
                 try {
                     const response = await fetch(`api/projects/${encodeURIComponent(projectId)}/quality/review`, {
                         method: 'POST',
@@ -1368,6 +1506,16 @@ window.ScriptViewer = (() => {
         const counts = review.review_counts || {};
         const unreviewed = joins.filter(item => (item.disposition || 'unreviewed') === 'unreviewed');
         const reviewed = joins.filter(item => (item.disposition || 'unreviewed') !== 'unreviewed');
+
+        const joinState = {
+            page: 1,
+            pageSize: 15,
+            disposition: 'unreviewed',
+            chapter: 'all',
+            speaker: 'all',
+            severity: 'all'
+        };
+
         const cardsHtml = items => items.map(item => `
             <article class="join-review-item" data-item-id="${escapeHtml(item.item_id)}"
                      data-initial-disposition="${escapeHtml(item.disposition || 'unreviewed')}"
@@ -1399,66 +1547,158 @@ window.ScriptViewer = (() => {
                 <small title="Diagnostic signals that placed this transition in the listening queue">Why flagged: ${escapeHtml((item.reasons || []).map(humanizeJoinReason).join(' · ') || 'Diagnostic threshold')}</small>
             </article>
         `).join('');
+
         section.innerHTML = `
-            <div class="join-review-heading">
-                <div>
-                    <strong>Chapter join review</strong>
-                    <p>${joins.length} diagnostic warning${joins.length === 1 ? '' : 's'}, sorted by measured severity. A warning is not automatically an audible defect.</p>
+            <details class="quality-section-details join-review-details" open id="join-review-details">
+                <summary class="quality-section-summary" role="button">
+                    <div>
+                        <strong>Chapter join review</strong>
+                        <small>${joins.length} diagnostic warning${joins.length === 1 ? '' : 's'}, sorted by measured severity. A warning is not automatically an audible defect.</small>
+                    </div>
+                    <span class="quality-summary-badge ${unreviewed.length === 0 ? 'resolved' : ''}">${counts.unreviewed || 0} unreviewed</span>
+                </summary>
+                <div class="quality-section-body">
+                    <div class="join-review-filter-bar">
+                        <label><span>Disposition</span><select class="input-sm join-filter-disposition">
+                            <option value="all">All</option><option value="unreviewed" selected>Unreviewed</option><option value="acceptable">Acceptable</option><option value="needs_remaster">Needs remaster</option><option value="source_tts_issue">Source / TTS issue</option>
+                        </select></label>
+                        <label><span>Chapter</span><select class="input-sm join-filter-chapter"><option value="all">All chapters</option>${[...new Set(joins.map(item => item.chapter_number))].sort((a, b) => a - b).map(chapter => `<option value="${chapter}">Chapter ${chapter}</option>`).join('')}</select></label>
+                        <label><span>Speaker</span><select class="input-sm join-filter-speaker"><option value="all">All speakers</option>${[...new Set(joins.flatMap(item => [item.previous_line?.speaker, item.current_line?.speaker]).filter(Boolean))].sort().map(speaker => `<option value="${escapeHtml(speaker.toLowerCase())}">${escapeHtml(speakerDisplayName(speaker))}</option>`).join('')}</select></label>
+                        <label><span>Severity</span><select class="input-sm join-filter-severity"><option value="all">All severities</option><option value="0.7">High (0.70+)</option><option value="0.4">Medium+ (0.40+)</option></select></label>
+                        <button type="button" class="btn btn-ghost btn-sm join-bulk-acceptable">Mark page acceptable</button>
+                    </div>
+                    <div class="join-review-list" id="join-review-items-container"></div>
+                    <div class="quality-pagination-toolbar" id="join-pagination-toolbar">
+                        <div class="pagination-info" id="join-pagination-info">Showing 0-0 of 0 warnings</div>
+                        <div class="pagination-controls">
+                            <button class="btn btn-ghost btn-sm" id="btn-join-prev-page" disabled>◀ Prev</button>
+                            <span class="pagination-page-num" id="join-pagination-page-num">Page 1 of 1</span>
+                            <button class="btn btn-ghost btn-sm" id="btn-join-next-page" disabled>Next ▶</button>
+                            <label class="visually-hidden" for="select-join-page-size">Warnings per page</label>
+                            <select id="select-join-page-size" class="input-sm">
+                                <option value="15" selected>15 per page</option>
+                                <option value="30">30 per page</option>
+                                <option value="50">50 per page</option>
+                                <option value="all">Show all</option>
+                            </select>
+                        </div>
+                    </div>
                 </div>
-                <span>${counts.unreviewed || 0} unreviewed</span>
-            </div>
-            <div class="join-review-filter-bar">
-                <label><span>Disposition</span><select class="input-sm join-filter-disposition">
-                    <option value="all">All</option><option value="unreviewed" selected>Unreviewed</option><option value="acceptable">Acceptable</option><option value="needs_remaster">Needs remaster</option><option value="source_tts_issue">Source / TTS issue</option>
-                </select></label>
-                <label><span>Chapter</span><select class="input-sm join-filter-chapter"><option value="all">All chapters</option>${[...new Set(joins.map(item => item.chapter_number))].sort((a, b) => a - b).map(chapter => `<option value="${chapter}">Chapter ${chapter}</option>`).join('')}</select></label>
-                <label><span>Speaker</span><select class="input-sm join-filter-speaker"><option value="all">All speakers</option>${[...new Set(joins.flatMap(item => [item.previous_line?.speaker, item.current_line?.speaker]).filter(Boolean))].sort().map(speaker => `<option value="${escapeHtml(speaker.toLowerCase())}">${escapeHtml(speakerDisplayName(speaker))}</option>`).join('')}</select></label>
-                <label><span>Severity</span><select class="input-sm join-filter-severity"><option value="all">All severities</option><option value="0.7">High (0.70+)</option><option value="0.4">Medium+ (0.40+)</option></select></label>
-                <button type="button" class="btn btn-ghost btn-sm join-bulk-acceptable">Mark visible acceptable</button>
-            </div>
-            <div class="join-review-list">
-                ${unreviewed.length ? cardsHtml(unreviewed) : '<div class="review-complete-message">All join warnings have been reviewed.</div>'}
-                ${reviewed.length ? `<details class="reviewed-joins"><summary>Show reviewed (${reviewed.length})</summary>${cardsHtml(reviewed)}</details>` : ''}
-            </div>
+            </details>
         `;
-        section.querySelectorAll('.join-review-item').forEach(row => {
-            const updateDirtyState = () => {
-                const disposition = row.querySelector('.join-disposition')?.value || 'unreviewed';
-                const note = row.querySelector('.join-note')?.value || '';
-                const dirty = disposition !== row.dataset.initialDisposition || note !== row.dataset.initialNote;
-                const button = row.querySelector('.join-review-save');
-                button.disabled = !dirty;
-                button.textContent = dirty ? 'Save review' : 'Saved';
-            };
-            row.querySelector('.join-disposition')?.addEventListener('change', updateDirtyState);
-            row.querySelector('.join-note')?.addEventListener('input', updateDirtyState);
-        });
-        const applyJoinFilters = () => {
-            const disposition = section.querySelector('.join-filter-disposition').value;
-            const chapter = section.querySelector('.join-filter-chapter').value;
-            const speaker = section.querySelector('.join-filter-speaker').value;
-            const severity = section.querySelector('.join-filter-severity').value;
-            let visibleCount = 0;
-            section.querySelectorAll('.join-review-item').forEach(row => {
-                row.hidden = !(
-                    (disposition === 'all' || row.dataset.disposition === disposition)
-                    && (chapter === 'all' || row.dataset.chapter === chapter)
-                    && (speaker === 'all' || row.dataset.speakers.split(' ').includes(speaker))
-                    && (severity === 'all' || Number(row.dataset.severity) >= Number(severity))
-                );
-                if (!row.hidden) visibleCount += 1;
+
+        function renderJoinPage() {
+            const container = section.querySelector('#join-review-items-container');
+            if (!container) return;
+
+            const filtered = joins.filter(item => {
+                const dispMatch = joinState.disposition === 'all' || (item.disposition || 'unreviewed') === joinState.disposition;
+                const chMatch = joinState.chapter === 'all' || String(item.chapter_number) === String(joinState.chapter);
+                const spkMatch = joinState.speaker === 'all' || [item.previous_line?.speaker, item.current_line?.speaker].filter(Boolean).some(s => s.toLowerCase() === joinState.speaker);
+                const sevMatch = joinState.severity === 'all' || Number(item.severity || 0) >= Number(joinState.severity);
+                return dispMatch && chMatch && spkMatch && sevMatch;
             });
-            section.querySelector('.join-bulk-acceptable').disabled = visibleCount === 0;
-            const reviewedDetails = section.querySelector('.reviewed-joins');
-            if (reviewedDetails && disposition !== 'unreviewed') reviewedDetails.open = true;
-        };
-        section.querySelectorAll('.join-review-filter-bar select').forEach(select => {
-            select.addEventListener('change', applyJoinFilters);
+
+            const pageSize = joinState.pageSize === 'all' ? filtered.length : Number(joinState.pageSize);
+            const totalPages = Math.max(1, Math.ceil(filtered.length / (pageSize || 1)));
+            if (joinState.page > totalPages) joinState.page = totalPages;
+            if (joinState.page < 1) joinState.page = 1;
+
+            const startIndex = (joinState.page - 1) * pageSize;
+            const pageItems = joinState.pageSize === 'all' ? filtered : filtered.slice(startIndex, startIndex + pageSize);
+
+            if (pageItems.length) {
+                container.innerHTML = cardsHtml(pageItems);
+            } else {
+                container.innerHTML = '<div class="review-complete-message">No join warnings match the selected filters.</div>';
+            }
+
+            const startDisplay = filtered.length ? startIndex + 1 : 0;
+            const endDisplay = Math.min(startIndex + pageItems.length, filtered.length);
+            const infoEl = section.querySelector('#join-pagination-info');
+            if (infoEl) infoEl.textContent = `Showing ${startDisplay}-${endDisplay} of ${filtered.length} warning${filtered.length === 1 ? '' : 's'}`;
+
+            const pageNumEl = section.querySelector('#join-pagination-page-num');
+            if (pageNumEl) pageNumEl.textContent = `Page ${joinState.page} of ${totalPages}`;
+
+            const prevBtn = section.querySelector('#btn-join-prev-page');
+            if (prevBtn) prevBtn.disabled = joinState.page <= 1;
+
+            const nextBtn = section.querySelector('#btn-join-next-page');
+            if (nextBtn) nextBtn.disabled = joinState.page >= totalPages;
+
+            const bulkBtn = section.querySelector('.join-bulk-acceptable');
+            if (bulkBtn) bulkBtn.disabled = pageItems.length === 0;
+
+            container.querySelectorAll('.join-review-item').forEach(row => {
+                const updateDirtyState = () => {
+                    const disposition = row.querySelector('.join-disposition')?.value || 'unreviewed';
+                    const note = row.querySelector('.join-note')?.value || '';
+                    const dirty = disposition !== row.dataset.initialDisposition || note !== row.dataset.initialNote;
+                    const button = row.querySelector('.join-review-save');
+                    if (button) {
+                        button.disabled = !dirty;
+                        button.textContent = dirty ? 'Save review' : 'Saved';
+                    }
+                };
+                row.querySelector('.join-disposition')?.addEventListener('change', updateDirtyState);
+                row.querySelector('.join-note')?.addEventListener('input', updateDirtyState);
+            });
+
+            container.querySelectorAll('.join-review-save').forEach(button => {
+                button.addEventListener('click', async () => {
+                    const row = button.closest('.join-review-item');
+                    await saveReviewDisposition(
+                        row?.dataset.itemId || '',
+                        row?.querySelector('.join-disposition')?.value || 'unreviewed',
+                        row?.querySelector('.join-note')?.value || '',
+                        button
+                    );
+                });
+            });
+        }
+
+        section.querySelector('.join-filter-disposition')?.addEventListener('change', e => {
+            joinState.disposition = e.target.value;
+            joinState.page = 1;
+            renderJoinPage();
         });
+        section.querySelector('.join-filter-chapter')?.addEventListener('change', e => {
+            joinState.chapter = e.target.value;
+            joinState.page = 1;
+            renderJoinPage();
+        });
+        section.querySelector('.join-filter-speaker')?.addEventListener('change', e => {
+            joinState.speaker = e.target.value;
+            joinState.page = 1;
+            renderJoinPage();
+        });
+        section.querySelector('.join-filter-severity')?.addEventListener('change', e => {
+            joinState.severity = e.target.value;
+            joinState.page = 1;
+            renderJoinPage();
+        });
+
+        section.querySelector('#btn-join-prev-page')?.addEventListener('click', () => {
+            if (joinState.page > 1) {
+                joinState.page -= 1;
+                renderJoinPage();
+            }
+        });
+        section.querySelector('#btn-join-next-page')?.addEventListener('click', () => {
+            joinState.page += 1;
+            renderJoinPage();
+        });
+        section.querySelector('#select-join-page-size')?.addEventListener('change', e => {
+            joinState.pageSize = e.target.value;
+            joinState.page = 1;
+            renderJoinPage();
+        });
+
         section.querySelector('.join-bulk-acceptable')?.addEventListener('click', async event => {
-            const visibleRows = [...section.querySelectorAll('.join-review-item:not([hidden])')];
+            const visibleRows = [...section.querySelectorAll('.join-review-item')];
             if (!visibleRows.length) {
-                showToast('No visible join warnings to update', 'info');
+                showToast('No visible join warnings on this page to update', 'info');
                 return;
             }
             if (!confirm(`Mark ${visibleRows.length} visible join warning${visibleRows.length === 1 ? '' : 's'} as acceptable?`)) return;
@@ -1490,18 +1730,8 @@ window.ScriptViewer = (() => {
                 button.textContent = 'Try bulk update again';
             }
         });
-        applyJoinFilters();
-        section.querySelectorAll('.join-review-save').forEach(button => {
-            button.addEventListener('click', async () => {
-                const row = button.closest('.join-review-item');
-                await saveReviewDisposition(
-                    row?.dataset.itemId || '',
-                    row?.querySelector('.join-disposition')?.value || 'unreviewed',
-                    row?.querySelector('.join-note')?.value || '',
-                    button
-                );
-            });
-        });
+
+        renderJoinPage();
         els.qualityOverview.appendChild(section);
     }
 
@@ -1524,13 +1754,12 @@ window.ScriptViewer = (() => {
                     })
                 }
             );
-            const data = await response.json().catch(() => ({}));
-            if (!response.ok) throw new Error(data.detail || 'Could not save review');
-            showToast('Join review saved', 'success');
+            if (!response.ok) throw new Error(await response.text());
+            showToast('Join review updated', 'success');
             await fetchQualityReview(projectId);
             renderQuality();
         } catch (error) {
-            showToast(error.message, 'error');
+            showToast(`Could not update join review: ${error.message}`, 'error');
             button.disabled = false;
             button.textContent = 'Try again';
         }
@@ -1538,50 +1767,419 @@ window.ScriptViewer = (() => {
 
     function renderPronunciationInventory() {
         const inventory = currentData.pronunciations;
-        if (!inventory?.candidates?.length) return;
-        const unresolved = inventory.candidates.filter(item => item.status === 'review_required');
-        const verified = inventory.candidates.filter(item => item.status === 'verified');
+        if (!inventory) return;
+        const candidates = inventory.candidates || [];
+        const unresolved = candidates.filter(item => item.status === 'review_required');
+        const verified = candidates.filter(item => item.status === 'verified');
         const section = document.createElement('section');
         section.className = 'pronunciation-review';
+
+        const lexState = {
+            page: 1,
+            pageSize: 15,
+            filter: 'all',
+            search: '',
+            inSentence: true
+        };
+
+        const unresolvedWithRecs = unresolved.filter(item => item.recommendation_default);
+
         section.innerHTML = `
-            <div class="pronunciation-heading">
-                <div>
-                    <strong>Book pronunciation lexicon</strong>
-                    <p>${unresolved.length} term${unresolved.length === 1 ? '' : 's'} need review. Nothing is inferred or applied automatically.</p>
+            <details class="quality-section-details pronunciation-details" open id="pronunciation-details">
+                <summary class="quality-section-summary" role="button">
+                    <div>
+                        <strong>Book pronunciation lexicon</strong>
+                        <small>${unresolved.length} term${unresolved.length === 1 ? '' : 's'} suggested from text · ${verified.length} custom verified mapping${verified.length === 1 ? '' : 's'}</small>
+                    </div>
+                    <span class="quality-summary-badge resolved">${verified.length} verified</span>
+                </summary>
+                <div class="quality-section-body">
+                    <div class="pronunciation-add-card">
+                        <strong>+ Add Custom Phonetic Replacement</strong>
+                        <input type="text" id="lexicon-custom-term" placeholder="Word in book (e.g. homeisle, homeisler)" maxlength="120">
+                        <input type="text" id="lexicon-custom-spoken" placeholder="Spoken form with spaces (e.g. Home aisle, Home eye ler)" maxlength="240">
+                        <div style="display:flex; gap:8px; align-items:center;">
+                            <button type="button" class="btn btn-ghost btn-sm" id="btn-preview-lexicon-custom" title="Test native TTS audio preview">▶ Test Preview</button>
+                            <button type="button" class="btn btn-primary btn-sm" id="btn-add-lexicon-custom">+ Add / Update Term</button>
+                        </div>
+                    </div>
+
+                    <div class="pronunciation-toolbar">
+                        <div class="pronunciation-search-bar" style="flex: 1;">
+                            <input type="text" id="lexicon-search-input" placeholder="🔍 Search words, terms, or replacements in lexicon...">
+                        </div>
+                        <div class="pronunciation-filter-tabs">
+                            <button type="button" class="btn btn-ghost btn-sm lex-tab active" data-filter="all">All (${candidates.length})</button>
+                            <button type="button" class="btn btn-ghost btn-sm lex-tab" data-filter="verified">Verified (${verified.length})</button>
+                            <button type="button" class="btn btn-ghost btn-sm lex-tab" data-filter="unresolved">Suggestions (${unresolved.length})</button>
+                        </div>
+                    </div>
+
+                    <div class="pronunciation-subtoolbar">
+                        <label class="pronunciation-preview-toggle" title="Preview words in natural sentence context ('The word is ...') for accurate flow">
+                            <input type="checkbox" id="lexicon-carrier-toggle" ${lexState.inSentence ? 'checked' : ''}>
+                            <span>Sentence context preview</span>
+                        </label>
+                        ${unresolvedWithRecs.length > 0 ? `
+                            <button type="button" class="btn btn-sm btn-batch-accept" id="btn-lexicon-batch-accept" title="Accept all default recommendations for unverified terms">
+                                ✨ Accept All Defaults (${unresolvedWithRecs.length})
+                            </button>
+                        ` : ''}
+                    </div>
+
+                    <div class="pronunciation-list" id="pronunciation-items-container"></div>
+
+                    <div class="quality-pagination-toolbar" id="lexicon-pagination-toolbar">
+                        <div class="pagination-info" id="lexicon-pagination-info">Showing 0-0 of 0 terms</div>
+                        <div class="pagination-controls">
+                            <button class="btn btn-ghost btn-sm" id="btn-lexicon-prev-page" disabled>◀ Prev</button>
+                            <span class="pagination-page-num" id="lexicon-pagination-page-num">Page 1 of 1</span>
+                            <button class="btn btn-ghost btn-sm" id="btn-lexicon-next-page" disabled>Next ▶</button>
+                            <label class="visually-hidden" for="select-lexicon-page-size">Terms per page</label>
+                            <select id="select-lexicon-page-size" class="input-sm">
+                                <option value="15" selected>15 per page</option>
+                                <option value="30">30 per page</option>
+                                <option value="50">50 per page</option>
+                                <option value="all">Show all</option>
+                            </select>
+                        </div>
+                    </div>
                 </div>
-                <span>${verified.length} verified</span>
-            </div>
-            <div class="pronunciation-list">
-                ${unresolved.slice(0, 40).map(item => `
-                    <div class="pronunciation-row" data-term="${escapeHtml(item.term)}">
-                        <div class="pronunciation-term">
-                            <strong>${escapeHtml(item.term)}</strong>
-                            <small>${item.occurrences} occurrence${item.occurrences === 1 ? '' : 's'} · chapters ${(item.chapters || []).join(', ') || '—'}</small>
-                            <span title="${escapeHtml((item.contexts || []).join(' | '))}">${escapeHtml((item.contexts || [])[0] || '')}</span>
-                        </div>
-                        <input type="text" maxlength="240" placeholder="Spoken form, e.g. Pah-chee" aria-label="Spoken form for ${escapeHtml(item.term)}">
-                        <button type="button" class="btn btn-secondary pronunciation-save">Verify</button>
-                    </div>
-                `).join('')}
-                ${verified.map(item => `
-                    <div class="pronunciation-row verified">
-                        <div class="pronunciation-term">
-                            <strong>${escapeHtml(item.term)}</strong>
-                            <small>${item.occurrences} occurrence${item.occurrences === 1 ? '' : 's'} · ${escapeHtml(item.mapping_source || 'project')}</small>
-                        </div>
-                        <span class="pronunciation-arrow">→</span>
-                        <strong>${escapeHtml(item.spoken_text)}</strong>
-                    </div>
-                `).join('')}
-            </div>
+            </details>
         `;
-        section.querySelectorAll('.pronunciation-save').forEach(button => {
-            button.addEventListener('click', () => {
-                const row = button.closest('.pronunciation-row');
-                approvePronunciation(row?.dataset.term || '', row?.querySelector('input')?.value || '', button);
+
+        function renderList() {
+            const container = section.querySelector('#pronunciation-items-container');
+            if (!container) return;
+            const q = lexState.search.toLowerCase();
+
+            let pool = candidates;
+            if (lexState.filter === 'verified') pool = verified;
+            else if (lexState.filter === 'unresolved') pool = unresolved;
+
+            const filtered = pool.filter(item => {
+                if (!q) return true;
+                return (
+                    item.term.toLowerCase().includes(q) ||
+                    (item.spoken_text || '').toLowerCase().includes(q) ||
+                    (item.recommendation_default || '').toLowerCase().includes(q) ||
+                    (item.recommendation_alternate || '').toLowerCase().includes(q) ||
+                    (item.contexts || []).some(c => c.toLowerCase().includes(q))
+                );
+            });
+
+            const pageSize = lexState.pageSize === 'all' ? filtered.length : Number(lexState.pageSize);
+            const totalPages = Math.max(1, Math.ceil(filtered.length / (pageSize || 1)));
+            if (lexState.page > totalPages) lexState.page = totalPages;
+            if (lexState.page < 1) lexState.page = 1;
+
+            const startIndex = (lexState.page - 1) * pageSize;
+            const pageItems = lexState.pageSize === 'all' ? filtered : filtered.slice(startIndex, startIndex + pageSize);
+
+            let html = '';
+            if (pageItems.length) {
+                html = pageItems.map(item => {
+                    if (item.status === 'verified') {
+                        return `
+                            <div class="pronunciation-row verified" data-term="${escapeHtml(item.term)}">
+                                <div class="pronunciation-term">
+                                    <strong>${escapeHtml(item.term)}</strong>
+                                    <small>${item.occurrences || 0} occurrence${item.occurrences === 1 ? '' : 's'} · ${escapeHtml(item.mapping_source || 'project')}</small>
+                                </div>
+                                <span class="pronunciation-arrow">→</span>
+                                <strong style="color:#86efac">${escapeHtml(item.spoken_text)}</strong>
+                                <div style="display:flex; align-items:center; gap:6px; margin-left:auto;">
+                                    <button type="button" class="pronunciation-preview" data-term="${escapeHtml(item.term)}" data-spoken="${escapeHtml(item.spoken_text || '')}" title="Test native TTS audio preview">▶ Preview</button>
+                                    <button type="button" class="pronunciation-delete" data-term="${escapeHtml(item.term)}" title="Remove custom pronunciation">✕ Remove</button>
+                                </div>
+                            </div>
+                        `;
+                    } else {
+                        const defaultRec = item.recommendation_default || '';
+                        const altRec = item.recommendation_alternate || '';
+                        const contextSentence = (item.contexts && item.contexts[0]) || '';
+                        return `
+                            <div class="pronunciation-row" data-term="${escapeHtml(item.term)}" data-context="${escapeHtml(contextSentence)}">
+                                <div class="pronunciation-term">
+                                    <strong>${escapeHtml(item.term)}</strong>
+                                    <small>${item.occurrences || 0} occurrence${item.occurrences === 1 ? '' : 's'} · chapters ${(item.chapters || []).join(', ') || '—'}</small>
+                                    <span title="${escapeHtml((item.contexts || []).join(' | '))}">${escapeHtml(contextSentence)}</span>
+                                    ${(defaultRec || altRec) ? `
+                                        <div class="pronunciation-recommendations">
+                                            ${defaultRec ? `
+                                                <button type="button" class="btn-rec-chip btn-rec-default active" data-rec="${escapeHtml(defaultRec)}" title="Click to use default recommendation">
+                                                    ✨ Default: <strong>${escapeHtml(defaultRec)}</strong>
+                                                </button>
+                                            ` : ''}
+                                            ${altRec ? `
+                                                <button type="button" class="btn-rec-chip btn-rec-alt" data-rec="${escapeHtml(altRec)}" title="Click to use alternate recommendation">
+                                                    🔄 Alt: <strong>${escapeHtml(altRec)}</strong>
+                                                </button>
+                                            ` : ''}
+                                        </div>
+                                    ` : ''}
+                                </div>
+                                <input type="text" maxlength="240" value="${escapeHtml(defaultRec)}" placeholder="Spoken form, e.g. Pah chee" aria-label="Spoken form for ${escapeHtml(item.term)}">
+                                <div style="display:flex; align-items:center; gap:6px;">
+                                    <button type="button" class="btn btn-ghost btn-sm pronunciation-preview-unresolved" data-term="${escapeHtml(item.term)}" title="Test native TTS audio preview">▶ Preview</button>
+                                    <button type="button" class="btn btn-secondary pronunciation-save">Verify</button>
+                                </div>
+                            </div>
+                        `;
+                    }
+                }).join('');
+            } else {
+                html = '<div class="review-complete-message">No lexicon terms match your search or filter.</div>';
+            }
+
+            container.innerHTML = html;
+
+            const startDisplay = filtered.length ? startIndex + 1 : 0;
+            const endDisplay = Math.min(startIndex + pageItems.length, filtered.length);
+            const infoEl = section.querySelector('#lexicon-pagination-info');
+            if (infoEl) infoEl.textContent = `Showing ${startDisplay}-${endDisplay} of ${filtered.length} term${filtered.length === 1 ? '' : 's'}`;
+
+            const pageNumEl = section.querySelector('#lexicon-pagination-page-num');
+            if (pageNumEl) pageNumEl.textContent = `Page ${lexState.page} of ${totalPages}`;
+
+            const prevBtn = section.querySelector('#btn-lexicon-prev-page');
+            if (prevBtn) prevBtn.disabled = lexState.page <= 1;
+
+            const nextBtn = section.querySelector('#btn-lexicon-next-page');
+            if (nextBtn) nextBtn.disabled = lexState.page >= totalPages;
+
+            container.querySelectorAll('.btn-rec-chip').forEach(chip => {
+                chip.addEventListener('click', () => {
+                    const row = chip.closest('.pronunciation-row');
+                    const input = row?.querySelector('input');
+                    const rec = chip.dataset.rec;
+                    if (input && rec) {
+                        input.value = rec;
+                        row.querySelectorAll('.btn-rec-chip').forEach(c => c.classList.remove('active'));
+                        chip.classList.add('active');
+                    }
+                });
+            });
+
+            container.querySelectorAll('.pronunciation-row input').forEach(input => {
+                input.addEventListener('input', () => {
+                    const row = input.closest('.pronunciation-row');
+                    const val = input.value.trim().toLowerCase();
+                    row?.querySelectorAll('.btn-rec-chip').forEach(chip => {
+                        chip.classList.toggle('active', chip.dataset.rec?.toLowerCase() === val);
+                    });
+                });
+            });
+
+            container.querySelectorAll('.pronunciation-save').forEach(button => {
+                button.addEventListener('click', () => {
+                    const row = button.closest('.pronunciation-row');
+                    approvePronunciation(row?.dataset.term || '', row?.querySelector('input')?.value || '', button);
+                });
+            });
+
+            container.querySelectorAll('.pronunciation-preview').forEach(button => {
+                button.addEventListener('click', () => {
+                    const term = button.dataset.term || '';
+                    const spoken = button.dataset.spoken || '';
+                    previewPronunciation(term, spoken, button, lexState.inSentence, null);
+                });
+            });
+
+            container.querySelectorAll('.pronunciation-preview-unresolved').forEach(button => {
+                button.addEventListener('click', () => {
+                    const row = button.closest('.pronunciation-row');
+                    const term = button.dataset.term || '';
+                    const spoken = row?.querySelector('input')?.value || term;
+                    const context = row?.dataset.context || '';
+                    previewPronunciation(term, spoken, button, lexState.inSentence, context);
+                });
+            });
+
+            container.querySelectorAll('.pronunciation-delete').forEach(button => {
+                button.addEventListener('click', () => {
+                    const term = button.dataset.term;
+                    if (confirm(`Remove custom pronunciation for "${term}"?`)) {
+                        deletePronunciation(term, button);
+                    }
+                });
+            });
+        }
+
+        renderList();
+
+        section.querySelector('#lexicon-carrier-toggle')?.addEventListener('change', (e) => {
+            lexState.inSentence = e.target.checked;
+        });
+
+        section.querySelector('#btn-lexicon-batch-accept')?.addEventListener('click', async () => {
+            const batch = {};
+            unresolved.forEach(item => {
+                if (item.recommendation_default) {
+                    batch[item.term] = item.recommendation_default;
+                }
+            });
+            const count = Object.keys(batch).length;
+            if (!count) return;
+            if (confirm(`Accept default recommendations for all ${count} unverified terms?`)) {
+                await batchApprovePronunciations(batch, section.querySelector('#btn-lexicon-batch-accept'));
+            }
+        });
+
+        section.querySelector('#lexicon-search-input')?.addEventListener('input', (e) => {
+            lexState.search = e.target.value.trim();
+            lexState.page = 1;
+            renderList();
+        });
+
+        section.querySelectorAll('.lex-tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                section.querySelectorAll('.lex-tab').forEach(t => t.classList.remove('active'));
+                tab.classList.add('active');
+                lexState.filter = tab.dataset.filter || 'all';
+                lexState.page = 1;
+                renderList();
             });
         });
+
+        section.querySelector('#btn-lexicon-prev-page')?.addEventListener('click', () => {
+            if (lexState.page > 1) {
+                lexState.page -= 1;
+                renderList();
+            }
+        });
+        section.querySelector('#btn-lexicon-next-page')?.addEventListener('click', () => {
+            lexState.page += 1;
+            renderList();
+        });
+        section.querySelector('#select-lexicon-page-size')?.addEventListener('change', e => {
+            lexState.pageSize = e.target.value;
+            lexState.page = 1;
+            renderList();
+        });
+
+        section.querySelector('#btn-preview-lexicon-custom')?.addEventListener('click', () => {
+            const termInput = section.querySelector('#lexicon-custom-term');
+            const spokenInput = section.querySelector('#lexicon-custom-spoken');
+            const term = termInput?.value.trim() || '';
+            const spoken = spokenInput?.value.trim() || term;
+            if (!spoken) {
+                showToast('Enter a word or spoken form to preview', 'warning');
+                return;
+            }
+            previewPronunciation(term, spoken, section.querySelector('#btn-preview-lexicon-custom'), lexState.inSentence, null);
+        });
+
+        section.querySelector('#btn-add-lexicon-custom')?.addEventListener('click', () => {
+            const termInput = section.querySelector('#lexicon-custom-term');
+            const spokenInput = section.querySelector('#lexicon-custom-spoken');
+            const term = termInput?.value.trim();
+            const spoken = spokenInput?.value.trim();
+            if (!term || !spoken) {
+                showToast('Please enter both the word and its phonetic replacement', 'warning');
+                return;
+            }
+            approvePronunciation(term, spoken, section.querySelector('#btn-add-lexicon-custom'));
+        });
+
         els.qualityOverview.appendChild(section);
+    }
+
+    let activePreviewAudio = null;
+
+    async function previewPronunciation(term, spokenText, button, inSentence = true, contextSentence = null) {
+        const projectId = window.state?.currentProjectId;
+        const cleanTerm = (term || '').replace(/^Pronunciation:\s*/i, '').trim();
+        const spoken = (spokenText || cleanTerm || '').replace(/^Pronunciation:\s*/i, '').trim();
+        if (!projectId || !spoken) {
+            showToast('Enter a term or spoken form to preview', 'warning');
+            return;
+        }
+
+        if (activePreviewAudio) {
+            activePreviewAudio.pause();
+            activePreviewAudio = null;
+        }
+
+        const originalHtml = button.innerHTML;
+        button.disabled = true;
+        button.innerHTML = '🔊 <span class="preview-spinner">...</span>';
+
+        try {
+            const response = await fetch(`api/projects/${encodeURIComponent(projectId)}/pronunciations/preview`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    term: cleanTerm,
+                    spoken_text: spoken,
+                    in_sentence: inSentence,
+                    context_sentence: contextSentence
+                })
+            });
+            const data = await response.json().catch(() => ({}));
+
+            if (response.ok && data.audio_url) {
+                const audio = new Audio(`${data.audio_url}?v=${Date.now()}`);
+                activePreviewAudio = audio;
+                audio.onended = () => {
+                    button.innerHTML = originalHtml;
+                    button.disabled = false;
+                    activePreviewAudio = null;
+                };
+                audio.onerror = () => {
+                    playWebSpeechFallback(spoken, button, originalHtml);
+                };
+                button.innerHTML = '🔊 Playing...';
+                await audio.play();
+            } else {
+                playWebSpeechFallback(spoken, button, originalHtml);
+            }
+        } catch (error) {
+            playWebSpeechFallback(spoken, button, originalHtml);
+        }
+    }
+
+    function playWebSpeechFallback(text, button, originalHtml) {
+        if ('speechSynthesis' in window) {
+            window.speechSynthesis.cancel();
+            const utterance = new SpeechSynthesisUtterance(text);
+            utterance.rate = 0.95;
+            utterance.onend = () => {
+                button.innerHTML = originalHtml;
+                button.disabled = false;
+            };
+            utterance.onerror = () => {
+                button.innerHTML = originalHtml;
+                button.disabled = false;
+            };
+            button.innerHTML = '🔊 Speaking...';
+            window.speechSynthesis.speak(utterance);
+        } else {
+            button.innerHTML = originalHtml;
+            button.disabled = false;
+            showToast('Audio playback not supported in this browser', 'warning');
+        }
+    }
+
+    async function deletePronunciation(term, button) {
+        const projectId = window.state?.currentProjectId;
+        if (!projectId || !term) return;
+        button.disabled = true;
+        try {
+            const response = await fetch(`api/projects/${encodeURIComponent(projectId)}/pronunciations`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({term, spoken_text: ''})
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(data.detail || 'Could not delete pronunciation');
+            currentData.pronunciations = data.inventory;
+            showToast(`Pronunciation for "${term}" removed`, 'info');
+            renderQuality();
+        } catch (error) {
+            showToast(error.message, 'error');
+            button.disabled = false;
+        }
     }
 
     async function approvePronunciation(term, spokenText, button) {
@@ -1601,11 +2199,32 @@ window.ScriptViewer = (() => {
             const data = await response.json().catch(() => ({}));
             if (!response.ok) throw new Error(data.detail || 'Could not save pronunciation');
             currentData.pronunciations = data.inventory;
-            showToast(`Pronunciation saved; ${data.affected_chapters.length} chapter${data.affected_chapters.length === 1 ? '' : 's'} marked for regeneration`, 'success');
+            showToast(`Pronunciation for "${term}" saved! (${data.affected_chapters.length} chapter${data.affected_chapters.length === 1 ? '' : 's'} updated)`, 'success');
             renderQuality();
         } catch (error) {
             showToast(error.message, 'error');
             button.disabled = false;
+        }
+    }
+
+    async function batchApprovePronunciations(entries, button) {
+        const projectId = window.state?.currentProjectId;
+        if (!projectId || !Object.keys(entries).length) return;
+        if (button) button.disabled = true;
+        try {
+            const response = await fetch(`api/projects/${encodeURIComponent(projectId)}/pronunciations/batch`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({entries})
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(data.detail || 'Could not save batch pronunciations');
+            currentData.pronunciations = data.inventory;
+            showToast(`Approved ${Object.keys(entries).length} pronunciations! (${data.affected_chapters.length} chapter${data.affected_chapters.length === 1 ? '' : 's'} updated)`, 'success');
+            renderQuality();
+        } catch (error) {
+            showToast(error.message, 'error');
+            if (button) button.disabled = false;
         }
     }
 
@@ -1632,17 +2251,67 @@ window.ScriptViewer = (() => {
         els.qualityOverview.appendChild(div);
     }
     
-    function escapeHtml(unsafe) {
-        if (!unsafe) return '';
-        return unsafe.toString()
-             .replace(/&/g, "&amp;")
-             .replace(/</g, "&lt;")
-             .replace(/>/g, "&gt;")
-             .replace(/"/g, "&quot;")
-             .replace(/'/g, "&#039;");
+    // escapeHtml now lives in js/dom-utils.js, which loads before this file.
+
+    function revealLine(lineId) {
+        if (!lineId) return false;
+        if (!currentData.script || !currentData.script.chapters) return false;
+
+        let targetChapterIndex = -1;
+        for (let i = 0; i < currentData.script.chapters.length; i++) {
+            const ch = currentData.script.chapters[i];
+            if (ch && ch.lines && ch.lines.some(l => l.line_id === lineId)) {
+                targetChapterIndex = i;
+                break;
+            }
+        }
+
+        if (targetChapterIndex === -1) {
+            const m = lineId.match(/^ch(\d+)_/i);
+            if (m) {
+                const chNum = parseInt(m[1], 10);
+                targetChapterIndex = currentData.script.chapters.findIndex(c => c && (c.chapter_number === chNum || c.number === chNum));
+            }
+        }
+
+        if (targetChapterIndex !== -1 && targetChapterIndex < currentData.script.chapters.length) {
+            if (els.chapterSelect) {
+                els.chapterSelect.value = String(targetChapterIndex);
+            }
+            currentScriptChapter = targetChapterIndex;
+            renderScriptLines(targetChapterIndex);
+
+            setTimeout(() => {
+                const el = document.querySelector(`[data-line-id="${CSS.escape(lineId)}"]`);
+                if (el) {
+                    el.scrollIntoView({behavior: 'smooth', block: 'center'});
+                    el.classList.add('highlight-line-pulse');
+                    setTimeout(() => el.classList.remove('highlight-line-pulse'), 3000);
+                }
+            }, 120);
+            return true;
+        }
+        return false;
+    }
+
+    async function refreshVoices(projectId) {
+        if (!projectId) return;
+        await fetchVoices(projectId);
+        renderCharacters();
+    }
+
+    async function refreshPronunciations(projectId) {
+        if (!projectId) return;
+        await fetchPronunciations(projectId);
+        renderQuality();
     }
 
     return {
-        loadData
+        loadData,
+        refreshVoices,
+        refreshPronunciations,
+        previewPronunciation,
+        revealLine,
+        jumpToScriptLine
     };
 })();

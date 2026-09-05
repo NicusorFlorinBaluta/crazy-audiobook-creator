@@ -13,37 +13,37 @@ import soundfile as sf
 from brain.orchestrator.job_queue import JobQueue
 from brain.orchestrator.pipeline import Pipeline
 from shared.artifacts import (
+    atomic_write_bytes,
     atomic_write_json,
+    atomic_write_text,
     build_segment_manifest,
     finalize_segment_manifest,
     hash_file,
     manifest_path,
     master_manifest_path,
 )
+from shared.constants import Gender
 from shared.models import (
     AudiobookMetadata,
+    Character,
+    ExportChapterInfo,
     ExportConfig,
     MasterChapterRequest,
     MasterSegmentInfo,
-    ExportChapterInfo,
     ScriptChapter,
     ScriptLine,
 )
+from shared.single_instance import SingleInstanceLock
 from voice.mastering.assembler import AudioAssembler
 from voice.mastering.m4b_exporter import M4BExporter
 from voice.tts_server.embedding_store import EmbeddingStore
 from voice.tts_server.voice_designer import VoiceDesigner
 from voice.tts_server.voice_library import VoiceLibraryManager
-from shared.constants import Gender
-from shared.models import Character
-from shared.single_instance import SingleInstanceLock
 
 
 class SingleInstanceTests(unittest.TestCase):
     def test_pipeline_lock_rejects_a_second_owner_without_erasing_pid(self) -> None:
-        with tempfile.TemporaryDirectory() as directory, patch.dict(
-            os.environ, {"TEMP": directory}
-        ):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"TEMP": directory}):
             first = SingleInstanceLock("pipeline-test.lock")
             second = SingleInstanceLock("pipeline-test.lock")
             try:
@@ -97,11 +97,23 @@ class JobQueueTests(unittest.TestCase):
             queue = JobQueue(str(Path(directory) / "state.db"))
             queue.create_job("book", {"status": "created"})
             queue.log_quality(
-                "book", "line-1", 1, 1, 0.0, 0.95, "pass",
+                "book",
+                "line-1",
+                1,
+                1,
+                0.0,
+                0.95,
+                "pass",
                 details={"selected": True},
             )
             queue.log_quality(
-                "book", "line-1", 1, 2, 0.5, 0.10, "fail",
+                "book",
+                "line-1",
+                1,
+                2,
+                0.5,
+                0.10,
+                "fail",
                 details={"selected": False},
             )
 
@@ -118,7 +130,11 @@ class JobQueueTests(unittest.TestCase):
             queue.create_job("book", {"status": "created"})
             queue.set_review_item("book", "join", "ch01-2", "acceptable")
             queue.set_review_item(
-                "book", "join", "ch01-2", "needs_remaster", "Level jump",
+                "book",
+                "join",
+                "ch01-2",
+                "needs_remaster",
+                "Level jump",
             )
 
             items = queue.get_review_items("book", "join")
@@ -126,6 +142,20 @@ class JobQueueTests(unittest.TestCase):
             self.assertEqual(len(items), 1)
             self.assertEqual(items[0]["disposition"], "needs_remaster")
             self.assertEqual(items[0]["note"], "Level jump")
+
+    def test_review_items_can_be_cleared_by_artifact_type(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            queue = JobQueue(str(Path(directory) / "state.db"))
+            queue.create_job("book", {"status": "created"})
+            queue.set_review_item("book", "segment", "line-1", "acceptable")
+            queue.set_review_item("book", "join", "join-1", "acceptable")
+
+            queue.clear_review_items("book", "segment")
+
+            self.assertEqual(
+                [(item["item_type"], item["item_id"]) for item in queue.get_review_items("book")],
+                [("join", "join-1")],
+            )
 
 
 class VoiceDiagnosticTests(unittest.TestCase):
@@ -250,13 +280,27 @@ class ArtifactStateTests(unittest.TestCase):
                 segment = root / "workspace" / project_id / "segments" / "ch01_0000.wav"
                 segment.parent.mkdir(parents=True)
                 sf.write(segment, np.ones(2400, dtype=np.float32) * 0.01, 24000)
+                # Build the manifest with the same voice-generation config the
+                # reconciler will hash. `_voice_generation_config` resolves
+                # `voice/config.yaml` from the repository root, so it is found
+                # regardless of the working directory -- it previously returned
+                # `{}` whenever the CWD differed, which quietly dropped the TTS
+                # and validation settings out of the generation fingerprint.
                 manifest = finalize_segment_manifest(
-                    build_segment_manifest(project_id, chapter),
+                    build_segment_manifest(
+                        project_id,
+                        chapter,
+                        Pipeline._voice_generation_config(project_id),
+                    ),
                     root / "workspace",
                 )
                 atomic_write_json(manifest_path(project_dir, 1), manifest)
 
                 pipeline = object.__new__(Pipeline)
+                # The workspace root is an explicit attribute rather than a
+                # working-directory-relative global, so point it at this
+                # temporary tree instead of relying on the `os.chdir` above.
+                pipeline.workspace_dir = root / "workspace"
                 generated, mastered = pipeline._reconcile_artifacts(
                     project_id,
                     project_dir,
@@ -265,9 +309,7 @@ class ArtifactStateTests(unittest.TestCase):
                 self.assertEqual(generated, [1])
                 self.assertEqual(mastered, [])
 
-                chapter_audio = (
-                    root / "workspace" / project_id / "chapters" / "chapter_001.wav"
-                )
+                chapter_audio = root / "workspace" / project_id / "chapters" / "chapter_001.wav"
                 chapter_audio.parent.mkdir(parents=True)
                 sf.write(
                     chapter_audio,
@@ -528,16 +570,32 @@ class FingerprintTests(unittest.TestCase):
                 generation_context=context,
             )
 
-            self.assertFalse(store.line_needs_synthesis(
-                project_id="book", line_id="line", text="Text",
-                speaker="speaker", emotion="neutral", speed=1.0,
-                fx_dict=None, output_path=audio, generation_context=context,
-            ))
-            self.assertTrue(store.line_needs_regeneration(
-                project_id="book", line_id="line", text="Text",
-                speaker="speaker", emotion="neutral", speed=1.0,
-                fx_dict=None, output_path=audio, generation_context=context,
-            ))
+            self.assertFalse(
+                store.line_needs_synthesis(
+                    project_id="book",
+                    line_id="line",
+                    text="Text",
+                    speaker="speaker",
+                    emotion="neutral",
+                    speed=1.0,
+                    fx_dict=None,
+                    output_path=audio,
+                    generation_context=context,
+                )
+            )
+            self.assertTrue(
+                store.line_needs_regeneration(
+                    project_id="book",
+                    line_id="line",
+                    text="Text",
+                    speaker="speaker",
+                    emotion="neutral",
+                    speed=1.0,
+                    fx_dict=None,
+                    output_path=audio,
+                    generation_context=context,
+                )
+            )
 
     def test_voice_reference_change_invalidates_line(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -751,3 +809,70 @@ class ExportMetadataTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AtomicWriteDurabilityTests(unittest.TestCase):
+    """`atomic_write_*` must never leave a partially written artifact.
+
+    The artifact model treats manifests and state files as authoritative
+    evidence that a chapter finished. A truncated one is worse than a missing
+    one, so a transient Windows lock is retried and a persistent one raises
+    rather than degrading to a non-atomic `shutil.copyfile`.
+    """
+
+    def test_text_write_replaces_existing_content_completely(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "state.json"
+            atomic_write_text(target, "a" * 5000)
+            atomic_write_text(target, "b")
+            self.assertEqual(target.read_text(encoding="utf-8"), "b")
+
+    def test_no_temporary_files_are_left_behind(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            atomic_write_json(root / "manifest.json", {"ok": True})
+            leftovers = [p.name for p in root.iterdir() if p.name != "manifest.json"]
+            self.assertEqual(leftovers, [])
+
+    def test_a_transient_permission_error_is_retried(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "state.json"
+            real_replace = os.replace
+            calls = {"n": 0}
+
+            def flaky_replace(src, dst):
+                calls["n"] += 1
+                if calls["n"] < 3:
+                    raise PermissionError("simulated antivirus handle")
+                return real_replace(src, dst)
+
+            with patch("shared.artifacts.os.replace", side_effect=flaky_replace):
+                atomic_write_text(target, "recovered")
+
+            self.assertEqual(calls["n"], 3)
+            self.assertEqual(target.read_text(encoding="utf-8"), "recovered")
+
+    def test_a_persistent_permission_error_raises_instead_of_copying(self) -> None:
+        """The old fallback truncated the destination; that must not return."""
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "state.json"
+            atomic_write_text(target, "original-content")
+
+            with patch(
+                "shared.artifacts.os.replace",
+                side_effect=PermissionError("held open"),
+            ):
+                with self.assertRaises(PermissionError):
+                    atomic_write_text(target, "replacement")
+
+            # The prior good content must survive a failed write untouched.
+            self.assertEqual(target.read_text(encoding="utf-8"), "original-content")
+            leftovers = [p.name for p in Path(tmp).iterdir() if p.name != "state.json"]
+            self.assertEqual(leftovers, [], "temp file leaked on the failure path")
+
+    def test_bytes_write_is_atomic_too(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "cover.jpg"
+            atomic_write_bytes(target, b"\xff\xd8original")
+            atomic_write_bytes(target, b"\xff\xd8new")
+            self.assertEqual(target.read_bytes(), b"\xff\xd8new")

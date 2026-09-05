@@ -15,6 +15,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from shared import paths as shared_paths
 from shared.models import (
     AudiobookMetadata,
     ExportChapterInfo,
@@ -35,7 +36,7 @@ class M4BExporter:
         chapters: list[ExportChapterInfo],
         cover_art: str | None = None,
         output_config: ExportConfig | None = None,
-        workspace: Path = Path("workspace"),
+        workspace: Path | None = None,
         output_name: str | None = None,
     ) -> ExportM4BResponse:
         """Export all chapters as a single M4B audiobook file.
@@ -58,6 +59,11 @@ class M4BExporter:
             ExportM4BResponse with output file info.
         """
         config = output_config or ExportConfig()
+        # `workspace` defaulted to a bare relative Path("workspace"), which
+        # silently depended on the process working directory. Resolve from the
+        # repository root instead when the caller supplies nothing.
+        if workspace is None:
+            workspace = shared_paths.WORKSPACE_DIR
         project_dir = workspace / project_id
         output_dir = project_dir / "output"
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -94,12 +100,15 @@ class M4BExporter:
                 cover_art=cover_art,
                 config=config,
             )
-            if (
-                not temporary_output.is_file()
-                or temporary_output.stat().st_size == 0
-            ):
+            if not temporary_output.is_file() or temporary_output.stat().st_size == 0:
                 raise RuntimeError("FFmpeg produced no M4B output")
-            os.replace(temporary_output, output_file)
+            try:
+                os.replace(temporary_output, output_file)
+            except OSError:
+                import shutil
+
+                with open(output_file, "wb") as dst, open(temporary_output, "rb") as src:
+                    shutil.copyfileobj(src, dst)
         finally:
             temporary_output.unlink(missing_ok=True)
 
@@ -135,9 +144,7 @@ class M4BExporter:
     ) -> dict[str, Any]:
         """Summarize mastered chapter consistency without changing the audio."""
         measured = [
-            (chapter.number, float(chapter.lufs), chapter.peak_dbfs)
-            for chapter in chapters
-            if chapter.lufs is not None
+            (chapter.number, float(chapter.lufs), chapter.peak_dbfs) for chapter in chapters if chapter.lufs is not None
         ]
         if not measured:
             return {
@@ -151,14 +158,8 @@ class M4BExporter:
         loudness = [item[1] for item in measured]
         median_lufs = float(statistics.median(loudness))
         spread_lu = float(max(loudness) - min(loudness))
-        outliers = [
-            number
-            for number, value, _ in measured
-            if abs(value - median_lufs) > 0.75
-        ]
-        peaks = [
-            float(peak) for _, _, peak in measured if peak is not None
-        ]
+        outliers = [number for number, value, _ in measured if abs(value - median_lufs) > 0.75]
+        peaks = [float(peak) for _, _, peak in measured if peak is not None]
         return {
             "status": "consistent" if spread_lu <= 1.0 else "warning",
             "measured_chapters": len(measured),
@@ -204,9 +205,12 @@ class M4BExporter:
                 result = subprocess.run(
                     [
                         "ffprobe",
-                        "-v", "quiet",
-                        "-show_entries", "format=duration",
-                        "-of", "csv=p=0",
+                        "-v",
+                        "quiet",
+                        "-show_entries",
+                        "format=duration",
+                        "-of",
+                        "csv=p=0",
                         str(chapter_path),
                     ],
                     capture_output=True,
@@ -220,9 +224,7 @@ class M4BExporter:
                     raise RuntimeError("chapter duration is zero")
                 durations.append(duration)
             except Exception as e:
-                raise RuntimeError(
-                    f"Failed to inspect chapter audio {chapter_path}: {e}"
-                ) from e
+                raise RuntimeError(f"Failed to inspect chapter audio {chapter_path}: {e}") from e
 
         return durations
 
@@ -239,13 +241,22 @@ class M4BExporter:
             current_time_ms = 0
             for chapter, duration in zip(chapters, durations):
                 duration_ms = int(duration * 1000)
+                formatted_title = self._format_chapter_title(chapter.number, chapter.title)
                 f.write("[CHAPTER]\n")
                 f.write("TIMEBASE=1/1000\n")
                 f.write(f"START={current_time_ms}\n")
                 f.write(f"END={current_time_ms + duration_ms}\n")
-                f.write(f"title={self._escape_ffmetadata(chapter.title)}\n")
+                f.write(f"title={self._escape_ffmetadata(formatted_title)}\n")
                 f.write("\n")
                 current_time_ms += duration_ms
+
+    @staticmethod
+    def _format_chapter_title(number: int, title: str | None) -> str:
+        """Format chapter title for M4B metadata using the book chapter title."""
+        clean_title = (title or "").strip()
+        if clean_title:
+            return clean_title
+        return f"Chapter {number}"
 
     @staticmethod
     def _escape_ffmetadata(value: str) -> str:
@@ -273,11 +284,16 @@ class M4BExporter:
         cmd = [
             "ffmpeg",
             "-y",  # Overwrite output
-            "-f", "concat",
-            "-safe", "0",
-            "-i", str(concat_file),
-            "-i", str(metadata_file),
-            "-map_metadata", "1",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(concat_file),
+            "-i",
+            str(metadata_file),
+            "-map_metadata",
+            "1",
         ]
 
         # Add cover art if available
@@ -289,29 +305,46 @@ class M4BExporter:
             cmd.extend(["-map", "0:a"])
 
         # Audio encoding
-        cmd.extend([
-            "-c:a", config.codec,
-            "-b:a", config.bitrate,
-            "-ar", "44100",
-            "-ac", str(config.channels),
-        ])
+        cmd.extend(
+            [
+                "-c:a",
+                config.codec,
+                "-b:a",
+                config.bitrate,
+                "-ar",
+                "44100",
+                "-ac",
+                str(config.channels),
+            ]
+        )
 
         # Metadata
-        cmd.extend([
-            "-metadata", f"title={book_metadata.title}",
-            "-metadata", f"artist={book_metadata.author}",
-            "-metadata", f"album={book_metadata.title}",
-            "-metadata", f"genre={book_metadata.genre}",
-            "-metadata", f"comment={book_metadata.description or 'Generated by Crazy Audiobook Creator'}",
-        ])
+        cmd.extend(
+            [
+                "-metadata",
+                f"title={book_metadata.title}",
+                "-metadata",
+                f"artist={book_metadata.author}",
+                "-metadata",
+                f"album={book_metadata.title}",
+                "-metadata",
+                f"genre={book_metadata.genre}",
+                "-metadata",
+                f"comment={book_metadata.description or 'Generated by Crazy Audiobook Creator'}",
+            ]
+        )
 
         if book_metadata.year:
             cmd.extend(["-metadata", f"date={book_metadata.year}"])
         if book_metadata.isbn:
-            cmd.extend([
-                "-metadata", f"isbn={book_metadata.isbn}",
-                "-metadata", f"grouping=ISBN {book_metadata.isbn}",
-            ])
+            cmd.extend(
+                [
+                    "-metadata",
+                    f"isbn={book_metadata.isbn}",
+                    "-metadata",
+                    f"grouping=ISBN {book_metadata.isbn}",
+                ]
+            )
 
         cmd.extend(["-movflags", "+faststart"])
 
@@ -324,7 +357,7 @@ class M4BExporter:
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=600,  # 10 minute timeout
+                timeout=7200,  # 2 hour timeout
             )
 
             if result.returncode != 0:
@@ -333,9 +366,7 @@ class M4BExporter:
 
             logger.info("FFmpeg completed successfully")
 
-        except subprocess.TimeoutExpired:
-            raise RuntimeError("FFmpeg timed out after 10 minutes")
-        except FileNotFoundError:
-            raise RuntimeError(
-                "FFmpeg not found. Install FFmpeg and add it to PATH"
-            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError("FFmpeg export timed out") from exc
+        except FileNotFoundError as exc:
+            raise RuntimeError("FFmpeg not found. Install FFmpeg and add it to PATH") from exc

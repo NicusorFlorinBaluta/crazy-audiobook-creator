@@ -15,7 +15,6 @@ import yaml
 
 from brain.validators.gemini_validation import GeminiApiClient, GeminiWebClient
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -32,9 +31,7 @@ def _load_env() -> None:
 
 
 def _config() -> dict:
-    return yaml.safe_load((ROOT / "brain/config.yaml").read_text(encoding="utf-8"))[
-        "external_validation"
-    ]
+    return yaml.safe_load((ROOT / "brain/config.yaml").read_text(encoding="utf-8"))["external_validation"]
 
 
 def inspect_browser_controls(browser: dict) -> int:
@@ -102,13 +99,18 @@ def inspect_browser_controls(browser: dict) -> int:
                     classes: String(element.className || '').slice(0, 160)
                 }))"""
             )
-            print(json.dumps({
-                "url_host": page.url.split("/", 3)[:3],
-                "controls": controls,
-                "visible_editors": editors,
-                "file_inputs": file_inputs,
-                "attachment_controls": attachment_controls,
-            }, indent=2))
+            print(
+                json.dumps(
+                    {
+                        "url_host": page.url.split("/", 3)[:3],
+                        "controls": controls,
+                        "visible_editors": editors,
+                        "file_inputs": file_inputs,
+                        "attachment_controls": attachment_controls,
+                    },
+                    indent=2,
+                )
+            )
         finally:
             context.close()
     return 0
@@ -145,10 +147,15 @@ def smoke_api(config: dict) -> None:
             prompt="Spoiler-free adjudication connectivity test. Return status ok and confidence 1.",
             schema=schema,
         )
-    print("API:", json.dumps({
-        "triage_audio": triage,
-        "adjudication": adjudication,
-    }))
+    print(
+        "API:",
+        json.dumps(
+            {
+                "triage_audio": triage,
+                "adjudication": adjudication,
+            }
+        ),
+    )
 
 
 def smoke_browser(config: dict) -> None:
@@ -164,9 +171,9 @@ def smoke_browser(config: dict) -> None:
             "connectivity_smoke_test",
             'Spoiler-free connectivity test. Return only JSON exactly as {"status":"ok","confidence":1}.',
         )
-        first_state = json.loads(
-            (project_dir / "external_validation/browser_state.json").read_text(encoding="utf-8")
-        )["conversations"]["connectivity_smoke_test"]
+        first_state = json.loads((project_dir / "external_validation/browser_state.json").read_text(encoding="utf-8"))[
+            "conversations"
+        ]["connectivity_smoke_test"]
         second = client.generate_json(
             project_dir,
             "connectivity_smoke_test",
@@ -174,21 +181,23 @@ def smoke_browser(config: dict) -> None:
             audio_path=candidate,
             reference_audio_path=reference,
         )
-        second_state = json.loads(
-            (project_dir / "external_validation/browser_state.json").read_text(encoding="utf-8")
-        )["conversations"]["connectivity_smoke_test"]
-        persistent = (
-            first_state["url"] == second_state["url"]
-            and int(second_state["turns"]) == 2
-        )
+        second_state = json.loads((project_dir / "external_validation/browser_state.json").read_text(encoding="utf-8"))[
+            "conversations"
+        ]["connectivity_smoke_test"]
+        persistent = first_state["url"] == second_state["url"] and int(second_state["turns"]) == 2
         if not persistent:
             raise RuntimeError("Browser smoke test did not reuse its saved conversation")
-    print("Browser:", json.dumps({
-        "first": first,
-        "audio": second,
-        "persistent_conversation": persistent,
-        "turns": 2,
-    }))
+    print(
+        "Browser:",
+        json.dumps(
+            {
+                "first": first,
+                "audio": second,
+                "persistent_conversation": persistent,
+                "turns": 2,
+            }
+        ),
+    )
 
 
 def _write_tone(path: Path, frequency: float) -> None:

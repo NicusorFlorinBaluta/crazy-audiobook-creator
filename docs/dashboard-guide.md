@@ -1,5 +1,7 @@
 # Dashboard Guide
 
+**Status:** Reference — Describes current behaviour. Keep it accurate when the code changes.
+
 The dashboard is organized around the current production decision rather than
 the internal pipeline implementation.
 
@@ -69,6 +71,16 @@ is an audit aid: tight narrator/dialogue grouping can be intentional.
 
 Quality retry rows link back to their source script line.
 
+## Book-section review
+
+An uncertain EPUB section appears under **Attention required → Book sections**
+before scripting starts. The row shows the local recommendation, confidence,
+word count, filename, and automated decision trail without revealing book text.
+Choose **Include in narration**, **Exclude**, or **Keep as reference**. The
+preserved `source.epub` is re-extracted and the pipeline resumes automatically
+after the last blocking section is resolved. Once scripting exists, reset to
+extraction first so downstream artifacts are deliberately invalidated.
+
 ## Quality review
 
 Summary cards include definitions for accepted rate, accepted warnings,
@@ -98,3 +110,10 @@ source EPUB and generated audio.
   and last tab.
 - The new-project dialog traps focus, closes with Escape, and returns focus to
   the control that opened it.
+
+## Server Lifecycle & Resilience
+
+The dashboard server runs under an automated self-healing supervisor:
+- **Self-Healing Supervisor**: Started via `scripts/start_dashboard.ps1`, which monitors `/health` on 10-second intervals and auto-recovers unresponsive sockets within $<2$ seconds while preserving manual shutdown capability.
+- **PortProxy Loopback Isolation**: Configurable via `scripts/setup_portproxy.ps1` to isolate external LAN connections from physical router resets.
+- For architectural details, see [Socket Resilience & Self-Healing Architecture](../docs/socket-resilience-and-supervision.md).

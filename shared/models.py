@@ -6,7 +6,7 @@ pipeline state persistence, and inter-stage data flow.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -17,7 +17,6 @@ from shared.constants import (
     PipelineStage,
     ValidationStatus,
 )
-
 
 # ===================================================================
 # Book & Chapter Models (Stage ①: Text Extraction)
@@ -48,6 +47,14 @@ class ExtractedChapter(BaseModel):
 
     number: int
     title: str
+    source_heading: str = Field(
+        default="",
+        description="Heading preserved from the EPUB; never used as sequence identity.",
+    )
+    book_chapter_label: str = Field(
+        default="",
+        description="Optional printed chapter label parsed from the source heading.",
+    )
     text: str
     word_count: int = 0
 
@@ -70,17 +77,14 @@ class ExtractedBook(BaseModel):
 
 class VoiceFXSettings(BaseModel):
     """Post-processing controls for TTS generation."""
+
     pitch_semitones: float = Field(default=0.0, ge=-12.0, le=12.0)
     speed: float = Field(default=1.0, ge=0.5, le=2.0)
     tone: str = Field(default="neutral", description="neutral | warm | bright")
 
     def is_identity(self) -> bool:
         """Return True when the settings would not alter the audio."""
-        return (
-            abs(self.pitch_semitones) < 1e-3
-            and abs(self.speed - 1.0) < 1e-3
-            and self.tone == "neutral"
-        )
+        return abs(self.pitch_semitones) < 1e-3 and abs(self.speed - 1.0) < 1e-3 and self.tone == "neutral"
 
 
 class Character(BaseModel):
@@ -96,9 +100,7 @@ class Character(BaseModel):
         default_factory=list,
         description="Known nicknames, titles, or alternative names for this character",
     )
-    voice_description: str = Field(
-        description="Natural language voice description for TTS Voice Design"
-    )
+    voice_description: str = Field(description="Natural language voice description for TTS Voice Design")
     speaking_style: str = Field(
         default="",
         description="How the character typically speaks",
@@ -106,6 +108,16 @@ class Character(BaseModel):
     discovered_in_pass2: bool = Field(
         default=False,
         description="True if this character was discovered during script generation, not initial analysis",
+    )
+    discovery_confidence: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Confidence of the source-grounded character discovery decision",
+    )
+    discovery_evidence: list[str] = Field(
+        default_factory=list,
+        description="Short source excerpts supporting character discovery",
     )
     voice_fx: VoiceFXSettings | None = Field(
         default=None,
@@ -129,11 +141,11 @@ class Character(BaseModel):
 class CharacterRegistry(BaseModel):
     """All characters identified in a book, keyed by character ID."""
 
-    book_title: str
-    book_author: str
+    book_title: str = ""
+    book_author: str = ""
     genre: str = "fantasy"
     tone: str = ""
-    characters: dict[str, Character]
+    characters: dict[str, Character] = Field(default_factory=dict)
 
 
 # ===================================================================
@@ -157,7 +169,7 @@ class ScriptLine(BaseModel):
     )
     speaker_evidence: str = Field(
         default="",
-        max_length=500,
+        max_length=4000,
         description="Short source-context reason for the selected speaker",
     )
     attribution_review_required: bool = Field(
@@ -166,7 +178,7 @@ class ScriptLine(BaseModel):
     )
     attribution_review_reason: str = Field(
         default="",
-        max_length=500,
+        max_length=4000,
         description="Why this speaker attribution still needs review",
     )
     attribution_resolver: str = Field(
@@ -183,7 +195,9 @@ class ScriptLine(BaseModel):
         description="Voice-library ID when it differs from the character/speaker ID",
     )
     text: str = Field(description="The text to speak")
-    spoken_text: str | None = Field(default=None, description="Optional explicitly overridden pronunciation for TTS synthesis")
+    spoken_text: str | None = Field(
+        default=None, description="Optional explicitly overridden pronunciation for TTS synthesis"
+    )
     emotion: str = Field(
         default="neutral",
         description="Emotional state described in natural language, e.g. 'contemplative, somber'",
@@ -210,9 +224,7 @@ class ScriptLine(BaseModel):
         le=5000,
         description="Silence after this segment (ms)",
     )
-    dialogue_kind: Literal[
-        "spoken", "non_spoken_quote", "reported_collective_speech"
-    ] | None = Field(
+    dialogue_kind: Literal["spoken", "non_spoken_quote", "reported_collective_speech"] | None = Field(
         default=None,
         description=(
             "Classification for quoted source fragments. Spoken quotations "
@@ -252,11 +264,13 @@ class ScriptLine(BaseModel):
 
 class SceneState(BaseModel):
     """A scene-level prosody state for pacing and mood constraint."""
+
     mood: str = Field(description="Overall scene mood (e.g. 'tense', 'melancholic')")
     tension: str = Field(description="Tension level (e.g. 'high', 'building', 'low')")
     narrator_pace: float = Field(description="Base pacing for the narrator in this scene")
     character_state: str = Field(description="General state of characters in the scene")
     transition_intent: str = Field(description="How this scene transitions to the next")
+
 
 class ScriptChapter(BaseModel):
     """A fully annotated chapter script ready for TTS generation."""
@@ -298,14 +312,14 @@ class VoiceReference(BaseModel):
     gender: Gender
     duration_seconds: float = 0.0
     sample_rate: int = 24000
-    generated_at: datetime = Field(default_factory=datetime.utcnow)
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class VoiceLibrary(BaseModel):
     """Collection of voice reference clips for a project."""
 
     project_id: str
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     voices: dict[str, VoiceReference] = Field(default_factory=dict)
 
 
@@ -417,12 +431,12 @@ class VoiceCandidate(BaseModel):
     acoustic_metrics: dict[str, float] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
 
+
 class BootstrapVoiceResult(VoiceCandidate):
     """Result of generating voice reference clips for a character."""
 
     id: str = "default"
     candidates: list[VoiceCandidate] = Field(default_factory=list)
-
 
 
 class CastPairDiagnostic(BaseModel):
@@ -439,14 +453,18 @@ class CastPairDiagnostic(BaseModel):
     warning_suppressed: bool = False
     suppression_reason: str | None = None
 
-class BootstrapVoicesResponse(BaseModel):
 
+class BootstrapVoicesResponse(BaseModel):
     """Response after generating all voice reference clips."""
 
     status: str = "success"
     project_id: str
     voices_generated: dict[str, BootstrapVoiceResult]
     cast_diagnostics: list[CastPairDiagnostic] = Field(default_factory=list)
+    # One entry per distinctness convergence round actually run: which voices
+    # were redesigned, and whether the collision count and worst similarity
+    # improved. Empty when the first measurement was already clean.
+    distinctness_rounds: list[dict[str, Any]] = Field(default_factory=list)
 
 
 # ===================================================================
@@ -541,7 +559,7 @@ class BookQualityReport(BaseModel):
     """Aggregated quality metrics for the entire book."""
 
     project_id: str
-    generated_at: datetime = Field(default_factory=datetime.utcnow)
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     total_segments: int = 0
     passed: int = 0
     accepted_with_warning: int = 0
@@ -606,6 +624,7 @@ class MasterChapterResponse(BaseModel):
     file_size_mb: float = 0.0
     join_warnings: int = 0
     join_diagnostics: list[dict[str, Any]] = Field(default_factory=list)
+    timeline: list[dict[str, Any]] = Field(default_factory=list)
 
 
 # ===================================================================
@@ -702,9 +721,7 @@ class ProgressSnapshot(BaseModel):
     eta_seconds: float | None = None
     eta_confidence: Literal["none", "low", "medium", "high"] = "none"
     started_at: datetime | None = None
-    updated_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc)
-    )
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class ProjectStatus(BaseModel):
@@ -740,6 +757,7 @@ class ProjectStatus(BaseModel):
     active_generation_chapter_selection: list[int] | None = None
     active_stage: PipelineStage | None = None
     pause_reason: str | None = None
+    schedule_override_active: bool = False
     progress: ProgressSnapshot | None = None
 
     # Incremental delivery state
@@ -749,6 +767,7 @@ class ProjectStatus(BaseModel):
     published_delivery_count: int = 0
     latest_published_delivery_id: str | None = None
     pause_after_delivery_requested: bool = False
+
 
 class ProjectSummary(BaseModel):
     """Brief summary of a project for listing."""
@@ -760,7 +779,7 @@ class ProjectSummary(BaseModel):
     total_chapters: int
     total_words: int
     estimated_audio_hours: float = 0.0
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 # ===================================================================

@@ -1,0 +1,13 @@
+{
+  "name": "crazy-audiobook-creator-frontend-tests",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Behavioural DOM tests for the dashboard frontend. The Python suite covers everything else; this exists because the dashboard's state-machine logic lives in JavaScript and was previously only checked by asserting on source substrings, which cannot catch a wrong branch.",
+  "type": "module",
+  "scripts": {
+    "test": "node --test \"tests/frontend/*.test.mjs\""
+  },
+  "devDependencies": {
+    "jsdom": "^26.0.0"
+  }
+}

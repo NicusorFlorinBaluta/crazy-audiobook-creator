@@ -18,7 +18,20 @@ from typing import Any
 
 import httpx
 
+from shared.constants import (
+    DEFAULT_OLLAMA_HOST,
+    DEFAULT_OLLAMA_MODEL,
+    GenerationCancelled,
+)
+
 logger = logging.getLogger(__name__)
+
+# How often to emit a liveness log line, in received stream chunks.
+LOG_INTERVAL_CHUNKS = 200
+# How often to test the response tail for a repetition loop. Deliberately
+# independent of LOG_INTERVAL_CHUNKS: this is a quality gate, not diagnostics,
+# and changing the log cadence must not change how quickly a loop is caught.
+REPETITION_CHECK_INTERVAL_CHUNKS = 100
 
 
 class OllamaClient:
@@ -26,13 +39,18 @@ class OllamaClient:
 
     def __init__(
         self,
-        host: str = "http://localhost:11434",
-        model: str = "qwen3:32b",
+        host: str = DEFAULT_OLLAMA_HOST,
+        model: str = DEFAULT_OLLAMA_MODEL,
         fallback_models: list[str] | tuple[str, ...] | None = None,
         timeout: int = 120,
         max_retries: int = 3,
         max_retry_seconds: int = 900,
         context_window: int = 8192,
+        max_output_tokens: int = 8192,
+        max_generation_seconds: int = 900,
+        repetition_window_chars: int = 512,
+        repetition_count: int = 4,
+        think: bool | str | None = None,
     ):
         self.host = host.rstrip("/")
         self.model = model
@@ -41,15 +59,18 @@ class OllamaClient:
         self.max_retries = max(1, max_retries)
         self.max_retry_seconds = max(0, max_retry_seconds)
         self.context_window = context_window
+        self.max_output_tokens = max(1, max_output_tokens)
+        self.max_generation_seconds = max(1, max_generation_seconds)
+        self.repetition_window_chars = max(0, repetition_window_chars)
+        self.repetition_count = max(2, repetition_count)
+        self.think = think
         self._client_lock = threading.Lock()
         self._client = self._new_client()
         self._cancel_event = threading.Event()
         self.last_generation_metrics: dict[str, Any] = {}
 
     def _new_client(self) -> httpx.Client:
-        return httpx.Client(
-            timeout=httpx.Timeout(self.timeout, connect=10.0, read=self.timeout)
-        )
+        return httpx.Client(timeout=httpx.Timeout(self.timeout, connect=10.0, read=self.timeout))
 
     def _ensure_client(self) -> httpx.Client:
         with self._client_lock:
@@ -69,13 +90,13 @@ class OllamaClient:
             with self._client_lock:
                 try:
                     self._client.close()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Could not force-close the Ollama socket; the stream will end on its own: %s", exc)
         logger.info("[Ollama] Cancellation requested")
 
     def _raise_if_cancelled(self) -> None:
         if self._cancel_event.is_set():
-            raise KeyboardInterrupt("Ollama generation cancelled")
+            raise GenerationCancelled("Ollama generation cancelled")
 
     def _wait_for_retry(self, seconds: int) -> None:
         """Wait between retries while remaining immediately cancellable."""
@@ -106,6 +127,9 @@ class OllamaClient:
         Raises:
             OllamaError: If the request fails after all retries.
         """
+        # Never let a failed request inherit diagnostics from the preceding
+        # successful request.
+        self.last_generation_metrics = {}
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
@@ -118,13 +142,18 @@ class OllamaClient:
             "options": {
                 "temperature": temperature,
                 "top_p": top_p,
-                "num_predict": -1,
+                # Never allow a malformed or looping response to generate
+                # indefinitely. This is also enforced on the client side in
+                # case a server version ignores ``num_predict``.
+                "num_predict": self.max_output_tokens,
                 "num_ctx": self.context_window,
                 "num_gpu": 99,
             },
         }
         if format:
             payload["format"] = format
+        if self.think is not None:
+            payload["think"] = self.think
 
         last_error: Exception | None = None
         retry_started = time.monotonic()
@@ -132,11 +161,7 @@ class OllamaClient:
         for attempt in range(1, self.max_retries + 1):
             self._raise_if_cancelled()
             retry_elapsed = time.monotonic() - retry_started
-            if (
-                attempt > 1
-                and self.max_retry_seconds
-                and retry_elapsed >= self.max_retry_seconds
-            ):
+            if attempt > 1 and self.max_retry_seconds and retry_elapsed >= self.max_retry_seconds:
                 logger.error(
                     "[Ollama] Retry budget exhausted after %.1fs (%d attempt%s)",
                     retry_elapsed,
@@ -156,9 +181,11 @@ class OllamaClient:
                 )
 
                 t0 = time.time()
+                started_monotonic = time.monotonic()
                 full_text = []
                 token_count = 0
                 last_log_tokens = 0
+                last_repetition_check = 0
                 final_chunk: dict[str, Any] = {}
 
                 client = self._ensure_client()
@@ -201,23 +228,84 @@ class OllamaClient:
                             if "message" in chunk and "content" in chunk["message"]:
                                 full_text.append(chunk["message"]["content"])
                                 token_count += 1
-                                # Log every 200 tokens so we know it's alive
-                                if token_count - last_log_tokens >= 200:
+                                generation_elapsed = time.monotonic() - started_monotonic
+                                if generation_elapsed >= self.max_generation_seconds:
+                                    self._record_generation_abort(
+                                        attempt=attempt,
+                                        messages=messages,
+                                        response_parts=full_text,
+                                        token_count=token_count,
+                                        elapsed=generation_elapsed,
+                                        reason="wall_clock_limit",
+                                    )
+                                    raise OllamaGenerationLimitError(
+                                        "Ollama generation exceeded the configured "
+                                        f"{self.max_generation_seconds}s wall-clock limit"
+                                    )
+                                if token_count >= self.max_output_tokens and not chunk.get("done"):
+                                    self._record_generation_abort(
+                                        attempt=attempt,
+                                        messages=messages,
+                                        response_parts=full_text,
+                                        token_count=token_count,
+                                        elapsed=generation_elapsed,
+                                        reason="output_token_limit",
+                                    )
+                                    raise OllamaGenerationLimitError(
+                                        "Ollama generation reached the configured "
+                                        f"{self.max_output_tokens}-token output limit"
+                                    )
+                                # Liveness logging.
+                                if token_count - last_log_tokens >= LOG_INTERVAL_CHUNKS:
                                     elapsed = time.time() - t0
                                     logger.info(
-                                        "[Ollama] ↻ Streaming... %d tokens | %.1f tok/s | %.0fs elapsed",
+                                        "[Ollama] ↻ Streaming... %d chunks | %.1f chunk/s | %.0fs elapsed",
                                         token_count,
                                         token_count / elapsed if elapsed > 0 else 0,
                                         elapsed,
                                     )
                                     last_log_tokens = token_count
 
+                                # Repetition detection is a quality gate and
+                                # must not inherit its sensitivity from the log
+                                # interval, which is what happened while this
+                                # check lived inside the logging branch above.
+                                if token_count - last_repetition_check >= REPETITION_CHECK_INTERVAL_CHUNKS:
+                                    last_repetition_check = token_count
+                                    if self._has_repeated_tail(full_text):
+                                        self._record_generation_abort(
+                                            attempt=attempt,
+                                            messages=messages,
+                                            response_parts=full_text,
+                                            token_count=token_count,
+                                            elapsed=generation_elapsed,
+                                            reason="repetition_loop",
+                                        )
+                                        raise OllamaGenerationLimitError(
+                                            "Ollama generation entered a repeated-output loop"
+                                        )
+
                 text = "".join(full_text)
                 elapsed = time.time() - t0
 
+                if final_chunk.get("done_reason") == "length":
+                    self._record_generation_abort(
+                        attempt=attempt,
+                        messages=messages,
+                        response_parts=full_text,
+                        token_count=token_count,
+                        elapsed=elapsed,
+                        reason="server_output_limit",
+                    )
+                    raise OllamaGenerationLimitError(
+                        "Ollama stopped at the configured output limit before completing the response"
+                    )
+
                 if not text.strip():
-                    with open("empty_response_debug.txt", "w", encoding="utf-8") as f:
-                        f.write(text)
+                    # No debug artifact is written here: by definition of this
+                    # branch the response is empty, so the file only ever
+                    # contained "". The log line below carries the useful
+                    # signal (chunk count and elapsed time).
                     logger.error(
                         "[Ollama] ✗ Empty response after streaming! %d token chunks received in %.1fs",
                         token_count,
@@ -239,9 +327,7 @@ class OllamaClient:
                     "response_characters": len(text),
                     "stream_chunks": token_count,
                     "elapsed_seconds": round(elapsed, 6),
-                    "chunks_per_second": round(
-                        token_count / elapsed if elapsed > 0 else 0.0, 6
-                    ),
+                    "chunks_per_second": round(token_count / elapsed if elapsed > 0 else 0.0, 6),
                     "prompt_eval_count": final_chunk.get("prompt_eval_count"),
                     "eval_count": final_chunk.get("eval_count"),
                     "prompt_eval_duration_ns": final_chunk.get("prompt_eval_duration"),
@@ -264,8 +350,8 @@ class OllamaClient:
                 err_text = ""
                 try:
                     err_text = e.response.text
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Could not read the error body from the Ollama response: %s", exc)
                 logger.warning(
                     "[Ollama] ✗ HTTP error (attempt %d/%d): %s — Body: %s",
                     attempt,
@@ -287,23 +373,66 @@ class OllamaClient:
                 )
 
             if attempt < self.max_retries:
-                wait = min(30, 2 ** attempt)
+                wait = min(30, 2**attempt)
                 if self.max_retry_seconds:
-                    remaining = self.max_retry_seconds - (
-                        time.monotonic() - retry_started
-                    )
+                    remaining = self.max_retry_seconds - (time.monotonic() - retry_started)
                     if remaining <= 0:
-                        logger.error(
-                            "[Ollama] Retry budget exhausted; not starting another request"
-                        )
+                        logger.error("[Ollama] Retry budget exhausted; not starting another request")
                         break
                     wait = min(wait, max(0, int(remaining)))
                 logger.info("[Ollama] Retrying in %d seconds...", wait)
                 self._wait_for_retry(wait)
 
-        raise OllamaError(
-            f"Failed after bounded retries: {last_error}"
-        ) from last_error
+        raise OllamaError(f"Failed after bounded retries: {last_error}") from last_error
+
+    def _has_repeated_tail(self, response_parts: list[str]) -> bool:
+        """Detect exact periodic output at the tail, regardless of loop length."""
+        max_period = self.repetition_window_chars
+        repeats = self.repetition_count
+        if not max_period:
+            return False
+        text = "".join(response_parts)
+        max_period = min(max_period, len(text) // repeats)
+        if max_period <= 0:
+            return False
+        # Very small periods are still caught by a 32-character block made of
+        # that pattern, while avoiding noisy single-character comparisons.
+        min_period = min(32, max_period)
+        for period in range(min_period, max_period + 1):
+            required = period * repeats
+            tail = text[-required:]
+            block = tail[-period:]
+            if block.strip() and all(tail[offset : offset + period] == block for offset in range(0, required, period)):
+                return True
+        return False
+
+    def _record_generation_abort(
+        self,
+        *,
+        attempt: int,
+        messages: list[dict[str, str]],
+        response_parts: list[str],
+        token_count: int,
+        elapsed: float,
+        reason: str,
+    ) -> None:
+        """Record bounded, text-free diagnostics for an aborted generation."""
+        response_characters = sum(len(part) for part in response_parts)
+        self.last_generation_metrics = {
+            "attempt": attempt,
+            "prompt_characters": sum(len(message["content"]) for message in messages),
+            "response_characters": response_characters,
+            "stream_chunks": token_count,
+            "elapsed_seconds": round(elapsed, 6),
+            "termination_reason": reason,
+        }
+        logger.error(
+            "[Ollama] Generation aborted safely: reason=%s chunks=%d chars=%d elapsed=%.1fs",
+            reason,
+            token_count,
+            response_characters,
+            elapsed,
+        )
 
     def generate_json(
         self,
@@ -335,6 +464,7 @@ class OllamaClient:
             temperature=temperature,
             top_p=top_p,
             system=system,
+            format="json",
         )
 
         return self._extract_json(raw)
@@ -353,7 +483,7 @@ class OllamaClient:
             response.raise_for_status()
             logger.info("[Ollama] Unloaded model '%s'", target_model)
             return True
-        except Exception as exc:
+        except (httpx.HTTPError, OSError, ValueError, KeyError, TypeError) as exc:
             logger.warning(
                 "[Ollama] Could not unload model '%s': %s",
                 target_model,
@@ -400,32 +530,28 @@ class OllamaClient:
                 pass
 
         import json_repair
-        
+
         # Try robust parsing using json_repair
         try:
             logger.info("[JSON] Attempting robust json_repair parsing...")
             target_str = fenced_match.group(1) if fenced_match else text
             brace_match = re.search(r"\{.*\}", target_str, re.DOTALL)
             json_text = brace_match.group(0) if brace_match else target_str
-            
+
             result = json_repair.loads(json_text)
             if isinstance(result, dict):
                 logger.info("[JSON] Parsed via json_repair successfully. Keys: %s", list(result.keys())[:8])
                 return result
-            else:
-                logger.warning("[JSON] json_repair returned non-dict type: %s", type(result))
-        except Exception as e:
-            logger.error("[JSON] json_repair failed: %s", e)
+            logger.warning("[JSON] json_repair returned non-dict type: %s", type(result))
+        except (ValueError, TypeError, KeyError) as e:
+            logger.exception("[JSON] json_repair failed: %s", e)
 
         logger.error(
             "[JSON] ✗ All parse attempts failed. Response head: %r | Response tail: %r",
             text[:300],
             text[-200:],
         )
-        raise OllamaError(
-            f"Could not extract valid JSON from LLM response. "
-            f"Response starts with: {text[:200]!r}"
-        )
+        raise OllamaError(f"Could not extract valid JSON from LLM response. Response starts with: {text[:200]!r}")
 
     def check_health(self, *, quiet: bool = False) -> bool:
         """Check if Ollama is running and the model is available."""
@@ -435,10 +561,7 @@ class OllamaClient:
             data = response.json()
             models = [m.get("name", "") for m in data.get("models", [])]
 
-            available = any(
-                self._model_names_match(self.model, installed)
-                for installed in models
-            )
+            available = any(self._model_names_match(self.model, installed) for installed in models)
 
             if not available and not quiet:
                 logger.warning(
@@ -448,11 +571,11 @@ class OllamaClient:
                 )
             return available
 
-        except Exception as e:
+        except (httpx.HTTPError, OSError, ValueError, KeyError, TypeError) as e:
             if quiet:
                 logger.debug("Ollama health preflight failed: %s", e)
             else:
-                logger.error("Ollama health check failed: %s", e)
+                logger.exception("Ollama health check failed: %s", e)
             return False
 
     @staticmethod
@@ -467,20 +590,15 @@ class OllamaClient:
         if not self.fallback_models:
             return None
         try:
-            response = self._ensure_client().get(
-                f"{self.host}/api/tags", timeout=5.0
-            )
+            response = self._ensure_client().get(f"{self.host}/api/tags", timeout=5.0)
             if response.status_code == 200:
                 data = response.json()
                 models = [m.get("name", "") for m in data.get("models", []) if m.get("name")]
                 logger.info("[Ollama] Discovered installed models: %s", models)
                 for fallback in self.fallback_models:
-                    if any(
-                        self._model_names_match(fallback, installed)
-                        for installed in models
-                    ):
+                    if any(self._model_names_match(fallback, installed) for installed in models):
                         return fallback
-        except Exception as e:
+        except (httpx.HTTPError, OSError, ValueError, KeyError, TypeError) as e:
             logger.warning("[Ollama] Failed to resolve configured fallback models: %s", e)
         return None
 
@@ -497,3 +615,7 @@ class OllamaClient:
 
 class OllamaError(Exception):
     """Raised when Ollama communication fails."""
+
+
+class OllamaGenerationLimitError(OllamaError):
+    """Raised when a generation safeguard terminates a runaway response."""

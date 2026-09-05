@@ -9,7 +9,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="static/css/styles.css?v=20260814.3">
+    <link rel="stylesheet" href="static/css/styles.css?v=20260902.1">
     <script>
         if ('serviceWorker' in navigator) {
             navigator.serviceWorker.getRegistrations().then(function(registrations) {
@@ -161,17 +161,61 @@
             </div>
 
             <section class="attention-panel hidden" id="attention-panel" aria-live="polite">
-                <div class="attention-heading">
-                    <div><span class="attention-kicker">Attention required</span><h2 id="attention-title">Review inbox</h2><p id="attention-summary"></p></div>
-                    <button class="btn btn-success hidden" id="btn-resume-after-review">Resume pipeline</button>
-                </div>
-                <div class="attention-toolbar">
-                    <label>Type<select class="input-sm" id="attention-type"><option value="all">All</option><option value="audio">Audio</option><option value="attribution">Speaker</option><option value="pronunciation">Pronunciation</option></select></label>
-                    <label>Status<select class="input-sm" id="attention-status"><option value="blocking">Blocking</option><option value="all">All</option><option value="resolved">Resolved</option></select></label>
-                    <label>Confidence<select class="input-sm" id="attention-confidence"><option value="all">All bands</option><option value="low">Low</option><option value="review">Review</option><option value="high">High</option></select></label>
-                </div>
-                <div class="attention-list" id="attention-list"></div>
-                <div class="attention-pagination"><button class="btn btn-ghost btn-sm" id="attention-prev">Previous</button><span id="attention-page"></span><button class="btn btn-ghost btn-sm" id="attention-next">Next</button></div>
+                <details class="attention-details" id="attention-details">
+                    <summary class="attention-heading">
+                        <div><span class="attention-kicker" id="attention-kicker">Attention required</span><h2 id="attention-title" style="display:inline-block; margin-left:8px;">Review inbox</h2><p id="attention-summary"></p></div>
+                        <button class="btn btn-success hidden" id="btn-resume-after-review" onclick="event.stopPropagation()">Resume pipeline</button>
+                    </summary>
+                    <div class="attention-body" id="attention-body">
+                        <div class="gemini-retry-banner hidden" id="gemini-retry-banner">
+                            <div class="gemini-retry-content">
+                                <div class="gemini-retry-icon">🤖</div>
+                                <div class="gemini-retry-text">
+                                    <div class="gemini-retry-header">
+                                        <strong id="gemini-retry-title">Gemini External Validation</strong>
+                                        <span class="badge badge-warning" id="gemini-retry-badge">Checking…</span>
+                                    </div>
+                                    <p id="gemini-retry-description">Gemini reached its rate limit on unresolved dialogue turns. You can wait for the quota window to reset, retry immediately, or review items manually.</p>
+                                </div>
+                            </div>
+                            <div class="gemini-retry-actions">
+                                <label class="gemini-auto-retry-toggle" title="Automatically retry when the rate-limit cooldown expires">
+                                    <input type="checkbox" id="gemini-auto-retry-check" checked>
+                                    <span>Auto-retry in <strong id="gemini-cooldown-timer">00:20</strong></span>
+                                </label>
+                                <button type="button" class="btn btn-primary btn-sm" id="btn-retry-gemini-now">⚡ Retry with Gemini Now</button>
+                                <button type="button" class="btn btn-ghost btn-sm" id="btn-dismiss-gemini-retry">✍️ Review Manually</button>
+                            </div>
+                        </div>
+                        <div class="attention-pills" id="attention-pills">
+                            <button type="button" class="attention-pill" data-filter="blocking">⚠️ Action Required (<span id="pill-count-blocking">0</span>)</button>
+                            <button type="button" class="attention-pill" data-filter="pronunciation">📖 Pronunciation Terms (<span id="pill-count-pronunciation">0</span>)</button>
+                            <button type="button" class="attention-pill" data-filter="character">👤 Character Notes (<span id="pill-count-character">0</span>)</button>
+                            <button type="button" class="attention-pill" data-filter="resolved">✅ Auto-Resolved / Fixed (<span id="pill-count-resolved">0</span>)</button>
+                            <button type="button" class="attention-pill active" data-filter="all">📋 All (<span id="pill-count-all">0</span>)</button>
+                        </div>
+                        <div class="attention-toolbar">
+                            <label>Type<select class="input-sm" id="attention-type"><option value="all">All types</option><option value="extraction">Book sections</option><option value="audio">Audio</option><option value="attribution">Speaker</option><option value="pronunciation">Pronunciation</option><option value="character">Character notes</option></select></label>
+                            <label>Status<select class="input-sm" id="attention-status"><option value="all">All statuses</option><option value="blocking">Blocking only</option><option value="optional">Optional / Info</option><option value="resolved">Resolved / Approved</option></select></label>
+                            <label>Confidence<select class="input-sm" id="attention-confidence"><option value="all">All bands</option><option value="low">Low</option><option value="review">Review</option><option value="high">High</option></select></label>
+                            <label class="attention-search-label">Search<input type="text" class="input-sm" id="attention-search" placeholder="Filter terms or text..."></label>
+                        </div>
+                        <div class="attention-list" id="attention-list"></div>
+                        <div class="attention-pagination">
+                            <button class="btn btn-ghost btn-sm" id="attention-prev">Previous</button>
+                            <span id="attention-page"></span>
+                            <button class="btn btn-ghost btn-sm" id="attention-next">Next</button>
+                            <label class="visually-hidden" for="attention-page-size">Items per page</label>
+                            <select id="attention-page-size" class="input-sm" style="margin-left: 8px;">
+                                <option value="10">10 per page</option>
+                                <option value="25">25 per page</option>
+                                <option value="50">50 per page</option>
+                                <option value="100">100 per page</option>
+                                <option value="all">Show all</option>
+                            </select>
+                        </div>
+                    </div>
+                </details>
             </section>
 
             <!-- Pipeline progress -->
@@ -234,7 +278,7 @@
                                 </select>
                             </div>
                         </div>
-                        <p class="chapter-selection-help" id="chapter-selection-help">Select chapters here, then use “Generate selected chapters again” above.</p>
+                        <p class="chapter-selection-help" id="chapter-selection-help">Select chapters here, then start the pipeline to generate the selected batch.</p>
                         <div class="chapter-list-header" aria-hidden="true">
                             <span></span><span>Chapter</span><span>Status</span><span>Progress</span><span></span>
                         </div>
@@ -532,9 +576,10 @@
     <div class="toast-container" id="toast-container" role="status" aria-live="polite"></div>
 
     <!-- Scripts -->
-    <script src="static/js/app.js?v=20260814.3"></script>
-    <script src="static/js/pipeline.js?v=20260814.3"></script>
-    <script src="static/js/script-viewer.js?v=20260814.3"></script>
-    <script src="static/js/log-console.js?v=20260814.3"></script>
+    <script src="static/js/dom-utils.js?v=20260902.1"></script>
+    <script src="static/js/app.js?v=20260902.1"></script>
+    <script src="static/js/pipeline.js?v=20260902.1"></script>
+    <script src="static/js/script-viewer.js?v=20260902.1"></script>
+    <script src="static/js/log-console.js?v=20260902.1"></script>
 </body>
 </html>

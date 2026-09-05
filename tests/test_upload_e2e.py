@@ -7,13 +7,12 @@ They are excluded from ordinary discovery unless ``RUN_LIVE_UPLOAD_E2E=1``.
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import shutil
-from tempfile import TemporaryDirectory
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import httpx
-
 
 RUN_LIVE = os.environ.get("RUN_LIVE_UPLOAD_E2E") == "1"
 BASE_URL = os.environ.get("UPLOAD_E2E_BASE_URL", "http://127.0.0.1:8000")
@@ -25,10 +24,7 @@ FILE_PATH = Path(
         "voice_library/sample_book-1/child_female.wav",
     )
 )
-TRANSCRIPT = (
-    "She walked through the moonlit garden, listening as fallen leaves "
-    "whispered beneath each careful step."
-)
+TRANSCRIPT = "She walked through the moonlit garden, listening as fallen leaves whispered beneath each careful step."
 
 
 @unittest.skipUnless(RUN_LIVE, "set RUN_LIVE_UPLOAD_E2E=1 for live API tests")
@@ -67,9 +63,7 @@ class VoiceUploadLiveTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
 
     def test_mismatched_transcript_is_rejected(self) -> None:
-        response = self._upload(
-            "This is completely different text that should fail."
-        )
+        response = self._upload("This is completely different text that should fail.")
         self.assertNotEqual(response.status_code, 200, response.text)
 
 

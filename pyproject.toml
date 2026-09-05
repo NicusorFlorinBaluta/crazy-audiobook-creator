@@ -1,0 +1,191 @@
+# Static-analysis configuration for Crazy Audiobook Creator.
+#
+# This project has no build/packaging step; the file exists so that `ruff` has a
+# single checked-in configuration shared by CI, pre-commit, and local runs.
+#
+# Policy: `ruff format` is enforced (CI and pre-commit). The repository was
+# reformatted in one isolated commit on 2026-09-04 -- 113 of 188 files -- so
+# that the gate never mixes formatting churn into a behavioural diff.
+#
+# The Pyflakes (`F`) rules are non-negotiable and must stay at zero.
+# They are what catch undefined names and duplicate definitions, which is the
+# failure class that previously reached production in this repository:
+#   - `F811` duplicate method definitions in `ScriptGenerator`
+#   - `F821` calls to a `ProgressEvent` class that was never written
+# Everything else is enabled where it is already clean and ratcheted otherwise.
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+extend-exclude = [
+    "scratch",
+    "node_modules",
+]
+
+[tool.ruff.lint]
+select = [
+    "F",     # Pyflakes: undefined names, duplicate definitions, unused imports
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "I",     # isort: import ordering
+    "UP",    # pyupgrade: deprecated syntax for the target version
+    "B",     # flake8-bugbear: likely bugs (loop-variable closures, mutable defaults)
+    "C4",    # flake8-comprehensions
+    "DTZ",   # flake8-datetimez: naive datetime use
+    "PTH105",# os.replace -> Path.replace (kept; the rest of PTH is noise here)
+    "RET",   # flake8-return
+    "SIM",   # flake8-simplify
+    "S",     # flake8-bandit: security
+    "BLE",   # flake8-blind-except
+    "TRY004",# raise TypeError for type checks
+    "TRY201",# verbose raise
+    "TRY400",# logger.error -> logger.exception inside except
+]
+
+ignore = [
+    # --- Deliberate project conventions -----------------------------------
+    "S101",    # assert: used intentionally in tests and internal invariants
+    "S603",    # subprocess call: every call site uses list-form argv, never shell=True
+    "S607",    # partial executable path: ffmpeg/ollama are resolved from PATH by design
+    "TRY003",  # long messages in raise: this codebase deliberately raises explanatory errors
+    "RET504",  # unnecessary assignment before return: often clearer with a named result
+    "SIM105",  # contextlib.suppress: explicit try/except/pass is used with comments
+    "E501",    # line length is reported separately; see `line-length` above
+    "E402",    # imports after code: `os.environ.setdefault` for ROCm and
+               # `sys.path` setup in scripts must run before project imports
+    "PTH105",  # os.replace over Path.replace: `shared/artifacts.py` needs the
+               # os-level call for its retry loop; see `_atomic_replace`
+    "S105",    # false positives only: env-var *names* (CRAZY_AUDIOBOOK_*_TOKEN)
+               # and the `ValidationStatus.PASS` enum member
+    "S608",    # false positives only: every flagged site builds a `?`
+               # placeholder list and binds values as parameters
+    "E741",    # ambiguous names (`l`) in short numeric/audio helpers
+    "B008",    # function call in argument default: this IS the FastAPI idiom
+               # for `File(...)` / `Form(...)` dependencies
+    "UP042",   # str+Enum -> StrEnum: NOT behaviour-preserving. `str()` and
+               # f-string output change from "Class.MEMBER" to the value, and
+               # `NotificationEventType` values are serialized into Home
+               # Assistant payloads. Migrate only with a payload review.
+
+    # --- Ratchet list ------------------------------------------------------
+    # Real signal, but too many existing sites to fix in one pass without
+    # risking behaviour. Reduce these over time; do not add entries without a
+    # comment explaining the count and the plan.
+    "BLE001",  # blind except (118, from ~208): narrowing incrementally.
+               #
+               # Every one of these already logs -- the silent subset went with
+               # S110, see below -- so what is left is breadth, not silence.
+               # The point of narrowing is that `except Exception` catches the
+               # failure you expected *and* the typo you did not: an
+               # AttributeError from a refactor gets swallowed and logged as a
+               # degraded read rather than crashing in the test suite.
+               #
+               # Cleared so far: mobile.py (14), cache.py (6),
+               # pronunciation.py (7), ollama_client.py (4),
+               # audio_effects.py (4), whisper_validator.py (4),
+               # routers/pronunciations.py (3), character_analyzer.py (4),
+               # script_generator.py (2), main.py (12 of 36),
+               # pipeline.py (17 of 29), metadata_fetcher.py (4),
+               # routers/external_validation.py (4). The
+               # convention is to name what
+               # the guarded call can actually raise, generously:
+               #
+               #   reading someone else's file  (OSError, UnicodeDecodeError,
+               #                                 ValueError, KeyError, TypeError)
+               #   sqlite + pickle              (sqlite3.Error, pickle.PickleError,
+               #                                 OSError, EOFError, ValueError, TypeError)
+               #   wave/soundfile               (OSError, wave.Error, EOFError, ValueError)
+               #   httpx calls                  (httpx.HTTPError, OSError, ValueError,
+               #                                 KeyError, TypeError)
+               #   subprocess-backed audio      (OSError, subprocess.SubprocessError,
+               #                                 ValueError, RuntimeError)
+               #
+               # ValueError is doing real work in those: JSONDecodeError is a
+               # ValueError, and so is int()/float() over a junk field.
+               #
+               # NOT narrowed on purpose: nas_syncer.py (15). paramiko raises
+               # SSHException alongside OSError and is imported lazily, so the
+               # name is not available in an except clause without making it a
+               # hard import. Narrowing to OSError alone would let an
+               # SSHException escape mid-delivery, which is worse than a broad
+               # catch that logs.
+    # S110 and S112 were cleared on 2026-09-04: ~75 sites that discarded an
+    # exception with no trace now say what was lost. Severity follows
+    # consequence -- `warning` where the user sees something wrong (a chapter
+    # listed as unscripted, a book with no chapters, an empty log view, audio
+    # silently re-rendered), `debug` where the fallback is the normal path (a
+    # health check that fails because the server has not started yet). The one
+    # site left silent is inside `ProjectLogHandler.emit`, where a logger call
+    # would re-enter the handler that just failed; it uses the stdlib's
+    # `handleError` instead. Both rules are enforced from here on.
+    # B023 (loop-variable closure) was cleared on 2026-09-04: all 31 sites now
+    # bind their loop variables as defaults. Every one was benign -- each
+    # closure was consumed inside its own iteration -- but benign by accident,
+    # and each would have misattributed data across iterations the moment its
+    # call became deferred or async. The rule is enforced from here on.
+    "ARG",     # unused arguments: mostly protocol/callback signatures
+    # TRY400, TRY004 and B904 were cleared on 2026-09-04.
+    #
+    # TRY400 (22): every `logger.error` inside an `except` is now
+    # `logger.exception`, so the traceback reaches the log instead of just the
+    # message. A redundant `exc_info=True` was dropped where present.
+    #
+    # TRY004 (22): 21 converted. All the script_generator sites parse LLM
+    # output and their callers already catch `(TypeError, ValueError)`, so the
+    # change is invisible to them. The exception is
+    # `configured_trusted_lan_cidrs`, which keeps ValueError -- see the
+    # per-file ignore below.
+    #
+    # B904 (13): every `raise` inside an `except` now chains with `from`, and
+    # the handlers that discarded the exception bind it instead, so the
+    # original cause survives into the traceback.
+    "SIM102",  # collapsible if (4)
+    "SIM103",  # needless bool (5)
+    "SIM108",  # ternary instead of if/else (4): often less readable here
+    "SIM117",  # combine with-statements (1)
+    "B905",    # zip without strict= (6): needs per-site length reasoning
+    "B007",    # unused loop variable (5)
+    "DTZ007",  # naive strptime (5): all parse operator-entered local times
+    "F841",    # unused locals (11 remaining, all in tests/scripts)
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests legitimately use asserts, private access, and hardcoded fixture secrets.
+"tests/**" = [
+    "S105", "S106", "S108", "SIM117", "B017",
+    "DTZ001", "DTZ005", "DTZ007",
+    "E731",   # inline lambdas are fine for building fixture payloads
+]
+
+# These handles are intentionally long-lived and owned by an object, so a
+# context manager would close them too early:
+#   pipeline.py         -> managed Ollama / Voice subprocess log handles
+#   single_instance.py  -> the lock file must stay open to hold the lock
+#   voice_designer.py   -> the VoiceDesign helper's log handle
+"brain/orchestrator/pipeline.py" = ["SIM115"]
+"shared/single_instance.py" = ["SIM115"]
+"voice/tts_server/voice_designer.py" = ["SIM115"]
+
+# The cache only ever unpickles values it wrote itself, in a local SQLite file
+# under the project workspace. Nothing external reaches it.
+"shared/cache.py" = ["S301"]
+
+# `configured_trusted_lan_cidrs` validates a config value, and every other bad
+# setting in this project raises ValueError (see shared/config_validation.py).
+# TRY004 would have it raise TypeError because the check is an isinstance; one
+# convention for config errors is worth more than the rule here, and a test
+# asserts the current type.
+"brain/dashboard/api/security.py" = ["TRY004"]
+
+# `urllib.request` against the operator's own configured local endpoints
+# (Ollama, Home Assistant), not arbitrary user input.
+"shared/pronunciation.py" = ["S310"]
+"brain/orchestrator/notifier.py" = ["S310"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["brain", "voice", "shared"]
+
+[tool.pytest.ini_options]
+# Folded in from pytest.ini so the repository has one static-analysis and test
+# configuration file rather than two.
+testpaths = ["tests"]

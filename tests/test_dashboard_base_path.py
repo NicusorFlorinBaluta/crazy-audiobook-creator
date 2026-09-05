@@ -1,7 +1,7 @@
-import unittest
+import os
 import re
+import unittest
 from pathlib import Path
-
 
 FRONTEND = Path("brain/dashboard/frontend")
 
@@ -39,19 +39,85 @@ class DashboardBasePathTests(unittest.TestCase):
         self.assertIn("new URL('ws/updates', window.location.href)", app_js)
 
     def test_frontend_assets_share_one_cache_revision(self):
+        """Every referenced asset must carry the same revision.
+
+        A stale revision on one asset lets a browser serve old CSS with new JS,
+        which is exactly the mixing the query revisions exist to prevent. The
+        expected count is derived from the files on disk rather than hardcoded,
+        so adding a script cannot leave this assertion silently weaker.
+        """
         index = (FRONTEND / "index.html").read_text(encoding="utf-8")
-        revisions = re.findall(
-            r'(?:styles\.css|(?:app|pipeline|script-viewer|log-console)\.js)'
-            r'\?v=([^"\']+)',
-            index,
+        referenced = re.findall(r"static/((?:js|css)/[\w.-]+)\?v=([0-9.]+)", index)
+        self.assertTrue(referenced, "no revisioned assets found in index.html")
+
+        for relative, _ in referenced:
+            self.assertTrue(
+                (FRONTEND / relative).is_file(),
+                f"index.html references a missing asset: {relative}",
+            )
+
+        local_scripts = {path.name for path in (FRONTEND / "js").glob("*.js")}
+        self.assertEqual(
+            {Path(relative).name for relative, _ in referenced if relative.endswith(".js")},
+            local_scripts,
+            "every js/ file must be referenced by index.html, and vice versa",
         )
-        self.assertEqual(len(revisions), 5)
-        self.assertEqual(len(set(revisions)), 1)
+
+        self.assertEqual(len({revision for _, revision in referenced}), 1)
+
+    def test_frontend_build_is_derived_from_the_frontend_on_disk(self):
+        """The reported UI version must follow the assets without human help.
+
+        This used to compare two hand-maintained strings -- a literal in
+        main.py and the ``?v=`` in index.html -- and require them to match.
+        That kept them equal to each other while both drifted away from the
+        code: the header still said 2026.09.02.1 after two days of frontend
+        changes, so "did this restart pick up the new UI?" was unanswerable
+        from a response, which is the one question the header exists for.
+
+        The value is computed from the files now, so the property worth
+        asserting is that it actually tracks them.
+        """
+        from brain.dashboard.api.main import FRONTEND_BUILD, _frontend_build
+
+        self.assertEqual(FRONTEND_BUILD, _frontend_build(), "not stable across calls")
+        self.assertRegex(FRONTEND_BUILD, r"^\d{4}\.\d{2}\.\d{2}\.[0-9a-f]{8}$")
+
+        api_source = Path("brain/dashboard/api/main.py").read_text(encoding="utf-8")
+        self.assertNotRegex(
+            api_source,
+            r'FRONTEND_BUILD = "',
+            "FRONTEND_BUILD is a literal again; it will drift from the assets",
+        )
+
+    def test_frontend_build_changes_when_an_asset_changes(self):
+        """A changed asset must produce a different version string.
+
+        Without this the derivation could silently hash nothing at all and
+        still return a plausible-looking value forever.
+        """
+        from brain.dashboard.api.main import _frontend_build
+
+        target = FRONTEND / "js" / "app.js"
+        before = _frontend_build()
+        original = target.read_bytes()
+        # The build string folds in file mtimes, so putting the bytes back is
+        # not enough -- the restoring write moves the mtime and the value stays
+        # changed for the rest of the process. That made this test corrupt its
+        # siblings: FRONTEND_BUILD is computed once at import, and the test
+        # asserting it equals a fresh _frontend_build() then failed depending
+        # on run order.
+        stat = target.stat()
+        try:
+            target.write_bytes(original + b"// version probe\n")
+            self.assertNotEqual(before, _frontend_build())
+        finally:
+            target.write_bytes(original)
+            os.utime(target, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+        self.assertEqual(before, _frontend_build(), "restore did not return the original value")
 
     def test_embedded_frontend_disables_stale_browser_caching(self):
-        api_source = Path("brain/dashboard/api/main.py").read_text(
-            encoding="utf-8"
-        )
+        api_source = Path("brain/dashboard/api/main.py").read_text(encoding="utf-8")
         self.assertIn(
             '"no-store, no-cache, max-age=0, must-revalidate"',
             api_source,

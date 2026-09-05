@@ -8,6 +8,8 @@ const state = window.state = {
     projects: [],
     currentProjectId: null,
     currentProject: null,
+    chapterSelection: null,
+    chapterSelectionProjectId: null,
     ws: null,
     voiceServerOnline: false,
     schedule: null,
@@ -16,7 +18,47 @@ const state = window.state = {
     metadataCandidate: null
 };
 
-const attentionState = {data: null, page: 1, pageSize: 10, projectId: null};
+/**
+ * Resolve the pipeline stage to render for a project or job payload.
+ *
+ * Contract, load-bearing: `active_stage` wins over `status`. `status` is the
+ * coarse state ("waiting_for_review" — blocked on a human decision) while
+ * `active_stage` names *which* phase that refers to ("voice_review"). The
+ * stage is strictly the more specific of the two.
+ *
+ * `renderWorkStatus` is the one caller that deliberately lets a *terminal*
+ * status win instead, because a paused or errored project must not be
+ * described by whatever stage it was in when it stopped. That exception is
+ * spelled out at its call site; it must never be extended to
+ * `waiting_for_review`, which is not terminal but blocked, and whose
+ * `active_stage` is the only thing that says what the operator has to do.
+ *
+ * @param {object|null|undefined} source A project or job-update payload.
+ * @returns {string} Lowercased stage, or '' when neither field is present.
+ */
+function resolvePipelineStage(source) {
+    if (!source) return '';
+    return String(source.active_stage || source.status || '').toLowerCase();
+}
+
+const savedAttentionPageSize = (() => {
+    try { return localStorage.getItem('crazy_audiobook_attention_page_size') || '10'; } catch (_) { return '10'; }
+})();
+const savedAttentionPill = (() => {
+    try { return localStorage.getItem('crazy_audiobook_attention_pill') || 'all'; } catch (_) { return 'all'; }
+})();
+// Exposed on `window` like `state` above, so the behavioural DOM tests can
+// seed it directly instead of faking the network.
+const attentionState = window.attentionState = {
+    data: null,
+    page: 1,
+    pageSize: savedAttentionPageSize === 'all' ? 999999 : parseInt(savedAttentionPageSize, 10) || 10,
+    pageSizeSetting: savedAttentionPageSize,
+    activePill: savedAttentionPill,
+    projectId: null,
+    expandedCandidates: new Set(),
+    searchQuery: '',
+};
 
 // DOM Elements
 const els = {
@@ -254,6 +296,39 @@ function setupEventListeners() {
             renderAttentionInbox();
         });
     });
+    document.getElementById('attention-search')?.addEventListener('input', (e) => {
+        attentionState.searchQuery = (e.target.value || '').trim().toLowerCase();
+        attentionState.page = 1;
+        renderAttentionInbox();
+    });
+    document.getElementById('attention-page-size')?.addEventListener('change', (e) => {
+        const val = e.target.value;
+        attentionState.pageSizeSetting = val;
+        attentionState.pageSize = val === 'all' ? 999999 : parseInt(val, 10) || 10;
+        attentionState.page = 1;
+        try { localStorage.setItem('crazy_audiobook_attention_page_size', val); } catch (_) {}
+        renderAttentionInbox();
+    });
+    document.getElementById('attention-pills')?.addEventListener('click', (e) => {
+        const pill = e.target.closest('.attention-pill');
+        if (!pill) return;
+        document.querySelectorAll('.attention-pill').forEach(p => p.classList.remove('active'));
+        pill.classList.add('active');
+        attentionState.activePill = pill.dataset.filter || 'all';
+        attentionState.page = 1;
+        
+        const statusSelect = document.getElementById('attention-status');
+        if (statusSelect) {
+            if (attentionState.activePill === 'blocking') {
+                if (statusSelect.value === 'optional') statusSelect.value = 'blocking';
+            } else if (attentionState.activePill === 'pronunciation' || attentionState.activePill === 'character') {
+                if (statusSelect.value === 'blocking') statusSelect.value = 'all';
+            }
+        }
+        
+        try { localStorage.setItem('crazy_audiobook_attention_pill', attentionState.activePill); } catch (_) {}
+        renderAttentionInbox();
+    });
     document.getElementById('attention-prev')?.addEventListener('click', () => {
         attentionState.page = Math.max(1, attentionState.page - 1);
         renderAttentionInbox();
@@ -263,6 +338,22 @@ function setupEventListeners() {
         renderAttentionInbox();
     });
     document.getElementById('btn-resume-after-review')?.addEventListener('click', startPipeline);
+    document.getElementById('btn-retry-gemini-now')?.addEventListener('click', () => {
+        if (state.currentProjectId) {
+            retryGeminiExternalValidation(state.currentProjectId, true);
+        }
+    });
+    document.getElementById('btn-dismiss-gemini-retry')?.addEventListener('click', () => {
+        const banner = document.getElementById('gemini-retry-banner');
+        if (banner) {
+            banner.classList.add('hidden');
+            banner.dataset.dismissed = 'true';
+        }
+        if (geminiRetryTimer) {
+            clearInterval(geminiRetryTimer);
+            geminiRetryTimer = null;
+        }
+    });
 
     // Feature Expansion Handlers
     const btnFetchMeta = document.getElementById('btn-fetch-metadata');
@@ -304,7 +395,7 @@ function setupEventListeners() {
     const btnSelAll = document.getElementById('btn-select-all-chapters');
     if (btnSelAll) {
         btnSelAll.addEventListener('click', () => {
-            document.querySelectorAll('.chapter-select-cb').forEach(cb => cb.checked = true);
+            state.chapterSelection = null;
             updateChapterSelectionState();
         });
     }
@@ -312,7 +403,7 @@ function setupEventListeners() {
     const btnSelNone = document.getElementById('btn-select-none-chapters');
     if (btnSelNone) {
         btnSelNone.addEventListener('click', () => {
-            document.querySelectorAll('.chapter-select-cb').forEach(cb => cb.checked = false);
+            state.chapterSelection = new Set();
             updateChapterSelectionState();
         });
     }
@@ -320,16 +411,13 @@ function setupEventListeners() {
     const btnApplyRange = document.getElementById('btn-apply-range');
     if (btnApplyRange) {
         btnApplyRange.addEventListener('click', () => {
-            const input = document.getElementById('chapter-range-input').value.trim();
+            const input = document.getElementById('chapter-range-input')?.value.trim();
             const chapters = parseChapterRange(input);
             if (!chapters) {
                 showToast('Use a range such as 1-5, 8, 12-14', 'warning');
                 return;
             }
-            document.querySelectorAll('.chapter-select-cb').forEach(cb => {
-                const ch = parseInt(cb.dataset.ch, 10);
-                cb.checked = chapters.has(ch);
-            });
+            state.chapterSelection = new Set(chapters);
             updateChapterSelectionState();
         });
     }
@@ -347,6 +435,7 @@ function setupEventListeners() {
     document.getElementById('select-page-size')?.addEventListener('change', (e) => {
         chapterPaginationState.pageSize = e.target.value;
         chapterPaginationState.currentPage = 1;
+        try { localStorage.setItem('crazy_audiobook_chapter_page_size', e.target.value); } catch (_) {}
         filterChapterRows();
     });
     document.getElementById('btn-prev-page')?.addEventListener('click', () => {
@@ -397,6 +486,9 @@ function activateDetailTab(targetId, remember = false) {
         content.hidden = !active;
     });
     if (remember) localStorage.setItem('projectDetailTab', targetId);
+    if (targetId === 'tab-characters' && state.currentProjectId && window.ScriptViewer) {
+        window.ScriptViewer.refreshVoices(state.currentProjectId);
+    }
 }
 
 function handleTabKeydown(event) {
@@ -483,12 +575,7 @@ async function showDetailView(projectId, isHashLoad = false) {
             : defaultTab
     );
 
-    if (detailPollTimer) clearInterval(detailPollTimer);
-    detailPollTimer = setInterval(() => {
-        if (state.currentProjectId) {
-            fetchProjectDetails(state.currentProjectId, true);
-        }
-    }, 2000);
+    scheduleDetailPoll();
 
     // Connect log console in background (non-blocking)
     if (window.LogConsole) {
@@ -497,6 +584,32 @@ async function showDetailView(projectId, isHashLoad = false) {
             && !terminal.includes(String(project?.status || '').toLowerCase());
         window.LogConsole.openForProject(projectId, running);
     }
+}
+
+function scheduleDetailPoll() {
+    if (detailPollTimer) clearTimeout(detailPollTimer);
+    if (!state.currentProjectId) return;
+    const project = state.currentProject || {};
+    const stage = resolvePipelineStage(project);
+    const status = String(project.status || '').toLowerCase();
+    const rapidStages = new Set([
+        'extracting', 'scripting', 'bootstrapping', 'generating',
+        'validating', 'mastering', 'exporting', 'pausing'
+    ]);
+    const terminalOrWaiting = new Set([
+        'complete', 'completed', 'selection_complete', 'paused',
+        'paused_scheduled', 'deploy_paused', 'waiting_for_review',
+        'voice_review', 'error'
+    ]);
+    const delay = !terminalOrWaiting.has(status)
+        && (project.running === true || rapidStages.has(stage))
+        ? 2000
+        : 10000;
+    detailPollTimer = setTimeout(async () => {
+        if (!state.currentProjectId) return;
+        await fetchProjectDetails(state.currentProjectId, true);
+        scheduleDetailPoll();
+    }, delay);
 }
 
 // ============================================================================
@@ -535,7 +648,8 @@ async function fetchProjectDetails(projectId, isPoll = false) {
             const logData = await logsResponse.json();
             data.work_progress = deriveWorkProgress(
                 logData.lines || [],
-                data.total_chapters || 0
+                data.total_chapters || 0,
+                new Map((data.chapter_details || []).map(d => [d.number, d.title]))
             );
         }
         renderProjectDetails(data);
@@ -553,20 +667,39 @@ async function fetchProjectDetails(projectId, isPoll = false) {
         }
         
         // Let pipeline.js and script-viewer.js update their parts
+        const stage = resolvePipelineStage(data);
         if (window.PipelineManager) {
-            const stage = (data.status || '').toLowerCase();
-            const activeStages = ['extracting', 'scripting', 'bootstrapping', 'generating', 'validating', 'mastering', 'exporting', 'pausing', 'paused_scheduled', 'deploy_paused'];
-            const isDoneStage = ['complete', 'completed', 'selection_complete', 'paused', 'error'].includes(stage);
-            const isRunning = (data.running === true || activeStages.includes(stage)) && !isDoneStage;
-            const coarseStatus = isRunning ? 'running' : stage;
+            const status = String(data.status || '').toLowerCase();
+            const activeStages = ['extracting', 'scripting', 'bootstrapping', 'generating', 'validating', 'mastering', 'exporting', 'pausing'];
+            const isPausedOrDone = ['complete', 'completed', 'selection_complete', 'paused', 'paused_scheduled', 'deploy_paused', 'waiting_for_review', 'voice_review', 'error'].includes(status);
+            const isRunning = (data.running === true || activeStages.includes(stage)) && !isPausedOrDone;
+            const coarseStatus = isRunning ? 'running' : status;
             window.LogConsole?.setProjectRunning(isRunning);
             
-            window.PipelineManager.updateTracker(data.active_stage || data.status, isRunning ? 'running' : coarseStatus, data);
+            window.PipelineManager.updateTracker(stage, isRunning ? 'running' : coarseStatus, data);
             window.PipelineManager.toggleControls(data.status, isRunning, data);
         }
         
-        if (window.ScriptViewer && !isPoll) {
-            window.ScriptViewer.loadData(projectId);
+        if (window.ScriptViewer) {
+            if (!isPoll) {
+                window.ScriptViewer.loadData(projectId);
+                state.lastVoiceRevision = String(data.voice_cast_revision || '');
+                state.lastVoiceRefresh = Date.now();
+            } else {
+                const charTab = document.getElementById('tab-characters');
+                const isCharTabActive = charTab && !charTab.hidden && charTab.classList.contains('active');
+                const revision = String(data.voice_cast_revision || '');
+                const revisionChanged = Boolean(
+                    revision && revision !== state.lastVoiceRevision
+                );
+                const bootstrapRefreshDue = stage === 'bootstrapping'
+                    && Date.now() - state.lastVoiceRefresh > 10000;
+                if (isCharTabActive && (revisionChanged || bootstrapRefreshDue)) {
+                    state.lastVoiceRefresh = Date.now();
+                    window.ScriptViewer.refreshVoices(projectId);
+                }
+                state.lastVoiceRevision = revision;
+            }
         }
         return data;
         
@@ -729,8 +862,8 @@ async function handleUploadSubmit() {
 
 async function startPipeline() {
     if (!state.currentProjectId) return;
-    const chapterCheckboxes = [...document.querySelectorAll('.chapter-select-cb')];
-    if (chapterCheckboxes.length && !chapterCheckboxes.some(cb => cb.checked)) {
+    
+    if (state.chapterSelection !== null && state.chapterSelection.size === 0) {
         showToast('Select at least one chapter before starting', 'warning');
         return;
     }
@@ -740,24 +873,34 @@ async function startPipeline() {
             clearTimeout(_selectionDebounceTimer);
             _selectionDebounceTimer = null;
         }
-        if (chapterCheckboxes.length) {
-            const selected = chapterCheckboxes
-                .filter(cb => cb.checked)
-                .map(cb => parseInt(cb.dataset.ch, 10));
-            const selectionValue = selected.length === chapterCheckboxes.length
-                ? null
-                : selected;
-            await saveChapterSelection(state.currentProjectId, selectionValue);
+        
+        const selectionValue = state.chapterSelection === null
+            ? null
+            : Array.from(state.chapterSelection).sort((a, b) => a - b);
+        
+        await saveChapterSelection(state.currentProjectId, selectionValue);
+        if (state.currentProject) {
+            state.currentProject.generation_chapter_selection = selectionValue;
         }
+
         if (window.PipelineManager) {
             window.PipelineManager.toggleControls('generating', true);
         }
-        const response = await fetch(`api/projects/${state.currentProjectId}/start`, { method: 'POST' });
+        const response = await fetch(
+            `api/projects/${encodeURIComponent(state.currentProjectId)}/start?override_schedule=true`,
+            { method: 'POST' }
+        );
         if (!response.ok) {
-            const err = await response.json();
+            const err = await response.json().catch(() => ({}));
             throw new Error(err.detail || 'Failed to start pipeline');
         }
-        showToast('Pipeline started', 'info');
+        const result = await response.json();
+        showToast(
+            result.schedule_overridden
+                ? 'Pipeline started — working-hours schedule overridden for this run'
+                : 'Pipeline started',
+            'info'
+        );
         setTimeout(() => fetchProjectDetails(state.currentProjectId), 500);
     } catch (error) {
         showToast(error.message, 'error');
@@ -769,12 +912,21 @@ async function pausePipeline() {
     if (!state.currentProjectId) return;
     
     try {
-        const response = await fetch(`api/projects/${state.currentProjectId}/stop`, { method: 'POST' });
+        const response = await fetch(
+            `api/projects/${state.currentProjectId}/stop?resume_on_schedule=true`,
+            { method: 'POST' }
+        );
         if (!response.ok) {
             const err = await response.json();
             throw new Error(err.detail || 'Failed to pause pipeline');
         }
-        showToast('Pipeline pausing...', 'info');
+        const result = await response.json();
+        showToast(
+            result.will_resume_on_schedule
+                ? 'Pipeline pausing — it will resume during working hours'
+                : 'Pipeline pausing...',
+            'info'
+        );
         // The pipeline thread might take a moment to gracefully stop.
         // Wait briefly before refreshing to ensure the UI reflects the PAUSED state.
         setTimeout(() => fetchProjectDetails(state.currentProjectId), 1000);
@@ -783,19 +935,30 @@ async function pausePipeline() {
     }
 }
 
-async function deleteProject() {
-    if (!state.currentProjectId) return;
+async function deleteProject(projectId = state.currentProjectId) {
+    if (!projectId) return;
     
-    if (!confirm('Are you sure you want to delete this project? This cannot be undone.')) {
+    const projectTitle = (projectId === state.currentProjectId && state.currentProject?.title)
+        ? state.currentProject.title
+        : projectId;
+
+    if (!confirm(`Are you sure you want to delete "${projectTitle}"?\n\nThis will permanently delete all project files and audio. This cannot be undone.`)) {
         return;
     }
     
     try {
-        const response = await fetch(`api/projects/${state.currentProjectId}`, { method: 'DELETE' });
-        if (!response.ok) throw new Error('Failed to delete project');
+        const response = await fetch(`api/projects/${encodeURIComponent(projectId)}`, { method: 'DELETE' });
+        if (!response.ok) {
+            const errData = await response.json().catch(() => ({}));
+            throw new Error(errData.detail || `Failed to delete project (${response.status})`);
+        }
         
-        showToast('Project deleted', 'success');
-        showProjectsView();
+        showToast('Project deleted successfully', 'success');
+        if (state.currentProjectId === projectId) {
+            showProjectsView();
+        } else {
+            await fetchProjects();
+        }
     } catch (error) {
         showToast(error.message, 'error');
     }
@@ -843,14 +1006,16 @@ function renderProjectsList() {
     projects.forEach(project => {
         const status = String(project.status || 'created').toLowerCase();
         const statusToken = status.replace(/[^a-z_]/g, '');
-        const card = document.createElement('button');
-        card.type = 'button';
+        const card = document.createElement('div');
         card.className = 'project-card';
+        card.setAttribute('role', 'button');
+        card.setAttribute('tabindex', '0');
         card.setAttribute(
             'aria-label',
             `Open ${project.title && project.title !== 'Unknown' ? project.title : 'untitled project'}, ${formatProjectStatus(status)}`
         );
         card.innerHTML = `
+            <button class="card-btn-delete" title="Delete project" aria-label="Delete project ${escapeHtml(project.title || project.project_id)}">🗑</button>
             <div class="card-header">
                 <div class="card-emoji">📖</div>
                 <div>
@@ -874,7 +1039,18 @@ function renderProjectsList() {
             </div>
         `;
         
+        card.querySelector('.card-btn-delete')?.addEventListener('click', (e) => {
+            e.stopPropagation();
+            deleteProject(project.project_id);
+        });
+
         card.addEventListener('click', () => showDetailView(project.project_id));
+        card.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                showDetailView(project.project_id);
+            }
+        });
         els.projectsGrid.appendChild(card);
     });
 }
@@ -886,19 +1062,276 @@ function confidenceBand(value) {
     return {key: 'low', label: `Low · ${Math.round(value * 100)}%`};
 }
 
-async function fetchAndRenderAttention(projectId, project = state.currentProject) {
+attentionState.expandedCandidates = attentionState.expandedCandidates || new Set();
+
+let geminiRetryTimer = null;
+let geminiCooldownSeconds = 0;
+let geminiAutoRetryCount = 0;
+
+async function checkAndRenderGeminiRetryBanner(projectId, items = []) {
+    const banner = document.getElementById('gemini-retry-banner');
+    if (!banner) return;
+    
+    // Check if there are unresolved attribution items
+    const unresolvedAttributions = items.filter(i => i.category === 'attribution' && i.blocking);
+    if (!unresolvedAttributions.length) {
+        banner.classList.add('hidden');
+        if (geminiRetryTimer) { clearInterval(geminiRetryTimer); geminiRetryTimer = null; }
+        return;
+    }
+
+    try {
+        const res = await fetch(`api/projects/${encodeURIComponent(projectId)}/external-validation/status`);
+        if (!res.ok) return;
+        const status = await res.json();
+        const health = status.provider_health || {};
+        
+        const quota = status.quota || {};
+        let maxCooldown = 0;
+        let rateLimited = false;
+
+        for (const [, pData] of Object.entries(health)) {
+            const cd = Number(pData.cooldown_remaining_seconds || 0);
+            if (cd > maxCooldown) maxCooldown = cd;
+            const err = String(pData.last_error || '').toLowerCase();
+            if (err.includes('429') || err.includes('quota') || err.includes('rate limit') || err.includes('cooling down') || pData.circuit_open) {
+                rateLimited = true;
+            }
+        }
+
+        // The daily budget is a fact the server reports, not something to infer
+        // from an error message. The old check looked for the literal "50/50",
+        // which never matched the 450-request flash-lite limit.
+        const dailyBudgetExhausted = Boolean(quota.any_exhausted);
+
+        const autoCheck = document.getElementById('gemini-auto-retry-check');
+        const desc = document.getElementById('gemini-retry-description');
+        const timerEl = document.getElementById('gemini-cooldown-timer');
+        const retryBtn = document.getElementById('btn-retry-gemini-now');
+
+        if (retryBtn && !retryBtn.dataset.busy) {
+            retryBtn.disabled = false;
+            retryBtn.innerHTML = '⚡ Retry with Gemini Now';
+        }
+
+        if (dailyBudgetExhausted) {
+            banner.classList.remove('hidden');
+            setGeminiBannerState('warning', 'Daily quota exhausted');
+            if (autoCheck) autoCheck.checked = false;
+            if (desc) {
+                desc.textContent = `Gemini daily API budget reached (${describeQuotaUsage(quota)}). Resets ${describeQuotaReset(quota)}. Automatic retries are paused; you can retry now, which falls back to Gemini Web, or review the remaining ${unresolvedAttributions.length} dialogue turns manually below.`;
+            }
+            if (timerEl) timerEl.textContent = formatDuration(Number(quota.resets_in_seconds || 0)) || 'Paused';
+            if (geminiRetryTimer) { clearInterval(geminiRetryTimer); geminiRetryTimer = null; }
+            return;
+        }
+
+        if (geminiAutoRetryCount >= 3) {
+            banner.classList.remove('hidden');
+            setGeminiBannerState('warning', 'Auto-retry paused');
+            if (autoCheck) autoCheck.checked = false;
+            if (desc) {
+                desc.textContent = `Auto-retry paused after 3 rate-limited attempts (${unresolvedAttributions.length} turns remaining). Click 'Retry with Gemini Now' anytime or review manually below.`;
+            }
+            if (timerEl) timerEl.textContent = 'Paused';
+            if (geminiRetryTimer) { clearInterval(geminiRetryTimer); geminiRetryTimer = null; }
+            return;
+        }
+
+        if (rateLimited || (unresolvedAttributions.length > 0 && maxCooldown > 0)) {
+            banner.classList.remove('hidden');
+            setGeminiBannerState('warning', maxCooldown > 0 ? `Backing off ${formatDuration(maxCooldown)}` : 'Backing off');
+            if (desc) {
+                const wait = formatDuration(maxCooldown || 30);
+                desc.textContent = `Gemini is backing off on ${unresolvedAttributions.length} dialogue turns; the provider circuit reopens in ${wait}. Daily budget ${describeQuotaUsage(quota)}. You can wait, retry now, or review items manually.`;
+            }
+            geminiCooldownSeconds = maxCooldown > 0 ? maxCooldown : 30;
+            startGeminiCooldownCountdown(projectId);
+        } else if (unresolvedAttributions.length > 0 && !banner.dataset.dismissed) {
+            banner.classList.remove('hidden');
+            // Nothing is throttled: Gemini simply has not been asked yet, or
+            // answered and could not settle these. Saying "Quota Paused" here
+            // was the single most misleading thing on the page.
+            setGeminiBannerState('success', 'Gemini available');
+            if (desc) {
+                desc.textContent = `${unresolvedAttributions.length} dialogue turns require resolution. Daily budget ${describeQuotaUsage(quota)}. You can run Gemini triage/adjudication now or review manually below.`;
+            }
+            if (timerEl) timerEl.textContent = 'Ready';
+        } else {
+            banner.classList.add('hidden');
+        }
+    } catch (err) {
+        console.warn('Could not check external validation health', err);
+    }
+}
+
+// Turn a span of seconds into something an operator can act on. A bare "71809s"
+// or a "Paused" with no number are both unusable when the question is whether
+// to wait or to go and review by hand.
+function formatDuration(seconds) {
+    const total = Math.max(0, Math.round(Number(seconds) || 0));
+    if (!total) return '';
+    if (total < 60) return `${total}s`;
+    const mins = Math.floor(total / 60) % 60;
+    const hours = Math.floor(total / 3600);
+    if (hours) return `${hours}h ${mins.toString().padStart(2, '0')}m`;
+    const secs = total % 60;
+    return `${mins}m ${secs.toString().padStart(2, '0')}s`;
+}
+
+// "31/450 flash-lite, 1/50 flash" -- the models are named so an exhausted
+// cheap tier is not mistaken for an exhausted expensive one.
+function describeQuotaUsage(quota) {
+    const models = (quota && quota.models) || {};
+    const parts = Object.entries(models).map(([name, m]) => {
+        const short = String(name).replace(/^gemini-[\d.]+-/, '');
+        return `${m.used}/${m.limit} ${short}`;
+    });
+    return parts.length ? parts.join(', ') : 'unknown';
+}
+
+// The budget rolls over at midnight America/Los_Angeles, where Google resets
+// quota -- not at local midnight, so state the local clock time as well.
+function describeQuotaReset(quota) {
+    const seconds = Number((quota && quota.resets_in_seconds) || 0);
+    const iso = quota && quota.resets_at;
+    const span = formatDuration(seconds);
+    if (!iso) return span ? `in ${span}` : 'shortly';
+    const when = new Date(iso);
+    if (Number.isNaN(when.getTime())) return span ? `in ${span}` : 'shortly';
+    const local = when.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    return span ? `in ${span} (${local} your time)` : `at ${local}`;
+}
+
+// The badge is the one-glance answer to "is Gemini working or not". It used to
+// be hardcoded to "Quota Paused" in the markup, so a healthy tier and an
+// exhausted one looked the same.
+function setGeminiBannerState(kind, label) {
+    const badge = document.getElementById('gemini-retry-badge');
+    const title = document.getElementById('gemini-retry-title');
+    if (badge) {
+        badge.textContent = label;
+        badge.className = `badge badge-${kind}`;
+    }
+    if (title) {
+        title.textContent = kind === 'success' ? 'Gemini External Validation' : 'Gemini External Validation — attention';
+    }
+}
+
+function startGeminiCooldownCountdown(projectId) {
+    if (geminiRetryTimer) { clearInterval(geminiRetryTimer); }
+    
+    function updateDisplay() {
+        const timerEl = document.getElementById('gemini-cooldown-timer');
+        if (!timerEl) return;
+        const mins = Math.floor(geminiCooldownSeconds / 60);
+        const secs = geminiCooldownSeconds % 60;
+        timerEl.textContent = `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+    }
+
+    updateDisplay();
+    geminiRetryTimer = setInterval(async () => {
+        geminiCooldownSeconds--;
+        updateDisplay();
+        if (geminiCooldownSeconds <= 0) {
+            clearInterval(geminiRetryTimer);
+            geminiRetryTimer = null;
+            const autoCheck = document.getElementById('gemini-auto-retry-check');
+            if (autoCheck && autoCheck.checked) {
+                geminiAutoRetryCount++;
+                await retryGeminiExternalValidation(projectId, true);
+            }
+        }
+    }, 1000);
+}
+
+async function retryGeminiExternalValidation(projectId, resetCircuit = true) {
+    const retryBtn = document.getElementById('btn-retry-gemini-now');
+    // A browser-tier adjudication runs about 83 seconds, and a retry covers
+    // every unresolved turn. Without a ticking elapsed time there is no way to
+    // tell a working request from a dead one.
+    const startedAt = Date.now();
+    let elapsedTimer = null;
+    if (retryBtn) {
+        retryBtn.dataset.busy = 'true';
+        retryBtn.disabled = true;
+        const tick = () => {
+            const secs = Math.round((Date.now() - startedAt) / 1000);
+            retryBtn.innerHTML = `⏳ Asking Gemini… ${formatDuration(secs) || '0s'}`;
+        };
+        tick();
+        elapsedTimer = setInterval(tick, 1000);
+    }
+    setGeminiBannerState('info', 'Asking Gemini…');
+
+    try {
+        const res = await fetch(`api/projects/${encodeURIComponent(projectId)}/external-validation/retry?reset_circuit=${resetCircuit}`, {
+            method: 'POST',
+        });
+        const result = await res.json();
+        if (res.ok && result.status === 'success') {
+            const resolved = result.resolved || 0;
+            const remaining = result.manual_review || 0;
+            if (resolved > 0) {
+                showToast(`Gemini resolved ${resolved} dialogue turn${resolved === 1 ? '' : 's'}! (${remaining} remaining)`, 'success');
+                geminiAutoRetryCount = 0;
+            } else {
+                // "0 resolved" is a real answer, not a failure -- Gemini can
+                // look at a line and decline to pick a speaker. Say so, rather
+                // than leaving the operator to guess whether it ran.
+                showToast(
+                    `Gemini answered but could not settle ${remaining} item${remaining === 1 ? '' : 's'}; they need a human decision.`,
+                    'info',
+                );
+                setGeminiBannerState('warning', 'Needs your decision');
+            }
+            await fetchAndRenderAttention(projectId, state.currentProject, true);
+        } else {
+            showToast(`Retry attempt: ${result.detail || 'Quota still cooling down'}`, 'warning');
+        }
+    } catch (err) {
+        console.error('Error retrying external validation', err);
+        showToast('External validation retry failed', 'error');
+    } finally {
+        if (elapsedTimer) clearInterval(elapsedTimer);
+        if (retryBtn) {
+            delete retryBtn.dataset.busy;
+            retryBtn.disabled = false;
+            const took = formatDuration(Math.round((Date.now() - startedAt) / 1000));
+            retryBtn.innerHTML = took ? `⚡ Retry with Gemini Now (last: ${took})` : '⚡ Retry with Gemini Now';
+        }
+    }
+}
+
+async function fetchAndRenderAttention(projectId, project = state.currentProject, force = false) {
     try {
         const response = await fetch(`api/projects/${encodeURIComponent(projectId)}/reviews`);
         if (!response.ok || state.currentProjectId !== projectId) return;
         const newProject = attentionState.projectId !== projectId;
-        attentionState.data = await response.json();
+        const rawJson = await response.text();
+        const data = JSON.parse(rawJson);
+        const dataChanged = newProject || attentionState.rawJson !== rawJson;
+        attentionState.rawJson = rawJson;
+        attentionState.data = data;
         attentionState.projectId = projectId;
         if (newProject) {
             document.getElementById('attention-status').value =
                 attentionState.data.blocking_count ? 'blocking' : 'all';
+            attentionState.expandedCandidates = new Set();
+        }
+        if (!attentionState.characters || newProject) {
+            fetch(`api/projects/${encodeURIComponent(projectId)}/characters`)
+                .then(r => r.ok ? r.json() : {})
+                .then(c => {
+                    attentionState.characters = c.characters || c || {};
+                    renderAttentionInbox(project);
+                })
+                .catch(() => {});
         }
         state.lastAttentionRefresh = Date.now();
-        renderAttentionInbox(project);
+        if (dataChanged || force) {
+            renderAttentionInbox(project);
+        }
     } catch (error) {
         console.warn('Could not refresh attention inbox', error);
     }
@@ -906,60 +1339,423 @@ async function fetchAndRenderAttention(projectId, project = state.currentProject
 
 function renderAttentionInbox(project = state.currentProject) {
     const panel = document.getElementById('attention-panel');
+    const details = document.getElementById('attention-details');
+    const kicker = document.getElementById('attention-kicker');
     const data = attentionState.data;
     if (!panel || !data || (!data.total_count && project?.status !== 'waiting_for_review')) {
         panel?.classList.add('hidden');
         return;
     }
     panel.classList.remove('hidden');
-    document.getElementById('attention-summary').textContent = data.blocking_count
-        ? `${data.blocking_count} blocking decision${data.blocking_count === 1 ? '' : 's'}; the pipeline resumes automatically after the last one.`
-        : `${data.total_count} non-blocking or resolved item${data.total_count === 1 ? '' : 's'}.`;
-    const resume = document.getElementById('btn-resume-after-review');
-    resume.classList.toggle('hidden', project?.status !== 'waiting_for_review' || data.blocking_count !== 0);
-    const type = document.getElementById('attention-type').value;
-    const status = document.getElementById('attention-status').value;
-    const confidence = document.getElementById('attention-confidence').value;
-    const filtered = data.items.filter(item => {
-        const band = confidenceBand(item.confidence).key;
-        return (type === 'all' || item.category === type)
-            && (status === 'all' || (status === 'blocking' ? item.blocking : !item.blocking))
-            && (confidence === 'all' || band === confidence);
+    const isWaitingForReview = project?.status === 'waiting_for_review';
+    const items = data.items || [];
+    checkAndRenderGeminiRetryBanner(project?.project_id || attentionState.projectId, items);
+    const blockingItems = items.filter(item => Boolean(item.blocking));
+    const pronunciationItems = items.filter(item => item.category === 'pronunciation');
+    const characterItems = items.filter(item => item.category === 'character');
+    const resolvedItems = items.filter(item => (
+        item.disposition === 'acceptable' ||
+        item.disposition === 'resolved' ||
+        item.status === 'verified' ||
+        (!item.blocking && (item.category === 'attribution' || item.category === 'extraction'))
+    ));
+
+    const blockingCount = blockingItems.length;
+    const pronunciationCount = pronunciationItems.length;
+    const characterCount = characterItems.length;
+    const resolvedCount = resolvedItems.length;
+    const hasBlocking = blockingCount > 0;
+
+    const countBlockingEl = document.getElementById('pill-count-blocking');
+    const countPronEl = document.getElementById('pill-count-pronunciation');
+    const countCharEl = document.getElementById('pill-count-character');
+    const countResEl = document.getElementById('pill-count-resolved');
+    const countAllEl = document.getElementById('pill-count-all');
+    if (countBlockingEl) countBlockingEl.textContent = blockingCount;
+    if (countPronEl) countPronEl.textContent = pronunciationCount;
+    if (countCharEl) countCharEl.textContent = characterCount;
+    if (countResEl) countResEl.textContent = resolvedCount;
+    if (countAllEl) countAllEl.textContent = items.length;
+    
+    if (details && !details.dataset.listenerAttached) {
+        details.dataset.listenerAttached = 'true';
+        details.addEventListener('toggle', () => {
+            details.dataset.userToggled = 'true';
+        });
+    }
+
+    if (details && !details.dataset.userToggled) {
+        details.open = false;
+    }
+
+    if (hasBlocking || isWaitingForReview) {
+        panel.classList.remove('attention-panel-resolved');
+        panel.classList.add('attention-panel-warning');
+        if (kicker) {
+            kicker.textContent = isWaitingForReview ? '⚠️ Action required' : '⚠️ Attention required';
+            kicker.className = 'attention-kicker attention-kicker-warning';
+        }
+        // The panel also opens for `waiting_for_review`, where the pipeline is
+        // blocked on a human decision that is not itself an inbox item. Naming
+        // the blocking count there produced the contradiction "⚠️ Action
+        // required ... 0 Action Required items" -- a red alarm asserting that
+        // nothing is wrong. Lead with the decision that is actually pending.
+        const plural = blockingCount === 1 ? '' : 's';
+        const lead = blockingCount > 0
+            ? `<strong>${blockingCount} Action Required item${plural}</strong>`
+            : (project?.pause_reason
+                ? `<strong>${escapeHtml(project.pause_reason)}</strong>`
+                : '<strong>Approval required before the pipeline can continue</strong>');
+        document.getElementById('attention-summary').innerHTML = `<span class="attention-warning-text">⚠️ ${lead} • ${pronunciationCount} Pronunciation Terms • ${characterCount} Character Notes <em>(Click to expand)</em></span>`;
+    } else {
+        panel.classList.remove('attention-panel-warning');
+        panel.classList.add('attention-panel-resolved');
+        if (kicker) {
+            kicker.textContent = 'Project Clear / Optional Tools';
+            kicker.className = 'attention-kicker attention-kicker-optional';
+        }
+        document.getElementById('attention-summary').innerHTML = `<span><strong style="color:#86efac">✓ 0 Blocking Issues (Pipeline Clear)</strong> • ${pronunciationCount} Optional Pronunciation Terms • ${characterCount} Character Notes <em>(Click to expand)</em></span>`;
+    }
+    
+    const activePill = attentionState.activePill || 'all';
+    document.querySelectorAll('.attention-pill').forEach(p => {
+        p.classList.toggle('active', (p.dataset.filter || 'all') === activePill);
     });
+    const attentionPageSizeSelect = document.getElementById('attention-page-size');
+    if (attentionPageSizeSelect && attentionState.pageSizeSetting) {
+        attentionPageSizeSelect.value = attentionState.pageSizeSetting;
+    }
+
+    const type = document.getElementById('attention-type')?.value || 'all';
+    const status = document.getElementById('attention-status')?.value || 'all';
+    const confidence = document.getElementById('attention-confidence')?.value || 'all';
+    const query = (attentionState.searchQuery || '').toLowerCase();
+
+    const filtered = items.filter(item => {
+        const band = confidenceBand(item.confidence).key;
+        
+        // Pill filter logic
+        if (activePill === 'blocking' && !item.blocking) return false;
+        if (activePill === 'pronunciation' && item.category !== 'pronunciation') return false;
+        if (activePill === 'character' && item.category !== 'character') return false;
+        if (activePill === 'resolved' && !resolvedItems.includes(item)) return false;
+
+        // Dropdown filters
+        if (type !== 'all' && item.category !== type) return false;
+        if (status === 'blocking' && !item.blocking) return false;
+        if (status === 'optional' && (item.blocking || resolvedItems.includes(item))) return false;
+        if (status === 'resolved' && !resolvedItems.includes(item)) return false;
+        if (confidence !== 'all' && band !== confidence) return false;
+
+        // Search query filter
+        if (query) {
+            const matchTitle = (item.title || '').toLowerCase().includes(query);
+            const matchReason = (item.reason || '').toLowerCase().includes(query);
+            const matchText = (item.details?.text || item.details?.source_excerpt || '').toLowerCase().includes(query);
+            const matchSpeaker = (item.details?.speaker || '').toLowerCase().includes(query);
+            const matchTerm = (item.details?.term || '').toLowerCase().includes(query);
+            if (!matchTitle && !matchReason && !matchText && !matchSpeaker && !matchTerm) return false;
+        }
+
+        return true;
+    });
+
     const pages = Math.max(1, Math.ceil(filtered.length / attentionState.pageSize));
     attentionState.page = Math.min(attentionState.page, pages);
     const rows = filtered.slice((attentionState.page - 1) * attentionState.pageSize, attentionState.page * attentionState.pageSize);
+
+    const charactersMap = attentionState.characters || {};
+
     document.getElementById('attention-list').innerHTML = rows.length ? rows.map(item => {
         const band = confidenceBand(item.confidence);
         const trail = item.details?.decision_trail || [];
-        return `<article class="attention-item ${item.blocking ? 'blocking' : ''}" data-line-id="${escapeHtml(item.item_id)}">
-            <div class="attention-item-head"><strong>${escapeHtml(item.title)}</strong><span class="confidence-band confidence-${band.key}">${escapeHtml(band.label)}</span></div>
-            <p>${escapeHtml(item.reason || '')}</p>
-            <div class="attention-item-actions">
-                ${item.category === 'audio' ? `<audio controls preload="none" src="${escapeHtml(item.details?.audio_url || '')}"></audio><button class="btn btn-ghost btn-sm load-candidates">Compare attempts</button>` : ''}
-                ${item.category === 'attribution' ? `<button class="btn btn-ghost btn-sm reveal-context">Reveal in script editor</button>` : ''}
+        const isCandidatesExpanded = attentionState.expandedCandidates.has(item.item_id);
+
+        let categoryBadge = '';
+        if (item.blocking) {
+            categoryBadge = `<span class="attention-item-category-badge badge-blocking">⚠️ Action Required</span>`;
+        } else if (item.category === 'pronunciation') {
+            categoryBadge = `<span class="attention-item-category-badge badge-pronunciation">📖 Optional Pronunciation</span>`;
+        } else if (item.category === 'character') {
+            categoryBadge = `<span class="attention-item-category-badge badge-character">👤 Character Note</span>`;
+        } else if (resolvedItems.includes(item)) {
+            categoryBadge = `<span class="attention-item-category-badge badge-resolved">✅ Auto-Resolved</span>`;
+        } else {
+            categoryBadge = `<span class="attention-item-category-badge badge-info">${escapeHtml(item.category || 'Info')}</span>`;
+        }
+
+        const isPronunciation = item.category === 'pronunciation';
+        const isAttribution = item.category === 'attribution';
+        const termName = (item.details?.term || (item.title || '')).replace(/^Pronunciation:\s*/i, '').trim();
+        const quoteText = item.details?.text || item.details?.source_excerpt || '';
+        const currentSpeaker = item.details?.speaker || 'narrator';
+
+        let charOptions = '';
+        if (isAttribution) {
+            charOptions = Object.entries(charactersMap).map(([cid, cinfo]) => {
+                const cname = cinfo.name || cid;
+                const isSelected = cid === currentSpeaker ? 'selected' : '';
+                return `<option value="${escapeHtml(cid)}" ${isSelected}>${escapeHtml(cname)} (${escapeHtml(cid)})</option>`;
+            }).join('');
+            // Attribution can resolve a line to a generic speaker such as
+            // `crowd`, which is not in the character registry. Without an
+            // option for it nothing matched, so the browser selected the first
+            // entry -- the narrator -- and "Change Speaker" was primed to put
+            // the narrator on shouted dialogue.
+            if (currentSpeaker && !Object.prototype.hasOwnProperty.call(charactersMap, currentSpeaker)) {
+                charOptions = `<option value="${escapeHtml(currentSpeaker)}" selected>${escapeHtml(currentSpeaker)} (current)</option>` + charOptions;
+            }
+            if (!charOptions) {
+                charOptions = `<option value="${escapeHtml(currentSpeaker)}" selected>${escapeHtml(currentSpeaker)}</option><option value="narrator">Narrator</option>`;
+            }
+        }
+
+        return `<article class="attention-item ${item.blocking ? 'blocking' : ''}" data-line-id="${escapeHtml(item.item_id)}" data-chapter="${item.chapter_number || ''}" data-term="${escapeHtml(termName)}">
+            <div class="attention-item-head">
+                <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                    <strong>${escapeHtml(item.title)}</strong>
+                    ${categoryBadge}
+                </div>
+                <span class="confidence-band confidence-${band.key}">${escapeHtml(band.label)}</span>
             </div>
-            <div class="candidate-comparison hidden"></div>
+            ${quoteText ? `
+                <div class="attention-line-quote">
+                    <strong>${escapeHtml(currentSpeaker ? (currentSpeaker.charAt(0).toUpperCase() + currentSpeaker.slice(1)) : 'Speaker')}:</strong>
+                    <span>“${escapeHtml(quoteText)}”</span>
+                </div>
+            ` : ''}
+            <p>${escapeHtml(item.reason || '')}</p>
+            ${isPronunciation ? `
+                <div class="attention-quick-pronunciation">
+                    <input type="text" placeholder="Phonetic spoken form (e.g. Pah-chee)" value="${escapeHtml(item.details?.spoken_text || '')}" class="quick-spoken-input" data-term="${escapeHtml(termName)}">
+                    <button type="button" class="btn btn-ghost btn-sm btn-quick-pronunciation-preview" data-term="${escapeHtml(termName)}" title="Test audio preview">▶ Preview</button>
+                    <button type="button" class="btn btn-secondary btn-sm btn-quick-pronunciation-save" data-term="${escapeHtml(termName)}">Save Pronunciation</button>
+                    <button type="button" class="btn btn-ghost btn-sm btn-open-lexicon">Open Lexicon</button>
+                </div>
+            ` : ''}
+            <div class="attention-item-actions">
+                ${item.category === 'audio' ? `
+                    <audio controls preload="none" src="${escapeHtml(item.details?.audio_url || '')}"></audio>
+                    <button class="btn btn-success btn-sm accept-audio-review" data-line-id="${escapeHtml(item.item_id)}">✓ Approve audio</button>
+                    <button class="btn btn-danger btn-sm regen-audio-review" data-line-id="${escapeHtml(item.item_id)}">↻ Regenerate</button>
+                    ${!isCandidatesExpanded ? `<button class="btn btn-ghost btn-sm load-candidates">Compare attempts</button>` : ''}
+                ` : ''}
+                ${isAttribution ? `
+                    <div class="attention-attribution-controls" style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; width:100%; margin-top:4px;">
+                        <button type="button" class="btn btn-success btn-sm accept-attribution-review" data-line-id="${escapeHtml(item.item_id)}" data-chapter="${item.chapter_number || ''}" data-speaker="${escapeHtml(currentSpeaker)}">✓ Approve "${escapeHtml(currentSpeaker)}"</button>
+                        <div style="display:inline-flex; align-items:center; gap:6px;">
+                            <select class="form-select form-select-sm attribution-speaker-select" style="max-width:220px; padding:4px 8px; font-size:12px; background:var(--bg-input, #1e293b); color:var(--text-main, #f8fafc); border:1px solid var(--border-subtle, #334155); border-radius:4px;">
+                                ${charOptions}
+                            </select>
+                            <button type="button" class="btn btn-secondary btn-sm save-attribution-review" data-line-id="${escapeHtml(item.item_id)}" data-chapter="${item.chapter_number || ''}">Change Speaker</button>
+                        </div>
+                        <button type="button" class="btn btn-ghost btn-sm reveal-context" data-line-id="${escapeHtml(item.item_id)}" data-chapter="${item.chapter_number || ''}">🔍 Jump to Script</button>
+                    </div>
+                ` : ''}
+            </div>
+            <div class="candidate-comparison ${isCandidatesExpanded ? '' : 'hidden'}"></div>
             ${trail.length ? `<details class="decision-trail"><summary>Decision trail (${trail.length})</summary>${trail.map(step => `<div><strong>${escapeHtml(step.provider || step.resolver || 'validator')}</strong> · ${escapeHtml(step.decision || 'unknown')} · ${step.confidence == null ? 'n/a' : `${Math.round(step.confidence * 100)}%`}<br><small>${escapeHtml(step.reason || '')}</small></div>`).join('')}</details>` : ''}
         </article>`;
     }).join('') : '<div class="review-complete-message">No items match these filters.</div>';
+
     document.getElementById('attention-page').textContent = `Page ${attentionState.page} of ${pages} · ${filtered.length} items`;
     document.getElementById('attention-prev').disabled = attentionState.page <= 1;
     document.getElementById('attention-next').disabled = attentionState.page >= pages;
+
+    // Load any candidate comparisons that were already expanded
+    rows.forEach(item => {
+        if (attentionState.expandedCandidates.has(item.item_id)) {
+            const row = panel.querySelector(`[data-line-id="${CSS.escape(item.item_id)}"]`);
+            if (row) {
+                const target = row.querySelector('.candidate-comparison');
+                if (target && !target.dataset.loaded) {
+                    target.dataset.loaded = 'true';
+                    fetch(`api/projects/${encodeURIComponent(attentionState.projectId)}/segments/${encodeURIComponent(item.item_id)}/candidates`)
+                        .then(res => res.ok ? res.json() : {candidates: []})
+                        .then(payload => {
+                            target.innerHTML = payload.candidates.length ? payload.candidates.map((candidate, index) => `<div><strong>${index === 0 ? 'Recommended' : 'Alternative'} · score ${Number(candidate.score).toFixed(1)}</strong><audio controls preload="metadata" src="${escapeHtml(candidate.audio_url)}"></audio><details><summary>Metrics and rationale</summary><pre>${escapeHtml(JSON.stringify(candidate.quality, null, 2))}</pre></details></div>`).join('') : '<small>No retained alternative is available yet.</small>';
+                        });
+                }
+            }
+        }
+    });
+
+    panel.querySelectorAll('.accept-attribution-review').forEach(button => button.addEventListener('click', async () => {
+        const lineId = button.dataset.lineId;
+        const chapter = parseInt(button.dataset.chapter, 10);
+        const speaker = button.dataset.speaker;
+        button.disabled = true;
+        button.textContent = 'Approving…';
+        try {
+            const response = await fetch(`api/projects/${encodeURIComponent(attentionState.projectId)}/script/chapter/${chapter}/line/${encodeURIComponent(lineId)}`, {
+                method: 'PATCH',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ speaker: speaker })
+            });
+            if (!response.ok) throw new Error(await response.text());
+            const saved = await response.json();
+            showToast(saved.auto_resuming ? 'Speaker approved. Pipeline is resuming automatically.' : 'Speaker approved.', 'success');
+            await fetchAndRenderAttention(attentionState.projectId, state.currentProject, true);
+            if (state.currentProjectId) fetchProjectDetails(state.currentProjectId);
+        } catch (error) {
+            showToast(`Could not approve: ${error.message}`, 'error');
+            button.disabled = false;
+            button.textContent = `✓ Approve "${speaker}"`;
+        }
+    }));
+
+    panel.querySelectorAll('.save-attribution-review').forEach(button => button.addEventListener('click', async () => {
+        const row = button.closest('.attention-item');
+        const lineId = button.dataset.lineId;
+        const chapter = parseInt(button.dataset.chapter, 10);
+        const select = row.querySelector('.attribution-speaker-select');
+        const speaker = select ? select.value : '';
+        if (!speaker) return;
+        button.disabled = true;
+        button.textContent = 'Saving…';
+        try {
+            const response = await fetch(`api/projects/${encodeURIComponent(attentionState.projectId)}/script/chapter/${chapter}/line/${encodeURIComponent(lineId)}`, {
+                method: 'PATCH',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ speaker: speaker })
+            });
+            if (!response.ok) throw new Error(await response.text());
+            const saved = await response.json();
+            showToast(saved.auto_resuming ? `Speaker changed to "${speaker}". Pipeline is resuming automatically.` : `Speaker changed to "${speaker}".`, 'success');
+            await fetchAndRenderAttention(attentionState.projectId, state.currentProject, true);
+            if (state.currentProjectId) fetchProjectDetails(state.currentProjectId);
+        } catch (error) {
+            showToast(`Could not update speaker: ${error.message}`, 'error');
+            button.disabled = false;
+            button.textContent = 'Change Speaker';
+        }
+    }));
+
+    panel.querySelectorAll('.reveal-context').forEach(button => button.addEventListener('click', () => {
+        const lineId = button.dataset.lineId;
+        const chapter = parseInt(button.dataset.chapter, 10);
+        if (window.ScriptViewer && typeof window.ScriptViewer.revealLine === 'function') {
+            window.ScriptViewer.revealLine(lineId);
+        } else if (chapter && lineId && window.ScriptViewer && typeof window.ScriptViewer.jumpToScriptLine === 'function') {
+            window.ScriptViewer.jumpToScriptLine(chapter, lineId);
+        } else if (typeof window.activateDetailTab === 'function') {
+            window.activateDetailTab('tab-script', true);
+        }
+    }));
+
+    panel.querySelectorAll('.accept-audio-review').forEach(button => button.addEventListener('click', async () => {
+        const row = button.closest('.attention-item');
+        const lineId = row.dataset.lineId;
+        button.disabled = true;
+        button.textContent = 'Approving…';
+        try {
+            const response = await fetch(`api/projects/${encodeURIComponent(attentionState.projectId)}/quality/review`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    item_type: 'segment',
+                    item_id: lineId,
+                    disposition: 'acceptable',
+                    note: 'Approved in Review Inbox'
+                })
+            });
+            if (!response.ok) throw new Error(await response.text());
+            const saved = await response.json();
+            showToast(saved.auto_resuming ? 'Audio approved. Pipeline is resuming automatically.' : 'Audio approved.', 'success');
+            await fetchAndRenderAttention(attentionState.projectId, state.currentProject, true);
+            if (state.currentProjectId) fetchProjectDetails(state.currentProjectId);
+        } catch (error) {
+            showToast(`Could not approve: ${error.message}`, 'error');
+            button.disabled = false;
+            button.textContent = '✓ Approve audio';
+        }
+    }));
+
+    panel.querySelectorAll('.regen-audio-review').forEach(button => button.addEventListener('click', async () => {
+        const row = button.closest('.attention-item');
+        const lineId = row.dataset.lineId;
+        if (!confirm('Are you sure you want to discard this segment and regenerate it?')) return;
+        button.disabled = true;
+        button.textContent = 'Requesting…';
+        try {
+            const response = await fetch(`api/projects/${encodeURIComponent(attentionState.projectId)}/quality/review`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    item_type: 'segment',
+                    item_id: lineId,
+                    disposition: 'regenerate',
+                    note: 'Regeneration requested in Review Inbox'
+                })
+            });
+            if (!response.ok) throw new Error(await response.text());
+            showToast('Regeneration requested. Re-synthesizing segment...', 'info');
+            await fetchAndRenderAttention(attentionState.projectId, state.currentProject, true);
+            if (state.currentProjectId) fetchProjectDetails(state.currentProjectId);
+        } catch (error) {
+            showToast(`Could not request regeneration: ${error.message}`, 'error');
+            button.disabled = false;
+            button.textContent = '↻ Regenerate';
+        }
+    }));
+
     panel.querySelectorAll('.load-candidates').forEach(button => button.addEventListener('click', async () => {
         const row = button.closest('.attention-item');
+        const lineId = row.dataset.lineId;
         const target = row.querySelector('.candidate-comparison');
         button.disabled = true;
-        const response = await fetch(`api/projects/${encodeURIComponent(attentionState.projectId)}/segments/${encodeURIComponent(row.dataset.lineId)}/candidates`);
-        const payload = response.ok ? await response.json() : {candidates: []};
-        target.innerHTML = payload.candidates.length ? payload.candidates.map((candidate, index) => `<div><strong>${index === 0 ? 'Recommended' : 'Alternative'} · score ${Number(candidate.score).toFixed(1)}</strong><audio controls preload="metadata" src="${escapeHtml(candidate.audio_url)}"></audio><details><summary>Metrics and rationale</summary><pre>${escapeHtml(JSON.stringify(candidate.quality, null, 2))}</pre></details></div>`).join('') : '<small>No retained alternative is available yet.</small>';
-        target.classList.remove('hidden');
-        button.remove();
+        attentionState.expandedCandidates.add(lineId);
+        target.dataset.loaded = 'true';
+        try {
+            const response = await fetch(`api/projects/${encodeURIComponent(attentionState.projectId)}/segments/${encodeURIComponent(lineId)}/candidates`);
+            const payload = response.ok ? await response.json() : {candidates: []};
+            target.innerHTML = payload.candidates.length ? payload.candidates.map((candidate, index) => `<div><strong>${index === 0 ? 'Recommended' : 'Alternative'} · score ${Number(candidate.score).toFixed(1)}</strong><audio controls preload="metadata" src="${escapeHtml(candidate.audio_url)}"></audio><details><summary>Metrics and rationale</summary><pre>${escapeHtml(JSON.stringify(candidate.quality, null, 2))}</pre></details></div>`).join('') : '<small>No retained alternative is available yet.</small>';
+            target.classList.remove('hidden');
+            button.remove();
+        } catch (e) {
+            button.disabled = false;
+        }
     }));
-    panel.querySelectorAll('.reveal-context').forEach(button => button.addEventListener('click', () => {
-        activateDetailTab('tab-script');
-        const id = button.closest('.attention-item').dataset.lineId;
-        setTimeout(() => document.querySelector(`[data-line-id="${CSS.escape(id)}"]`)?.scrollIntoView({behavior: 'smooth', block: 'center'}), 50);
+    panel.querySelectorAll('.btn-quick-pronunciation-preview').forEach(button => button.addEventListener('click', () => {
+        const row = button.closest('.attention-item');
+        const term = (button.dataset.term || row.dataset.term || '').replace(/^Pronunciation:\s*/i, '').trim();
+        const spoken = (row.querySelector('.quick-spoken-input')?.value.trim() || term).replace(/^Pronunciation:\s*/i, '').trim();
+        if (window.ScriptViewer && window.ScriptViewer.previewPronunciation) {
+            window.ScriptViewer.previewPronunciation(term, spoken, button);
+        }
+    }));
+    panel.querySelectorAll('.btn-quick-pronunciation-save').forEach(button => button.addEventListener('click', async () => {
+        const row = button.closest('.attention-item');
+        const term = (button.dataset.term || row.dataset.term || '').replace(/^Pronunciation:\s*/i, '').trim();
+        const spoken = (row.querySelector('.quick-spoken-input')?.value.trim() || '').replace(/^Pronunciation:\s*/i, '').trim();
+        if (!spoken) {
+            showToast('Enter the phonetic spoken form first', 'warning');
+            return;
+        }
+        button.disabled = true;
+        button.textContent = 'Saving…';
+        try {
+            const response = await fetch(`api/projects/${encodeURIComponent(attentionState.projectId)}/pronunciations`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({term, spoken_text: spoken})
+            });
+            if (!response.ok) throw new Error(await response.text());
+            const saved = await response.json();
+            showToast(`Pronunciation for "${term}" saved! (${saved.affected_chapters.length} chapter${saved.affected_chapters.length === 1 ? '' : 's'} marked for update)`, 'success');
+            await fetchAndRenderAttention(attentionState.projectId, state.currentProject, true);
+        } catch (err) {
+            showToast(`Could not save: ${err.message}`, 'error');
+            button.disabled = false;
+            button.textContent = 'Save Pronunciation';
+        }
+    }));
+    panel.querySelectorAll('.btn-open-lexicon').forEach(button => button.addEventListener('click', () => {
+        activateDetailTab('tab-quality');
+        setTimeout(() => {
+            const lex = document.querySelector('.pronunciation-review');
+            if (lex) lex.scrollIntoView({behavior: 'smooth', block: 'start'});
+        }, 150);
     }));
 }
 
@@ -1280,10 +2076,14 @@ function renderChapterList(project) {
     const mastered = new Set(project.mastered_chapters || []);
     const currentScript = project.current_script_chapter;
     const currentGen = project.current_gen_chapter;
-    const selectedNumbers = project.active_generation_chapter_selection
-        || project.generation_chapter_selection;
-    const selection = selectedNumbers ? new Set(selectedNumbers) : null;
     const selectionLocked = project.running === true;
+    if (state.chapterSelectionProjectId !== project.project_id) {
+        state.chapterSelectionProjectId = project.project_id;
+        state.chapterSelection = project.generation_chapter_selection ? new Set(project.generation_chapter_selection) : null;
+    } else if (selectionLocked) {
+        state.chapterSelection = project.active_generation_chapter_selection ? new Set(project.active_generation_chapter_selection) : null;
+    }
+    const selection = state.chapterSelection;
     const detailsMap = new Map(
         (project.chapter_details || []).map(detail => [detail.number, detail])
     );
@@ -1302,17 +2102,17 @@ function renderChapterList(project) {
         let statusBackground = 'rgba(148, 163, 184, 0.12)';
         let statusColor = '#94a3b8';
         let download = '<span></span>';
-        const stage = String(project.active_stage || project.status || '').toLowerCase();
+        const stage = resolvePipelineStage(project);
 
         const isSelectedInBatch = selection === null || selection.has(chapter);
 
         if (mastered.has(chapter)) {
             statusKey = 'done';
             statusText = 'Mastered';
-            statusBackground = 'rgba(16, 185, 129, 0.15)';
-            statusColor = '#34d399';
+            statusBackground = 'rgba(168, 85, 247, 0.15)';
+            statusColor = '#c084fc';
             percent = 100;
-            download = `<a class="chapter-download" data-server-download href="api/projects/${encodeURIComponent(project.project_id)}/download/chapter/${chapter}" target="_blank" rel="noopener" aria-label="Download chapter ${chapter} mastered WAV" title="Download mastered chapter WAV">↓</a>`;
+            download = `<a class="chapter-download" data-server-download href="api/projects/${encodeURIComponent(project.project_id)}/download/chapter/${chapter}" target="_blank" rel="noopener" aria-label="Download ${escapeHtml(title)} mastered WAV" title="Download mastered chapter WAV">↓</a>`;
         } else if (generated.has(chapter)) {
             statusKey = 'generated';
             statusText = 'Generated';
@@ -1365,10 +2165,9 @@ function renderChapterList(project) {
         row.innerHTML = `
             <input type="checkbox" class="chapter-select-cb" data-ch="${chapter}"
                 ${isChecked ? 'checked' : ''} ${selectionLocked ? 'disabled' : ''}
-                aria-label="Include chapter ${chapter}, ${escapeHtml(title)}, in the next audio batch"
+                aria-label="Include ${escapeHtml(title)} in the next audio batch"
                 title="${selectionLocked ? 'The active batch is locked while the pipeline runs' : 'Include this chapter in the next audio batch'}">
             <div class="chapter-title-wrap">
-                <span class="chapter-number">${chapter}</span>
                 <span class="chapter-title" title="${escapeHtml(title)}">${escapeHtml(title)}</span>
                 ${isInActiveBatch ? '<span class="chapter-run-badge">In this run</span>' : ''}
             </div>
@@ -1381,7 +2180,7 @@ function renderChapterList(project) {
         `;
         row.querySelector('.chapter-select-cb').addEventListener(
             'change',
-            updateChapterSelectionState
+            (e) => onChapterCheckboxToggle(chapter, e.target.checked)
         );
         grid.appendChild(row);
     }
@@ -1415,13 +2214,22 @@ function parseChapterRange(value) {
     return result.size ? result : null;
 }
 
+const savedChapterPageSize = (() => {
+    try { return localStorage.getItem('crazy_audiobook_chapter_page_size') || '15'; } catch (_) { return '15'; }
+})();
+
 const chapterPaginationState = {
     currentPage: 1,
-    pageSize: '15',
+    pageSize: savedChapterPageSize,
     projectId: null
 };
 
 function filterChapterRows() {
+    const selectPageSize = document.getElementById('select-page-size');
+    if (selectPageSize && chapterPaginationState.pageSize && selectPageSize.value !== chapterPaginationState.pageSize) {
+        selectPageSize.value = chapterPaginationState.pageSize;
+    }
+
     const search = (document.getElementById('chapter-search-input')?.value || '')
         .trim().toLowerCase();
     const status = document.getElementById('chapter-status-filter')?.value || 'all';
@@ -1480,44 +2288,84 @@ function filterChapterRows() {
 function updateSelectionSummary(project = null) {
     const summary = document.getElementById('chapter-selection-summary');
     if (!summary) return;
-    const checkboxes = [...document.querySelectorAll('.chapter-select-cb')];
-    const selected = checkboxes.filter(cb => cb.checked).length;
-    const locked = project?.running === true;
-    summary.textContent = selected === checkboxes.length
+    const current = project || state.currentProject;
+    const total = current?.total_chapters || document.querySelectorAll('.chapter-select-cb').length;
+    const selected = state.chapterSelection === null ? total : state.chapterSelection.size;
+    const locked = current?.running === true;
+    summary.textContent = selected === total
         ? `All ${selected} chapters${locked ? ' · active batch' : ''}`
-        : `${selected} of ${checkboxes.length} selected${locked ? ' · active batch' : ''}`;
+        : `${selected} of ${total} selected${locked ? ' · active batch' : ''}`;
+}
+
+function formatChapterActivityMessage(message, detailMap) {
+    if (!message) return '';
+    const m = message.match(/^(synthesis|validation|scripting|mastering|generating)\s+chapter\s+(\d+):\s*(.*)$/i);
+    if (m) {
+        const phaseName = m[1].charAt(0).toUpperCase() + m[1].slice(1).toLowerCase();
+        const chNum = parseInt(m[2], 10);
+        const bookTitle = (detailMap && detailMap.get(chNum) && detailMap.get(chNum).title) || `Chapter ${chNum}`;
+        return `${phaseName} — ${bookTitle}: ${m[3]}`;
+    }
+    if (!detailMap) return message;
+    return message.replace(/\bchapter\s+(\d+)\b/gi, (match, chStr) => {
+        const chNum = parseInt(chStr, 10);
+        const detail = detailMap.get(chNum);
+        return (detail && detail.title) ? detail.title : match;
+    });
 }
 
 function renderWorkStatus(project) {
+    // Statuses that must describe the project themselves rather than defer to
+    // `active_stage`: a paused, errored or finished project must not be
+    // described by whatever stage it happened to stop in.
+    //
+    // `waiting_for_review` is deliberately NOT in this set. It is blocked, not
+    // terminal, and its `active_stage` is the only field that says which gate
+    // is blocking. Including it made the `voice_review` branch below
+    // unreachable, so a project awaiting voice-cast approval fell through to
+    // the generic default and was told to "Choose chapters and start the
+    // pipeline" — an instruction that cannot clear a review gate.
+    const terminalStatuses = new Set([
+        'paused', 'pausing', 'paused_scheduled', 'deploy_paused', 'error',
+        'complete', 'completed', 'selection_complete'
+    ]);
     const details = project.chapter_details || [];
     const detailMap = new Map(details.map(item => [item.number, item]));
-    const selected = project.active_generation_chapter_selection
-        || project.generation_chapter_selection
-        || Array.from({length: project.total_chapters || 0}, (_, index) => index + 1);
+    const savedSelection = project.running === true
+        ? project.active_generation_chapter_selection
+        : project.generation_chapter_selection;
+    const selected = savedSelection == null
+        ? Array.from({length: project.total_chapters || 0}, (_, index) => index + 1)
+        : savedSelection;
     const selectedSet = new Set(selected);
     const mastered = new Set(project.mastered_chapters || []);
     const generated = new Set(project.generated_chapters || []);
-    const currentChapter = project.current_gen_chapter || project.current_script_chapter;
+    const totalSelected = selected.length;
+    const masteredInBatch = selected.filter(ch => mastered.has(ch)).length;
+    const generatedInBatch = selected.filter(ch => generated.has(ch)).length;
+    const progress = project.progress || null;
+    const currentChapter = progress?.chapter || project.current_gen_chapter || project.current_script_chapter;
     const currentDetail = detailMap.get(currentChapter) || {};
     const status = String(project.status || 'created').toLowerCase();
-    const terminalStatuses = new Set([
-        'paused', 'pausing', 'paused_scheduled', 'deploy_paused', 'waiting_for_review', 'error',
-        'complete', 'completed', 'selection_complete'
-    ]);
     const stage = terminalStatuses.has(status)
         ? status
-        : String(project.active_stage || status).toLowerCase();
-    const chapterTitle = currentDetail.title || (
-        currentChapter ? `Chapter ${currentChapter}` : ''
-    );
+        : resolvePipelineStage(project);
+    // Any review gate, whatever `active_stage` names it. A future gate whose
+    // stage this function does not know must still render review copy rather
+    // than fall through to "Waiting to start".
+    const isAwaitingReview = status === 'waiting_for_review';
+    const currentChapterDetail = currentChapter ? (detailMap.get(currentChapter) || {}) : {};
+    const chapterTitle = currentChapter
+        ? (currentChapterDetail.title || `Chapter ${currentChapter}`)
+        : '';
     const workProgress = project.work_progress || {};
-    const progress = project.progress || null;
     const totalBookChapters = project.total_chapters || 0;
     const isSelectiveBatch = selected.length > 0 && selected.length < totalBookChapters;
     let batchSummary = 'Full book';
     if (isSelectiveBatch) {
         if (selected.length <= 4) {
-            batchSummary = `Chapters ${selected.join(', ')} (${selected.length} selected)`;
+            const batchTitles = selected.map(ch => detailMap.get(ch)?.title || `Chapter ${ch}`);
+            batchSummary = `${batchTitles.join(', ')} (${selected.length} selected)`;
         } else {
             batchSummary = `${selected.length} selected chapters`;
         }
@@ -1591,15 +2439,25 @@ function renderWorkStatus(project) {
                 description += ` · Selected for audio: ${batchSummary}`;
             }
         }
-    } else if (stage === 'voice_review') {
+    } else if (stage === 'voice_review' || isAwaitingReview) {
         overall = 100;
         overallLabel = 'Voice preparation';
         chapterMetric = 'Ready';
         chapterLabel = 'Speaking cast';
         lineMetric = 'Approval';
         lineLabel = 'Next action';
-        activity = 'Waiting for voice-cast approval';
-        description = 'Preview or change the speaking voices in the Voice casting tab, then approve them once to begin audio generation.';
+        if (stage === 'voice_review') {
+            activity = 'Waiting for voice-cast approval';
+            description = 'Preview or change the speaking voices in the Voice casting tab, then approve them once to begin audio generation.';
+        } else {
+            // A review gate this function does not have specific copy for.
+            // Say so honestly rather than inventing a next step.
+            overallLabel = 'Review';
+            chapterLabel = 'Pipeline';
+            activity = 'Waiting for review';
+            description = project.pause_reason
+                || 'The pipeline is paused for review and will continue once the pending items are approved.';
+        }
     } else if (stage.includes('bootstrap')) {
         activity = 'Preparing character voice references';
         description = 'Creating reusable voice identities before chapter generation.';
@@ -1639,7 +2497,11 @@ function renderWorkStatus(project) {
     }
 
     if (progress && project.running) {
-        activity = progress.message || activity;
+        if (progress.message) {
+            activity = formatChapterActivityMessage(progress.message, detailMap);
+        } else {
+            activity = activity;
+        }
         if (Number.isFinite(progress.percent)) {
             overall = Math.round(progress.percent);
             overallLabel = `${(progress.phase || progress.stage || 'Current').replaceAll('_', ' ')}`;
@@ -1662,10 +2524,23 @@ function renderWorkStatus(project) {
         : '—';
     const updatedAt = progress?.updated_at || (project.running ? (project.last_run_started_at || new Date().toISOString()) : (project.last_activity_at || project.updated_at));
     let freshness = 'No activity recorded yet.';
+    let progressAgeSeconds = null;
+    if (updatedAt && Number.isFinite(Date.parse(updatedAt))) {
+        progressAgeSeconds = Math.max(
+            0,
+            Math.round((Date.now() - Date.parse(updatedAt)) / 1000)
+        );
+    }
     if (project.running) {
-        freshness = 'Active · Running live';
+        if (progressAgeSeconds == null || progressAgeSeconds < 30) {
+            freshness = 'Active · Running live';
+        } else if (progressAgeSeconds < 120) {
+            freshness = `Active · Updated ${progressAgeSeconds} seconds ago`;
+        } else {
+            freshness = `No progress update for ${Math.round(progressAgeSeconds / 60)} minutes`;
+        }
     } else if (updatedAt) {
-        const ageSeconds = Math.max(0, Math.round((Date.now() - Date.parse(updatedAt)) / 1000));
+        const ageSeconds = progressAgeSeconds || 0;
         freshness = ageSeconds < 10
             ? 'Updated just now'
             : ageSeconds < 120
@@ -1684,11 +2559,18 @@ function renderWorkStatus(project) {
     document.getElementById('work-line-label').textContent = lineLabel;
     document.getElementById('work-eta').textContent = etaText;
     document.getElementById('work-eta-label').textContent = progress?.eta_confidence
+        && progress.eta_confidence !== 'none'
         ? `ETA · ${progress.eta_confidence} confidence`
         : 'Estimated remaining';
     const isComplete = ['complete', 'completed'].includes(stage);
     const workPanel = document.getElementById('work-status-panel');
     workPanel.classList.toggle('terminal', isComplete);
+    workPanel.classList.toggle(
+        'stale',
+        project.running === true
+            && progressAgeSeconds != null
+            && progressAgeSeconds >= 120
+    );
     document.getElementById('work-status-freshness').textContent = isComplete
         ? 'No pipeline work is active.'
         : freshness;
@@ -1714,7 +2596,7 @@ function renderChapterGridLegacy(project) {
     const mastered = new Set(project.mastered_chapters || []);
     const currentScript = project.current_script_chapter;
     const currentGen = project.current_gen_chapter;
-    const selection = project.generation_chapter_selection ? new Set(project.generation_chapter_selection) : null;
+    const selection = state.chapterSelection;
     const detailsMap = {};
     if (project.chapter_details) {
         project.chapter_details.forEach(d => { detailsMap[d.number] = d; });
@@ -1812,7 +2694,7 @@ function renderChapterGridLegacy(project) {
         `;
 
         const cb = cell.querySelector('.chapter-select-cb');
-        cb.addEventListener('change', updateChapterSelectionState);
+        cb.addEventListener('change', (e) => onChapterCheckboxToggle(i, e.target.checked));
 
         grid.appendChild(cell);
     }
@@ -1845,7 +2727,7 @@ async function saveChapterSelection(projectId, chapters) {
     }
 }
 
-function deriveWorkProgress(lines, totalChapters) {
+function deriveWorkProgress(lines, totalChapters, chapterTitleMap = new Map()) {
     const progress = {
         phase: null,
         stagePercent: null,
@@ -1892,17 +2774,17 @@ function deriveWorkProgress(lines, totalChapters) {
         if (match) {
             const current = Number(match[1]);
             const total = Number(match[2]) || totalChapters;
-            const title = match[3];
+            const realTitle = chapterTitleMap.get(current) || `Chapter ${current}`;
             progress.phase = 'chapter_scripting';
             progress.stagePercent = 20 + Math.round(80 * (current - 1) / Math.max(total, 1));
-            progress.current = `Scripting · Chapter ${current} of ${total}: ${title}`;
-            progress.detail = `Annotating dialogue, speaker attribution, and scene directions for ${title}.`;
+            progress.current = `Scripting \u00b7 ${realTitle}`;
+            progress.detail = `Annotating dialogue, speaker attribution, and scene directions for ${realTitle}.`;
             progress.position = `${current} / ${total}`;
             progress.chapterLabel = 'Scripting chapter';
             progress.tokens = null;
             progress.chapterIndex = current;
             progress.chapterTotal = total;
-            progress.chapterTitle = title;
+            progress.chapterTitle = realTitle;
             continue;
         }
 
@@ -1924,10 +2806,11 @@ function deriveWorkProgress(lines, totalChapters) {
         if (match) {
             const current = Number(match[1]);
             const total = Number(match[2]) || totalChapters;
+            const realTitle = chapterTitleMap.get(current) || `Chapter ${current}`;
             progress.phase = 'chapter_scripting';
             progress.stagePercent = 20 + Math.round(80 * current / Math.max(total, 1));
-            progress.current = `Scripting · Chapter ${current} of ${total} complete`;
-            progress.detail = `${current} of ${total} chapter scripts complete.`;
+            progress.current = `Scripting · ${realTitle} complete`;
+            progress.detail = `${realTitle} script complete (${current} of ${total} chapters).`;
             progress.position = `${current} / ${total}`;
             progress.chapterLabel = 'Scripting chapter';
             progress.tokens = null;
@@ -1943,35 +2826,69 @@ function deriveWorkProgress(lines, totalChapters) {
     return progress;
 }
 
+function onChapterCheckboxToggle(chapter, isChecked) {
+    const total = state.currentProject?.total_chapters || 0;
+    if (state.chapterSelection === null) {
+        state.chapterSelection = new Set();
+        for (let i = 1; i <= total; i++) {
+            state.chapterSelection.add(i);
+        }
+    }
+    if (isChecked) {
+        state.chapterSelection.add(chapter);
+    } else {
+        state.chapterSelection.delete(chapter);
+    }
+    if (state.chapterSelection.size === total) {
+        state.chapterSelection = null;
+    }
+    updateChapterSelectionState();
+}
+
 function updateChapterSelectionState() {
     if (!state.currentProjectId) return;
     if (_selectionDebounceTimer) clearTimeout(_selectionDebounceTimer);
 
-    const cbs = document.querySelectorAll('.chapter-select-cb');
-    const selected = [];
-    let total = cbs.length;
+    const total = state.currentProject?.total_chapters || 0;
+    const targetProjectId = state.currentProjectId;
+    const selectionValue = state.chapterSelection === null
+        ? null
+        : Array.from(state.chapterSelection).sort((a, b) => a - b);
 
-    cbs.forEach(cb => {
-        if (cb.checked) {
-            selected.push(parseInt(cb.dataset.ch, 10));
-        }
+    // Update all visible checkboxes in the DOM immediately
+    document.querySelectorAll('.chapter-select-cb').forEach(cb => {
+        const ch = parseInt(cb.dataset.ch, 10);
+        cb.checked = (state.chapterSelection === null || state.chapterSelection.has(ch));
     });
 
-    const selectionValue = selected.length === total ? null : selected;
-    const targetProjectId = state.currentProjectId;
-    updateSelectionSummary();
+    updateSelectionSummary(state.currentProject);
+
+    // Update start/pipeline button tracker instantly
+    if (window.PipelineManager && state.currentProject) {
+        const isRunning = Boolean(state.currentProject.running);
+        const coarseStatus = isRunning ? 'running' : (state.currentProject.status || 'created');
+        const projectData = {
+            ...state.currentProject,
+            generation_chapter_selection: selectionValue
+        };
+        window.PipelineManager.updateTracker(projectData.active_stage || projectData.status, coarseStatus, projectData);
+        window.PipelineManager.toggleControls(projectData.status, isRunning, projectData);
+    }
 
     _selectionDebounceTimer = setTimeout(async () => {
         try {
             await saveChapterSelection(targetProjectId, selectionValue);
-            if (selected.length === 0) {
+            if (state.currentProject && state.currentProjectId === targetProjectId) {
+                state.currentProject.generation_chapter_selection = selectionValue;
+            }
+            if (selectionValue && selectionValue.length === 0) {
                 showToast('Cleared chapter selection', 'info');
             }
         } catch (e) {
             console.error('Failed to update selection', e);
             showToast(e.message || 'Failed to save chapter selection', 'error');
         }
-    }, 300);
+    }, 200);
 }
 
 const SCHEDULE_DAYS = [
@@ -2241,15 +3158,7 @@ function formatProjectStatus(status) {
     return labels[token] || token.replaceAll('_', ' ').replace(/\b\w/g, letter => letter.toUpperCase());
 }
 
-function escapeHtml(unsafe) {
-    if (!unsafe) return '';
-    return unsafe
-         .replace(/&/g, "&amp;")
-         .replace(/</g, "&lt;")
-         .replace(/>/g, "&gt;")
-         .replace(/"/g, "&quot;")
-         .replace(/'/g, "&#039;");
-}
+// escapeHtml now lives in js/dom-utils.js, which loads before this file.
 
 // ============================================================================
 // WebSocket & Health Checks
@@ -2347,22 +3256,23 @@ async function fetchAndRenderDeliveries(projectId) {
         list.innerHTML = '';
 
         // Update dashboard settings UI
-        currentDeliverySettings = data.settings || {};
+        currentDeliverySettings = data.settings || { enabled: false, batch_size: 5 };
         const incToggle = document.getElementById('dashboard-enable-incremental');
         const batchInput = document.getElementById('dashboard-delivery-batch-size');
         const opts = document.getElementById('dashboard-incremental-options');
         const saveBtn = document.getElementById('dashboard-save-delivery');
-        const settingsLocked = Boolean(state.currentProject?.running) ||
-            Boolean(data.deliveries?.length);
-        incToggle.disabled = settingsLocked;
-        batchInput.disabled = settingsLocked;
-        incToggle.title = settingsLocked
-            ? 'Stop the pipeline and reset published parts before changing delivery boundaries'
-            : '';
 
-        // Only update UI elements if the user hasn't made unsaved changes
-        if (saveBtn.style.display === 'none' || !saveBtn.style.display) {
-            incToggle.checked = currentDeliverySettings.enabled || false;
+        incToggle.disabled = false;
+        batchInput.disabled = false;
+        incToggle.title = '';
+
+        // Only update UI elements if the user is not actively editing them
+        const isEditing = document.activeElement === incToggle ||
+                          document.activeElement === batchInput ||
+                          (saveBtn && saveBtn.style.display !== 'none' && saveBtn.style.display !== '');
+
+        if (!isEditing) {
+            incToggle.checked = Boolean(currentDeliverySettings.enabled);
             batchInput.value = currentDeliverySettings.batch_size || 5;
 
             if (incToggle.checked) {
@@ -2410,7 +3320,6 @@ async function fetchAndRenderDeliveries(projectId) {
 
         summary.textContent = `${data.published_count} parts available`;
 
-
         data.deliveries.forEach((d, index) => {
             const row = document.createElement('div');
             row.style.display = 'flex';
@@ -2447,10 +3356,8 @@ async function fetchAndRenderDeliveries(projectId) {
 
 window.toggleIncrementalSettings = function(checked) {
     const opts = document.getElementById('dashboard-incremental-options');
-    if (checked) {
-        opts.style.display = 'flex';
-    } else {
-        opts.style.display = 'none';
+    if (opts) {
+        opts.style.display = checked ? 'flex' : 'none';
     }
     window.checkIncrementalSettings();
 };
@@ -2460,7 +3367,9 @@ window.checkIncrementalSettings = function() {
     const batchInput = document.getElementById('dashboard-delivery-batch-size');
     const saveBtn = document.getElementById('dashboard-save-delivery');
 
-    const changed = (incToggle.checked !== (currentDeliverySettings.enabled || false)) ||
+    if (!incToggle || !batchInput || !saveBtn) return;
+
+    const changed = (incToggle.checked !== Boolean(currentDeliverySettings.enabled)) ||
                    (parseInt(batchInput.value, 10) !== (currentDeliverySettings.batch_size || 5));
 
     if (changed) {
@@ -2475,6 +3384,11 @@ window.saveIncrementalSettings = async function() {
     const batchInput = document.getElementById('dashboard-delivery-batch-size');
     const saveBtn = document.getElementById('dashboard-save-delivery');
 
+    if (!incToggle || !batchInput || !saveBtn) return;
+
+    const newBatchSize = Math.max(1, Math.min(20, parseInt(batchInput.value, 10) || 5));
+    batchInput.value = newBatchSize;
+
     saveBtn.disabled = true;
     saveBtn.textContent = 'Saving...';
     try {
@@ -2484,14 +3398,21 @@ window.saveIncrementalSettings = async function() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 enabled: incToggle.checked,
-                batch_size: parseInt(batchInput.value, 10)
+                batch_size: newBatchSize
             })
         });
         const data = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(data.detail || 'Could not save delivery settings');
         if (state.currentProjectId !== projectId) return;
-        currentDeliverySettings = { enabled: incToggle.checked, batch_size: parseInt(batchInput.value, 10) };
+        currentDeliverySettings = { enabled: incToggle.checked, batch_size: newBatchSize };
         saveBtn.style.display = 'none';
+        showToast(
+            data.applies_after_current_run
+                ? `Settings saved for the next run; the active run remains on ${data.active_batch_size} chapters per part.`
+                : 'Incremental delivery settings saved',
+            data.applies_after_current_run ? 'info' : 'success'
+        );
+        await fetchAndRenderDeliveries(projectId);
     } catch (e) {
         showToast(e.message, 'error');
     }

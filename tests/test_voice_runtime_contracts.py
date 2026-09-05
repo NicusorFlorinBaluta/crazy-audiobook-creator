@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,22 +9,26 @@ from unittest.mock import Mock, patch
 
 import numpy as np
 
+from brain.orchestrator.job_queue import JobQueue
+from brain.orchestrator.pipeline import Pipeline
+from brain.orchestrator.voice_client import VoiceClient
 from shared.constants import Gender, ValidationStatus
 from shared.models import (
     BookMetadata,
+    BootstrapVoicesRequest,
     Character,
+    ExportM4BResponse,
     ExtractedBook,
     ExtractedChapter,
-    ExportM4BResponse,
-    QualityResult,
     MasterChapterResponse,
+    QualityResult,
+    VoiceCandidate,
     VoiceFXSettings,
 )
-from brain.orchestrator.job_queue import JobQueue
-from brain.orchestrator.pipeline import Pipeline
-from voice.tts_server.qwen3_engine import Qwen3TTSEngine
 from voice.tts_server.audio_effects import AudioPostProcessor
+from voice.tts_server.qwen3_engine import Qwen3TTSEngine
 from voice.tts_server.voice_designer import VoiceDesigner
+from voice.validator.validation_loop import ValidationLoop
 
 
 class _FakeLibrary:
@@ -60,14 +65,110 @@ class VoiceModelResidencyTests(unittest.TestCase):
             )
             response = SimpleNamespace(status_code=200, text="")
 
-            with patch("requests.post", return_value=response), patch(
-                "soundfile.read", return_value=(np.zeros(24000), 24000)
+            with (
+                patch("requests.post", return_value=response),
+                patch("soundfile.read", return_value=(np.zeros(24000), 24000)),
             ):
                 result = designer._generate_voice("project", "speaker", character)
 
             engine.load.assert_not_called()
             self.assertEqual(result.id, "speaker")
             self.assertIsNotNone(library.registered)
+
+    def test_bootstrap_client_consumes_progress_stream(self) -> None:
+        client = VoiceClient(retries=1)
+        response = Mock()
+        response.raise_for_status = Mock()
+        response.iter_lines.return_value = [
+            json.dumps(
+                {
+                    "type": "progress",
+                    "data": {
+                        "phase": "designing_references",
+                        "completed": 1,
+                        "total": 2,
+                        "message": "Prepared 1 of 2 voice candidates",
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "result",
+                    "data": {
+                        "status": "success",
+                        "project_id": "book",
+                        "voices_generated": {},
+                        "cast_diagnostics": [],
+                    },
+                }
+            ),
+        ]
+        stream_context = Mock()
+        stream_context.__enter__ = Mock(return_value=response)
+        stream_context.__exit__ = Mock(return_value=False)
+        http_client = Mock()
+        http_client.__enter__ = Mock(return_value=http_client)
+        http_client.__exit__ = Mock(return_value=False)
+        http_client.stream.return_value = stream_context
+        progress = []
+
+        with patch(
+            "brain.orchestrator.voice_client.httpx.Client",
+            return_value=http_client,
+        ):
+            result = client.bootstrap_voices(
+                BootstrapVoicesRequest(project_id="book", characters={}),
+                progress_callback=progress.append,
+            )
+
+        self.assertEqual(result.project_id, "book")
+        self.assertEqual(progress[0]["phase"], "designing_references")
+        self.assertEqual(progress[0]["completed"], 1)
+
+    def test_elevated_wer_is_retained_with_warning_and_does_not_crash(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            engine = Mock(speaker_embedding=Mock(return_value=[0.1, 0.2]), embedding_similarity=Mock(return_value=0.5))
+            library = Mock(
+                voice_exists=Mock(return_value=False), get_voice_path=Mock(return_value=Path(directory) / "speaker.wav")
+            )
+            validator = Mock(
+                transcribe=Mock(return_value="transcribed words"),
+                calculate_wer=Mock(return_value=0.45),
+                is_loaded=False,
+                unload=Mock(),
+            )
+            designer = VoiceDesigner(engine=engine, library=library, validator=validator, wer_threshold=0.20)
+            character = Character(
+                id="speaker",
+                name="Speaker",
+                gender=Gender.FEMALE,
+                age_range="adult",
+                voice_description="desc",
+                test_sentence="some test words",
+            )
+
+            with (
+                patch("subprocess.Popen") as mock_popen,
+                patch("httpx.get") as mock_get,
+                patch.object(designer, "_generate_voice") as mock_gen,
+                patch.object(designer, "_acoustic_diagnostics", return_value=({}, [])),
+            ):
+                mock_proc = Mock(poll=Mock(return_value=None), terminate=Mock(), wait=Mock())
+                mock_popen.return_value = mock_proc
+                mock_get.return_value = Mock(status_code=200, json=Mock(return_value={"model_loaded": True}))
+
+                wav_path = Path(directory) / "speaker.wav"
+                wav_path.write_bytes(b"fake_wav_data")
+                mock_gen.return_value = VoiceCandidate(
+                    id="speaker", file=str(wav_path), duration_seconds=5.0, sample_rate=24000
+                )
+
+                req = BootstrapVoicesRequest(project_id="test_proj", characters={"speaker": character})
+                resp = designer.bootstrap_voices(req)
+                self.assertEqual(resp.status, "success")
+                speaker_result = resp.voices_generated["speaker"]
+                self.assertEqual(len(speaker_result.candidates), 1)
+                self.assertTrue(any("exceeded threshold" in w for w in speaker_result.candidates[0].warnings))
 
 
 class CleanAudioPolicyTests(unittest.TestCase):
@@ -129,9 +230,7 @@ class CleanAudioPolicyTests(unittest.TestCase):
             )
 
         self.assertGreaterEqual(
-            engine.last_generation_metrics[
-                "autoregressive_generation_seconds"
-            ],
+            engine.last_generation_metrics["autoregressive_generation_seconds"],
             0.0,
         )
         self.assertGreaterEqual(engine.last_generation_metrics["total_seconds"], 0.0)
@@ -301,3 +400,87 @@ class ProjectSourceContractTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DeterministicSynthesisSeedTests(unittest.TestCase):
+    """Generated audio must be reproducible from the script plus settings.
+
+    The engine samples with `do_sample: true` at `temperature: 0.9`. Without a
+    seed, "same fingerprint implies same audio" held only because the WAV was
+    cached -- after a cache purge the same script produced a different
+    audiobook, and a single repaired line landed as a fresh draw among
+    untouched neighbours.
+    """
+
+    def test_a_hex_fingerprint_maps_to_a_stable_seed(self) -> None:
+        first = Qwen3TTSEngine._resolve_seed("a3f9c1d2b4e5f607")
+        second = Qwen3TTSEngine._resolve_seed("a3f9c1d2b4e5f607")
+        self.assertEqual(first, second)
+        self.assertIsInstance(first, int)
+
+    def test_seeds_stay_inside_the_torch_range(self) -> None:
+        for candidate in ("f" * 16, "0" * 16, "deadbeefdeadbeef", -(2**70), 2**70):
+            resolved = Qwen3TTSEngine._resolve_seed(candidate)
+            self.assertIsNotNone(resolved)
+            self.assertGreaterEqual(resolved, 0)
+            self.assertLess(resolved, 2**63 - 1)
+
+    def test_absent_seed_leaves_sampling_random(self) -> None:
+        self.assertIsNone(Qwen3TTSEngine._resolve_seed(None))
+        self.assertIsNone(Qwen3TTSEngine._resolve_seed(""))
+        self.assertIsNone(Qwen3TTSEngine._resolve_seed("   "))
+
+    def test_a_non_hex_string_is_still_accepted_deterministically(self) -> None:
+        first = Qwen3TTSEngine._resolve_seed("chapter-1-line-7")
+        second = Qwen3TTSEngine._resolve_seed("chapter-1-line-7")
+        self.assertEqual(first, second)
+        self.assertNotEqual(first, Qwen3TTSEngine._resolve_seed("chapter-1-line-8"))
+
+    def test_applying_a_seed_makes_torch_sampling_repeatable(self) -> None:
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("torch is not installed")
+        Qwen3TTSEngine._apply_seed(1234)
+        first = torch.randn(4).tolist()
+        Qwen3TTSEngine._apply_seed(1234)
+        second = torch.randn(4).tolist()
+        self.assertEqual(first, second)
+
+
+class LineSeedDerivationTests(unittest.TestCase):
+    def test_the_same_line_and_attempt_always_seeds_identically(self) -> None:
+        args = ("proj", "ch01_0001", "Hello there.", "narrator", 1)
+        self.assertEqual(
+            ValidationLoop._line_seed(*args),
+            ValidationLoop._line_seed(*args),
+        )
+
+    def test_a_retry_must_not_reproduce_the_failing_take(self) -> None:
+        """Attempt is part of the seed on purpose.
+
+        A retry exists because the previous take failed validation. Reusing the
+        identical seed would regenerate that exact audio and the retry could
+        never succeed.
+        """
+        first = ValidationLoop._line_seed("p", "ch01_0001", "Text.", "narrator", 1)
+        second = ValidationLoop._line_seed("p", "ch01_0001", "Text.", "narrator", 2)
+        self.assertNotEqual(first, second)
+
+    def test_seed_varies_with_every_identity_bearing_input(self) -> None:
+        base = ValidationLoop._line_seed("p", "ch01_0001", "Text.", "narrator", 1)
+        self.assertNotEqual(base, ValidationLoop._line_seed("other", "ch01_0001", "Text.", "narrator", 1))
+        self.assertNotEqual(base, ValidationLoop._line_seed("p", "ch01_0002", "Text.", "narrator", 1))
+        self.assertNotEqual(base, ValidationLoop._line_seed("p", "ch01_0001", "Text!", "narrator", 1))
+        self.assertNotEqual(base, ValidationLoop._line_seed("p", "ch01_0001", "Text.", "kvothe", 1))
+
+    def test_seed_is_not_confusable_across_field_boundaries(self) -> None:
+        """Fields are separated, so concatenation cannot collide."""
+        self.assertNotEqual(
+            ValidationLoop._line_seed("a", "b", "c", "narrator", 1),
+            ValidationLoop._line_seed("ab", "", "c", "narrator", 1),
+        )
+
+    def test_the_engine_no_longer_advertises_fake_batching(self) -> None:
+        """`generate_speech_batch` looped sequentially; it must stay removed."""
+        self.assertFalse(hasattr(Qwen3TTSEngine, "generate_speech_batch"))

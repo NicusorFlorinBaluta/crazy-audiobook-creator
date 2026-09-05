@@ -47,6 +47,12 @@ def main():
 
     child_env = os.environ.copy()
     child_env.setdefault("ROCM_SDK_TARGET_FAMILY", "custom")
+    # Kept as literals rather than importing shared.constants: this launcher is
+    # deliberately dependency-free so it runs before any project import path is
+    # set up. See TORCH_ALLOC_CONF in shared/constants.py for the crash-log
+    # evidence behind the value, and keep the two in sync.
+    for _alloc_var in ("PYTORCH_CUDA_ALLOC_CONF", "PYTORCH_HIP_ALLOC_CONF"):
+        child_env.setdefault(_alloc_var, "expandable_segments:True")
     subprocess.Popen(cmd, cwd=base_dir, env=child_env, **kwargs)
     
     # Wait 2 seconds for FastAPI server startup

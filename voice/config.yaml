@@ -67,8 +67,23 @@ validation:
   emotion_wer_allowance: 0.0        # Keep transcript accuracy strict unless benchmark evidence justifies a relaxation
   max_retries: 3
   speaker_similarity_threshold: 0.55
+  # Speaker-embedding cosine similarity at or above which two cast voices are
+  # judged too close to tell apart. Lower is stricter.
   voice_profile_similarity_warning: 0.985
   voice_profile_acoustic_regenerations: 1
+  # Extra design/compare rounds spent separating voices that collide at the
+  # threshold above. Each round re-boots the VoiceDesign subprocess and
+  # redesigns only the colliding voices with a brief naming who they collided
+  # with, then re-measures.
+  #
+  # Before this existed, comparison ran after VoiceDesign had been unloaded, so
+  # a collision could only ever be reported. A 52-character cast left 22
+  # flagged pairs for manual resolution, one of them a character measured at
+  # 0.992 against the narrator.
+  #
+  # Set to 0 to restore that report-only behaviour. Whatever still collides
+  # when the rounds run out is surfaced for manual redesign either way.
+  voice_distinctness_rounds: 2
 
   # Audio checks
   artifact_noise_threshold: -50      # dB

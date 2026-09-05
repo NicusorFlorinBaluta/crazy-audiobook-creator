@@ -1,5 +1,7 @@
 # Human listening QA gate — 2026-08-10
 
+**Status:** Historical record — A dated record of what was done and why. Evidence, not a specification -- do not implement from it.
+
 ## Current decision
 
 Do not tune global crossfade or gain from the existing `sample_book-13` queue.

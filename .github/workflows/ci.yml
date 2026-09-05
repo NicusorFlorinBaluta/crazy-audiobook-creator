@@ -12,6 +12,28 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Static analysis runs first and on Linux: it is the cheapest job, it needs
+  # no project dependencies, and its Pyflakes rules are what catch the failure
+  # class that previously reached production here -- duplicate method
+  # definitions (F811) and calls to names that were never defined (F821).
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install ruff
+        run: python -m pip install ruff
+      - name: Ruff lint
+        run: ruff check --output-format=github .
+      # Enforced from 2026-09-04. The repository was reformatted in one
+      # isolated commit first, so this gate never mixes formatting churn into
+      # a behavioural diff.
+      - name: Ruff format
+        run: ruff format --check --diff .
+
   tests:
     runs-on: windows-latest
     timeout-minutes: 30
@@ -29,20 +51,66 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
-          python -m pip install -r brain/requirements.txt pydub pyloudnorm librosa jiwer
+          # Install the declared requirement files rather than hand-copying a
+          # subset. voice/requirements.txt previously was not installed at all
+          # and four of its packages were listed inline here, so the two drifted
+          # with nothing to detect it. The heavy GPU/model packages are excluded
+          # via the constraints file below, not by omitting the file.
+          python -m pip install -r brain/requirements.txt
+          python -m pip install -r requirements-ci.txt
       - name: Python unit tests
         run: python -m unittest discover -s tests -v
       - name: Python compilation
-        run: python -m compileall -q brain voice shared scripts
+        # Includes the repository root: a stray non-UTF-8 file there used to be
+        # invisible to every check.
+        run: python -m compileall -q brain voice shared scripts tools legacy .
       - name: JavaScript syntax
         shell: pwsh
         run: |
-          node --check brain/dashboard/frontend/js/app.js
-          node --check brain/dashboard/frontend/js/pipeline.js
-          node --check brain/dashboard/frontend/js/script-viewer.js
+          Get-ChildItem brain/dashboard/frontend/js/*.js | ForEach-Object {
+            node --check $_.FullName
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+          }
           node --check desktop/main.js
+      - name: Frontend behaviour tests
+        # Behavioural DOM tests, as distinct from the syntax check above and
+        # from the source-substring assertions in
+        # tests/test_dashboard_frontend_ux.py. The dashboard's state-machine
+        # logic lives in JavaScript, and a wrong branch with intact markup --
+        # which is what shipped twice -- is invisible to both of the others.
+        run: |
+          npm ci
+          npm test
       - name: Local documentation links
         run: python scripts/check_markdown_links.py
+      - name: Configuration validity
+        # The checked-in configuration must satisfy its own startup validation,
+        # including the dashboard LAN-trust CIDRs and the Ollama runtime keys.
+        shell: pwsh
+        run: |
+          python -c @"
+          import yaml
+          from shared.config_validation import validate_brain_config, validate_voice_config
+          validate_brain_config(yaml.safe_load(open('brain/config.yaml', encoding='utf-8')))
+          validate_voice_config(yaml.safe_load(open('voice/config.yaml', encoding='utf-8')))
+          print('brain/config.yaml and voice/config.yaml are valid')
+          "@
+
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Advisory only: a new advisory against a transitive dependency should not
+    # block an unrelated change, but it must be visible.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install pip-audit
+        run: python -m pip install pip-audit
+      - name: Audit declared brain dependencies
+        run: pip-audit --requirement brain/requirements.txt --strict
 
   model-gates:
     if: ${{ false }}

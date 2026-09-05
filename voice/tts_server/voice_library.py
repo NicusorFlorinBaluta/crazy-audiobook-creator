@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -29,19 +29,10 @@ class VoiceLibraryManager:
 
     def _project_dir(self, project_id: str) -> Path:
         """Resolve a project directory without permitting path traversal."""
-        if (
-            not project_id
-            or project_id in {".", ".."}
-            or "/" in project_id
-            or "\\" in project_id
-            or ":" in project_id
-        ):
+        if not project_id or project_id in {".", ".."} or "/" in project_id or "\\" in project_id or ":" in project_id:
             raise ValueError("Invalid project ID")
         project_dir = (self.library_dir / project_id).resolve()
-        if (
-            not project_dir.is_relative_to(self.library_dir)
-            or project_dir == self.library_dir
-        ):
+        if not project_dir.is_relative_to(self.library_dir) or project_dir == self.library_dir:
             raise ValueError("Invalid project ID")
         return project_dir
 
@@ -105,7 +96,7 @@ class VoiceLibraryManager:
         previous_path = Path(previous["file"]).resolve() if previous.get("file") else None
 
         registry["project_id"] = project_id
-        registry.setdefault("created_at", datetime.now(timezone.utc).isoformat())
+        registry.setdefault("created_at", datetime.now(UTC).isoformat())
         registry.setdefault("voices", {})
 
         registry["voices"][character_id] = {
@@ -119,7 +110,7 @@ class VoiceLibraryManager:
             "design_fingerprint": design_fingerprint,
             "source_type": source_type,
             "source_filename": source_filename,
-            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "generated_at": datetime.now(UTC).isoformat(),
         }
 
         self._save_registry(project_id, registry)
@@ -156,11 +147,7 @@ class VoiceLibraryManager:
         """Remove superseded WAV/embedding pairs not referenced by the registry."""
         project_dir = self._project_dir(project_id)
         registry = self._load_registry(project_id)
-        referenced = {
-            Path(info["file"]).resolve()
-            for info in registry.get("voices", {}).values()
-            if info.get("file")
-        }
+        referenced = {Path(info["file"]).resolve() for info in registry.get("voices", {}).values() if info.get("file")}
         removed: list[str] = []
         for audio_path in project_dir.glob("*.wav"):
             if audio_path.resolve() in referenced:
@@ -182,11 +169,7 @@ class VoiceLibraryManager:
         if not resolved.is_relative_to(project_dir):
             logger.warning("Refusing to clean voice artifact outside %s", project_dir)
             return
-        referenced = {
-            Path(info["file"]).resolve()
-            for info in registry.get("voices", {}).values()
-            if info.get("file")
-        }
+        referenced = {Path(info["file"]).resolve() for info in registry.get("voices", {}).values() if info.get("file")}
         if resolved in referenced:
             return
         for artifact in (resolved, resolved.with_suffix(".pt")):
@@ -209,7 +192,7 @@ class VoiceLibraryManager:
 
         registry_path = self._project_dir(project_id) / "voices.json"
         if registry_path.exists():
-            with open(registry_path, "r", encoding="utf-8") as f:
+            with open(registry_path, encoding="utf-8") as f:
                 data = json.load(f)
                 self._registry_cache[project_id] = data
                 return data
