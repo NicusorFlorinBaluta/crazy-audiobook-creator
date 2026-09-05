@@ -57,6 +57,7 @@ class CharacterProfileUpdate(BaseModel):
     speaking_style: str | None = Field(default=None, max_length=500)
 
 
+@router.get("/api/projects/{project_id}/characters")
 async def get_characters(project_id: str):
     """Get the character registry for a project."""
     chars_path = runtime.project_dir(project_id) / "characters.json"

@@ -3300,7 +3300,6 @@ async def regenerate_chapter(project_id: str, chapter_number: int):
     return {"status": "success", "message": f"Chapter {chapter_number} queued for regeneration"}
 
 
-@app.get("/api/projects/{project_id}/characters")
 @app.post("/api/projects/{project_id}/voice-review/approve")
 async def approve_voice_cast(
     project_id: str,
@@ -3572,8 +3571,6 @@ async def release_gpu(request: Request):
     return {"status": "success", "message": "GPU resources released"}
 
 
-@app.get("/api/projects/{project_id}/external-validation/status")
-@app.post("/api/projects/{project_id}/external-validation/retry")
 @app.post("/api/system/restart")
 async def restart_dashboard_server(request: Request):
     """Start the controlled restart helper, then release this API process."""

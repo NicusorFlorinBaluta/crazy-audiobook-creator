@@ -85,6 +85,91 @@ class RouterWiringTests(unittest.TestCase):
                     f"{method} {path} is not mounted; check include_router in main.py",
                 )
 
+    #: route -> the function that must serve it. Mountedness is not enough:
+    #: a route bound to the wrong handler is still mounted, which is how
+    #: `GET /characters` came to approve the voice cast.
+    ROUTE_OWNERS = {
+        ("get", "/api/projects/{project_id}/characters"): "get_characters",
+        ("get", "/api/projects/{project_id}/voices"): "get_project_voices",
+        ("post", "/api/projects/{project_id}/voice-review/approve"): "approve_voice_cast",
+        ("get", "/api/projects/{project_id}/external-validation/events"): "get_external_validation_events",
+        ("get", "/api/projects/{project_id}/external-validation/status"): "get_external_validation_status",
+        ("post", "/api/projects/{project_id}/external-validation/retry"): "retry_external_validation",
+        ("get", "/api/projects/{project_id}/quality"): "get_quality_report",
+        ("get", "/api/projects/{project_id}/quality/review"): "get_quality_review",
+        ("post", "/api/projects/{project_id}/quality/review"): "update_quality_review",
+        ("get", "/api/projects/{project_id}/pronunciations"): "get_pronunciations",
+        ("post", "/api/system/restart"): "restart_dashboard_server",
+        ("post", "/api/system/shutdown"): "shutdown_dashboard",
+        ("post", "/api/system/release-gpu"): "release_gpu",
+    }
+
+    def test_each_route_is_served_by_its_own_handler(self) -> None:
+        """Extracting a router must not leave a decorator behind.
+
+        The extraction located functions by AST `lineno`, which points at
+        `def` and not at the decorators above it. Bodies moved into the
+        routers; the `@app.get`/`@app.post` lines stayed in main.py and bound
+        themselves to whichever function was defined next. Four routes ended up
+        calling the wrong handler:
+
+            GET  /characters                  -> approve_voice_cast
+            GET  /external-validation/status  -> restart_dashboard_server
+            POST /external-validation/retry   -> restart_dashboard_server
+            GET  /external-validation/events  -> get_quality_report
+
+        Two of those restarted the dashboard. The review inbox polls
+        `/external-validation/status`, so every poll killed the running
+        pipeline -- which is what the unexplained restarts of 2026-09-04 were.
+
+        `test_extracted_routes_are_mounted` could not catch it: a
+        wrongly-bound route is still mounted.
+        """
+        spec = app.openapi()
+        wrong = []
+        for (method, path), owner in self.ROUTE_OWNERS.items():
+            operation = spec["paths"].get(path, {}).get(method)
+            if operation is None:
+                wrong.append(f"{method.upper()} {path} is not registered at all")
+                continue
+            # FastAPI builds operationId as "<func>_<mangled path>_<method>".
+            actual = operation.get("operationId", "").split("_api_")[0]
+            if actual != owner:
+                wrong.append(f"{method.upper()} {path} -> {actual}, expected {owner}")
+        self.assertEqual(wrong, [], "routes bound to the wrong handler:\n  " + "\n  ".join(wrong))
+
+    def test_no_handler_carries_routes_from_two_different_features(self) -> None:
+        """Catch the shape of the bug, not just the four known instances.
+
+        A function legitimately serves two paths (`/health` and `/api/health`).
+        It does not legitimately serve paths from unrelated features, which is
+        what an orphaned decorator produces.
+        """
+        spec = app.openapi()
+        by_handler: dict[str, list[str]] = {}
+        for path, operations in spec["paths"].items():
+            for method, operation in operations.items():
+                handler = operation.get("operationId", "").split("_api_")[0]
+                by_handler.setdefault(handler, []).append(f"{method.upper()} {path}")
+
+        def feature(route: str) -> str:
+            path = route.split(" ", 1)[1]
+            tail = path.replace("/api/projects/{project_id}", "").replace("/api", "")
+            return tail.strip("/").split("/")[0] or "root"
+
+        suspicious = []
+        for handler, routes in by_handler.items():
+            features = {feature(r) for r in routes}
+            # health/api-health differ only by prefix and collapse to one feature.
+            if len(features) > 1:
+                suspicious.append(f"{handler} serves {sorted(features)}: {routes}")
+        self.assertEqual(
+            suspicious,
+            [],
+            "one handler is serving routes from unrelated features, which means a "
+            "decorator was left behind by an extraction:\n  " + "\n  ".join(suspicious),
+        )
+
     def test_an_unmounted_path_really_does_404(self) -> None:
         """Guard the guard: the discriminator above must actually fire."""
         response = self.client.get("/api/projects/pinned/definitely-not-a-route")

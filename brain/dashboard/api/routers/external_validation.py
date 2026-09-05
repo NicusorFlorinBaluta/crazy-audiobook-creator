@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+@router.get("/api/projects/{project_id}/external-validation/events")
 async def get_external_validation_events(project_id: str):
     """Expose the audit ledger and passive confidence calibration."""
     runtime.require_job(project_id)
@@ -35,6 +36,7 @@ async def get_external_validation_events(project_id: str):
     }
 
 
+@router.get("/api/projects/{project_id}/external-validation/status")
 async def get_external_validation_status(project_id: str):
     """Return readiness without exposing API keys or Gemini conversation URLs."""
     runtime.require_job(project_id)
@@ -74,6 +76,7 @@ async def get_external_validation_status(project_id: str):
 _retry_locks: dict[str, asyncio.Lock] = {}
 
 
+@router.post("/api/projects/{project_id}/external-validation/retry")
 async def retry_external_validation(
     project_id: str,
     reset_circuit: bool = False,

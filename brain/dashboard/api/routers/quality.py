@@ -203,7 +203,6 @@ async def get_attention_reviews(project_id: str):
     return result
 
 
-@router.get("/api/projects/{project_id}/external-validation/events")
 @router.get("/api/projects/{project_id}/quality")
 async def get_quality_report(project_id: str):
     """Get quality report for a project."""
