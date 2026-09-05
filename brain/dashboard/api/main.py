@@ -93,6 +93,7 @@ from brain.orchestrator.nas_syncer import NASSyncer
 from brain.orchestrator.pipeline import Pipeline
 from brain.orchestrator.review_gate import collect_review_gate
 from brain.orchestrator.stage_runner import PipelineResumePlan
+from brain.validators.gemini_validation import _GENERIC_ATTRIBUTION_IDS
 from shared import paths as shared_paths
 from shared.artifacts import (
     atomic_write_bytes,
@@ -3130,7 +3131,12 @@ async def update_script_line(
     if not characters_path.is_file():
         raise HTTPException(status_code=409, detail="Character registry is missing")
     characters = json.loads(characters_path.read_text(encoding="utf-8")).get("characters", {})
-    if request.speaker not in characters:
+    # Attribution legitimately resolves some lines to a generic speaker -- a
+    # crowd, an unnamed minor character -- and each of those has a voice
+    # profile. They are not written into characters.json, so requiring registry
+    # membership made those items impossible to clear: the Approve button sends
+    # the line's own speaker back and got 422 for it.
+    if request.speaker not in characters and request.speaker not in _GENERIC_ATTRIBUTION_IDS:
         raise HTTPException(
             status_code=422,
             detail=f"Unknown character speaker '{request.speaker}'",
@@ -3141,6 +3147,18 @@ async def update_script_line(
     updated = False
     for line in data.get("lines", []):
         if str(line.get("id")) == line_id or str(line.get("line_id")) == line_id:
+            # The narrator does not speak dialogue. That rule existed only as a
+            # sentence inside an LLM prompt; nothing enforced it, so a
+            # mis-selected dropdown could put the narrator on a shouted line
+            # and the pipeline would happily render it.
+            if request.speaker == "narrator" and str(line.get("dialogue_kind") or "") == "spoken":
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        "The narrator cannot be the speaker of spoken dialogue. "
+                        "Pick a character, or one of the generic speakers such as 'crowd'."
+                    ),
+                )
             line["speaker"] = request.speaker
             line["speaker_confidence"] = 1.0
             line["speaker_evidence"] = "Human-reviewed speaker assignment."

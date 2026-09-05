@@ -1116,6 +1116,7 @@ async function checkAndRenderGeminiRetryBanner(projectId, items = []) {
 
         if (dailyBudgetExhausted) {
             banner.classList.remove('hidden');
+            setGeminiBannerState('warning', 'Daily quota exhausted');
             if (autoCheck) autoCheck.checked = false;
             if (desc) {
                 desc.textContent = `Gemini daily API budget reached (${describeQuotaUsage(quota)}). Resets ${describeQuotaReset(quota)}. Automatic retries are paused; you can retry now, which falls back to Gemini Web, or review the remaining ${unresolvedAttributions.length} dialogue turns manually below.`;
@@ -1127,6 +1128,7 @@ async function checkAndRenderGeminiRetryBanner(projectId, items = []) {
 
         if (geminiAutoRetryCount >= 3) {
             banner.classList.remove('hidden');
+            setGeminiBannerState('warning', 'Auto-retry paused');
             if (autoCheck) autoCheck.checked = false;
             if (desc) {
                 desc.textContent = `Auto-retry paused after 3 rate-limited attempts (${unresolvedAttributions.length} turns remaining). Click 'Retry with Gemini Now' anytime or review manually below.`;
@@ -1138,6 +1140,7 @@ async function checkAndRenderGeminiRetryBanner(projectId, items = []) {
 
         if (rateLimited || (unresolvedAttributions.length > 0 && maxCooldown > 0)) {
             banner.classList.remove('hidden');
+            setGeminiBannerState('warning', maxCooldown > 0 ? `Backing off ${formatDuration(maxCooldown)}` : 'Backing off');
             if (desc) {
                 const wait = formatDuration(maxCooldown || 30);
                 desc.textContent = `Gemini is backing off on ${unresolvedAttributions.length} dialogue turns; the provider circuit reopens in ${wait}. Daily budget ${describeQuotaUsage(quota)}. You can wait, retry now, or review items manually.`;
@@ -1146,6 +1149,10 @@ async function checkAndRenderGeminiRetryBanner(projectId, items = []) {
             startGeminiCooldownCountdown(projectId);
         } else if (unresolvedAttributions.length > 0 && !banner.dataset.dismissed) {
             banner.classList.remove('hidden');
+            // Nothing is throttled: Gemini simply has not been asked yet, or
+            // answered and could not settle these. Saying "Quota Paused" here
+            // was the single most misleading thing on the page.
+            setGeminiBannerState('success', 'Gemini available');
             if (desc) {
                 desc.textContent = `${unresolvedAttributions.length} dialogue turns require resolution. Daily budget ${describeQuotaUsage(quota)}. You can run Gemini triage/adjudication now or review manually below.`;
             }
@@ -1196,6 +1203,21 @@ function describeQuotaReset(quota) {
     return span ? `in ${span} (${local} your time)` : `at ${local}`;
 }
 
+// The badge is the one-glance answer to "is Gemini working or not". It used to
+// be hardcoded to "Quota Paused" in the markup, so a healthy tier and an
+// exhausted one looked the same.
+function setGeminiBannerState(kind, label) {
+    const badge = document.getElementById('gemini-retry-badge');
+    const title = document.getElementById('gemini-retry-title');
+    if (badge) {
+        badge.textContent = label;
+        badge.className = `badge badge-${kind}`;
+    }
+    if (title) {
+        title.textContent = kind === 'success' ? 'Gemini External Validation' : 'Gemini External Validation — attention';
+    }
+}
+
 function startGeminiCooldownCountdown(projectId) {
     if (geminiRetryTimer) { clearInterval(geminiRetryTimer); }
     
@@ -1225,11 +1247,22 @@ function startGeminiCooldownCountdown(projectId) {
 
 async function retryGeminiExternalValidation(projectId, resetCircuit = true) {
     const retryBtn = document.getElementById('btn-retry-gemini-now');
+    // A browser-tier adjudication runs about 83 seconds, and a retry covers
+    // every unresolved turn. Without a ticking elapsed time there is no way to
+    // tell a working request from a dead one.
+    const startedAt = Date.now();
+    let elapsedTimer = null;
     if (retryBtn) {
         retryBtn.dataset.busy = 'true';
         retryBtn.disabled = true;
-        retryBtn.innerHTML = '⏳ Retrying Gemini...';
+        const tick = () => {
+            const secs = Math.round((Date.now() - startedAt) / 1000);
+            retryBtn.innerHTML = `⏳ Asking Gemini… ${formatDuration(secs) || '0s'}`;
+        };
+        tick();
+        elapsedTimer = setInterval(tick, 1000);
     }
+    setGeminiBannerState('info', 'Asking Gemini…');
 
     try {
         const res = await fetch(`api/projects/${encodeURIComponent(projectId)}/external-validation/retry?reset_circuit=${resetCircuit}`, {
@@ -1243,7 +1276,14 @@ async function retryGeminiExternalValidation(projectId, resetCircuit = true) {
                 showToast(`Gemini resolved ${resolved} dialogue turn${resolved === 1 ? '' : 's'}! (${remaining} remaining)`, 'success');
                 geminiAutoRetryCount = 0;
             } else {
-                showToast(`Gemini retry finished. ${remaining} items remaining for review.`, 'info');
+                // "0 resolved" is a real answer, not a failure -- Gemini can
+                // look at a line and decline to pick a speaker. Say so, rather
+                // than leaving the operator to guess whether it ran.
+                showToast(
+                    `Gemini answered but could not settle ${remaining} item${remaining === 1 ? '' : 's'}; they need a human decision.`,
+                    'info',
+                );
+                setGeminiBannerState('warning', 'Needs your decision');
             }
             await fetchAndRenderAttention(projectId, state.currentProject, true);
         } else {
@@ -1253,10 +1293,12 @@ async function retryGeminiExternalValidation(projectId, resetCircuit = true) {
         console.error('Error retrying external validation', err);
         showToast('External validation retry failed', 'error');
     } finally {
+        if (elapsedTimer) clearInterval(elapsedTimer);
         if (retryBtn) {
             delete retryBtn.dataset.busy;
             retryBtn.disabled = false;
-            retryBtn.innerHTML = '⚡ Retry with Gemini Now';
+            const took = formatDuration(Math.round((Date.now() - startedAt) / 1000));
+            retryBtn.innerHTML = took ? `⚡ Retry with Gemini Now (last: ${took})` : '⚡ Retry with Gemini Now';
         }
     }
 }
@@ -1455,6 +1497,14 @@ function renderAttentionInbox(project = state.currentProject) {
                 const isSelected = cid === currentSpeaker ? 'selected' : '';
                 return `<option value="${escapeHtml(cid)}" ${isSelected}>${escapeHtml(cname)} (${escapeHtml(cid)})</option>`;
             }).join('');
+            // Attribution can resolve a line to a generic speaker such as
+            // `crowd`, which is not in the character registry. Without an
+            // option for it nothing matched, so the browser selected the first
+            // entry -- the narrator -- and "Change Speaker" was primed to put
+            // the narrator on shouted dialogue.
+            if (currentSpeaker && !Object.prototype.hasOwnProperty.call(charactersMap, currentSpeaker)) {
+                charOptions = `<option value="${escapeHtml(currentSpeaker)}" selected>${escapeHtml(currentSpeaker)} (current)</option>` + charOptions;
+            }
             if (!charOptions) {
                 charOptions = `<option value="${escapeHtml(currentSpeaker)}" selected>${escapeHtml(currentSpeaker)}</option><option value="narrator">Narrator</option>`;
             }
