@@ -13,6 +13,7 @@ import json
 import logging
 import re
 import shutil
+import subprocess
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -305,7 +306,7 @@ class Pipeline:
         zone_name = schedule_cfg.get("timezone", "Europe/Bucharest")
         try:
             return datetime.now(ZoneInfo(zone_name))
-        except Exception:
+        except (KeyError, ValueError):
             logger.warning("Invalid schedule timezone %r; using local time", zone_name)
             return datetime.now().astimezone()
 
@@ -337,7 +338,6 @@ class Pipeline:
             )
 
         import os
-        import subprocess
 
         executable = str(ollama_cfg.get("executable", "")).strip()
         if not executable:
@@ -454,7 +454,7 @@ class Pipeline:
                 env=env,
                 **kwargs,
             )
-        except Exception:
+        except (OSError, subprocess.SubprocessError, ValueError):
             self._ollama_server_log_handle.close()
             self._ollama_server_log_handle = None
             raise
@@ -468,7 +468,7 @@ class Pipeline:
                 if getattr(self, "_ollama_server_log_handle", None) is not None:
                     try:
                         self._ollama_server_log_handle.close()
-                    except Exception as exc:
+                    except (OSError, ValueError) as exc:
                         logger.debug("Could not close the Ollama server log handle: %s", exc)
                     self._ollama_server_log_handle = None
                 raise RuntimeError(f"Managed Ollama exited during startup with code {code}")
@@ -492,11 +492,11 @@ class Pipeline:
         logger.info("Stopping managed Ollama subprocess...")
         try:
             self._terminate_managed_process_tree(process)
-        except Exception as exc:
+        except (OSError, subprocess.SubprocessError, ValueError) as exc:
             logger.warning("Force killing managed Ollama subprocess: %s", exc)
             try:
                 process.kill()
-            except Exception as exc:
+            except (OSError, subprocess.SubprocessError, ValueError) as exc:
                 logger.warning(
                     "Could not kill the managed Ollama subprocess; it may survive and keep holding the port and GPU: %s",
                     exc,
@@ -512,7 +512,6 @@ class Pipeline:
     def _terminate_managed_process_tree(process: Any) -> None:
         """Terminate an app-owned process and all of its descendants."""
         import os
-        import subprocess
 
         process_id = getattr(process, "pid", None)
         if os.name == "nt" and process_id:
@@ -534,7 +533,7 @@ class Pipeline:
                 )
             try:
                 process.wait(timeout=5)
-            except Exception as exc:
+            except (OSError, subprocess.SubprocessError, ValueError) as exc:
                 logger.debug("taskkill reported success but the process did not reap within 5s: %s", exc)
             return
         process.terminate()
@@ -560,7 +559,6 @@ class Pipeline:
             logger.debug("Voice server health check failed, so it is not running yet; starting one: %s", exc)
 
         import os
-        import subprocess
         import sys
 
         venv_py = Path(voice_cfg.get("venv", r"E:\PyTorch env\my_venv"))
@@ -622,7 +620,7 @@ class Pipeline:
                 stdout=self._voice_server_log_handle,
                 stderr=subprocess.STDOUT,
             )
-        except Exception:
+        except (OSError, subprocess.SubprocessError, ValueError):
             self._voice_server_log_handle.close()
             self._voice_server_log_handle = None
             raise
@@ -704,11 +702,11 @@ class Pipeline:
             logger.info("Stopping Voice Server subprocess...")
             try:
                 self._terminate_managed_process_tree(self._voice_server_proc)
-            except Exception as e:
+            except (OSError, subprocess.SubprocessError, ValueError) as e:
                 logger.warning("Force killing Voice Server subprocess: %s", e)
                 try:
                     self._voice_server_proc.kill()
-                except Exception as exc:
+                except (OSError, subprocess.SubprocessError, ValueError) as exc:
                     logger.warning(
                         "Could not kill the Voice Server subprocess; it may survive and keep holding VRAM: %s", exc
                     )
@@ -1069,7 +1067,7 @@ class Pipeline:
                     cast_data = json.loads(cast_path.read_text(encoding="utf-8"))
                     if any(not v.get("ready") for v in cast_data.get("voices", {}).values()):
                         needs_bootstrap = True
-                except Exception:
+                except (OSError, UnicodeDecodeError, ValueError, KeyError, TypeError):
                     needs_bootstrap = True
             if needs_bootstrap:
                 self._run_voice_bootstrap(project_id, project_dir)
@@ -1434,7 +1432,7 @@ class Pipeline:
             try:
                 chars_meta = json.loads(chars_meta_path.read_text(encoding="utf-8"))
                 reuse_characters = chars_meta.get("fingerprint") == chars_fingerprint
-            except Exception:
+            except (OSError, UnicodeDecodeError, ValueError, KeyError, TypeError):
                 reuse_characters = False
 
         self._progress_estimator.reset(f"{project_id}:character_analysis")
@@ -3415,7 +3413,7 @@ class Pipeline:
                 try:
                     script_payload = json.loads(script_path.read_text(encoding="utf-8"))
                     collect_text(script_payload.get("chapters", []))
-                except Exception as exc:
+                except (OSError, UnicodeDecodeError, ValueError, KeyError, TypeError) as exc:
                     logger.warning(
                         "Could not read %s; mid-sentence detection will miss this script: %s", script_path, exc
                     )
@@ -3425,7 +3423,7 @@ class Pipeline:
                     try:
                         ch_payload = json.loads(ch_file.read_text(encoding="utf-8"))
                         collect_text(ch_payload.get("lines", []))
-                    except Exception as exc:
+                    except (OSError, UnicodeDecodeError, ValueError, KeyError, TypeError) as exc:
                         logger.warning(
                             "Could not read %s; mid-sentence detection will miss this chapter: %s", ch_file, exc
                         )
