@@ -301,6 +301,35 @@ def _evidence_name_patterns(name: str) -> tuple[re.Pattern[str], ...]:
     )
 
 
+# A speech tag routinely names someone who is not speaking: the person
+# addressed ("he asked Breezy"), a bystander in a following clause ("he said,
+# and Breezy gave a low growl"), or a possessor ("Effron's head snapped
+# around"). Only the subject of the speech verb is the speaker.
+_SUBJECT_PRONOUNS = frozenset({"he", "she", "they", "i", "we", "you", "it"})
+_CLAUSE_BOUNDARIES = frozenset(
+    {
+        "and",
+        "but",
+        "then",
+        "yet",
+        "so",
+        "while",
+        "when",
+        "who",
+        "which",
+        "as",
+        "though",
+        "although",
+        "because",
+        "before",
+        "after",
+        "until",
+        "since",
+        "whereas",
+    }
+)
+
+
 _UNSAFE_SPEAKER_ALIASES = {
     "she",
     "he",
@@ -3626,6 +3655,16 @@ class ScriptGenerator:
         if not speech_positions:
             return None, None, None
 
+        # A pronoun subject settles who is speaking. Any name after that verb is
+        # the person being addressed, not an inverted subject.
+        pronoun_subject_verbs: set[int] = set()
+        for verb_index in speech_positions:
+            back = verb_index - 1
+            if back >= 1 and tag_tokens[back].endswith("ly"):
+                back -= 1  # step over an adverb: "he said quietly"
+            if back >= 0 and tag_tokens[back] in _SUBJECT_PRONOUNS:
+                pronoun_subject_verbs.add(verb_index)
+
         pre_verbal_matches: list[tuple[int, int, str]] = []
         post_verbal_matches: list[tuple[int, int, str]] = []
 
@@ -3641,9 +3680,18 @@ class ScriptGenerator:
                 name_tokens = _word_tokens(name)
                 if not name_tokens:
                     continue
+                # A possessive alias ("Effron's" -> ('effron', 's')) would match
+                # the possessive it should be rejected for, and nobody is named
+                # by the possessive form of their own name.
+                if len(name_tokens) > 1 and name_tokens[-1] == "s":
+                    continue
                 starts = _subsequence_starts(tag_tokens, name_tokens)
                 for start in starts:
                     name_end = start + len(name_tokens)
+                    # "Effron's head snapped around" -- a possessive modifies
+                    # the real subject, it is not the subject.
+                    if name_end < len(tag_tokens) and tag_tokens[name_end] == "s":
+                        continue
                     for verb_index in speech_positions:
                         # Case 1: Pre-verbal subject (Candidate before SpeechVerb)
                         if 0 <= verb_index - name_end <= 3:
@@ -3653,10 +3701,13 @@ class ScriptGenerator:
                                 pre_verbal_matches.append((proximity, len(name), character_id))
                         # Case 2: Post-verbal inverted subject (SpeechVerb before Candidate)
                         elif 0 <= start - (verb_index + 1) <= 2:
+                            if verb_index in pronoun_subject_verbs:
+                                continue
                             intervening = tag_tokens[verb_index + 1 : start]
                             has_prep = any(t in _PREPOSITIONS_OBJECTS for t in intervening)
                             has_participle = any(t.endswith("ing") and len(t) > 3 for t in intervening)
-                            if not has_prep and not has_participle:
+                            has_clause_break = any(t in _CLAUSE_BOUNDARIES for t in intervening)
+                            if not has_prep and not has_participle and not has_clause_break:
                                 proximity = start - (verb_index + 1)
                                 post_verbal_matches.append((proximity, len(name), character_id))
 
