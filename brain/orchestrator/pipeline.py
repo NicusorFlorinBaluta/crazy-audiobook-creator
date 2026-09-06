@@ -1806,11 +1806,35 @@ class Pipeline:
                         local_auto_accept=local_auto_accept,
                         ollama_temperature=ollama_temp,
                     )
+                    attribution_tick = 0.0
+
+                    def on_attribution_progress(done: int, total: int) -> None:
+                        # Throttled: one row per turn would be ~1,089 database
+                        # writes on a long book, for a bar nobody watches that
+                        # closely.
+                        nonlocal attribution_tick
+                        now = time.perf_counter()
+                        if done < total and now - attribution_tick < 1.0:
+                            return
+                        attribution_tick = now
+                        self.job_queue.update_progress(
+                            project_id,
+                            self._progress_estimator.snapshot(
+                                f"{project_id}:attribution",
+                                stage=PipelineStage.SCRIPTING.value,
+                                phase="speaker_attribution",
+                                message=f"Resolving speaker attribution ({done:,} of {total:,} dialogue turns)",
+                                completed_units=done,
+                                total_units=total,
+                            ),
+                        )
+
                     tier1_report = adjudicator.adjudicate(
                         suspicious,
                         project_dir=project_dir,
                         chapters=chapter_scripts,
                         dry_run=is_dry_run,
+                        progress_callback=on_attribution_progress,
                     )
                     logger.info(
                         "[TieredAttribution] Tier 1 adjudication finished: %s",

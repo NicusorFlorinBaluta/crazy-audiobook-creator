@@ -15,6 +15,7 @@ import difflib
 import json
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -24,7 +25,7 @@ from brain.director.ollama_client import OllamaClient
 from brain.director.script_generator import _GENERIC_ROLE_DESCRIPTORS, ScriptGenerator
 from brain.validators.gemini_validation import GeminiValidationService
 from shared.artifacts import atomic_write_json
-from shared.constants import DEFAULT_OLLAMA_MODEL
+from shared.constants import DEFAULT_OLLAMA_MODEL, Gender
 from shared.models import CharacterRegistry, ScriptChapter, ScriptLine
 
 logger = logging.getLogger(__name__)
@@ -113,6 +114,75 @@ def _check_gender_pronoun_consistency(
         return False, "Female speaker contradicts cited male speech tag"
 
     return True, "gender_consistent"
+
+
+def _label_support(
+    lines: list[dict[str, Any]],
+    index: int,
+    registry: CharacterRegistry,
+) -> str:
+    """Say what backs the speaker label on `lines[index]`, for the prompt.
+
+    A neighbouring label is evidence of wildly varying quality: the book naming
+    the speaker outright, or a previous model's guess. Presented flat they look
+    identical, and the alternation rule then propagates whichever ones are
+    wrong. Only the book's own speech tag counts as confirmation here.
+    """
+    speaker = str(lines[index].get("speaker") or "")
+    if not speaker or speaker == "narrator":
+        return ""
+    if index + 1 >= len(lines):
+        return "  [unverified]"
+    following = lines[index + 1]
+    if str(following.get("speaker") or "") != "narrator":
+        return "  [unverified]"
+    tag = str(following.get("text") or "").strip()
+    lead = next((char for char in tag if char.isalpha()), "")
+    if not lead or not lead.islower():
+        return "  [unverified]"
+
+    named, _kind, gender = ScriptGenerator._dialogue_tag_evidence(tag, registry)
+    if named:
+        if named == speaker:
+            return "  [confirmed by the speech tag below]"
+        return f"  [CONTRADICTED: the speech tag below names {named}]"
+    if gender is not None:
+        candidate = registry.characters.get(speaker)
+        if candidate and candidate.gender in (Gender.MALE, Gender.FEMALE):
+            if candidate.gender == gender:
+                return "  [confirmed by the speech tag below]"
+            return f"  [CONTRADICTED: the speech tag below is {gender.value}]"
+    return "  [unverified]"
+
+
+def _attached_tag_evidence(
+    turn: SuspiciousTurn,
+    registry: CharacterRegistry,
+) -> tuple[str | None, Gender | None, str]:
+    """Read the speech tag the author attached to this line, if there is one.
+
+    Narration right after a quote whose first letter is lowercase is a
+    grammatical continuation of it, so it is the author naming the speaker
+    outright. Narration starting with a capital is a new sentence and merely a
+    reaction ("Dahlia laughed at that."), which says nothing about who just
+    spoke; reading those as tags is how a bystander ends up owning the line.
+
+    Parsing is delegated to `_dialogue_tag_evidence`, so a tag is read the same
+    way here as everywhere else in the pipeline.
+    """
+    lines = list(turn.surrounding_lines or [])
+    index = next((i for i, line in enumerate(lines) if line.get("is_target")), None)
+    if index is None or index + 1 >= len(lines):
+        return None, None, ""
+    following = lines[index + 1]
+    if str(following.get("speaker") or "") != "narrator":
+        return None, None, ""
+    tag = str(following.get("text") or "").strip()
+    lead = next((char for char in tag if char.isalpha()), "")
+    if not lead or not lead.islower():
+        return None, None, ""
+    exact, _kind, gender = ScriptGenerator._dialogue_tag_evidence(tag, registry)
+    return exact, gender, tag
 
 
 def _resolve_speaker_alias(raw_speaker: str, registry: CharacterRegistry) -> tuple[str | None, str]:
@@ -231,11 +301,17 @@ class TieredAttributionAdjudicator:
         chapters: list[ScriptChapter],
         *,
         dry_run: bool = False,
+        progress_callback: Callable[[int, int], None] | None = None,
     ) -> AdjudicationReport:
         """Run Tier 1 micro-adjudication with guardrails on all suspicious turns.
 
         Lines meeting all guardrails and confidence >= local_auto_accept are resolved.
         Lines failing any check are marked for Tier 2 escalation.
+
+        `progress_callback(done, total)` is invoked as each turn is adjudicated.
+        This loop is one LLM call per turn and can run for over an hour on a
+        long book -- 1,089 turns on a 32-chapter one -- so without it the
+        dashboard shows whatever Pass 2 last said and the run looks hung.
         """
         lines_by_id: dict[str, ScriptLine] = {line.line_id: line for chapter in chapters for line in chapter.lines}
         chapter_map: dict[int, ScriptChapter] = {c.chapter_number: c for c in chapters}
@@ -245,9 +321,15 @@ class TieredAttributionAdjudicator:
         # -------------------------------------------------------------
         # Phase 1: Tier 1 Local Qwen Micro-Adjudication
         # -------------------------------------------------------------
-        for turn in suspicious_turns:
+        total_turns = len(suspicious_turns)
+        for index, turn in enumerate(suspicious_turns, start=1):
             result = self._adjudicate_turn_tier1(turn, chapter_map.get(turn.chapter_number))
             results.append(result)
+            if progress_callback is not None:
+                try:
+                    progress_callback(index, total_turns)
+                except Exception as exc:  # noqa: BLE001 - reporting must never fail the pass
+                    logger.debug("Attribution progress callback raised: %s", exc)
 
         # -------------------------------------------------------------
         # Phase 2: Guardrail 4 — Reciprocal Turn Consistency Check
@@ -265,13 +347,49 @@ class TieredAttributionAdjudicator:
         confirmed_count = 0
         reattributed_count = 0
         escalated_count = 0
+        tag_overruled_count = 0
 
         for res in results:
             line = lines_by_id.get(res.line_id)
             if line is None:
                 continue
 
-            if res.resolver_tier == "local_qwen" and res.resolved_speaker:
+            if res.resolver_tier == "deterministic_tag" and res.resolved_speaker:
+                # Recorded under its own resolver so the trail says the source
+                # text decided this, not a model.
+                local_resolved_count += 1
+                tag_overruled_count += 1
+                if not dry_run:
+                    prev_speaker = line.speaker
+                    line.speaker = res.resolved_speaker
+                    line.speaker_confidence = 1.0
+                    line.speaker_evidence = f"Attached speech tag: {res.evidence_quote}"[:4000]
+                    line.attribution_resolver = "deterministic_attached_tag"
+                    line.attribution_review_required = False
+                    line.attribution_review_reason = ""
+                    line.attribution_confidence_history.append(
+                        {
+                            "resolver": "deterministic_attached_tag",
+                            "model": "source_parser",
+                            "decision": "resolved",
+                            "speaker_id": res.resolved_speaker,
+                            "confidence": 1.0,
+                            "reason": res.reason,
+                            "evidence": res.evidence_quote,
+                        }
+                    )
+                    if prev_speaker == res.resolved_speaker:
+                        confirmed_count += 1
+                    else:
+                        reattributed_count += 1
+                        logger.info(
+                            "[TieredAttribution] Speech tag overruled adjudication on %s (%s -> %s): %s",
+                            res.line_id,
+                            prev_speaker,
+                            res.resolved_speaker,
+                            res.reason,
+                        )
+            elif res.resolver_tier == "local_qwen" and res.resolved_speaker:
                 local_resolved_count += 1
                 if not dry_run:
                     prev_speaker = line.speaker
@@ -343,6 +461,9 @@ class TieredAttributionAdjudicator:
             "confirmed": confirmed_count,
             "reattributed": reattributed_count,
             "escalated_to_tier2": escalated_count,
+            # How often the source text had to overrule the model. A rising
+            # number here means adjudication is drifting from the book.
+            "tag_overruled": tag_overruled_count,
             "dry_run": dry_run,
         }
 
@@ -391,12 +512,16 @@ class TieredAttributionAdjudicator:
                     }
                 )
 
-        # Format surrounding lines
+        # Format surrounding lines, each marked with what backs its label. Sent
+        # flat, a neighbour's guess is indistinguishable from the book stating
+        # the speaker, and Rule 1 below then propagates the guesses.
         context_lines_formatted = []
-        for neighbor in turn.surrounding_lines:
+        window = list(turn.surrounding_lines or [])
+        for position, neighbor in enumerate(window):
             prefix = ">>> [TARGET]" if neighbor.get("is_target") else "   "
+            support = "" if neighbor.get("is_target") else _label_support(window, position, self.registry)
             context_lines_formatted.append(
-                f"{prefix} [{neighbor['line_id']}] {neighbor['speaker']}: {neighbor['text']}"
+                f"{prefix} [{neighbor['line_id']}] {neighbor['speaker']}: {neighbor['text']}{support}"
             )
         formatted_context = "\n".join(context_lines_formatted)
 
@@ -412,7 +537,12 @@ class TieredAttributionAdjudicator:
             f"  Text: {turn.text}\n"
             f"  Current Assigned Speaker: {turn.current_speaker}\n\n"
             "RULES:\n"
-            "1. In two-party dialogue without explicit speech tags, turns strictly ALTERNATE between speakers.\n"
+            "1. In two-party dialogue without explicit speech tags, turns usually ALTERNATE "
+            "between speakers -- but a label marked [unverified] is a previous guess, not "
+            "evidence. Never flip the TARGET merely to preserve alternation against "
+            "[unverified] neighbours; if they are the only reason to change it, they are the "
+            "more likely thing to be wrong. A label marked [confirmed by the speech tag] is "
+            "the book stating who spoke, and outranks every other consideration.\n"
             "2. If a line addresses someone by name (e.g., '..., Dusk'), the SPEAKER is the OTHER character talking TO that person.\n"
             "3. Match pronouns in action beats: 'He frowned. \"Quote\"' means a MALE character speaks.\n"
             "4. Do NOT assume consecutive quotes are a monologue unless there is explicit evidence of continuation (e.g., 'he continued', 'she went on').\n"
@@ -468,11 +598,55 @@ class TieredAttributionAdjudicator:
             else (True, "skipped_due_to_unresolved_alias")
         )
 
+        # Guardrail 2b: the book's own speech tag. The check above reads the
+        # model's prose, which is the wrong text -- see this module's history on
+        # ch11_0149. This one reads the narration the author attached.
+        tag_named, tag_gender, tag_text = _attached_tag_evidence(turn, self.registry)
+        tag_status: dict[str, Any] = {
+            "passed": True,
+            "detail": "tag_consistent" if tag_text else "no_attached_tag",
+        }
+        if alias_passed and resolved_speaker and tag_text and tag_named is None and tag_gender is not None:
+            candidate = self.registry.characters.get(resolved_speaker)
+            if candidate and candidate.gender in (Gender.MALE, Gender.FEMALE) and candidate.gender != tag_gender:
+                # The tag cannot say who spoke, but it is decisive about who did
+                # not. Refuse rather than guess.
+                gender_passed = False
+                gender_detail = (
+                    f"Attached speech tag identifies a {tag_gender.value} speaker; "
+                    f"'{resolved_speaker}' is {candidate.gender.value}"
+                )
+                tag_status = {"passed": False, "detail": gender_detail}
+
         guardrail_status = {
             "alias_resolution": {"passed": alias_passed, "detail": alias_detail},
             "quote_in_context": {"passed": quote_passed, "detail": quote_detail},
             "gender_pronoun": {"passed": gender_passed, "detail": gender_detail},
+            "attached_tag": tag_status,
         }
+
+        if alias_passed and resolved_speaker and tag_named and tag_named != resolved_speaker:
+            # The author named the speaker. That is not evidence to weigh, it is
+            # the answer, and no confidence score outranks it.
+            guardrail_status["attached_tag"] = {
+                "passed": False,
+                "detail": f"tag names '{tag_named}', adjudication said '{resolved_speaker}'",
+            }
+            return AdjudicationResult(
+                line_id=turn.line_id,
+                chapter_number=turn.chapter_number,
+                text=turn.text,
+                original_speaker=turn.current_speaker,
+                resolved_speaker=tag_named,
+                resolver_tier="deterministic_tag",
+                confidence=1.0,
+                reason=(
+                    f"Attached speech tag names '{tag_named}'; micro-adjudication "
+                    f"proposed '{resolved_speaker}' and was overruled"
+                ),
+                evidence_quote=tag_text,
+                guardrail_results=guardrail_status,
+            )
 
         all_passed = alias_passed and gender_passed and confidence >= self.local_auto_accept
 
