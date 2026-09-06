@@ -248,6 +248,17 @@ _SPEECH_VERBS = (
 )
 
 _SPEECH_VERB_PATTERN = "|".join(re.escape(item) for item in _SPEECH_VERBS)
+
+# A pronoun only says who spoke when it is the subject of the speech verb.
+# "he said" does; "as she neared", trailing a tag about someone else, does not.
+_HE_SPEECH_TAG = re.compile(
+    r"\bhe\b(?:\s+\w+){0,2}\s+(?:" + _SPEECH_VERB_PATTERN + r")\b"
+    r"|(?:\b" + _SPEECH_VERB_PATTERN + r")\s+(?:\w+\s+){0,2}\bhe\b"
+)
+_SHE_SPEECH_TAG = re.compile(
+    r"\bshe\b(?:\s+\w+){0,2}\s+(?:" + _SPEECH_VERB_PATTERN + r")\b"
+    r"|(?:\b" + _SPEECH_VERB_PATTERN + r")\s+(?:\w+\s+){0,2}\bshe\b"
+)
 _SPEECH_VERB_SET = frozenset(_SPEECH_VERBS)
 _PREPOSITIONS_OBJECTS = frozenset(
     {
@@ -3763,18 +3774,8 @@ class ScriptGenerator:
                 return matching_roles[0], "generic_role_tag", gender
             return None, "generic_gender", gender
 
-        he_pos = re.search(
-            r"\bhe\b(?:\s+\w+){0,2}\s+(?:" + speech_verbs + r")\b|(?:\b" + speech_verbs + r")\s+(?:\w+\s+){0,2}\bhe\b",
-            tag,
-        )
-        she_pos = re.search(
-            r"\bshe\b(?:\s+\w+){0,2}\s+(?:"
-            + speech_verbs
-            + r")\b|(?:\b"
-            + speech_verbs
-            + r")\s+(?:\w+\s+){0,2}\bshe\b",
-            tag,
-        )
+        he_pos = _HE_SPEECH_TAG.search(tag)
+        she_pos = _SHE_SPEECH_TAG.search(tag)
         if he_pos and she_pos:
             return (
                 (None, "pronoun_gender", Gender.MALE)

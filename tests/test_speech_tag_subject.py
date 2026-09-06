@@ -167,13 +167,16 @@ class _StubOllama:
 
     model = "stub"
 
-    def __init__(self, speaker: str, confidence: float = 0.98) -> None:
+    def __init__(self, speaker: str, confidence: float = 0.98, evidence: str | None = None) -> None:
+        # The quote guardrail checks this against the scene, so a test whose
+        # scene is a different one must supply its own or lose 0.15 confidence
+        # to a fabricated-quote penalty rather than to the guard under test.
         self._payload = json.dumps(
             {
                 "speaker_id": speaker,
                 "confidence": confidence,
                 "reason": "The line addresses the speaker as 'mother'; Effron is her son.",
-                "evidence_quote": "You will never be invited into my tower, mother,",
+                "evidence_quote": evidence or "You will never be invited into my tower, mother,",
             }
         )
 
@@ -181,8 +184,12 @@ class _StubOllama:
         return self._payload
 
 
-def _adjudicator(registry: CharacterRegistry, speaker: str) -> TieredAttributionAdjudicator:
-    return TieredAttributionAdjudicator(ollama=_StubOllama(speaker), external_validator=None, registry=registry)
+def _adjudicator(
+    registry: CharacterRegistry, speaker: str, evidence: str | None = None
+) -> TieredAttributionAdjudicator:
+    return TieredAttributionAdjudicator(
+        ollama=_StubOllama(speaker, evidence=evidence), external_validator=None, registry=registry
+    )
 
 
 LINE = '"You will never be invited into my tower, mother,"'
@@ -239,3 +246,33 @@ def test_no_tag_at_all_changes_nothing(registry) -> None:
     )
     assert result.resolver_tier == "local_qwen"
     assert result.guardrail_results["attached_tag"]["detail"] == "no_attached_tag"
+
+
+def test_a_lone_pronoun_elsewhere_does_not_veto(registry) -> None:
+    """ch28_0028: the pronoun belongs to someone else in the sentence.
+
+    "the seated halfling said, then hopping to stand and bow as she neared."
+    is a tag about Ghaliver, who names himself in the line above; the `she` is
+    the traveller approaching him. `_dialogue_tag_evidence` falls back to any
+    lone pronoun in the tag, which is fine as advice and far too weak to refuse
+    an attribution on -- blocking a correct answer is worse than the failure
+    the veto exists to prevent.
+    """
+    registry.characters["ghaliver"] = Character(
+        id="ghaliver",
+        name="Ghaliver Longstocking",
+        gender=Gender.MALE,
+        age_range="adult",
+        voice_description="v",
+        aliases=["Ghaliver"],
+    )
+    line = '"Ghaliver Longstocking at your service, traveler,"'
+    tag = "the seated halfling said, then hopping to stand and bow as she neared."
+
+    _named, gender, _tag = _attached_tag_evidence(_turn(line, "ghaliver", tag), registry)
+    assert gender is None, "a pronoun that is not the subject must not refuse an attribution"
+
+    adjudicator = _adjudicator(registry, "ghaliver", evidence="Ghaliver Longstocking at your service")
+    result = adjudicator._adjudicate_turn_tier1(_turn(line, "ghaliver", tag), None)
+    assert result.resolved_speaker == "ghaliver"
+    assert result.resolver_tier == "local_qwen"

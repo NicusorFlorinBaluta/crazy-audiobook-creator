@@ -22,7 +22,12 @@ from typing import Any
 
 from brain.director.attribution_detector import SuspiciousTurn
 from brain.director.ollama_client import OllamaClient
-from brain.director.script_generator import _GENERIC_ROLE_DESCRIPTORS, ScriptGenerator
+from brain.director.script_generator import (
+    _GENERIC_ROLE_DESCRIPTORS,
+    _HE_SPEECH_TAG,
+    _SHE_SPEECH_TAG,
+    ScriptGenerator,
+)
 from brain.validators.gemini_validation import GeminiValidationService
 from shared.artifacts import atomic_write_json
 from shared.constants import DEFAULT_OLLAMA_MODEL, Gender
@@ -141,7 +146,13 @@ def _label_support(
     if not lead or not lead.islower():
         return "  [unverified]"
 
-    named, _kind, gender = ScriptGenerator._dialogue_tag_evidence(tag, registry)
+    named, kind, gender = ScriptGenerator._dialogue_tag_evidence(tag, registry)
+    if (
+        gender is not None
+        and kind == "pronoun_gender"
+        and not (_HE_SPEECH_TAG.search(tag) or _SHE_SPEECH_TAG.search(tag))
+    ):
+        gender = None
     if named:
         if named == speaker:
             return "  [confirmed by the speech tag below]"
@@ -181,7 +192,16 @@ def _attached_tag_evidence(
     lead = next((char for char in tag if char.isalpha()), "")
     if not lead or not lead.islower():
         return None, None, ""
-    exact, _kind, gender = ScriptGenerator._dialogue_tag_evidence(tag, registry)
+    exact, kind, gender = ScriptGenerator._dialogue_tag_evidence(tag, registry)
+    if (
+        gender is not None
+        and kind == "pronoun_gender"
+        and not (_HE_SPEECH_TAG.search(tag) or _SHE_SPEECH_TAG.search(tag))
+    ):
+        # A lone pronoun elsewhere in the sentence is not the speaker: "the
+        # seated halfling said, then ... as she neared" is about the person
+        # approaching. Too weak to refuse an attribution on.
+        gender = None
     return exact, gender, tag
 
 
