@@ -46,6 +46,7 @@ cleaned up, so some paths inside them no longer resolve.
 | --- | --- |
 | [voice-review-incident-2026-08-10.md](voice-review-incident-2026-08-10.md) | Voice review failure and its resolution. |
 | [tiered-attribution-and-audio-regeneration-2026-09-03.md](tiered-attribution-and-audio-regeneration-2026-09-03.md) | Conversational attribution collapse and the auto-fix engine. |
+| [attribution-repair-2026-09-06.md](attribution-repair-2026-09-06.md) | Three attribution runs on a 32-chapter book, a misparsed cast entry, and the stale-process lesson. |
 | [speaker-attribution-incident-2026-08-11.md](speaker-attribution-incident-2026-08-11.md) | Misattributed quotations in the shipped release, and the selective repair. |
 | [speaker-attribution-improvements-2026-08-18.md](speaker-attribution-improvements-2026-08-18.md) | Attribution failure modes across a 63-chapter book, and the fixes. |
 | [scripting-schema-v4-validation-2026-08-21.md](scripting-schema-v4-validation-2026-08-21.md) | Targeted validation of scripting schema v4. |
@@ -88,6 +89,7 @@ plus two write-ups:
 | Document | Covers |
 | --- | --- |
 | [unattended-full-app-audit-2026-08-23.md](plans/unattended-full-app-audit-2026-08-23.md) | Unattended full-application audit plan. |
+| [targeted-block-adjudication-2026-09-06.md](plans/targeted-block-adjudication-2026-09-06.md) | Joint speaker assignment for dialogue blocks no speech tag can settle. |
 
 ## Not documentation
 

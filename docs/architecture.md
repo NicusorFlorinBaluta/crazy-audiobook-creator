@@ -48,7 +48,14 @@ scratch-runner concurrency.
      spoken labels, and routine pause defaults are restored deterministically.
      See [Scripting quality and performance policy](scripting-quality-performance-policy.md).
    - Joint responses may introduce a provisional speaker only with a confidence score and fragment IDs whose local source context explicitly identifies that speaker. A compact post-pass reconciles aliases, remaps completed scripts, enriches only proven speakers from Glossary/Dramatis Personae evidence, and records accepted/rejected reference patches in `character_reference_audit.json` without rereading the full book through the LLM.
-   - Dialogue attribution is model-driven and source-grounded. Unsupported IDs and
+   - Dialogue attribution is model-driven and source-grounded, but an attached
+     speech tag outranks every model: a tag that names a speaker overrules
+     micro-adjudication outright (recorded as `deterministic_attached_tag` and
+     counted as `tag_overruled`), and a tag that yields only a gender cannot name
+     a winner but vetoes a contradicting speaker into review. Only a pronoun that
+     is the subject of the speech verb counts. See
+     [decisions/2026-09-06-speech-tags-outrank-adjudication.md](decisions/2026-09-06-speech-tags-outrank-adjudication.md).
+     Unsupported IDs and
      low-confidence results trigger focused retries. Unresolved dialogue is retained as a low-confidence review item rather than a
      release-grade guess. Scripting completes and persists `attribution_audit.json`, but
      generation/export remain blocked until every review item is resolved.
