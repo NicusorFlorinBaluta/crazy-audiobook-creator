@@ -73,6 +73,16 @@ _UNVETOABLE = {
     "brother",
     "father",
     "mother",
+    "grandda",
+    "grandma",
+    "grandpa",
+    "grandfather",
+    "grandmother",
+    "uncle",
+    "aunt",
+    "niece",
+    "nephew",
+    "cousin",
     "narrator",
     "stranger",
     "guard",
@@ -145,6 +155,68 @@ def _positional_siblings(left_id: str, right_id: str) -> bool:
     return left_id[: left_match.start()] == right_id[: right_match.start()]
 
 
+_INTERACTION_VERBS = r"(?:said|spoke|replied|asked|shouted|whispered|nodded|turned|looked|glanced)"
+
+
+def distinct_participant_veto(
+    source_text: str,
+    left_entry: dict[str, Any],
+    left_id: str,
+    right_entry: dict[str, Any],
+    right_id: str,
+) -> str | None:
+    """Return why a merge must be refused if source text shows them as distinct individuals."""
+    if not source_text:
+        return None
+    terms1 = _vetoable_terms(left_entry, left_id)
+    terms2 = _vetoable_terms(right_entry, right_id)
+    if not terms1 or not terms2:
+        return None
+
+    lower1 = {t.lower() for t in terms1}
+    lower2 = {t.lower() for t in terms2}
+    common = lower1 & lower2
+    u1 = [t for t in terms1 if t.lower() not in common]
+    u2 = [t for t in terms2 if t.lower() not in common]
+    if not u1 or not u2:
+        return None
+
+    left = "|".join(re.escape(t) for t in sorted(u1, key=len, reverse=True))
+    right = "|".join(re.escape(t) for t in sorted(u2, key=len, reverse=True))
+
+    p_left = rf"\b(?:{left})\b"
+    p_right = rf"\b(?:{right})\b"
+    if not re.search(p_left, source_text, re.IGNORECASE) or not re.search(p_right, source_text, re.IGNORECASE):
+        return None
+
+    # 1. Syntactic conjunction ("A and B", "A, B, and C")
+    conjoined = conjunction_count(source_text, u1, u2)
+    if conjoined:
+        return f"the source names them as separate participants {conjoined} time(s) (conjunction veto)"
+
+    # 2. Interactive narrative beats ("A said to B", "A ..., but B ...")
+    interactive_patterns = [
+        rf"\b(?:{left})\b[^.!?\n]{{0,60}}\b{_INTERACTION_VERBS}\s+to\s+\b(?:{right})\b",
+        rf"\b(?:{right})\b[^.!?\n]{{0,60}}\b{_INTERACTION_VERBS}\s+to\s+\b(?:{left})\b",
+        rf"\b(?:{left})\b[^.!?\n]{{0,80}},\s*but\s+\b(?:{right})\b",
+        rf"\b(?:{right})\b[^.!?\n]{{0,80}},\s*but\s+\b(?:{left})\b",
+    ]
+    for p in interactive_patterns:
+        if re.search(p, source_text, re.IGNORECASE):
+            return "the source depicts them interacting as distinct individuals (interaction veto)"
+
+    # 3. Concurrent occurrence across >= 3 separate sentences (within 300 chars without sentence boundary)
+    p_sentence_fwd = rf"\b(?:{left})\b[^.!?\n]{{1,300}}\b(?:{right})\b"
+    p_sentence_rev = rf"\b(?:{right})\b[^.!?\n]{{1,300}}\b(?:{left})\b"
+    cooccur = len(re.findall(p_sentence_fwd, source_text, re.IGNORECASE)) + len(
+        re.findall(p_sentence_rev, source_text, re.IGNORECASE)
+    )
+    if cooccur >= 3:
+        return f"the source depicts them concurrently across {cooccur} separate sentences (co-occurrence veto)"
+
+    return None
+
+
 def merge_veto(
     primary_id: str,
     duplicate_id: str,
@@ -184,13 +256,15 @@ def merge_veto(
             "aliases": getattr(entry, "aliases", []) or [],
         }
 
-    conjoined = conjunction_count(
+    distinct = distinct_participant_veto(
         source_text,
-        _vetoable_terms(as_dict(left), primary_id),
-        _vetoable_terms(as_dict(right), duplicate_id),
+        as_dict(left),
+        primary_id,
+        as_dict(right),
+        duplicate_id,
     )
-    if conjoined:
-        return f"the source names them as separate participants {conjoined} time(s) (conjunction veto)"
+    if distinct:
+        return distinct
     return None
 
 

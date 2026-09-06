@@ -197,6 +197,10 @@ external_validation:
     max_short_response_chars: 80
     ollama_temperature: 0.1
     dry_run: false
+    block_adjudication:
+      enabled: true            # opt-in until measured on a second book
+      max_suspicious_per_call: 8
+      only_unconfirmed_runs: true   # the 124, not all 176 blocks
 
 
   character_augmentation:

@@ -24,6 +24,7 @@ from brain.director.cast_identity import (
     apply_merge,
     choose_primary,
     conjunction_count,
+    distinct_participant_veto,
     find_unlinked_speakers,
     merge_veto,
 )
@@ -648,6 +649,35 @@ class CheckpointLifetimeTests(unittest.TestCase):
             max(fallible),
             "the checkpoint is deleted while work that can still fail is pending",
         )
+
+    def test_distinct_participant_veto_catches_interactive_dialogue(self) -> None:
+        c1 = {"name": "Catti-brie", "aliases": ["Catti-brie", "Catti", "Brie"]}
+        c2 = {"name": "Brie", "aliases": ["Brie", "Breezy", "Briennelle"]}
+        text = '"Do not believe that you are escaping this," Catti-brie said to Breezy.'
+        reason = distinct_participant_veto(text, c1, "catti_brie", c2, "brie")
+        self.assertIsNotNone(reason)
+        self.assertIn("interacting as distinct individuals", reason)
+
+    def test_distinct_participant_veto_catches_adversative_narrative(self) -> None:
+        c1 = {"name": "Catti-brie", "aliases": ["Catti-brie", "Catti"]}
+        c2 = {"name": "Brie", "aliases": ["Breezy", "Briennelle"]}
+        text = "Catti-brie moved as if to hug her, but Breezy held her hand up."
+        reason = distinct_participant_veto(text, c1, "catti_brie", c2, "brie")
+        self.assertIsNotNone(reason)
+        self.assertIn("interacting as distinct individuals", reason)
+
+    def test_distinct_participant_veto_allows_identity_reveals(self) -> None:
+        c1 = {"name": "Artemis Entreri", "aliases": ["Artemis Entreri", "Barrabus the Gray"]}
+        c2 = {"name": "Barrabus the Gray", "aliases": ["Barrabus the Gray", "Artemis Entreri"]}
+        text = "Barrabus had traveled through the shadows for days."
+        reason = distinct_participant_veto(text, c1, "entreri", c2, "barrabus")
+        self.assertIsNone(reason)
+
+    def test_distinct_participant_veto_allows_apposition_aliases(self) -> None:
+        c1 = {"name": "Jarlaxle", "aliases": ["Jarlaxle", "Uncle Jax"]}
+        c2 = {"name": "Uncle Jax", "aliases": ["Uncle Jax", "Jarlaxle"]}
+        reason = distinct_participant_veto(APPOSITION, c1, "jarlaxle", c2, "uncle_jax")
+        self.assertIsNone(reason)
 
 
 if __name__ == "__main__":

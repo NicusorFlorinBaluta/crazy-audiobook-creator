@@ -1787,6 +1787,10 @@ class Pipeline:
                 local_auto_accept = float(tiered_cfg.get("local_auto_accept_confidence", 0.95))
                 ollama_temp = float(tiered_cfg.get("ollama_temperature", 0.1))
                 is_dry_run = bool(tiered_cfg.get("dry_run", False))
+                block_cfg = tiered_cfg.get("block_adjudication", {})
+                block_enabled = bool(block_cfg.get("enabled", False))
+                max_suspicious_per_call = int(block_cfg.get("max_suspicious_per_call", 8))
+                only_unconfirmed_runs = bool(block_cfg.get("only_unconfirmed_runs", True))
 
                 suspicious = detect_suspicious_turns(
                     chapter_scripts,
@@ -1805,6 +1809,9 @@ class Pipeline:
                         registry=registry,
                         local_auto_accept=local_auto_accept,
                         ollama_temperature=ollama_temp,
+                        block_adjudication_enabled=block_enabled,
+                        max_suspicious_per_call=max_suspicious_per_call,
+                        only_unconfirmed_runs=only_unconfirmed_runs,
                     )
                     attribution_tick = 0.0
 

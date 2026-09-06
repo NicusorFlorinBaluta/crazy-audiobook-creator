@@ -303,7 +303,8 @@ class CharacterAnalyzer:
             )
             raw_characters = raw_result.get("characters", {})
             if isinstance(raw_characters, dict):
-                raw_characters = self._consolidate_accumulated_characters(raw_characters)
+                _src = "\n".join(ch.text for ch in book.chapters)
+                raw_characters = self._consolidate_accumulated_characters(raw_characters, source_text=_src)
                 raw_result["characters"] = self._adjudicate_name_candidates(
                     raw_characters,
                     book,
@@ -460,7 +461,8 @@ class CharacterAnalyzer:
             # Consolidate only identities explicitly linked through aliases or
             # exact display names. Name containment is candidate evidence for
             # the LLM, never sufficient proof by itself.
-            accumulated_chars = self._consolidate_accumulated_characters(accumulated_chars)
+            _src = "\n".join(ch.text for ch in book.chapters)
+            accumulated_chars = self._consolidate_accumulated_characters(accumulated_chars, source_text=_src)
             accumulated_chars = self._adjudicate_name_candidates(
                 accumulated_chars,
                 book,
@@ -1444,12 +1446,25 @@ class CharacterAnalyzer:
         return registry
 
     @staticmethod
-    def _consolidate_accumulated_characters(accumulated_chars: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    def _consolidate_accumulated_characters(
+        accumulated_chars: dict[str, dict[str, Any]],
+        source_text: str = "",
+    ) -> dict[str, dict[str, Any]]:
         """Merge only explicit aliases and exact normalized display names.
 
         Substring/suffix matching is intentionally forbidden: ``king`` and
         ``red_king`` (or ``john`` and ``uncle_john``) may be different people.
+
+        When *source_text* is provided, a conjunction veto applies: if both
+        sides are named as separate participants in the text (``"A and B"``,
+        ``"A, B, and C"``), they are distinct people and the merge is refused
+        even when the alias link is explicit.  This catches family members who
+        share a nickname (mother Catti-brie vs daughter Brie) while still
+        allowing identity reveals (a hooded stranger whose alias is the real
+        name) because a reveal character is never conjoined with itself.
         """
+        from brain.director.cast_identity import merge_veto
+
         keys = list(accumulated_chars.keys())
         merged_into: dict[str, str] = {}
 
@@ -1498,6 +1513,27 @@ class CharacterAnalyzer:
                         target_info, variant_info = cinfo2, cinfo1
 
                 if target_id and variant_id and target_info and variant_info:
+                    # Conjunction veto: if the source text names both sides as
+                    # separate participants ("A and B", "A, B, and C"), they
+                    # are distinct people regardless of the alias link.
+                    # Identity reveals pass because a character is never
+                    # conjoined with its own alter-ego in the narrative.
+                    veto_reason = merge_veto(
+                        target_id,
+                        variant_id,
+                        {target_id: target_info, variant_id: variant_info},
+                        source_text,
+                    )
+                    if veto_reason:
+                        logger.warning(
+                            "[CharacterAnalyzer] Refusing merge of '%s' (%s) into '%s' (%s) — %s",
+                            variant_id,
+                            variant_info.get("name"),
+                            target_id,
+                            target_info.get("name"),
+                            veto_reason,
+                        )
+                        continue
                     logger.info(
                         "[CharacterAnalyzer] Consolidating short variant '%s' (%s) into canonical key '%s' (%s)",
                         variant_id,
@@ -1718,7 +1754,8 @@ class CharacterAnalyzer:
             aliases.extend([variant, str(characters[variant].get("name", variant))])
             characters[target]["aliases"] = list(dict.fromkeys(aliases))
 
-        return self._consolidate_accumulated_characters(characters)
+        _src = "\n".join(ch.text for ch in book.chapters)
+        return self._consolidate_accumulated_characters(characters, source_text=_src)
 
     @classmethod
     def _find_short_name_continuation(

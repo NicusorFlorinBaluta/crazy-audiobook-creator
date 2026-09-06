@@ -111,6 +111,7 @@ class OllamaClient:
         top_p: float = 0.9,
         system: str | None = None,
         format: str | None = None,
+        max_output_tokens: int | None = None,
     ) -> str:
         """Generate a text completion from the LLM.
 
@@ -120,6 +121,7 @@ class OllamaClient:
             top_p: Nucleus sampling parameter.
             system: Optional system prompt.
             format: Optional response format (e.g., 'json').
+            max_output_tokens: Optional per-call override for token limit.
 
         Returns:
             The generated text response.
@@ -130,6 +132,7 @@ class OllamaClient:
         # Never let a failed request inherit diagnostics from the preceding
         # successful request.
         self.last_generation_metrics = {}
+        effective_output_tokens = max(1, max_output_tokens) if max_output_tokens is not None else self.max_output_tokens
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
@@ -145,7 +148,7 @@ class OllamaClient:
                 # Never allow a malformed or looping response to generate
                 # indefinitely. This is also enforced on the client side in
                 # case a server version ignores ``num_predict``.
-                "num_predict": self.max_output_tokens,
+                "num_predict": effective_output_tokens,
                 "num_ctx": self.context_window,
                 "num_gpu": 99,
             },
@@ -242,7 +245,7 @@ class OllamaClient:
                                         "Ollama generation exceeded the configured "
                                         f"{self.max_generation_seconds}s wall-clock limit"
                                     )
-                                if token_count >= self.max_output_tokens and not chunk.get("done"):
+                                if token_count >= effective_output_tokens and not chunk.get("done"):
                                     self._record_generation_abort(
                                         attempt=attempt,
                                         messages=messages,
@@ -253,7 +256,7 @@ class OllamaClient:
                                     )
                                     raise OllamaGenerationLimitError(
                                         "Ollama generation reached the configured "
-                                        f"{self.max_output_tokens}-token output limit"
+                                        f"{effective_output_tokens}-token output limit"
                                     )
                                 # Liveness logging.
                                 if token_count - last_log_tokens >= LOG_INTERVAL_CHUNKS:

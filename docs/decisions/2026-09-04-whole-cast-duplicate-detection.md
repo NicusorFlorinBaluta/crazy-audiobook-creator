@@ -108,6 +108,48 @@ apposition, so the veto stops here and the grounded adjudication stage carries
 that case. **The veto is a safety net for what text can settle
 deterministically, not a complete classifier.**
 
+### 2026-09-06 Update: Distinct Participant Veto & Consolidation Integration
+
+In September 2026, an investigation into why mother `catti_brie` was swallowed by
+her daughter `brie` (Briennelle / Breezy) revealed two gaps in the earlier design:
+
+1. **Conjunctions alone miss interacting family members:** Catti-brie and Breezy
+   share scenes across 21 chapters and 29 sentences, but the author never wrote
+   the literal phrase *"Catti-brie and Breezy"*. Instead, they interact via
+   dialogue direction (*"she said to Breezy"*), physical reactions (*"Breezy looked
+   to Catti-brie"*, *"held her hand up to keep her mother back"*), and adversative
+   clauses (*"Catti-brie started, but Breezy cut her short"*).
+2. **`CharacterAnalyzer._consolidate_accumulated_characters` bypassed local vetoes:**
+   It previously evaluated only alias matches and dialogue counts, allowing
+   asymmetric nickname collisions (e.g. Catti-brie carrying a short alias "Brie")
+   to collapse a canonical character into another speaker with higher line count.
+
+To resolve both without risking false-positive vetoes on legitimate identity reveals
+(e.g., *The Stranger* $\to$ *Jarlaxle*, or *Barrabus the Gray* $\to$ *Artemis Entreri*),
+`conjunction_count` was generalized to `distinct_participant_veto`:
+- **Direct Syntactic Conjunctions:** `A and B`, `A, B, and C`.
+- **Interactive Narrative Beats:** `A (said|spoke|replied|asked|shouted|whispered|nodded|turned|looked) to B`,
+  and adversative clauses `A ..., but B ...`.
+- **Bounded Sentence Co-occurrence:** Bounded distance matching (`{1,300}` chars
+  without sentence boundaries) requiring $\ge 3$ independent sentence co-occurrences
+  between non-overlapping distinct terms. Identity reveals and appositive aliases
+  appear together at most 0–1 time across a book (in the reveal/apposition sentence).
+- **Familial Honorifics:** Extended `_UNVETOABLE` to include familial titles
+  (`uncle`, `aunt`, `grandda`, `grandma`, `grandpa`, `cousin`, etc.) so appositions
+  remain safe from accidental vetoes.
+- **Consolidation Routing:** `CharacterAnalyzer._consolidate_accumulated_characters`
+  now actively routes candidate merges through `merge_veto`, inheriting gender
+  disagreement checks and distinct-participant protection.
+
+**Cross-Book Verification:**
+- *The Finest Edge of Twilight:* Successfully prevented `catti_brie` from being
+  absorbed into `brie`, while cleanly allowing legitimate aliases (`Uncle Jax` $\to$
+  `Jarlaxle`, `Spider Parrafin` $\to$ `Regis`).
+- *Isles of the Emberdark:* Evaluated across all 68 characters, 91 valid character-alias
+  pairs, and 63 chapters (735k characters). Resulted in **0 false positive vetoes**
+  on aliases (Dusk, Starling, Mother Frond, Tuka, etc.) and correctly blocked a
+  cross-gender merge between male `guard` and female officer `guard_woman` (`Saja`).
+
 ## The approval gate is optional, and off by default
 
 `require_approval: false` applies merges that clear every veto and the

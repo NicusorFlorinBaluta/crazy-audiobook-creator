@@ -1,6 +1,6 @@
 # Targeted block adjudication — plan, 2026-09-06
 
-**Status:** Plan — not implemented
+**Status:** Implemented (behind external_validation.tiered_attribution.block_adjudication flag, defaulted off)
 
 Addresses the gap left by
 [../decisions/2026-09-06-speech-tags-outrank-adjudication.md](../decisions/2026-09-06-speech-tags-outrank-adjudication.md):

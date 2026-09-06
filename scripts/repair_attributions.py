@@ -16,6 +16,7 @@ import json
 import logging
 import sys
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -55,6 +56,22 @@ def main():
     parser.add_argument("--escalate-gemini", action="store_true", help="Escalate unresolved Tier 1 lines to Gemini API")
     parser.add_argument(
         "--local-conf", type=float, default=0.85, help="Confidence threshold for Tier 1 local Qwen auto-accept"
+    )
+    parser.add_argument(
+        "--block-adjudication",
+        action="store_true",
+        help="Enable targeted block adjudication for multi-turn dialogue",
+    )
+    parser.add_argument(
+        "--max-suspicious-per-call",
+        type=int,
+        default=8,
+        help="Max suspicious turns per block adjudication call (default: 8)",
+    )
+    parser.add_argument(
+        "--all-blocks",
+        action="store_true",
+        help="Target all blocks instead of only unconfirmed runs",
     )
     args = parser.parse_args()
 
@@ -137,7 +154,7 @@ def main():
         model=ollama_cfg.get("model", DEFAULT_OLLAMA_MODEL),
         timeout=ollama_cfg.get("timeout", 600),
         think=ollama_cfg.get("think", False),
-        max_output_tokens=350,
+        max_output_tokens=int(ollama_cfg.get("max_output_tokens", 350)),
     )
 
     external_validator = GeminiValidationService(
@@ -145,11 +162,17 @@ def main():
         project_path.parent,
     )
 
+    block_adj_cfg = config.get("external_validation", {}).get("tiered_attribution", {}).get("block_adjudication", {})
+    block_enabled = args.block_adjudication or bool(block_adj_cfg.get("enabled", False))
+
     adjudicator = TieredAttributionAdjudicator(
         ollama=ollama,
         external_validator=external_validator,
         registry=registry,
         local_auto_accept=args.local_conf,
+        block_adjudication_enabled=block_enabled,
+        max_suspicious_per_call=args.max_suspicious_per_call,
+        only_unconfirmed_runs=not args.all_blocks,
     )
 
     print(
@@ -161,6 +184,8 @@ def main():
     total_local_resolved = 0
     total_escalated = 0
     total_repairs = 0
+    total_blocks_adjudicated = 0
+    total_block_fallbacks = 0
 
     for ch in chapter_scripts:
         ch_num = ch.chapter_number
@@ -186,12 +211,16 @@ def main():
         total_suspicious += ch_report.summary["total_suspicious"]
         total_local_resolved += ch_report.summary["local_resolved"]
         total_escalated += ch_report.summary["escalated_to_tier2"]
+        total_blocks_adjudicated += ch_report.summary.get("blocks_adjudicated", 0)
+        total_block_fallbacks += ch_report.summary.get("block_fallbacks", 0)
 
         # Print fixes for this chapter
         ch_repairs = [
             r
             for r in ch_report.results
-            if r.resolver_tier == "local_qwen" and r.resolved_speaker and r.resolved_speaker != r.original_speaker
+            if r.resolver_tier in ("local_qwen", "local_qwen_block")
+            and r.resolved_speaker
+            and r.resolved_speaker != r.original_speaker
         ]
         total_repairs += len(ch_repairs)
         if ch_repairs:
@@ -233,6 +262,9 @@ def main():
     print(f"  Total suspicious turns: {total_suspicious}")
     print(f"  Local Qwen resolved:    {total_local_resolved}")
     print(f"  Escalated to Tier 2:    {total_escalated}")
+    if args.block_adjudication:
+        print(f"  Blocks adjudicated:     {total_blocks_adjudicated}")
+        print(f"  Block fallbacks:        {total_block_fallbacks}")
     print(f"  Total speaker repairs:  {total_repairs}")
     print(f"  Dry run mode:           {dry_run}")
     print("=" * 70)
@@ -260,22 +292,28 @@ def main():
             except Exception as exc:
                 logger.warning("Could not update book_script.json: %s", exc)
 
-        # Write final report
-        report_path = project_path / "external_validation" / "tiered_attribution_report.json"
-        atomic_write_json(
-            report_path,
-            {
-                "summary": {
-                    "total_suspicious": total_suspicious,
-                    "local_resolved": total_local_resolved,
-                    "escalated_to_tier2": total_escalated,
-                    "total_repairs": total_repairs,
-                    "dry_run": False,
-                },
-                "results": [r.to_dict() for r in all_results],
-            },
-        )
-        print(f"\nFinal attribution report written to {report_path}")
+    # Write final report or preview across all chapters
+    out_file = "tiered_attribution_preview.json" if dry_run else "tiered_attribution_report.json"
+    report_path = project_path / "external_validation" / out_file
+    summary_dict: dict[str, Any] = {
+        "total_suspicious": total_suspicious,
+        "local_resolved": total_local_resolved,
+        "escalated_to_tier2": total_escalated,
+        "total_repairs": total_repairs,
+        "dry_run": dry_run,
+    }
+    if block_enabled:
+        summary_dict["blocks_adjudicated"] = total_blocks_adjudicated
+        summary_dict["block_fallbacks"] = total_block_fallbacks
+
+    atomic_write_json(
+        report_path,
+        {
+            "summary": summary_dict,
+            "results": [r.to_dict() for r in all_results],
+        },
+    )
+    print(f"\nFinal attribution report written to {report_path}")
 
 
 if __name__ == "__main__":
