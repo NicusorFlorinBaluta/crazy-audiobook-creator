@@ -3676,16 +3676,35 @@ class ScriptGenerator:
             if back >= 0 and tag_tokens[back] in _SUBJECT_PRONOUNS:
                 pronoun_subject_verbs.add(verb_index)
 
+        # An alias that is some *other* character's actual name is not a name
+        # this character answers to -- it is a cast error, and honouring it
+        # makes every tag naming the real owner ambiguous, so the parser
+        # abstains and that character loses every tag they have. Shared
+        # descriptors ("the copper dragon" on twin sisters) are not canonical
+        # names and stay ambiguous, which is correct.
+        canonical_owners: dict[str, set[str]] = {}
+        for other_id, other in registry.characters.items():
+            for value in (other_id, other.name):
+                key = str(value or "").strip().casefold().replace("_", " ")
+                if key:
+                    canonical_owners.setdefault(key, set()).add(other_id)
+
         pre_verbal_matches: list[tuple[int, int, str]] = []
         post_verbal_matches: list[tuple[int, int, str]] = []
 
         for character_id, candidate in registry.characters.items():
             if character_id == "narrator":
                 continue
+            own = {str(value or "").strip().casefold().replace("_", " ") for value in (character_id, candidate.name)}
             names = {
                 value.strip().casefold().replace("_", " ")
                 for value in [character_id, candidate.name, *candidate.aliases]
-                if value.strip() and value.strip().casefold().replace("_", " ") not in _UNSAFE_SPEAKER_ALIASES
+                if value.strip()
+                and value.strip().casefold().replace("_", " ") not in _UNSAFE_SPEAKER_ALIASES
+                and (
+                    value.strip().casefold().replace("_", " ") in own
+                    or character_id in canonical_owners.get(value.strip().casefold().replace("_", " "), {character_id})
+                )
             }
             for name in names:
                 name_tokens = _word_tokens(name)

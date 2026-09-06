@@ -53,12 +53,16 @@ def registry() -> CharacterRegistry:
             "narrator": char("narrator", "Narrator", Gender.OTHER, []),
             "brie": char("brie", "Brie", Gender.FEMALE, ["Breezy", "Catti-brie"]),
             "dahlia": char("dahlia", "Dahlia", Gender.FEMALE, ["Lady Delilah"]),
-            "effron": char("effron", "Effron", Gender.MALE, []),
+            "effron": char("effron", "Effron", Gender.MALE, ["Effron Alegni", "the warlock"]),
             "jarlaxle": char("jarlaxle", "Jarlaxle", Gender.MALE, []),
             "allefaero": char("allefaero", "Allefaero", Gender.MALE, []),
-            # A real cast entry from the book. Its "Effron's" alias absorbed the
-            # possessive marker, so the possessive guard never saw one.
-            "effron_son": char("effron_son", "Effron's Son", Gender.MALE, ["Effron's", "son"]),
+            # Verbatim from the book's cast: a possessive misparsed into a whole
+            # character. Its "Effron's" alias absorbed the possessive marker so
+            # the possessive guard never saw one, and its bare "Effron" alias
+            # made every tag naming the real effron ambiguous.
+            "effron_son": char(
+                "effron_son", "Effron's Son", Gender.MALE, ["son", "Effron's Son", "Effron's", "Effron"]
+            ),
         }
     )
 
@@ -276,3 +280,39 @@ def test_a_lone_pronoun_elsewhere_does_not_veto(registry) -> None:
     result = adjudicator._adjudicate_turn_tier1(_turn(line, "ghaliver", tag), None)
     assert result.resolved_speaker == "ghaliver"
     assert result.resolver_tier == "local_qwen"
+
+
+def test_an_alias_claiming_another_characters_name_is_ignored(registry) -> None:
+    """A misparsed cast entry must not cost the real character every tag.
+
+    This book's cast contained effron_son ("Effron's Son", 4 lines, age_range
+    unknown) -- a possessive minted into a character -- carrying the alias
+    "Effron", which is the real effron's name and 110 lines of dialogue. Because
+    the parser abstains when a name has more than one owner, that 4-line entry
+    silently suppressed every tag naming Effron across the whole book.
+    """
+    assert "effron_son" in registry.characters, "the fixture must reproduce the collision"
+    assert "Effron" in registry.characters["effron_son"].aliases
+
+    for tag in ("said Effron.", "Effron replied quietly."):
+        exact, _kind, _gender = ScriptGenerator._dialogue_tag_evidence(tag, registry)
+        assert exact == "effron", f"{tag!r} resolved to {exact!r}"
+
+
+def test_a_descriptor_shared_by_twins_stays_ambiguous(registry) -> None:
+    """Only canonical names are protected; a shared descriptor is genuinely unclear."""
+    for cid, name in (("ilnezhara", "Ilnezhara"), ("tazmikella", "Tazmikella")):
+        registry.characters[cid] = Character(
+            id=cid,
+            name=name,
+            gender=Gender.FEMALE,
+            age_range="adult",
+            voice_description="v",
+            aliases=["copper dragon", "sister"],
+        )
+
+    ambiguous, _kind, _gender = ScriptGenerator._dialogue_tag_evidence("said the copper dragon.", registry)
+    assert ambiguous is None, "a descriptor both sisters answer to must not pick one"
+
+    named, _kind, _gender = ScriptGenerator._dialogue_tag_evidence("Ilnezhara laughed and said,", registry)
+    assert named == "ilnezhara", "their own names must still resolve"
