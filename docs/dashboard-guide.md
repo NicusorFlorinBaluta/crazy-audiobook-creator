@@ -71,6 +71,26 @@ is an audit aid: tight narrator/dialogue grouping can be intentional.
 
 Quality retry rows link back to their source script line.
 
+## Pronunciation lexicon
+
+Manage phonetic spellings and pronunciations for characters, fantasy terms,
+and book-specific vocabulary:
+
+- **Candidate inventory**: Scans project script text for non-standard words,
+  filtering out recognized vocabulary using an offline English word index.
+- **Search & filtering**: Ranked lexical search with an instant clear (`✕`)
+  action, categorizing entries by Status (Custom, Verified, Defaults).
+- **Audio previews & preview mode**: Audition pronunciation rules using concise
+  context sentences or full carrier phrases. Previewing audio engages Preview Mode,
+  safely pausing active background pipeline jobs; resuming the pipeline automatically
+  exits Preview Mode. Previews can also be batch pregenerated with real-time
+  progress and ETA tracking.
+- **Scoped export & import**: Export rules with granular scope filters (`all`,
+  `custom`, `defaults`). Import rules from JSON files or directly cherry-pick
+  entries from another book project, with side-by-side diff resolution.
+- **Implicit defaults**: Unmodified candidate defaults apply automatically during
+  synthesis without requiring manual confirmation.
+
 ## Book-section review
 
 An uncertain EPUB section appears under **Attention required → Book sections**

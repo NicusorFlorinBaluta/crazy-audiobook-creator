@@ -661,8 +661,20 @@ window.ScriptViewer = (() => {
 
     async function fetchPronunciations(projectId) {
         try {
-            const res = await fetch(`api/projects/${projectId}/pronunciations`);
+            const [res, modeRes] = await Promise.all([
+                fetch(`api/projects/${projectId}/pronunciations`),
+                fetch(`api/projects/${projectId}/pronunciations/preview-mode`).catch(() => null),
+            ]);
             currentData.pronunciations = res.ok ? await res.json() : null;
+            if (modeRes && modeRes.ok) {
+                const modeData = await modeRes.json();
+                window.previewModeState = {
+                    active: Boolean(modeData.preview_mode),
+                    pausedPipeline: Boolean(modeData.paused_pipeline),
+                    voiceId: modeData.voice_id || null,
+                    isWarming: false,
+                };
+            }
         } catch (e) {
             currentData.pronunciations = null;
         }
@@ -1784,6 +1796,8 @@ window.ScriptViewer = (() => {
 
         const unresolvedWithRecs = unresolved.filter(item => item.recommendation_default);
 
+        const pMode = window.previewModeState || { active: false, pausedPipeline: false, voiceId: null, isWarming: false };
+
         section.innerHTML = `
             <details class="quality-section-details pronunciation-details" open id="pronunciation-details">
                 <summary class="quality-section-summary" role="button">
@@ -1794,10 +1808,37 @@ window.ScriptViewer = (() => {
                     <span class="quality-summary-badge resolved">${verified.length} verified</span>
                 </summary>
                 <div class="quality-section-body">
+                    <div class="pronunciation-preview-mode-bar ${pMode.active ? 'active' : ''}" id="preview-mode-bar">
+                        <div class="preview-mode-info">
+                            <span class="preview-mode-icon ${pMode.active ? 'pulse' : ''}">${pMode.active ? '🟢' : '⚡'}</span>
+                            <div>
+                                <strong>${pMode.active ? '<span style="color: #4ade80;">Preview Mode Active — Qwen TTS Ready</span>' : 'Instant Qwen TTS Preview Mode'}</strong>
+                                <small class="preview-mode-desc">
+                                    ${pMode.active
+                                        ? `Engine primed for fast generation with voice: <code>${escapeHtml(pMode.voiceId || 'Narrator')}</code>${pMode.pausedPipeline ? ' · <span style="color: #fbbf24;">⏸️ Book paused to avoid GPU lock contention</span>' : ''}`
+                                        : 'Warms up Qwen3-TTS engine and pauses book generation so previews synthesize in seconds without GPU lock delays.'
+                                    }
+                                </small>
+                            </div>
+                        </div>
+                        <div class="preview-mode-actions">
+                            ${pMode.active && pMode.pausedPipeline ? `
+                                <label class="preview-mode-resume-toggle" title="Automatically resume book generation when exiting preview mode">
+                                    <input type="checkbox" id="preview-mode-resume-checkbox" checked>
+                                    <span>Resume book on exit</span>
+                                </label>
+                            ` : ''}
+                            <button type="button" class="btn btn-sm ${pMode.active ? 'btn-preview-mode-exit' : 'btn-preview-mode-toggle'}" id="btn-toggle-preview-mode" ${pMode.isWarming ? 'disabled' : ''}>
+                                ${pMode.isWarming ? '⏳ Warming Up Engine...' : (pMode.active ? '🛑 Exit Preview Mode' : '⚡ Enter Preview Mode')}
+                            </button>
+                        </div>
+                    </div>
+
                     <div class="pronunciation-add-card">
                         <strong>+ Add Custom Phonetic Replacement</strong>
-                        <input type="text" id="lexicon-custom-term" placeholder="Word in book (e.g. homeisle, homeisler)" maxlength="120">
-                        <input type="text" id="lexicon-custom-spoken" placeholder="Spoken form with spaces (e.g. Home aisle, Home eye ler)" maxlength="240">
+                        <input type="text" id="lexicon-custom-term" placeholder="Word in book (e.g. homeisle, kokerlii)" maxlength="120">
+                        <input type="text" id="lexicon-custom-spoken" placeholder="Phonetic respelling (e.g. Homeaisle, Home-aisle, Drizt)" maxlength="240">
+                        <small style="color:var(--color-text-muted, #94a3b8); display:block; margin-top:-4px;">Tip: Single-word phonetic spellings (e.g. Homeaisle, Cokerlee, Drizt) sound most natural without pauses.</small>
                         <div style="display:flex; gap:8px; align-items:center;">
                             <button type="button" class="btn btn-ghost btn-sm" id="btn-preview-lexicon-custom" title="Test native TTS audio preview">▶ Test Preview</button>
                             <button type="button" class="btn btn-primary btn-sm" id="btn-add-lexicon-custom">+ Add / Update Term</button>
@@ -1805,13 +1846,29 @@ window.ScriptViewer = (() => {
                     </div>
 
                     <div class="pronunciation-toolbar">
-                        <div class="pronunciation-search-bar" style="flex: 1;">
+                        <div class="pronunciation-search-bar" style="flex: 1; position: relative;">
                             <input type="text" id="lexicon-search-input" placeholder="🔍 Search words, terms, or replacements in lexicon...">
+                            <button type="button" class="btn-clear-search" id="btn-clear-lexicon-search" title="Clear search" style="display: none;">&times;</button>
                         </div>
                         <div class="pronunciation-filter-tabs">
                             <button type="button" class="btn btn-ghost btn-sm lex-tab active" data-filter="all">All (${candidates.length})</button>
                             <button type="button" class="btn btn-ghost btn-sm lex-tab" data-filter="verified">Verified (${verified.length})</button>
                             <button type="button" class="btn btn-ghost btn-sm lex-tab" data-filter="unresolved">Suggestions (${unresolved.length})</button>
+                        </div>
+                        <div class="pronunciation-io-actions">
+                            <div class="lexicon-export-dropdown" style="position: relative;">
+                                <button type="button" class="btn btn-ghost btn-sm" id="btn-lexicon-export-toggle" title="Export lexicon mappings">
+                                    📤 Export ▾
+                                </button>
+                                <div class="lexicon-dropdown-menu" id="lexicon-export-menu" style="display: none;">
+                                    <button type="button" class="lexicon-menu-item" data-scope="all">Export All Active</button>
+                                    <button type="button" class="lexicon-menu-item" data-scope="verified">Export Verified / Custom Only</button>
+                                    <button type="button" class="lexicon-menu-item" data-scope="defaults">Export Defaults Only</button>
+                                </div>
+                            </div>
+                            <button type="button" class="btn btn-ghost btn-sm" id="btn-lexicon-import" title="Import pronunciations from file or another project">
+                                📥 Import...
+                            </button>
                         </div>
                     </div>
 
@@ -1820,11 +1877,9 @@ window.ScriptViewer = (() => {
                             <input type="checkbox" id="lexicon-carrier-toggle" ${lexState.inSentence ? 'checked' : ''}>
                             <span>Sentence context preview</span>
                         </label>
-                        ${unresolvedWithRecs.length > 0 ? `
-                            <button type="button" class="btn btn-sm btn-batch-accept" id="btn-lexicon-batch-accept" title="Accept all default recommendations for unverified terms">
-                                ✨ Accept All Defaults (${unresolvedWithRecs.length})
-                            </button>
-                        ` : ''}
+                        <div class="pronunciation-defaults-indicator" title="All recommended pronunciations are applied automatically during generation unless customized">
+                            <span style="color: #34d399; font-size: 0.78rem; font-weight: 500;">✓ Defaults active in generation</span>
+                        </div>
                     </div>
 
                     <div class="pronunciation-list" id="pronunciation-items-container"></div>
@@ -1848,6 +1903,29 @@ window.ScriptViewer = (() => {
             </details>
         `;
 
+        function matchesTerm(item, q) {
+            const term = (item.term || '').toLowerCase();
+            const spoken = (item.spoken_text || '').toLowerCase();
+            const defRec = (item.recommendation_default || '').toLowerCase();
+            const altRec = (item.recommendation_alternate || '').toLowerCase();
+            return term.includes(q) || spoken.includes(q) || defRec.includes(q) || altRec.includes(q);
+        }
+
+        function getRelevanceScore(item, q) {
+            const term = (item.term || '').toLowerCase();
+            const spoken = (item.spoken_text || '').toLowerCase();
+            const defRec = (item.recommendation_default || '').toLowerCase();
+            const altRec = (item.recommendation_alternate || '').toLowerCase();
+
+            if (term === q) return 0; // Exact term match (highest priority)
+            if (term.startsWith(q)) return 1; // Term prefix
+            if (spoken === q || defRec === q || altRec === q) return 2; // Exact spoken/replacement
+            if (spoken.startsWith(q) || defRec.startsWith(q)) return 3; // Spoken prefix
+            if (term.includes(q)) return 4; // Term substring
+            if (spoken.includes(q) || defRec.includes(q) || altRec.includes(q)) return 5; // Spoken substring
+            return 6; // Context fallback
+        }
+
         function renderList() {
             const container = section.querySelector('#pronunciation-items-container');
             if (!container) return;
@@ -1857,16 +1935,40 @@ window.ScriptViewer = (() => {
             if (lexState.filter === 'verified') pool = verified;
             else if (lexState.filter === 'unresolved') pool = unresolved;
 
-            const filtered = pool.filter(item => {
-                if (!q) return true;
-                return (
-                    item.term.toLowerCase().includes(q) ||
-                    (item.spoken_text || '').toLowerCase().includes(q) ||
-                    (item.recommendation_default || '').toLowerCase().includes(q) ||
-                    (item.recommendation_alternate || '').toLowerCase().includes(q) ||
-                    (item.contexts || []).some(c => c.toLowerCase().includes(q))
-                );
-            });
+            let filtered;
+            if (!q) {
+                filtered = pool.slice();
+            } else {
+                // If user is searching on a specific tab with 0 matches, but matches exist in the full lexicon,
+                // automatically search across all candidates so the user doesn't miss verified/suggested terms.
+                if (lexState.filter !== 'all' && !pool.some(item => matchesTerm(item, q)) && candidates.some(item => matchesTerm(item, q))) {
+                    pool = candidates;
+                    lexState.filter = 'all';
+                    section.querySelectorAll('.lex-tab').forEach(t => {
+                        t.classList.toggle('active', t.dataset.filter === 'all');
+                    });
+                }
+
+                // Primary search: match terms, spoken forms, or recommendations
+                const termMatches = pool.filter(item => matchesTerm(item, q));
+                if (termMatches.length > 0) {
+                    filtered = termMatches;
+                } else {
+                    // Fallback: search context sentences only if no term or replacement matched
+                    filtered = pool.filter(item => (item.contexts || []).some(c => c.toLowerCase().includes(q)));
+                }
+
+                // Sort by relevance to search query: exact matches and prefixes first!
+                filtered.sort((a, b) => {
+                    const scoreA = getRelevanceScore(a, q);
+                    const scoreB = getRelevanceScore(b, q);
+                    if (scoreA !== scoreB) return scoreA - scoreB;
+                    if ((b.occurrences || 0) !== (a.occurrences || 0)) {
+                        return (b.occurrences || 0) - (a.occurrences || 0);
+                    }
+                    return (a.term || '').localeCompare(b.term || '');
+                });
+            }
 
             const pageSize = lexState.pageSize === 'all' ? filtered.length : Number(lexState.pageSize);
             const totalPages = Math.max(1, Math.ceil(filtered.length / (pageSize || 1)));
@@ -1919,7 +2021,7 @@ window.ScriptViewer = (() => {
                                         </div>
                                     ` : ''}
                                 </div>
-                                <input type="text" maxlength="240" value="${escapeHtml(defaultRec)}" placeholder="Spoken form, e.g. Pah chee" aria-label="Spoken form for ${escapeHtml(item.term)}">
+                                <input type="text" maxlength="240" value="${escapeHtml(defaultRec)}" placeholder="Phonetic respelling, e.g. Homeaisle, Drizt" aria-label="Spoken form for ${escapeHtml(item.term)}">
                                 <div style="display:flex; align-items:center; gap:6px;">
                                     <button type="button" class="btn btn-ghost btn-sm pronunciation-preview-unresolved" data-term="${escapeHtml(item.term)}" title="Test native TTS audio preview">▶ Preview</button>
                                     <button type="button" class="btn btn-secondary pronunciation-save">Verify</button>
@@ -2012,24 +2114,83 @@ window.ScriptViewer = (() => {
             lexState.inSentence = e.target.checked;
         });
 
-        section.querySelector('#btn-lexicon-batch-accept')?.addEventListener('click', async () => {
-            const batch = {};
-            unresolved.forEach(item => {
-                if (item.recommendation_default) {
-                    batch[item.term] = item.recommendation_default;
-                }
-            });
-            const count = Object.keys(batch).length;
-            if (!count) return;
-            if (confirm(`Accept default recommendations for all ${count} unverified terms?`)) {
-                await batchApprovePronunciations(batch, section.querySelector('#btn-lexicon-batch-accept'));
+        // Search clear button
+        const searchInput = section.querySelector('#lexicon-search-input');
+        const clearSearchBtn = section.querySelector('#btn-clear-lexicon-search');
+
+        searchInput?.addEventListener('input', (e) => {
+            lexState.search = e.target.value.trim();
+            if (clearSearchBtn) clearSearchBtn.style.display = e.target.value.length ? 'flex' : 'none';
+            lexState.page = 1;
+            renderList();
+        });
+
+        clearSearchBtn?.addEventListener('click', () => {
+            if (searchInput) searchInput.value = '';
+            lexState.search = '';
+            if (clearSearchBtn) clearSearchBtn.style.display = 'none';
+            searchInput?.focus();
+            lexState.page = 1;
+            renderList();
+        });
+
+        searchInput?.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                e.target.value = '';
+                lexState.search = '';
+                if (clearSearchBtn) clearSearchBtn.style.display = 'none';
+                lexState.page = 1;
+                renderList();
             }
         });
 
-        section.querySelector('#lexicon-search-input')?.addEventListener('input', (e) => {
-            lexState.search = e.target.value.trim();
-            lexState.page = 1;
-            renderList();
+        // Export dropdown menu
+        const exportToggleBtn = section.querySelector('#btn-lexicon-export-toggle');
+        const exportMenu = section.querySelector('#lexicon-export-menu');
+
+        exportToggleBtn?.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (!exportMenu) return;
+            const isShown = exportMenu.style.display === 'flex';
+            exportMenu.style.display = isShown ? 'none' : 'flex';
+        });
+
+        document.addEventListener('click', (e) => {
+            if (exportMenu && !exportMenu.contains(e.target) && e.target !== exportToggleBtn) {
+                exportMenu.style.display = 'none';
+            }
+        });
+
+        exportMenu?.querySelectorAll('.lexicon-menu-item').forEach(item => {
+            item.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                if (exportMenu) exportMenu.style.display = 'none';
+                const scope = item.dataset.scope || 'all';
+                const projectId = window.state?.currentProjectId;
+                if (!projectId) return;
+
+                try {
+                    const res = await fetch(`api/projects/${encodeURIComponent(projectId)}/pronunciations/export?scope=${encodeURIComponent(scope)}`);
+                    if (!res.ok) throw new Error('Failed to export lexicon');
+                    const blob = await res.blob();
+                    const url = window.URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `${projectId}_lexicon_${scope}.json`;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    window.URL.revokeObjectURL(url);
+                    showToast(`Exported lexicon (${scope})`, 'success');
+                } catch (err) {
+                    showToast(`Export failed: ${err.message}`, 'error');
+                }
+            });
+        });
+
+        // Import modal
+        section.querySelector('#btn-lexicon-import')?.addEventListener('click', () => {
+            openLexiconImportModal(window.state?.currentProjectId, candidates, verified);
         });
 
         section.querySelectorAll('.lex-tab').forEach(tab => {
@@ -2058,6 +2219,53 @@ window.ScriptViewer = (() => {
             renderList();
         });
 
+        section.querySelector('#btn-toggle-preview-mode')?.addEventListener('click', async (e) => {
+            const btn = e.currentTarget;
+            const projectId = window.state?.currentProjectId;
+            if (!projectId) return;
+
+            const isCurrentlyActive = Boolean(window.previewModeState?.active);
+            const resumeChecked = section.querySelector('#preview-mode-resume-checkbox')?.checked ?? true;
+
+            btn.disabled = true;
+            btn.innerHTML = isCurrentlyActive ? '⏳ Exiting...' : '⏳ Warming up engine...';
+            window.previewModeState = window.previewModeState || {};
+            window.previewModeState.isWarming = true;
+
+            try {
+                const res = await fetch(`api/projects/${encodeURIComponent(projectId)}/pronunciations/preview-mode`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        enabled: !isCurrentlyActive,
+                        resume_pipeline: isCurrentlyActive ? resumeChecked : false,
+                    })
+                });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) throw new Error(data.detail || 'Could not toggle preview mode');
+
+                window.previewModeState = {
+                    active: Boolean(data.preview_mode),
+                    pausedPipeline: Boolean(data.paused_pipeline),
+                    voiceId: data.voice_id || null,
+                    isWarming: false,
+                };
+
+                if (data.preview_mode) {
+                    showToast('Preview mode active! Qwen TTS model primed.', 'success');
+                } else {
+                    const resumeNote = data.pipeline_resumed ? ' (Book generation resumed)' : '';
+                    showToast(`Exited preview mode.${resumeNote}`, 'info');
+                }
+                renderQuality();
+            } catch (err) {
+                showToast(err.message, 'error');
+                if (window.previewModeState) window.previewModeState.isWarming = false;
+                btn.disabled = false;
+                btn.innerHTML = isCurrentlyActive ? '🛑 Exit Preview Mode' : '⚡ Enter Preview Mode';
+            }
+        });
+
         section.querySelector('#btn-preview-lexicon-custom')?.addEventListener('click', () => {
             const termInput = section.querySelector('#lexicon-custom-term');
             const spokenInput = section.querySelector('#lexicon-custom-spoken');
@@ -2070,7 +2278,7 @@ window.ScriptViewer = (() => {
             previewPronunciation(term, spoken, section.querySelector('#btn-preview-lexicon-custom'), lexState.inSentence, null);
         });
 
-        section.querySelector('#btn-add-lexicon-custom')?.addEventListener('click', () => {
+        section.querySelector('#btn-add-lexicon-custom')?.addEventListener('click', async () => {
             const termInput = section.querySelector('#lexicon-custom-term');
             const spokenInput = section.querySelector('#lexicon-custom-spoken');
             const term = termInput?.value.trim();
@@ -2079,10 +2287,388 @@ window.ScriptViewer = (() => {
                 showToast('Please enter both the word and its phonetic replacement', 'warning');
                 return;
             }
-            approvePronunciation(term, spoken, section.querySelector('#btn-add-lexicon-custom'));
+            const ok = await approvePronunciation(term, spoken, section.querySelector('#btn-add-lexicon-custom'));
+            if (ok) {
+                if (termInput) termInput.value = '';
+                if (spokenInput) spokenInput.value = '';
+            }
         });
 
         els.qualityOverview.appendChild(section);
+    }
+
+    function openLexiconImportModal(projectId, currentCandidates, currentVerified) {
+        document.querySelector('.lexicon-modal-backdrop')?.remove();
+
+        const currentMap = new Map();
+        (currentCandidates || []).forEach(c => {
+            currentMap.set((c.term || '').toLowerCase(), {
+                term: c.term,
+                spoken: c.spoken_text || c.recommendation_default || '',
+                isVerified: c.status === 'verified',
+            });
+        });
+
+        const backdrop = document.createElement('div');
+        backdrop.className = 'lexicon-modal-backdrop';
+        backdrop.innerHTML = `
+            <div class="lexicon-modal" role="dialog" aria-labelledby="lexicon-modal-title">
+                <div class="lexicon-modal-header">
+                    <h3 id="lexicon-modal-title">📥 Import Pronunciation Lexicon</h3>
+                    <button type="button" class="lexicon-modal-close" id="btn-close-import-modal">&times;</button>
+                </div>
+                <div class="lexicon-modal-body">
+                    <div class="source-selector-tabs">
+                        <button type="button" class="source-tab-btn active" id="tab-src-project">From Another Project</button>
+                        <button type="button" class="source-tab-btn" id="tab-src-file">Upload JSON File</button>
+                    </div>
+
+                    <div id="source-project-panel" style="display: flex; flex-direction: column; gap: 8px;">
+                        <label style="font-size: 0.8rem; color: var(--text-secondary);">Select source project in app:</label>
+                        <select id="select-import-source-project" class="input-sm" style="width: 100%; max-width: 400px; padding: 6px 10px;">
+                            <option value="">Loading projects...</option>
+                        </select>
+                    </div>
+
+                    <div id="source-file-panel" style="display: none; flex-direction: column; gap: 8px;">
+                        <label style="font-size: 0.8rem; color: var(--text-secondary);">Choose a lexicon JSON file:</label>
+                        <input type="file" id="input-import-file" accept=".json" style="font-size: 0.82rem;">
+                    </div>
+
+                    <div id="import-comparison-section" style="display: none; flex-direction: column; gap: 10px;">
+                        <div class="cherrypick-toolbar">
+                            <div class="cherrypick-filters">
+                                <button type="button" class="btn btn-ghost btn-sm cherry-filter active" data-filter="all">All (<span id="cherry-count-all">0</span>)</button>
+                                <button type="button" class="btn btn-ghost btn-sm cherry-filter" data-filter="actionable">New & Conflicts (<span id="cherry-count-actionable">0</span>)</button>
+                                <button type="button" class="btn btn-ghost btn-sm cherry-filter" data-filter="conflicts">Conflicts Only (<span id="cherry-count-conflicts">0</span>)</button>
+                            </div>
+                            <div style="display: flex; gap: 8px; align-items: center;">
+                                <button type="button" class="btn btn-ghost btn-sm" id="btn-cherry-select-all">Select All</button>
+                                <button type="button" class="btn btn-ghost btn-sm" id="btn-cherry-deselect-all">Deselect All</button>
+                            </div>
+                        </div>
+
+                        <div class="cherrypick-table-container">
+                            <table class="cherrypick-table">
+                                <thead>
+                                    <tr>
+                                        <th style="width: 36px; text-align: center;"><input type="checkbox" id="cherry-master-checkbox" checked></th>
+                                        <th>Term</th>
+                                        <th>Incoming Pronunciation</th>
+                                        <th>Current in Project</th>
+                                        <th style="width: 110px;">Status</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="cherrypick-table-body"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+                <div class="lexicon-modal-footer">
+                    <button type="button" class="btn btn-ghost btn-sm" id="btn-cancel-import">Cancel</button>
+                    <button type="button" class="btn btn-primary btn-sm" id="btn-apply-import" disabled>
+                        Import Selected (0 terms)
+                    </button>
+                </div>
+            </div>
+        `;
+
+        document.body.appendChild(backdrop);
+
+        let comparisonItems = []; // { term, incoming, current, status, selected }
+        let currentFilter = 'all';
+
+        const closeModal = () => backdrop.remove();
+        backdrop.querySelector('#btn-close-import-modal')?.addEventListener('click', closeModal);
+        backdrop.querySelector('#btn-cancel-import')?.addEventListener('click', closeModal);
+        backdrop.addEventListener('click', (e) => {
+            if (e.target === backdrop) closeModal();
+        });
+
+        // Tab switching
+        const tabProject = backdrop.querySelector('#tab-src-project');
+        const tabFile = backdrop.querySelector('#tab-src-file');
+        const panelProject = backdrop.querySelector('#source-project-panel');
+        const panelFile = backdrop.querySelector('#source-file-panel');
+
+        tabProject?.addEventListener('click', () => {
+            tabProject.classList.add('active');
+            tabFile.classList.remove('active');
+            panelProject.style.display = 'flex';
+            panelFile.style.display = 'none';
+        });
+
+        tabFile?.addEventListener('click', () => {
+            tabFile.classList.add('active');
+            tabProject.classList.remove('active');
+            panelFile.style.display = 'flex';
+            panelProject.style.display = 'none';
+        });
+
+        // Populate projects dropdown
+        const projectSelect = backdrop.querySelector('#select-import-source-project');
+        fetch('api/projects')
+            .then(res => res.json())
+            .then(data => {
+                const projects = (data.projects || []).filter(p => p.project_id !== projectId);
+                if (!projects.length) {
+                    projectSelect.innerHTML = '<option value="">No other projects available</option>';
+                    return;
+                }
+                projectSelect.innerHTML = '<option value="">-- Choose a project --</option>' +
+                    projects.map(p => `<option value="${escapeHtml(p.project_id)}">${escapeHtml(p.title || p.project_id)}</option>`).join('');
+            })
+            .catch(() => {
+                projectSelect.innerHTML = '<option value="">Could not load projects</option>';
+            });
+
+        projectSelect?.addEventListener('change', async () => {
+            const srcId = projectSelect.value;
+            if (!srcId) return;
+            try {
+                const res = await fetch(`api/projects/${encodeURIComponent(srcId)}/pronunciations/export?scope=all`);
+                if (!res.ok) throw new Error('Could not fetch source lexicon');
+                const data = await res.json();
+                processIncomingLexicon(data.lexicon || {});
+            } catch (err) {
+                showToast(err.message, 'error');
+            }
+        });
+
+        // File upload handling
+        const fileInput = backdrop.querySelector('#input-import-file');
+        fileInput?.addEventListener('change', (e) => {
+            const file = e.target.files?.[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = (evt) => {
+                try {
+                    const parsed = JSON.parse(evt.target?.result || '{}');
+                    const lexicon = parsed.lexicon || parsed;
+                    processIncomingLexicon(lexicon);
+                } catch {
+                    showToast('Invalid JSON file format', 'error');
+                }
+            };
+            reader.readAsText(file);
+        });
+
+        function processIncomingLexicon(rawLexicon) {
+            comparisonItems = [];
+            const byKey = new Map();
+
+            for (const [rawTerm, spokenVal] of Object.entries(rawLexicon)) {
+                if (!rawTerm) continue;
+                const spoken = typeof spokenVal === 'object' && spokenVal !== null
+                    ? (spokenVal.spoken || spokenVal.default || '')
+                    : String(spokenVal || '');
+                if (!spoken) continue;
+
+                const folded = rawTerm.trim().toLowerCase();
+                if (!folded) continue;
+
+                const cur = currentMap.get(folded);
+                const displayTerm = cur ? cur.term : rawTerm.trim();
+                let status = 'new';
+                let currentText = '—';
+                let selected = true;
+
+                if (cur) {
+                    currentText = cur.spoken || '—';
+                    if (cur.spoken && cur.spoken.toLowerCase() === spoken.toLowerCase()) {
+                        status = 'identical';
+                        selected = false;
+                    } else {
+                        status = 'conflict';
+                    }
+                }
+
+                const newItem = {
+                    term: displayTerm,
+                    incoming: spoken,
+                    current: currentText,
+                    status,
+                    selected,
+                    rawTerm: rawTerm.trim(),
+                };
+
+                if (!byKey.has(folded)) {
+                    byKey.set(folded, newItem);
+                } else {
+                    const existing = byKey.get(folded);
+                    // If existing had conflict but newItem is identical, prefer identical (matches current project)
+                    if (existing.status === 'conflict' && newItem.status === 'identical') {
+                        byKey.set(folded, newItem);
+                    } else if (existing.status === 'identical' && newItem.status === 'conflict') {
+                        // Keep identical
+                    } else if (rawTerm !== rawTerm.toLowerCase() && existing.rawTerm === existing.rawTerm.toLowerCase()) {
+                        // Prefer casing with uppercase/titlecase over all-lowercase
+                        byKey.set(folded, newItem);
+                    } else {
+                        byKey.set(folded, newItem);
+                    }
+                }
+            }
+
+            comparisonItems = Array.from(byKey.values());
+
+            comparisonItems.sort((a, b) => {
+                const order = { conflict: 0, new: 1, identical: 2 };
+                const ordA = order[a.status] ?? 3;
+                const ordB = order[b.status] ?? 3;
+                if (ordA !== ordB) return ordA - ordB;
+                return a.term.localeCompare(b.term);
+            });
+
+            backdrop.querySelector('#import-comparison-section').style.display = 'flex';
+            updateCherrypickCounts();
+            renderCherrypickRows();
+            updateApplyButton();
+        }
+
+        function updateCherrypickCounts() {
+            const total = comparisonItems.length;
+            const actionable = comparisonItems.filter(i => i.status === 'new' || i.status === 'conflict').length;
+            const conflicts = comparisonItems.filter(i => i.status === 'conflict').length;
+
+            const elAll = backdrop.querySelector('#cherry-count-all');
+            const elAct = backdrop.querySelector('#cherry-count-actionable');
+            const elConf = backdrop.querySelector('#cherry-count-conflicts');
+            if (elAll) elAll.textContent = total;
+            if (elAct) elAct.textContent = actionable;
+            if (elConf) elConf.textContent = conflicts;
+        }
+
+        function renderCherrypickRows() {
+            const tbody = backdrop.querySelector('#cherrypick-table-body');
+            if (!tbody) return;
+
+            const visible = comparisonItems.filter(item => {
+                if (currentFilter === 'conflicts') return item.status === 'conflict';
+                if (currentFilter === 'actionable') return item.status === 'new' || item.status === 'conflict';
+                return true;
+            });
+
+            if (!visible.length) {
+                tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--text-muted); padding: 20px;">No terms match this filter</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = visible.map(item => {
+                const badgeClass = item.status === 'new' ? 'new' : (item.status === 'conflict' ? 'conflict' : 'identical');
+                const badgeLabel = item.status === 'new' ? 'New' : (item.status === 'conflict' ? 'Overwrite' : 'Identical');
+                return `
+                    <tr>
+                        <td style="text-align: center;">
+                            <input type="checkbox" class="cherry-row-check" data-term="${escapeHtml(item.term)}" ${item.selected ? 'checked' : ''}>
+                        </td>
+                        <td><strong>${escapeHtml(item.term)}</strong></td>
+                        <td><code style="color: #67e8f9;">${escapeHtml(item.incoming)}</code></td>
+                        <td><span style="color: var(--text-muted);">${escapeHtml(item.current)}</span></td>
+                        <td><span class="badge-comparison ${badgeClass}">${badgeLabel}</span></td>
+                    </tr>
+                `;
+            }).join('');
+
+            tbody.querySelectorAll('.cherry-row-check').forEach(chk => {
+                chk.addEventListener('change', (e) => {
+                    const term = e.target.dataset.term;
+                    const item = comparisonItems.find(i => i.term === term);
+                    if (item) item.selected = e.target.checked;
+                    updateApplyButton();
+                });
+            });
+        }
+
+        function updateApplyButton() {
+            const selectedCount = comparisonItems.filter(i => i.selected).length;
+            const applyBtn = backdrop.querySelector('#btn-apply-import');
+            if (applyBtn) {
+                applyBtn.disabled = selectedCount === 0;
+                applyBtn.textContent = `Import Selected (${selectedCount} term${selectedCount === 1 ? '' : 's'})`;
+            }
+            const masterCheck = backdrop.querySelector('#cherry-master-checkbox');
+            if (masterCheck) {
+                const visible = comparisonItems.filter(item => {
+                    if (currentFilter === 'conflicts') return item.status === 'conflict';
+                    if (currentFilter === 'actionable') return item.status === 'new' || item.status === 'conflict';
+                    return true;
+                });
+                masterCheck.checked = visible.length > 0 && visible.every(i => i.selected);
+            }
+        }
+
+        backdrop.querySelectorAll('.cherry-filter').forEach(btn => {
+            btn.addEventListener('click', () => {
+                backdrop.querySelectorAll('.cherry-filter').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                currentFilter = btn.dataset.filter || 'all';
+                renderCherrypickRows();
+                updateApplyButton();
+            });
+        });
+
+        backdrop.querySelector('#btn-cherry-select-all')?.addEventListener('click', () => {
+            comparisonItems.forEach(i => {
+                if (currentFilter === 'conflicts' && i.status !== 'conflict') return;
+                if (currentFilter === 'actionable' && i.status === 'identical') return;
+                i.selected = true;
+            });
+            renderCherrypickRows();
+            updateApplyButton();
+        });
+
+        backdrop.querySelector('#btn-cherry-deselect-all')?.addEventListener('click', () => {
+            comparisonItems.forEach(i => i.selected = false);
+            renderCherrypickRows();
+            updateApplyButton();
+        });
+
+        backdrop.querySelector('#cherry-master-checkbox')?.addEventListener('change', (e) => {
+            const isChecked = e.target.checked;
+            comparisonItems.forEach(i => {
+                if (currentFilter === 'conflicts' && i.status !== 'conflict') return;
+                if (currentFilter === 'actionable' && i.status === 'identical') return;
+                i.selected = isChecked;
+            });
+            renderCherrypickRows();
+            updateApplyButton();
+        });
+
+        backdrop.querySelector('#btn-apply-import')?.addEventListener('click', async () => {
+            const selected = comparisonItems.filter(i => i.selected);
+            if (!selected.length) return;
+
+            const applyBtn = backdrop.querySelector('#btn-apply-import');
+            applyBtn.disabled = true;
+            applyBtn.textContent = 'Importing...';
+
+            const batch = {};
+            selected.forEach(i => {
+                batch[i.term] = i.incoming;
+            });
+
+            try {
+                const res = await fetch(`api/projects/${encodeURIComponent(projectId)}/pronunciations/batch`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ entries: batch })
+                });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) throw new Error(data.detail || 'Import failed');
+
+                showToast(`Successfully imported ${selected.length} pronunciation mapping${selected.length === 1 ? '' : 's'}!`, 'success');
+                closeModal();
+                if (typeof fetchQualityReview === 'function') {
+                    await fetchQualityReview(projectId);
+                    renderQuality();
+                }
+            } catch (err) {
+                showToast(err.message, 'error');
+                applyBtn.disabled = false;
+                applyBtn.textContent = `Import Selected (${selected.length} terms)`;
+            }
+        });
     }
 
     let activePreviewAudio = null;
@@ -2101,9 +2687,13 @@ window.ScriptViewer = (() => {
             activePreviewAudio = null;
         }
 
+        const pMode = window.previewModeState || {};
+        const isPreviewMode = Boolean(pMode.active);
         const originalHtml = button.innerHTML;
         button.disabled = true;
-        button.innerHTML = '🔊 <span class="preview-spinner">...</span>';
+        button.innerHTML = isPreviewMode
+            ? '🔊 <span class="preview-spinner">Qwen TTS...</span>'
+            : '🔊 <span class="preview-spinner">...</span>';
 
         try {
             const response = await fetch(`api/projects/${encodeURIComponent(projectId)}/pronunciations/preview`, {
@@ -2127,19 +2717,24 @@ window.ScriptViewer = (() => {
                     activePreviewAudio = null;
                 };
                 audio.onerror = () => {
-                    playWebSpeechFallback(spoken, button, originalHtml);
+                    playWebSpeechFallback(spoken, button, originalHtml, 'Preview audio decode error');
                 };
                 button.innerHTML = '🔊 Playing...';
                 await audio.play();
             } else {
-                playWebSpeechFallback(spoken, button, originalHtml);
+                const msg = data.message || 'TTS generation unavailable.';
+                playWebSpeechFallback(spoken, button, originalHtml, msg);
             }
         } catch (error) {
-            playWebSpeechFallback(spoken, button, originalHtml);
+            playWebSpeechFallback(spoken, button, originalHtml, error.message);
         }
     }
 
-    function playWebSpeechFallback(text, button, originalHtml) {
+    function playWebSpeechFallback(text, button, originalHtml, reason = '') {
+        const isPreviewMode = Boolean(window.previewModeState?.active);
+        if (isPreviewMode && reason) {
+            showToast(`Qwen TTS unavailable (${reason}). Using browser speech.`, 'warning');
+        }
         if ('speechSynthesis' in window) {
             window.speechSynthesis.cancel();
             const utterance = new SpeechSynthesisUtterance(text);
@@ -2187,7 +2782,7 @@ window.ScriptViewer = (() => {
         const spoken = spokenText.trim();
         if (!projectId || !term || !spoken) {
             showToast('Enter the exact spoken form first', 'warning');
-            return;
+            return false;
         }
         button.disabled = true;
         try {
@@ -2201,9 +2796,11 @@ window.ScriptViewer = (() => {
             currentData.pronunciations = data.inventory;
             showToast(`Pronunciation for "${term}" saved! (${data.affected_chapters.length} chapter${data.affected_chapters.length === 1 ? '' : 's'} updated)`, 'success');
             renderQuality();
+            return true;
         } catch (error) {
             showToast(error.message, 'error');
             button.disabled = false;
+            return false;
         }
     }
 

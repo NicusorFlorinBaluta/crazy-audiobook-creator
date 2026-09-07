@@ -1349,6 +1349,9 @@ async def start_pipeline(
     if not pipeline or not job_queue:
         raise HTTPException(status_code=503, detail="Server not initialized")
 
+    # Automatically exit preview mode if active for this project
+    runtime.exit_preview_mode(project_id)
+
     if project_id in running_tasks and not running_tasks[project_id].done():
         current = job_queue.get_job(project_id)
         if current.get("status") in (

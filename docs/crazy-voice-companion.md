@@ -70,8 +70,27 @@ The compiled Android application (`Voice-CrazyAudiobook-debug.apk`) is continuou
 | :--- | :--- | :--- |
 | **24/7 NAS Remote Streamer** | Primary 24/7 remote download (always online) | `https://<username>:<password>@crazyha.mywire.org/bookplayer/Voice-CrazyAudiobook-debug.apk` <br>*(or browse to `https://crazyha.mywire.org/bookplayer/Voice-CrazyAudiobook-debug.apk` and enter basic auth credentials)* |
 | **Creator PC Direct** | Workstation direct download endpoint | `http://192.168.50.44:8000/api/mobile/v1/app` |
-| **Local Project Root** | Copied to Creator repository root | `e:\Projects\crazy-audiobook-creator\Voice-CrazyAudiobook-debug.apk` |
+| **Local Project Root (Creator)** | Copied to Creator repository root | `e:\Projects\crazy-audiobook-creator\Voice-CrazyAudiobook-debug.apk` |
+| **Local Project Root (Voice)** | Copied to Voice repository root | `E:\Projects\Voice\Voice-CrazyAudiobook-debug.apk` |
 | **Android Build Output** | Compiled from Voice repository | `E:\Projects\Voice\app\build\outputs\apk\free\debug\app-free-debug.apk` |
+
+### Continuous Publishing Workflow
+
+Whenever an updated APK is generated:
+1. **Never leave it solely in the Gradle build output** (`app/build/outputs/apk/free/debug/app-free-debug.apk`).
+2. **Publish immediately to all distribution endpoints** using the automated deployment script:
+   ```bash
+   # From crazy-audiobook-creator:
+   python scripts/deploy_voice_apk.py
+
+   # Or compile from source and deploy in a single command:
+   python scripts/deploy_voice_apk.py --build
+   ```
+3. The script automatically:
+   - Copies the build artifact to `e:\Projects\crazy-audiobook-creator\Voice-CrazyAudiobook-debug.apk` and `E:\Projects\Voice\Voice-CrazyAudiobook-debug.apk`.
+   - Uploads via SFTP directly to the 24/7 NAS storage `/mnt/nas/media/crazybooks/Voice-CrazyAudiobook-debug.apk` on `192.168.50.180`.
+   - Syncs into the `crazy-bookplayer-streamer` container.
+   - Verifies HTTP responses on both the remote streamer (`https://crazyha.mywire.org/bookplayer/Voice-CrazyAudiobook-debug.apk`) and local Creator API (`http://192.168.50.44:8000/api/mobile/v1/app`).
 
 ---
 

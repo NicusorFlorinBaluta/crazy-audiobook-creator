@@ -32,6 +32,7 @@ Newest first.
 
 | Date | Record | Status |
 | --- | --- | --- |
+| 2026-09-07 | [Pronunciation lexicon ergonomics & Whisper STT language normalization](2026-09-07-pronunciation-lexicon-and-stt-validation.md) | Current |
 | 2026-09-06 | [The book's speech tag outranks the model](2026-09-06-speech-tags-outrank-adjudication.md) | Current |
 | 2026-09-04 | [Whole-cast duplicate detection](2026-09-04-whole-cast-duplicate-detection.md) | Current |
 | 2026-09-04 | [Cast distinctness convergence](2026-09-04-voice-distinctness-convergence.md) | Current |

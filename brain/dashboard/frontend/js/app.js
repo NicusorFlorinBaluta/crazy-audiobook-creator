@@ -2461,6 +2461,17 @@ function renderWorkStatus(project) {
     } else if (stage.includes('bootstrap')) {
         activity = 'Preparing character voice references';
         description = 'Creating reusable voice identities before chapter generation.';
+        chapterLabel = 'Voice candidates';
+        lineLabel = 'Active voice';
+        if (progress?.completed_units && progress?.total_units) {
+            chapterMetric = `${Math.round(progress.completed_units)} / ${Math.round(progress.total_units)}`;
+        }
+        if (progress?.character_name) {
+            lineMetric = progress.character_name;
+        } else if (progress?.phase) {
+            lineMetric = progress.phase.replaceAll('_', ' ');
+            lineLabel = 'Active phase';
+        }
     } else if (stage.includes('generat') && currentChapter) {
         const validating = currentDetail.total_lines > 0
             && currentDetail.lines_generated >= currentDetail.total_lines;
@@ -2511,6 +2522,32 @@ function renderWorkStatus(project) {
         }
         if (progress.line_position && progress.line_total) {
             lineMetric = `${progress.line_position} / ${progress.line_total}`;
+        }
+        if (stage.includes('bootstrap') || (progress.stage && progress.stage.toLowerCase().includes('bootstrap'))) {
+            if (Number.isFinite(progress.completed_units) && Number.isFinite(progress.total_units) && progress.total_units > 0) {
+                chapterMetric = `${Math.round(progress.completed_units)} / ${Math.round(progress.total_units)}`;
+                chapterLabel = progress.phase === 'validating_transcripts' || progress.phase === 'revalidating_transcripts'
+                    ? 'Checked transcripts'
+                    : progress.phase === 'measuring_references'
+                        ? 'Measured references'
+                        : progress.phase === 'redesigning_cast'
+                            ? 'Redesigned voices'
+                            : progress.phase === 'comparing_cast'
+                                ? 'Compared pairs'
+                                : progress.phase === 'pronunciation_previews'
+                                    ? 'Lexicon previews'
+                                    : 'Voice candidates';
+            }
+            if (progress.character_name) {
+                lineMetric = progress.character_name;
+                lineLabel = progress.phase === 'pronunciation_previews' ? 'Current term' : 'Active voice';
+            } else if (progress.phase) {
+                lineMetric = progress.phase.replaceAll('_', ' ');
+                lineLabel = 'Active phase';
+            }
+            if (progress.phase === 'pronunciation_previews') {
+                description = 'Synthesizing voice previews for book pronunciation terms.';
+            }
         }
     }
 

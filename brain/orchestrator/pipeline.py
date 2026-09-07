@@ -74,15 +74,19 @@ from shared.models import (
     ExportChapterInfo,
     ExportM4BRequest,
     GenerateChapterRequest,
+    GenerateLineRequest,
     MasterChapterRequest,
     MasterSegmentInfo,
     ProjectStatus,
+    ScriptLine,
 )
 from shared.progress import ProgressEstimator
 from shared.pronunciation import (
     apply_pronunciations,
     build_pronunciation_inventory,
+    extract_concise_sentence,
     load_pronunciation_dictionary,
+    normalize_phonetic_text,
 )
 from shared.reference_selection import select_reference_text
 from shared.single_instance import SingleInstanceLock
@@ -2108,8 +2112,45 @@ class Pipeline:
                 for voice_id, profile in cast["voices"].items()
             },
         )
+        total_candidates = sum(request.candidate_counts.values())
+        self.job_queue.update_progress(
+            project_id,
+            self._progress_estimator.snapshot(
+                f"{project_id}:bootstrap",
+                stage=PipelineStage.BOOTSTRAPPING.value,
+                phase="reference_generation",
+                message=f"Preparing {total_candidates} voice candidates for {len(characters_for_request)} characters",
+                completed_units=0,
+                total_units=max(1, total_candidates),
+            ),
+        )
+
+        def on_bootstrap_progress(event: dict[str, Any]) -> None:
+            phase = str(event.get("phase", "reference_generation"))
+            completed = float(event.get("completed", 0))
+            total = float(event.get("total", 1))
+            message = str(event.get("message", "Preparing reusable voice references"))
+            char_name = event.get("character_name")
+            char_id = event.get("character_id")
+
+            key = f"{project_id}:bootstrap:{phase}"
+            self.job_queue.update_progress(
+                project_id,
+                self._progress_estimator.snapshot(
+                    key,
+                    stage=PipelineStage.BOOTSTRAPPING.value,
+                    phase=phase,
+                    message=message,
+                    completed_units=completed,
+                    total_units=total,
+                    character_name=char_name,
+                    character_id=char_id,
+                ),
+            )
+            self._check_stop(project_id)
+
         try:
-            response = self.voice_client.bootstrap_voices(request)
+            response = self.voice_client.bootstrap_voices(request, progress_callback=on_bootstrap_progress)
             for voice_id, result in response.voices_generated.items():
                 profile = cast["voices"].get(voice_id)
                 if not profile:
@@ -2183,10 +2224,108 @@ class Pipeline:
                     "force_voice_regeneration": False,
                 },
             )
+            self.job_queue.update_progress(
+                project_id,
+                self._progress_estimator.snapshot(
+                    f"{project_id}:bootstrap:complete",
+                    stage=PipelineStage.BOOTSTRAPPING.value,
+                    phase="complete",
+                    message="Voice references ready for review",
+                    completed_units=1,
+                    total_units=1,
+                ),
+            )
             logger.info("Voice bootstrapping complete: %d voices generated", len(response.voices_generated))
+            self._pregenerate_pronunciation_previews(project_id, project_dir)
         except Exception as e:
             logger.exception("Failed to bootstrap voices: %s", e)
             raise
+
+    def _pregenerate_pronunciation_previews(self, project_id: str, project_dir: Path) -> None:
+        """Batch-generate Qwen3-TTS audio previews for pronunciation candidates after voice bootstrap."""
+        try:
+            inv = build_pronunciation_inventory(project_dir, client=self.ollama)
+            candidates = inv.get("candidates", [])
+            if not candidates:
+                return
+
+            cast_path = project_dir / "voice_cast.json"
+            voice_id = "narrator"
+            if cast_path.is_file():
+                try:
+                    cast_data = json.loads(cast_path.read_text(encoding="utf-8"))
+                    voices = cast_data.get("voices", {})
+                    voice_id = next((vid for vid in voices if "narrator" in vid.lower()), next(iter(voices.keys()), "narrator"))
+                except Exception:
+                    voice_id = "narrator"
+
+            workspace_dir = self.workspace_dir / project_id
+            previews_dir = workspace_dir / "previews"
+            previews_dir.mkdir(parents=True, exist_ok=True)
+
+            # Prioritize candidates by occurrence count, up to 100 items
+            candidates_to_process = candidates[:100]
+            total = len(candidates_to_process)
+            estimator_key = f"{project_id}:bootstrap:pronunciation_previews"
+            self._progress_estimator.reset(estimator_key)
+
+            logger.info("Starting pronunciation preview pre-generation for %d candidates...", total)
+            for i, cand in enumerate(candidates_to_process, 1):
+                term = str(cand.get("term", "")).strip()
+                if not term:
+                    continue
+                spoken = cand.get("effective_spoken") or cand.get("spoken_text") or cand.get("recommendation_default") or term
+                clean_spoken = normalize_phonetic_text(str(spoken))
+
+                ctx_list = cand.get("contexts") or []
+                ctx_sentence = ctx_list[0] if ctx_list else None
+                if ctx_sentence:
+                    concise = extract_concise_sentence(ctx_sentence, term, max_chars=100)
+                    text_to_speak = apply_pronunciations(concise, {term: clean_spoken})
+                else:
+                    text_to_speak = f"The word is {clean_spoken}."
+
+                preview_hash = hashlib.sha256(f"{voice_id}_{text_to_speak}".encode()).hexdigest()[:16]
+                audio_path = previews_dir / f"pron_{preview_hash}.wav"
+
+                start_tick = time.time()
+                if not audio_path.is_file() or audio_path.stat().st_size <= 44:
+                    try:
+                        line_req = GenerateLineRequest(
+                            project_id=project_id,
+                            line=ScriptLine(
+                                line_id=f"preview_pron_{preview_hash}",
+                                speaker=voice_id,
+                                voice_id=voice_id,
+                                text=text_to_speak,
+                            ),
+                        )
+                        self.voice_client.generate_line(line_req, timeout=45)
+                        seg_path = workspace_dir / "segments" / f"preview_pron_{preview_hash}.wav"
+                        if seg_path.is_file() and seg_path.stat().st_size > 44:
+                            shutil.copyfile(seg_path, audio_path)
+                    except Exception as gen_exc:
+                        logger.debug("Pronunciation preview generation skipped for '%s': %s", term, gen_exc)
+
+                elapsed = max(0.1, time.time() - start_tick)
+                self._progress_estimator.observe(estimator_key, 1.0, elapsed)
+
+                self.job_queue.update_progress(
+                    project_id,
+                    self._progress_estimator.snapshot(
+                        estimator_key,
+                        stage=PipelineStage.BOOTSTRAPPING.value,
+                        phase="pronunciation_previews",
+                        message=f"Pre-generating audio preview for '{term}' ({i}/{total})",
+                        completed_units=i,
+                        total_units=total,
+                        character_name=term,
+                    ),
+                )
+            logger.info("Completed pronunciation preview pre-generation.")
+        except Exception as exc:
+            logger.warning("Pronunciation preview pre-generation encountered an issue: %s", exc)
+
 
     def _run_incremental_delivery(self, project_id: str, project_dir: Path, current_stage: PipelineStage) -> None:
         """Run incremental batching, generating, mastering, and publishing."""
@@ -2425,7 +2564,7 @@ class Pipeline:
         state = self.job_queue.get_job(project_id)
         project_language: str | None = None
         try:
-            project_language = (
+            raw_lang = (
                 str(
                     json.loads((project_dir / "book.json").read_text(encoding="utf-8"))
                     .get("metadata", {})
@@ -2434,6 +2573,10 @@ class Pipeline:
                 ).strip()
                 or None
             )
+            if raw_lang:
+                clean_lang = raw_lang.split("-")[0].split("_")[0].strip().lower()
+                if clean_lang not in ("", "auto", "none", "null", "undefined"):
+                    project_language = clean_lang
         except (OSError, ValueError, TypeError):
             project_language = None
         generated_chapters, mastered_chapters = self._reconcile_artifacts(project_id, project_dir, script_files)

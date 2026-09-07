@@ -103,6 +103,102 @@ _COMMON_SENTENCE_WORDS = {
 }
 _CANDIDATE_PATTERN = re.compile(r"\b[A-Z][A-Za-z'’-]{2,}\b")
 
+_ENGLISH_WORDS_CACHE: set[str] | None = None
+
+
+def get_english_dictionary() -> set[str]:
+    """Return the cached set of standard English dictionary words."""
+    global _ENGLISH_WORDS_CACHE
+    if _ENGLISH_WORDS_CACHE is not None:
+        return _ENGLISH_WORDS_CACHE
+    dict_gz = Path(__file__).resolve().parent / "data" / "english_words.txt.gz"
+    if dict_gz.is_file():
+        try:
+            import gzip
+
+            with gzip.open(dict_gz, "rt", encoding="utf-8") as f:
+                _ENGLISH_WORDS_CACHE = {line.strip().lower() for line in f if line.strip()}
+                return _ENGLISH_WORDS_CACHE
+        except Exception as exc:
+            logger.warning("Failed to load english_words.txt.gz: %s", exc)
+    _ENGLISH_WORDS_CACHE = set()
+    return _ENGLISH_WORDS_CACHE
+
+
+def is_english_word(word: str) -> bool:
+    """Return True if word exists in the standard English dictionary."""
+    if not word:
+        return False
+    return word.strip().casefold() in get_english_dictionary()
+
+
+def extract_concise_sentence(text: str, term: str = "", max_chars: int = 100) -> str:
+    """Extract a concise single sentence around term (max_chars) for fast audio preview."""
+    if not text:
+        return ""
+    cleaned = re.sub(r"\s+", " ", text).strip()
+    if len(cleaned) <= max_chars and "\n" not in cleaned:
+        return cleaned
+
+    # Split into individual sentences on punctuation boundaries
+    sentences = re.split(r"(?<=[.!?])\s+", cleaned)
+    term_pat = re.compile(rf"(?<!\w){re.escape(term)}(?!\w)", re.IGNORECASE) if term else None
+
+    target_sentence = ""
+    if term_pat:
+        for s in sentences:
+            if term_pat.search(s):
+                target_sentence = s.strip()
+                break
+
+    if not target_sentence:
+        target_sentence = sentences[0].strip() if sentences else cleaned
+
+    if len(target_sentence) <= max_chars:
+        return target_sentence
+
+    # If sentence is still longer than max_chars, extract a centered window around term
+    if term_pat:
+        m = term_pat.search(target_sentence)
+        if m:
+            start_pos = m.start()
+            end_pos = m.end()
+            term_len = end_pos - start_pos
+            half = max(10, (max_chars - term_len - 6) // 2)
+            win_start = max(0, start_pos - half)
+            win_end = min(len(target_sentence), end_pos + half)
+
+            # Snap to word boundaries
+            if win_start > 0:
+                space_idx = target_sentence.find(" ", win_start)
+                if space_idx != -1 and space_idx < start_pos:
+                    win_start = space_idx + 1
+            if win_end < len(target_sentence):
+                space_idx = target_sentence.rfind(" ", start_pos, win_end)
+                if space_idx != -1 and space_idx > end_pos:
+                    win_end = space_idx
+
+            snippet = target_sentence[win_start:win_end].strip()
+            if win_start > 0:
+                snippet = "..." + snippet
+            if win_end < len(target_sentence):
+                snippet = snippet + "..."
+            return snippet
+
+    return target_sentence[:max_chars].rstrip() + "..."
+
+
+def _is_heading_or_title(text: str) -> bool:
+    """Return True if text appears to be a chapter title or title-cased heading."""
+    words = re.findall(r"\b[A-Za-z]+\b", text)
+    if not words:
+        return False
+    if len(words) <= 10 and sum(1 for w in words if w[0].isupper()) / len(words) >= 0.7:
+        return True
+    if re.match(r"^(?:chapter|part|prologue|epilogue|book|act)\b", text.strip(), re.IGNORECASE):
+        return True
+    return False
+
 
 def _is_sentence_initial(text: str, start: int) -> bool:
     """Return true when a token only has sentence punctuation/quotes before it."""
@@ -134,10 +230,37 @@ def _validate_entries(payload: Any, source: Path) -> dict[str, str]:
 def load_pronunciation_dictionary(
     project_dir: Path,
     global_path: Path | None = None,
+    include_defaults: bool = True,
 ) -> tuple[dict[str, str], dict[str, str]]:
-    """Load validated mappings and their source, with project entries winning."""
+    """Load validated mappings and their source, with project entries winning.
+
+    When `include_defaults=True`, default recommendations from
+    `project_dir / "pronunciation_recommendations.json"` are loaded as base mappings.
+    Global dictionary overrides defaults, and project dictionary overrides both.
+    """
     global_path = global_path or _repo_root() / "brain" / "pronunciation_dict.json"
     mappings: dict[str, tuple[str, str, str]] = {}
+
+    if include_defaults:
+        recs_path = project_dir / "pronunciation_recommendations.json"
+        if recs_path.exists():
+            try:
+                raw_recs = json.loads(recs_path.read_text(encoding="utf-8"))
+                if isinstance(raw_recs, dict):
+                    for word, rec_val in raw_recs.items():
+                        if not isinstance(word, str) or not word.strip():
+                            continue
+                        word_clean = word.strip()
+                        default_spoken = ""
+                        if isinstance(rec_val, dict):
+                            default_spoken = str(rec_val.get("default", "")).strip()
+                        elif isinstance(rec_val, str):
+                            default_spoken = rec_val.strip()
+                        if default_spoken and default_spoken.casefold() != word_clean.casefold():
+                            mappings[word_clean.casefold()] = (word_clean, default_spoken, "default")
+            except (OSError, UnicodeDecodeError, ValueError, KeyError, TypeError) as exc:
+                logger.debug("Could not read recommendations for defaults in %s: %s", project_dir, exc)
+
     for source_name, path in (
         ("global", global_path),
         ("project", project_dir / "pronunciation_dict.json"),
@@ -150,22 +273,27 @@ def load_pronunciation_dictionary(
             raise ValueError(f"Invalid pronunciation dictionary: {path}") from exc
         for word, replacement in _validate_entries(raw, path).items():
             mappings[word.casefold()] = (word, replacement, source_name)
+
     return (
-        {word: replacement for word, replacement, _ in mappings.values()},
+        {
+            word: replacement
+            for word, replacement, _ in mappings.values()
+            if replacement and replacement.casefold() != word.casefold()
+        },
         {word: source for word, _, source in mappings.values()},
     )
 
 
 def normalize_phonetic_text(text: str) -> str:
-    """Normalize hyphenated inter-syllable respellings to spaces for fluid TTS.
+    """Normalize phonetic respelling text for TTS while preserving hyphens and compounds.
 
-    E.g. 'Koh-ker-lee' -> 'Koh ker lee', 'home-aisle' -> 'home aisle', 'Pah-chee' -> 'Pah chee'
-    while preserving non-hyphenated words.
+    Does NOT replace hyphens with spaces to prevent neural TTS from inserting
+    word-boundary pauses.
     """
     if not text:
         return text
-    # Convert hyphens connecting alphanumeric characters into natural spaces
-    cleaned = re.sub(r"(?<=[A-Za-z0-9])-(?=[A-Za-z0-9])", " ", text)
+    # Strip enclosing quotes while keeping internal hyphens and apostrophes
+    cleaned = text.strip().strip("\"'“”‘’")
     return re.sub(r"\s+", " ", cleaned).strip()
 
 
@@ -227,23 +355,23 @@ _COMPOUND_BASES = {
 }
 
 _KNOWN_TERM_OVERRIDES = {
-    "kokerlii": ("Coker lee", "Koh ker lee"),
-    "pache": ("Pah chee", "Paych"),
+    "kokerlii": ("Cokerlee", "Koh-ker-lee"),
+    "pache": ("Pahchee", "Paych"),
     "szeth": ("Seth", "Zeth"),
-    "jasnah": ("Yas nah", "Jaz nah"),
-    "sadeas": ("Sah dee us", "Say dee us"),
-    "kaladin": ("Cal a din", "Kah lah din"),
-    "shallan": ("Shah lan", "Sha lahn"),
-    "adolin": ("Ay do lin", "Ah do lin"),
-    "navani": ("Nah vah nee", "Na vah nee"),
-    "renarin": ("Reh na rin", "Ren a rin"),
-    "dalinar": ("Dah li nar", "Dal i nar"),
-    "taravangian": ("Tah rah vahn jee an", "Ta ra van gian"),
-    "kharbranth": ("Kar branth", "Kahr branth"),
-    "alethi": ("Ah leth ee", "Uh leth ee"),
-    "parshendi": ("Par shen dee", "Parsh en dee"),
-    "parshman": ("Parsh man", "Parsh mun"),
-    "parshmen": ("Parsh men", "Parsh min"),
+    "jasnah": ("Yasnah", "Jaznah"),
+    "sadeas": ("Sahdeeus", "Saydeeus"),
+    "kaladin": ("Caladin", "Kalladin"),
+    "shallan": ("Shahlan", "Shalan"),
+    "adolin": ("Aydolin", "Ahdolin"),
+    "navani": ("Nahvahnee", "Navahnee"),
+    "renarin": ("Rehnarin", "Renarin"),
+    "dalinar": ("Dahlinar", "Dalinar"),
+    "taravangian": ("Taravanjian", "Tah-rah-van-gee-an"),
+    "kharbranth": ("Karbranth", "Kahrbranth"),
+    "alethi": ("Ahlethee", "Uhlethee"),
+    "parshendi": ("Parshendee", "Parsh-en-dee"),
+    "parshman": ("Parshman", "Parsh-man"),
+    "parshmen": ("Parshmen", "Parsh-men"),
 }
 
 
@@ -284,12 +412,12 @@ def generate_phonetic_recommendations(term: str, context: str = "") -> dict[str,
 
     comp = _split_compound(raw)
     if comp:
-        rec_def = " ".join(comp)
+        rec_def = "".join(comp)
         alt_parts: list[str] = []
         for p in comp:
             low = p.lower()
             if low == "aisle":
-                alt_parts.append("eye ull")
+                alt_parts.append("aisle")
             elif low == "eye ler":
                 alt_parts.append("aisler")
             elif low == "eye lers":
@@ -302,17 +430,19 @@ def generate_phonetic_recommendations(term: str, context: str = "") -> dict[str,
                 alt_parts.append("Lite")
             else:
                 alt_parts.append(p)
-        rec_alt = " ".join(alt_parts) if alt_parts != comp else (comp[0] + " " + comp[1].capitalize())
+        rec_alt = "-".join(comp) if alt_parts == comp else "".join(alt_parts)
+        if rec_alt.lower() == rec_def.lower():
+            rec_alt = "-".join(comp)
         return {"default": rec_def, "alternate": rec_alt}
 
     clean_def = raw
     clean_alt = raw
     if re.search(r"lii$", clean_def, re.I):
-        clean_def = re.sub(r"lii$", " lee", clean_def, flags=re.I)
-        clean_alt = re.sub(r"lii$", "lee", clean_alt, flags=re.I)
+        clean_def = re.sub(r"lii$", "lee", clean_def, flags=re.I)
+        clean_alt = re.sub(r"lii$", "-lee", clean_alt, flags=re.I)
     elif re.search(r"ii$", clean_def, re.I):
-        clean_def = re.sub(r"ii$", " ee", clean_def, flags=re.I)
-        clean_alt = re.sub(r"ii$", "ee", clean_alt, flags=re.I)
+        clean_def = re.sub(r"ii$", "ee", clean_def, flags=re.I)
+        clean_alt = re.sub(r"ii$", "-ee", clean_alt, flags=re.I)
 
     if re.match(r"^Sz", clean_def, re.I):
         clean_def = re.sub(r"^Sz", "S", clean_def, flags=re.I)
@@ -343,13 +473,15 @@ def generate_phonetic_recommendations(term: str, context: str = "") -> dict[str,
                 parts.append("nah")
             else:
                 parts.append(s.capitalize() if not parts else s.lower())
-        return " ".join(parts)
+        if not alt and parts:
+            return parts[0].capitalize() + "".join(p.lower() for p in parts[1:])
+        return "-".join(parts)
 
     rec_def = format_sylls(sylls_def, alt=False)
     rec_alt = format_sylls(sylls_alt, alt=True)
 
     if rec_def.lower() == rec_alt.lower() or not rec_alt:
-        rec_alt = raw
+        rec_alt = "-".join(sylls_def) if len(sylls_def) > 1 else raw
 
     return {"default": rec_def, "alternate": rec_alt}
 
@@ -422,8 +554,8 @@ _PRONUNCIATION_PROMPT_HEADER = (
     "You are an expert fantasy and fiction pronunciation director for audiobooks.\n"
     "For each candidate proper noun or out-of-vocabulary term and its book context, provide the exact spoken phonetic respelling for a Neural TTS engine.\n"
     "Rules:\n"
-    "1. Write phonetic respellings in plain English syllables (e.g. 'KALL-uh-din', 'Zeth', 'tah-rah-VAN-jee-an', 'shah-LAHN').\n"
-    "2. Capitalize the stressed syllable.\n"
+    "1. Write phonetic respellings as fluid single words or natural English syllables without spaces (e.g. 'Kaludin', 'Zeth', 'Taravanjian', 'Homeaisle', 'Shalan').\n"
+    "2. Do NOT put spaces between syllables because neural TTS engines treat spaces as unnatural pauses.\n"
     "3. Provide 1 default respelling and 1 alternate valid respelling.\n"
     '4. Output STRICT JSON with key \'recommendations\': [{"term": "...", "default": "...", "alternate": "..."}]\n\n'
     "CANDIDATES:\n"
@@ -494,16 +626,7 @@ def resolve_pronunciations_with_llm(
 
     import urllib.request
 
-    prompt = (
-        "You are an expert fantasy and fiction pronunciation director for audiobooks.\n"
-        "For each candidate proper noun or out-of-vocabulary term and its book context, provide the exact spoken phonetic respelling for a Neural TTS engine.\n"
-        "Rules:\n"
-        "1. Write phonetic respellings in plain English syllables (e.g. 'KALL-uh-din', 'Zeth', 'tah-rah-VAN-jee-an', 'shah-LAHN').\n"
-        "2. Capitalize the stressed syllable.\n"
-        "3. Provide 1 default respelling and 1 alternate valid respelling.\n"
-        '4. Output STRICT JSON with key \'recommendations\': [{"term": "...", "default": "...", "alternate": "..."}]\n\n'
-        "CANDIDATES:\n" + json.dumps([{"term": t, "context": c[:200]} for t, c in items], ensure_ascii=False, indent=2)
-    )
+    prompt = _pronunciation_prompt(items)
 
     req_body = json.dumps(
         {
@@ -553,6 +676,7 @@ def build_pronunciation_inventory(
     project_dir: Path,
     use_llm: bool = True,
     client: PronunciationLLM | None = None,
+    force: bool = False,
 ) -> dict[str, Any]:
     """Inventory verified mappings and repeated unresolved book terms with recommendations.
 
@@ -564,7 +688,8 @@ def build_pronunciation_inventory(
     if not script_path.exists():
         return {"schema": 1, "verified": 0, "unresolved": 0, "candidates": []}
 
-    dict_path = project_dir / "pronunciation_dictionary.json"
+    dict_path = project_dir / "pronunciation_dict.json"
+    global_dict = _repo_root() / "brain" / "pronunciation_dict.json"
     chars_path = project_dir / "characters.json"
     inv_path = project_dir / "pronunciation_inventory.json"
 
@@ -572,28 +697,31 @@ def build_pronunciation_inventory(
     mtimes = [script_path.stat().st_mtime]
     if dict_path.is_file():
         mtimes.append(dict_path.stat().st_mtime)
+    if global_dict.is_file():
+        mtimes.append(global_dict.stat().st_mtime)
     if chars_path.is_file():
         mtimes.append(chars_path.stat().st_mtime)
     current_sig = max(mtimes)
 
     cache_key = f"pronunciation_inv:{project_dir.resolve()}"
-    cached = cache_service.get(cache_key)
-    if cached and isinstance(cached, dict) and cached.get("sig") == current_sig:
-        return cached.get("data", {})
+    if not force:
+        cached = cache_service.get(cache_key)
+        if cached and isinstance(cached, dict) and cached.get("sig") == current_sig:
+            return cached.get("data", {})
 
-    if inv_path.is_file():
-        try:
-            if inv_path.stat().st_mtime >= current_sig:
-                data = json.loads(inv_path.read_text(encoding="utf-8"))
-                cache_service.set(cache_key, {"sig": current_sig, "data": data}, ttl_seconds=1800)
-                return data
-        except (OSError, UnicodeDecodeError, ValueError, KeyError, TypeError) as exc:
-            logger.warning(
-                "Could not read the cached inventory %s; it will be rebuilt from the scripts: %s", inv_path, exc
-            )
+        if inv_path.is_file():
+            try:
+                if inv_path.stat().st_mtime >= current_sig:
+                    data = json.loads(inv_path.read_text(encoding="utf-8"))
+                    cache_service.set(cache_key, {"sig": current_sig, "data": data}, ttl_seconds=1800)
+                    return data
+            except (OSError, UnicodeDecodeError, ValueError, KeyError, TypeError) as exc:
+                logger.warning(
+                    "Could not read the cached inventory %s; it will be rebuilt from the scripts: %s", inv_path, exc
+                )
 
     payload = json.loads(script_path.read_text(encoding="utf-8"))
-    mappings, mapping_sources = load_pronunciation_dictionary(project_dir)
+    mappings, mapping_sources = load_pronunciation_dictionary(project_dir, include_defaults=False)
     mapping_by_folded = {word.casefold(): (word, replacement) for word, replacement in mappings.items()}
     source_by_folded = {word.casefold(): source for word, source in mapping_sources.items()}
 
@@ -630,6 +758,7 @@ def build_pronunciation_inventory(
     chapters: dict[str, set[int]] = defaultdict(set)
     contexts: dict[str, list[str]] = defaultdict(list)
     mid_sentence: set[str] = set()
+    english_words = get_english_dictionary()
 
     def record(term: str, chapter_number: int, text: str) -> None:
         key = term.casefold()
@@ -637,7 +766,7 @@ def build_pronunciation_inventory(
         display.setdefault(key, term)
         chapters[key].add(chapter_number)
         if len(contexts[key]) < 3:
-            contexts[key].append(text[:240])
+            contexts[key].append(extract_concise_sentence(text, term, max_chars=100))
 
     for chapter_index, chapter in enumerate(payload.get("chapters", []), 1):
         chapter_number = int(chapter.get("chapter_number") or chapter_index)
@@ -645,6 +774,7 @@ def build_pronunciation_inventory(
             text = line.get("text") if isinstance(line, dict) else None
             if not isinstance(text, str):
                 continue
+            is_heading = _is_heading_or_title(text)
             occupied: list[tuple[int, int]] = []
             for alias in sorted(multiword_aliases, key=lambda value: (-len(value), value)):
                 for alias_match in re.finditer(rf"(?<!\w){re.escape(alias)}(?!\w)", text, re.IGNORECASE):
@@ -660,7 +790,7 @@ def build_pronunciation_inventory(
                 if key in multiword_parts and key not in character_aliases:
                     continue
                 record(term, chapter_number, text)
-                if not _is_sentence_initial(text, match.start()):
+                if not is_heading and not _is_sentence_initial(text, match.start()):
                     mid_sentence.add(key)
 
     all_keys = set(counts) | set(mapping_by_folded)
@@ -668,6 +798,9 @@ def build_pronunciation_inventory(
     for key in all_keys:
         verified = key in mapping_by_folded
         occurrence_count = counts.get(key, 0)
+        # Skip standard English dictionary words unless explicitly verified or in character cast
+        if not verified and key not in character_aliases and key in english_words:
+            continue
         if not verified and occurrence_count < 2 and key not in character_aliases:
             continue
         if not verified and key not in character_aliases and key not in mid_sentence:
@@ -676,22 +809,20 @@ def build_pronunciation_inventory(
 
     # Batch-resolve missing terms with LLM if enabled
     recs_updated = False
-    if use_llm:
-        missing_llm_items: list[tuple[str, str]] = []
-        for key in valid_keys:
-            if key not in mapping_by_folded and key not in cached_recs:
-                mapped_word = mapping_by_folded.get(key, (display.get(key, key), None))[0]
-                d_term = display.get(key, mapped_word)
-                ctx = contexts.get(key, [""])[0]
-                missing_llm_items.append((d_term, ctx))
-        if missing_llm_items:
+    if use_llm and client:
+        unresolved_keys = [k for k in valid_keys if k not in mapping_by_folded and k not in cached_recs]
+        if unresolved_keys:
+            items_to_query = [{"term": display.get(k, k), "context": contexts.get(k, [""])[0]} for k in unresolved_keys]
+            # Assumes usage of batch LLM helper
             llm_results = resolve_pronunciations_with_llm(
-                missing_llm_items,
+                [(item["term"], item["context"]) for item in items_to_query],
                 client=client,
             )
-            for raw_k, rec_data in llm_results.items():
-                cached_recs[raw_k.casefold()] = rec_data
-                recs_updated = True
+            for k in unresolved_keys:
+                t = display.get(k, k).casefold()
+                if t in llm_results:
+                    cached_recs[k] = llm_results[t]
+                    recs_updated = True
 
     candidates: list[dict[str, Any]] = []
     for key in valid_keys:
@@ -715,6 +846,7 @@ def build_pronunciation_inventory(
                 cached_recs[key] = {"default": rec_default, "alternate": rec_alternate}
                 recs_updated = True
 
+        effective = replacement if verified else rec_default
         candidates.append(
             {
                 "term": display_term,
@@ -722,7 +854,8 @@ def build_pronunciation_inventory(
                 "spoken_text": replacement,
                 "recommendation_default": rec_default,
                 "recommendation_alternate": rec_alternate,
-                "mapping_source": source_by_folded.get(key),
+                "effective_spoken": effective or "",
+                "mapping_source": source_by_folded.get(key) or ("default" if rec_default else None),
                 "occurrences": occurrence_count,
                 "chapters": sorted(chapters.get(key, set())),
                 "contexts": contexts.get(key, []),

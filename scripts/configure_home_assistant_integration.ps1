@@ -240,7 +240,7 @@ if ($token -notmatch "^[A-Za-z0-9_-]{32,128}$") {
 # after setting up `tailscale serve` used to silently put the unusable public
 # URL back.
 $existingExternalUrl = Get-YamlScalar $haSecretsPath "audiobook_external_url"
-if ($existingExternalUrl -and $existingExternalUrl -match "^https://[^/]+\.ts\.net(/|$)") {
+if ($existingExternalUrl -and ($existingExternalUrl -match "^https?://([^/]+\.ts\.net|100\.\d+\.\d+\.\d+(:\d+)?)(/|$)")) {
     $audiobookExternalUrl = $existingExternalUrl
     Write-Output "Kept the existing Tailscale panel URL instead of replacing it with the public one."
 }

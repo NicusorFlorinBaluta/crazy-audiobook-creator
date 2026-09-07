@@ -124,12 +124,29 @@ def load_config(config_path: str = "brain/config.yaml") -> dict[str, Any]:
 # `runtime` to start a pipeline without learning where that lives.
 
 _pipeline_starter: Any = None
+_preview_mode_exiter: Any = None
 
 
 def register_pipeline_starter(starter: Any) -> None:
     """Install the coroutine that starts a pipeline run. Called once, by `main`."""
     global _pipeline_starter
     _pipeline_starter = starter
+
+
+def register_preview_mode_exiter(exiter: Any) -> None:
+    """Install the function that exits preview mode for a project."""
+    global _preview_mode_exiter
+    _preview_mode_exiter = exiter
+
+
+def exit_preview_mode(project_id: str) -> bool:
+    """Synchronously exit preview mode for project if active."""
+    if _preview_mode_exiter is not None:
+        try:
+            return bool(_preview_mode_exiter(project_id))
+        except Exception:
+            pass
+    return False
 
 
 async def start_pipeline(project_id: str, **kwargs: Any) -> Any:

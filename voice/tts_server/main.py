@@ -46,6 +46,8 @@ from shared.models import (
     MasterChapterResponse,
     ValidateRequest,
     VoiceHealthResponse,
+    VoiceWarmupRequest,
+    VoiceWarmupResponse,
 )
 from voice.mastering.assembler import AudioAssembler
 from voice.mastering.m4b_exporter import M4BExporter
@@ -512,7 +514,7 @@ def bootstrap_voices_stream(
                 progress_callback=on_progress,
                 cancel_check=cancellation.is_set,
             )
-            events.put({"type": "result", "data": result.model_dump()})
+            events.put({"type": "result", "data": result.model_dump(mode="json")})
         except Exception as exc:
             logger.exception("Voice bootstrap stream failed")
             events.put({"type": "error", "error": "exception", "detail": str(exc)})
@@ -581,6 +583,47 @@ def list_voices(project_id: str):
     return library.list_voices(project_id)
 
 
+@app.post("/voices/warmup")
+def warmup_voice(request: VoiceWarmupRequest) -> VoiceWarmupResponse:
+    """Warm up TTS model and prime prompt cache for preview or synthesis."""
+    if not engine or not library:
+        raise HTTPException(status_code=503, detail="Server not initialized")
+
+    prompt_primed = False
+    resolved_id = None
+    with gpu_job():
+        engine._ensure_loaded()
+        if request.project_id:
+            ref_path, resolved_id, ref_text = library.resolve_voice_reference(
+                request.project_id, request.voice_id
+            )
+            if ref_path and ref_path.exists():
+                try:
+                    engine._get_voice_clone_prompt(
+                        str(ref_path),
+                        ref_text,
+                        x_vector_only_mode=not bool(ref_text and ref_text.strip()),
+                    )
+                    prompt_primed = True
+                    logger.info(
+                        "[VoiceServer] Warmup primed voice '%s' (%s, icl=%s)",
+                        resolved_id,
+                        ref_path.name,
+                        bool(ref_text and ref_text.strip()),
+                    )
+                except Exception as exc:
+                    logger.warning("[VoiceServer] Warmup prompt priming failed: %s", exc)
+
+    return VoiceWarmupResponse(
+        status="ready",
+        model_loaded=engine.model_name if engine.is_loaded else "none",
+        device=engine.device,
+        voice_id=resolved_id or request.voice_id,
+        prompt_primed=prompt_primed,
+        vram=engine.get_vram_info(),
+    )
+
+
 @app.post("/generate/line")
 def generate_line(request: GenerateLineRequest) -> GenerateLineResponse:
     """Generate audio for a single script line."""
@@ -599,14 +642,21 @@ def generate_line(request: GenerateLineRequest) -> GenerateLineResponse:
     )
 
     voice_id = request.line.voice_id or request.line.speaker
-    voice_ref = library.get_voice_path(request.project_id, voice_id)
-    if not voice_ref.exists():
-        logger.warning("[VoiceServer] Voice ref missing for '%s', falling back to narrator", request.line.speaker)
-        voice_ref = library.get_voice_path(request.project_id, "narrator")
-
-    ref_text = library.get_voice_ref_text(request.project_id, voice_id)
-    if voice_ref == library.get_voice_path(request.project_id, "narrator"):
-        ref_text = library.get_voice_ref_text(request.project_id, "narrator")
+    voice_ref, resolved_id, ref_text = library.resolve_voice_reference(
+        request.project_id, voice_id
+    )
+    if not voice_ref or not voice_ref.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"No voice reference found for speaker '{voice_id}' in project '{request.project_id}'",
+        )
+    if resolved_id != voice_id:
+        logger.info(
+            "[VoiceServer] Resolved voice '%s' -> '%s' (%s)",
+            voice_id,
+            resolved_id,
+            voice_ref.name,
+        )
 
     with gpu_job():
         audio = engine.generate_speech(

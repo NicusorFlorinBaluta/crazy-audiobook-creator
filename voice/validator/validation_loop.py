@@ -110,6 +110,7 @@ class ValidationLoop:
         language: str | None = None,
     ) -> GenerateChapterResponse:
         """Generate a chapter with one output and one result per line ID."""
+        language = WhisperValidator.normalize_language(language)
         request_started = time.perf_counter()
         timings: dict[str, float] = {}
 

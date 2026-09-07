@@ -125,8 +125,12 @@ window.PipelineManager = (() => {
                         } else if (stage === 'SCRIPTING') {
                             percentEl.innerHTML = '<span class="loading-dots">⏳</span>';
                         } else if (stage === 'BOOTSTRAPPING') {
-                            pct = data.bootstrapping_completed ? 100 : null;
-                            if (!data.bootstrapping_completed) {
+                            if (data.bootstrapping_completed) {
+                                pct = 100;
+                            } else if (Number.isFinite(canonicalProgress?.percent)) {
+                                pct = canonicalProgress.percent;
+                            } else {
+                                pct = null;
                                 percentEl.innerHTML = '<span class="loading-dots">⏳</span>';
                             }
                         } else if (stage === 'VOICE_REVIEW') {

@@ -238,6 +238,11 @@ def audit_book_attribution(
                 )
                 continue
 
+            if owner.attribution_resolver == "human":
+                # A human reviewer has explicitly confirmed this attribution;
+                # automated heuristics and speech-tag fallbacks must not overrule human judgment.
+                continue
+
             # Identity-reveal parsing is relevant only to generic speakers.
             # Avoid compiling every registered name pattern for the thousands
             # of already-named dialogue lines in a full book audit.

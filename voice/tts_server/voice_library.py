@@ -129,6 +129,64 @@ class VoiceLibraryManager:
             return info.get("ref_text", "")
         return ""
 
+    def resolve_voice_reference(
+        self, project_id: str, character_id: str | None = None
+    ) -> tuple[Path | None, str, str]:
+        """Resolve an existing voice reference clip, character ID, and ref_text.
+
+        If character_id exists, returns its path, id, and ref_text.
+        Otherwise falls back to narrator variants ('narrator', 'narrator_female', 'narrator_male'),
+        or any available voice in the project, or any available voice across any project.
+        """
+        # 1. Exact match if provided
+        if character_id:
+            try:
+                safe_id = self._safe_character_id(character_id)
+                p = self.get_voice_path(project_id, safe_id)
+                if p.is_file():
+                    return p, safe_id, self.get_voice_ref_text(project_id, safe_id)
+            except ValueError:
+                pass
+
+        # 2. Check narrator variants in this project
+        registry = self._load_registry(project_id)
+        voices = registry.get("voices", {})
+        for nid in ("narrator", "narrator_female", "narrator_male"):
+            if nid in voices:
+                p = self.get_voice_path(project_id, nid)
+                if p.is_file():
+                    return p, nid, self.get_voice_ref_text(project_id, nid)
+
+        # 3. Check any voice in this project with "narrator" in its name/id
+        for vid in voices:
+            if "narrator" in vid.lower():
+                p = self.get_voice_path(project_id, vid)
+                if p.is_file():
+                    return p, vid, self.get_voice_ref_text(project_id, vid)
+
+        # 4. Check any available registered voice in this project
+        for vid in voices:
+            p = self.get_voice_path(project_id, vid)
+            if p.is_file():
+                return p, vid, self.get_voice_ref_text(project_id, vid)
+
+        # 5. Check any wav file in the project directory
+        proj_dir = self._project_dir(project_id)
+        for wav in proj_dir.glob("*.wav"):
+            if wav.is_file() and not wav.name.endswith(".tmp.wav"):
+                vid = wav.stem.split("_")[0]
+                return wav, vid, ""
+
+        # 6. Global fallback: search across other project directories in library_dir
+        for sub_dir in self.library_dir.iterdir():
+            if sub_dir.is_dir() and sub_dir != proj_dir:
+                for wav in sub_dir.glob("*.wav"):
+                    if wav.is_file() and not wav.name.endswith(".tmp.wav"):
+                        vid = wav.stem.split("_")[0]
+                        return wav, vid, ""
+
+        return None, "", ""
+
     def list_voices(self, project_id: str) -> dict[str, Any]:
         """List all voices for a project."""
         registry = self._load_registry(project_id)

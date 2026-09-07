@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from shared.constants import (
     DEFAULT_SPEED,
@@ -95,6 +95,18 @@ class Character(BaseModel):
     gender: Gender
     age_range: str = Field(description="e.g. '40s', 'late teens'")
     importance: Literal["major", "minor"] = Field(default="minor", description="Role significance in the narrative")
+
+    @field_validator("importance", mode="before")
+    @classmethod
+    def _normalize_importance(cls, v: Any) -> str:
+        if isinstance(v, str):
+            v_clean = v.strip().lower()
+            if v_clean in {"major", "main", "lead", "primary", "protagonist"}:
+                return "major"
+            if v_clean in {"minor", "supporting", "secondary", "background"}:
+                return "minor"
+        return v
+
     personality_traits: list[str] = Field(default_factory=list)
     aliases: list[str] = Field(
         default_factory=list,
@@ -720,6 +732,8 @@ class ProgressSnapshot(BaseModel):
     elapsed_seconds: float = 0.0
     eta_seconds: float | None = None
     eta_confidence: Literal["none", "low", "medium", "high"] = "none"
+    character_name: str | None = None
+    character_id: str | None = None
     started_at: datetime | None = None
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
@@ -857,3 +871,22 @@ class VoiceHealthResponse(BaseModel):
     validator_model: str = ""
     validator_vad_filter: bool = False
     uptime_seconds: float = 0.0
+
+
+class VoiceWarmupRequest(BaseModel):
+    """Request to warm up the TTS generation model and prime voice prompt cache."""
+
+    project_id: str | None = None
+    voice_id: str | None = None
+
+
+class VoiceWarmupResponse(BaseModel):
+    """Response from TTS engine warmup."""
+
+    status: str = "ready"
+    model_loaded: str = ""
+    device: str = ""
+    voice_id: str | None = None
+    prompt_primed: bool = False
+    vram: dict[str, float] = Field(default_factory=dict)
+

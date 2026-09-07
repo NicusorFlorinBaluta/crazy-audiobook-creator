@@ -35,6 +35,26 @@ from voice.tts_server.voice_library import VoiceLibraryManager
 logger = logging.getLogger(__name__)
 
 
+def _safe_emit(
+    emit_fn: Callable[..., Any] | None,
+    phase: str,
+    completed: int,
+    total: int,
+    message: str,
+    **extra: Any,
+) -> None:
+    """Invoke an emit callback, falling back gracefully if it does not accept keyword arguments."""
+    if emit_fn is None:
+        return
+    try:
+        emit_fn(phase, completed, total, message, **extra)
+    except TypeError:
+        try:
+            emit_fn(phase, completed, total, message)
+        except Exception:
+            logger.warning("Voice bootstrap progress callback failed", exc_info=True)
+
+
 class VoiceDesigner:
     """Generate unique voice reference clips for characters."""
 
@@ -218,18 +238,19 @@ class VoiceDesigner:
             completed: int,
             total: int,
             message: str,
+            **extra: Any,
         ) -> None:
             if progress_callback is None:
                 return
             try:
-                progress_callback(
-                    {
-                        "phase": phase,
-                        "completed": max(0, int(completed)),
-                        "total": max(1, int(total)),
-                        "message": message,
-                    }
-                )
+                payload = {
+                    "phase": phase,
+                    "completed": max(0, int(completed)),
+                    "total": max(1, int(total)),
+                    "message": message,
+                    **extra,
+                }
+                progress_callback(payload)
             except Exception:
                 logger.warning("Voice bootstrap progress callback failed", exc_info=True)
 
@@ -310,7 +331,9 @@ class VoiceDesigner:
                                 "designing_references",
                                 designed_candidates,
                                 candidate_total,
-                                f"Prepared {designed_candidates} of {candidate_total} voice candidates",
+                                f"Prepared {designed_candidates} of {candidate_total} voice candidates ({character.name})",
+                                character_name=character.name,
+                                character_id=char_id,
                             )
                             continue
                         expected_fingerprint = request.design_fingerprints.get(char_id, "")
@@ -333,7 +356,9 @@ class VoiceDesigner:
                                 "designing_references",
                                 designed_candidates,
                                 candidate_total,
-                                f"Prepared {designed_candidates} of {candidate_total} voice candidates",
+                                f"Prepared {designed_candidates} of {candidate_total} voice candidates ({character.name})",
+                                character_name=character.name,
+                                character_id=char_id,
                             )
                             continue
 
@@ -374,7 +399,9 @@ class VoiceDesigner:
                         "designing_references",
                         designed_candidates,
                         candidate_total,
-                        f"Prepared {designed_candidates} of {candidate_total} voice candidates",
+                        f"Prepared {designed_candidates} of {candidate_total} voice candidates ({character.name})",
+                        character_name=character.name,
+                        character_id=char_id,
                     )
 
                 voices_generated[char_id] = BootstrapVoiceResult(
@@ -431,7 +458,9 @@ class VoiceDesigner:
                         "validating_transcripts",
                         validation_completed,
                         validation_total,
-                        f"Checked {validation_completed} of {validation_total} reference transcripts",
+                        f"Checked {validation_completed} of {validation_total} reference transcripts ({character.name})",
+                        character_name=character.name,
+                        character_id=char_id,
                     )
                 result.candidates = validated_candidates
                 if not validated_candidates:
@@ -464,7 +493,9 @@ class VoiceDesigner:
                     "measuring_references",
                     acoustic_completed,
                     acoustic_total,
-                    f"Measured {acoustic_completed} of {acoustic_total} references",
+                    f"Measured {acoustic_completed} of {acoustic_total} references ({character.name})",
+                    character_name=character.name,
+                    character_id=char_id,
                 )
             if result.candidates:
                 result.acoustic_metrics = result.candidates[0].acoustic_metrics
@@ -657,7 +688,7 @@ class VoiceDesigner:
         # audio in place, and the initial pass already checked that.
         redesigned = {char_id for entry in convergence_rounds if entry["kept"] for char_id in entry["redesigned"]}
         if redesigned and self.validator:
-            self._revalidate_transcripts(request, redesigned, voices_generated)
+            self._revalidate_transcripts(request, redesigned, voices_generated, emit)
 
         self._discard_snapshot(best_state)
         return cast_diagnostics, convergence_rounds
@@ -667,19 +698,33 @@ class VoiceDesigner:
         request: BootstrapVoicesRequest,
         char_ids: set[str],
         voices_generated: dict[str, BootstrapVoiceResult],
+        emit: Callable[..., None] | None = None,
     ) -> None:
         """Re-run the WER check over references replaced by a redesign round."""
         try:
-            for char_id in sorted(char_ids):
+            total_reval = len(char_ids)
+            for idx, char_id in enumerate(sorted(char_ids), 1):
                 result = voices_generated.get(char_id)
                 if result is None or not result.candidates:
                     continue
                 candidate = result.candidates[0]
-                expected = self._build_test_sentence(char_id, request.characters[char_id])
+                char_obj = request.characters.get(char_id)
+                char_name = char_obj.name if char_obj else char_id
+                expected = self._build_test_sentence(char_id, char_obj) if char_obj else ""
                 transcribed = self.validator.transcribe(candidate.file)
                 wer = float(self.validator.calculate_wer(expected, transcribed))
                 candidate.transcription_wer = wer
                 result.transcription_wer = wer
+                if emit is not None:
+                    _safe_emit(
+                        emit,
+                        "revalidating_transcripts",
+                        idx,
+                        total_reval,
+                        f"Re-checked transcript {idx} of {total_reval} after distinctness redesign ({char_name})",
+                        character_name=char_name,
+                        character_id=char_id,
+                    )
                 if wer > self.wer_threshold:
                     logger.warning(
                         "Redesigned reference '%s' has elevated transcript "
@@ -1059,11 +1104,16 @@ class VoiceDesigner:
                 existing.warnings = list(result.warnings)
 
                 regenerated.add(char_id)
-                emit(
+                char_obj = request.characters.get(char_id)
+                char_name = char_obj.name if char_obj else char_id
+                _safe_emit(
+                    emit,
                     "redesigning_cast",
                     position,
                     len(targets),
-                    f"Redesigned {position} of {len(targets)} colliding voices",
+                    f"Redesigned {position} of {len(targets)} colliding voices ({char_name})",
+                    character_name=char_name,
+                    character_id=char_id,
                 )
         return regenerated
 

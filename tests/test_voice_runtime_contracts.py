@@ -170,6 +170,53 @@ class VoiceModelResidencyTests(unittest.TestCase):
                 self.assertEqual(len(speaker_result.candidates), 1)
                 self.assertTrue(any("exceeded threshold" in w for w in speaker_result.candidates[0].warnings))
 
+    def test_bootstrap_voices_emits_character_metadata_in_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            engine = Mock(speaker_embedding=Mock(return_value=[0.1, 0.2]), embedding_similarity=Mock(return_value=0.5))
+            library = Mock(
+                voice_exists=Mock(return_value=False), get_voice_path=Mock(return_value=Path(directory) / "speaker.wav")
+            )
+            validator = Mock(
+                transcribe=Mock(return_value="some test words"),
+                calculate_wer=Mock(return_value=0.0),
+                is_loaded=False,
+                unload=Mock(),
+            )
+            designer = VoiceDesigner(engine=engine, library=library, validator=validator, wer_threshold=0.20)
+            character = Character(
+                id="catti_brie",
+                name="Catti-brie",
+                gender=Gender.FEMALE,
+                age_range="adult",
+                voice_description="clearly female",
+                test_sentence="some test words",
+            )
+            wav_path = Path(directory) / "speaker.wav"
+            wav_path.write_bytes(b"fake_wav_data")
+            progress_events = []
+
+            with (
+                patch("subprocess.Popen") as mock_popen,
+                patch("httpx.get") as mock_get,
+                patch.object(designer, "_generate_voice") as mock_gen,
+                patch.object(designer, "_acoustic_diagnostics", return_value=({}, [])),
+            ):
+                mock_popen.return_value = Mock(poll=Mock(return_value=None), terminate=Mock(), wait=Mock())
+                mock_get.return_value = Mock(status_code=200, json=Mock(return_value={"model_loaded": True}))
+                mock_gen.return_value = VoiceCandidate(
+                    id="catti_brie", file=str(wav_path), duration_seconds=5.0, sample_rate=24000
+                )
+
+                req = BootstrapVoicesRequest(project_id="test_proj", characters={"catti_brie": character})
+                designer.bootstrap_voices(req, progress_callback=progress_events.append)
+
+            # Check that designing_references emitted character name and id
+            design_events = [e for e in progress_events if e.get("phase") == "designing_references" and e.get("completed", 0) > 0]
+            self.assertTrue(len(design_events) > 0)
+            self.assertEqual(design_events[0].get("character_name"), "Catti-brie")
+            self.assertEqual(design_events[0].get("character_id"), "catti_brie")
+            self.assertIn("Catti-brie", design_events[0].get("message", ""))
+
 
 class CleanAudioPolicyTests(unittest.TestCase):
     def test_generation_skips_post_fx_by_default(self) -> None:
@@ -484,3 +531,98 @@ class LineSeedDerivationTests(unittest.TestCase):
     def test_the_engine_no_longer_advertises_fake_batching(self) -> None:
         """`generate_speech_batch` looped sequentially; it must stay removed."""
         self.assertFalse(hasattr(Qwen3TTSEngine, "generate_speech_batch"))
+
+
+class PipelineVoiceBootstrapProgressTests(unittest.TestCase):
+    def test_run_voice_bootstrap_streams_progress_to_job_queue(self) -> None:
+        from brain.orchestrator.pipeline import Pipeline
+        from shared.models import BootstrapVoicesResponse, Character, CharacterRegistry, Gender, ScriptChapter, ScriptLine
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pdir = Path(tmpdir) / "test_proj"
+            pdir.mkdir(parents=True)
+            (pdir / "script").mkdir(parents=True)
+
+            char = Character(
+                id="hero",
+                name="Hero",
+                gender=Gender.MALE,
+                age_range="adult",
+                voice_description="A strong male voice",
+                test_sentence="Testing reference sentence.",
+            )
+            reg = CharacterRegistry(characters={"hero": char})
+            (pdir / "characters.json").write_text(reg.model_dump_json(), encoding="utf-8")
+
+            line = ScriptLine(
+                line_id="line1",
+                speaker="hero",
+                voice_id="hero",
+                text="This is a test line from the hero.",
+            )
+            chap = ScriptChapter(
+                chapter_number=1,
+                chapter_title="Chapter 1",
+                lines=[line],
+            )
+            (pdir / "script" / "ch01.json").write_text(chap.model_dump_json(), encoding="utf-8")
+
+            with patch("brain.orchestrator.pipeline.JobQueue") as mock_jq_cls, \
+                 patch("brain.orchestrator.pipeline.VoiceClient") as mock_vc_cls, \
+                 patch("brain.orchestrator.pipeline.OllamaClient"):
+                mock_jq = Mock()
+                mock_jq.get_job.return_value = {
+                    "voice_review_policy": "required_once",
+                    "voice_review_status": "none",
+                }
+                pipeline = Pipeline()
+                pipeline.job_queue = mock_jq
+
+                def fake_bootstrap(request, progress_callback=None):
+                    if progress_callback:
+                        progress_callback({
+                            "phase": "designing_references",
+                            "completed": 1,
+                            "total": 1,
+                            "message": "Prepared 1 of 1 voice candidates (Hero)",
+                            "character_name": "Hero",
+                            "character_id": "hero",
+                        })
+                    return BootstrapVoicesResponse(
+                        status="success",
+                        project_id="test_proj",
+                        voices_generated={},
+                        cast_diagnostics=[],
+                    )
+
+                pipeline.voice_client = Mock()
+                pipeline.voice_client.bootstrap_voices.side_effect = fake_bootstrap
+
+                pipeline._run_voice_bootstrap("test_proj", pdir)
+
+                progress_calls = mock_jq.update_progress.call_args_list
+                self.assertTrue(len(progress_calls) >= 2)
+                # Check the streamed progress snapshot
+                streamed = [c[0][1] for c in progress_calls if getattr(c[0][1], "phase", "") == "designing_references"]
+                self.assertEqual(len(streamed), 1)
+                self.assertEqual(streamed[0].character_name, "Hero")
+                self.assertEqual(streamed[0].character_id, "hero")
+                self.assertEqual(streamed[0].percent, 100.0)
+                self.assertEqual(streamed[0].stage, "bootstrapping")
+
+                # Check the complete snapshot
+                complete = [c[0][1] for c in progress_calls if getattr(c[0][1], "phase", "") == "complete"]
+                self.assertEqual(len(complete), 1)
+                self.assertEqual(complete[0].percent, 100.0)
+
+    def test_whisper_validator_normalize_language(self) -> None:
+        """Verify normalize_language strips locale sub-tags and ignores auto/none."""
+        from voice.validator.whisper_validator import WhisperValidator
+
+        self.assertEqual(WhisperValidator.normalize_language("en-US"), "en")
+        self.assertEqual(WhisperValidator.normalize_language("en_GB"), "en")
+        self.assertEqual(WhisperValidator.normalize_language("es-ES"), "es")
+        self.assertEqual(WhisperValidator.normalize_language("fr"), "fr")
+        self.assertIsNone(WhisperValidator.normalize_language("auto"))
+        self.assertIsNone(WhisperValidator.normalize_language(""))
+        self.assertIsNone(WhisperValidator.normalize_language(None))

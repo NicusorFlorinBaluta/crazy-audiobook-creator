@@ -110,11 +110,23 @@ class WhisperValidator:
 
             logger.info("Whisper model unloaded")
 
+    @staticmethod
+    def normalize_language(language: str | None) -> str | None:
+        """Normalize language tags (e.g. 'en-US', 'en_US') to standard 2-letter codes for Whisper."""
+        if not language:
+            return None
+        clean = str(language).strip().lower()
+        if clean in ("", "auto", "none", "null", "undefined"):
+            return None
+        code = clean.split("-")[0].split("_")[0].strip()
+        return code or None
+
     def transcribe(self, audio_file: str, language: str | None = None) -> str:
         """Transcribe an audio file to text.
 
         Args:
             audio_file: Path to the .wav file.
+            language: Optional language code (e.g. 'en', 'es'). BCP-47 tags like 'en-US' are normalized.
 
         Returns:
             Transcribed text.
@@ -122,9 +134,11 @@ class WhisperValidator:
         if not self._is_loaded:
             self.load()
 
-        try:
+        clean_lang = self.normalize_language(language)
+
+        def _do_transcribe(lang_arg: str | None) -> str:
             if getattr(self, "_backend", "faster_whisper") == "openai_whisper":
-                kwargs = {"language": language} if language else {}
+                kwargs = {"language": lang_arg} if lang_arg else {}
                 if not self.vad_filter:
                     result = self._model.transcribe(audio_file, **kwargs)
                     return result.get("text", "").strip()
@@ -182,11 +196,24 @@ class WhisperValidator:
                     audio_file,
                     beam_size=5,
                     vad_filter=True,
-                    language=language,
+                    language=lang_arg,
                 )
                 text = " ".join(segment.text for segment in segments)
                 return text.strip()
+
+        try:
+            return _do_transcribe(clean_lang)
         except Exception as e:
+            if clean_lang and "language" in str(e).lower():
+                logger.warning(
+                    "[WhisperValidator] STT transcription failed with language '%s' (%s); retrying with auto-detection...",
+                    clean_lang,
+                    e,
+                )
+                try:
+                    return _do_transcribe(None)
+                except Exception as retry_err:
+                    logger.warning("[WhisperValidator] Fallback auto-detection transcription failed: %s", retry_err)
             logger.warning("[WhisperValidator] STT transcription failed for '%s': %s", audio_file, e)
             return ""
 

@@ -30,6 +30,8 @@ from shared.models import (
     QualityResult,
     ValidateRequest,
     VoiceHealthResponse,
+    VoiceWarmupRequest,
+    VoiceWarmupResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -153,7 +155,7 @@ class VoiceClient:
                     ) as response:
                         response.raise_for_status()
                         for line in response.iter_lines():
-                            if not line:
+                            if not line or not line.strip():
                                 continue
                             event = json.loads(line)
                             if event.get("type") == "progress":
@@ -165,7 +167,7 @@ class VoiceClient:
                                     f"Voice Server bootstrap error: {event.get('error')} - {event.get('detail')}"
                                 )
                 raise RuntimeError("Voice bootstrap stream ended without a result")
-            except (httpx.TimeoutException, httpx.RequestError) as exc:
+            except (httpx.TimeoutException, httpx.RequestError, httpx.HTTPStatusError) as exc:
                 last_error = exc
                 logger.warning(
                     "POST /voices/bootstrap/stream failed (attempt %d/%d): %s",
@@ -178,12 +180,27 @@ class VoiceClient:
         raise last_error or RuntimeError("Failed to bootstrap voices after retries")
 
     # ------------------------------------------------------------------
-    # TTS generation
+    # TTS generation & Warmup
     # ------------------------------------------------------------------
 
-    def generate_line(self, request: GenerateLineRequest) -> GenerateLineResponse:
+    def warmup_voice(
+        self,
+        project_id: str | None = None,
+        voice_id: str | None = None,
+        timeout: int = 120,
+    ) -> VoiceWarmupResponse:
+        """Warm up the TTS engine and prime prompt cache for preview or synthesis."""
+        req = VoiceWarmupRequest(project_id=project_id, voice_id=voice_id)
+        data = self._post("/voices/warmup", req.model_dump(), timeout=timeout)
+        return VoiceWarmupResponse(**data)
+
+    def generate_line(
+        self,
+        request: GenerateLineRequest,
+        timeout: int | None = None,
+    ) -> GenerateLineResponse:
         """Generate audio for a single script line."""
-        data = self._post("/generate/line", request.model_dump())
+        data = self._post("/generate/line", request.model_dump(), timeout=timeout)
         return GenerateLineResponse(**data)
 
     def generate_chapter(self, request: GenerateChapterRequest, progress_callback=None) -> GenerateChapterResponse:

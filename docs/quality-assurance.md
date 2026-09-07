@@ -26,9 +26,12 @@ signal-level metrics.
 
 Reference audio and reference text are always paired. If a character reference lacks a trustworthy transcript, the validator does not combine it with the narrator transcript; synthesis falls back to supported speaker conditioning.
 
-Chapter validation passes the EPUB metadata language to Whisper. Auto-detection
-is used only when the project has no language metadata, avoiding independent
-language guesses for every short utterance.
+Chapter validation normalizes the EPUB metadata language to a standard 2-letter
+ISO 639-1 code (e.g. converting `en-US` to `en`) before passing it to Whisper,
+preventing STT exceptions on BCP-47 locale tags. If a project has no language
+metadata or if Whisper encounters an unsupported language error, validation
+automatically falls back to auto-detection (`language=None`) for transcription
+rather than crashing the chapter evaluation.
 
 ## Outcome rules
 
