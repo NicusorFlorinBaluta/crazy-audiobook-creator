@@ -274,12 +274,20 @@ def load_pronunciation_dictionary(
         for word, replacement in _validate_entries(raw, path).items():
             mappings[word.casefold()] = (word, replacement, source_name)
 
-    return (
-        {
+    if include_defaults:
+        active_mappings = {
             word: replacement
             for word, replacement, _ in mappings.values()
             if replacement and replacement.casefold() != word.casefold()
-        },
+        }
+    else:
+        active_mappings = {
+            word: replacement
+            for word, replacement, _ in mappings.values()
+            if replacement
+        }
+    return (
+        active_mappings,
         {word: source for word, _, source in mappings.values()},
     )
 
@@ -409,6 +417,27 @@ def generate_phonetic_recommendations(term: str, context: str = "") -> dict[str,
     if key in _KNOWN_TERM_OVERRIDES:
         d, a = _KNOWN_TERM_OVERRIDES[key]
         return {"default": d, "alternate": a}
+
+    # Multi-word terms (whitespace separated): process each word independently to preserve word separation
+    if re.search(r"\s+", raw):
+        words = raw.split()
+        sub_recs = [generate_phonetic_recommendations(w, context) for w in words]
+        rec_def = " ".join(r["default"] for r in sub_recs)
+        rec_alt = " ".join(r["alternate"] for r in sub_recs)
+        if rec_def.lower() == rec_alt.lower() or not rec_alt:
+            rec_alt = raw
+        return {"default": rec_def, "alternate": rec_alt}
+
+    # Hyphenated terms: process parts independently to preserve hyphen boundaries
+    if "-" in raw:
+        parts = [p for p in raw.split("-") if p]
+        if len(parts) > 1:
+            sub_recs = [generate_phonetic_recommendations(p, context) for p in parts]
+            rec_def = "-".join(r["default"] for r in sub_recs)
+            rec_alt = "-".join(r["alternate"] for r in sub_recs)
+            if rec_def.lower() == rec_alt.lower() or not rec_alt:
+                rec_alt = raw
+            return {"default": rec_def, "alternate": rec_alt}
 
     comp = _split_compound(raw)
     if comp:
@@ -554,10 +583,11 @@ _PRONUNCIATION_PROMPT_HEADER = (
     "You are an expert fantasy and fiction pronunciation director for audiobooks.\n"
     "For each candidate proper noun or out-of-vocabulary term and its book context, provide the exact spoken phonetic respelling for a Neural TTS engine.\n"
     "Rules:\n"
-    "1. Write phonetic respellings as fluid single words or natural English syllables without spaces (e.g. 'Kaludin', 'Zeth', 'Taravanjian', 'Homeaisle', 'Shalan').\n"
-    "2. Do NOT put spaces between syllables because neural TTS engines treat spaces as unnatural pauses.\n"
-    "3. Provide 1 default respelling and 1 alternate valid respelling.\n"
-    '4. Output STRICT JSON with key \'recommendations\': [{"term": "...", "default": "...", "alternate": "..."}]\n\n'
+    "1. For single-word terms, write phonetic respellings as fluid single words or natural English syllables without spaces between syllables (e.g. 'Kaludin', 'Zeth', 'Taravanjian', 'Homeaisle', 'Shalan'). Do NOT put spaces between syllables of a single word.\n"
+    "2. For multi-word terms or names (e.g. 'Braelin Janquay', 'Uncle Jax', 'Ghaliver Longstocking'), ALWAYS preserve the spaces between separate words. Never concatenate separate words or names into a single word (e.g. write 'Braelin Yanquay', NEVER 'BraelinJanquay').\n"
+    "3. For hyphenated terms (e.g. 'Ten-Towns', 'Caer-Konig'), preserve the hyphen or use spaces between distinct words; do NOT concatenate them into a single squashed word.\n"
+    "4. Provide 1 default respelling and 1 alternate valid respelling.\n"
+    '5. Output STRICT JSON with key \'recommendations\': [{"term": "...", "default": "...", "alternate": "..."}]\n\n'
     "CANDIDATES:\n"
 )
 
@@ -570,14 +600,30 @@ def _pronunciation_prompt(items: list[tuple[str, str]]) -> str:
     )
 
 
+def _clean_rec(term: str, rec: str) -> str:
+    cleaned = normalize_phonetic_text(rec)
+    if not cleaned:
+        return ""
+    # Guard against LLM concatenating words when term had spaces
+    if " " in term and " " not in cleaned:
+        fb = generate_phonetic_recommendations(term)
+        return fb.get("default", cleaned)
+    # Guard against LLM concatenating words when term had hyphens
+    if "-" in term and "-" not in cleaned and " " not in cleaned:
+        fb = generate_phonetic_recommendations(term)
+        return fb.get("default", cleaned)
+    return cleaned
+
+
 def _parse_pronunciation_response(raw_text: str) -> dict[str, dict[str, str]]:
     """Extract normalized recommendations from a strict-JSON model response."""
     parsed = json.loads(raw_text)
     result: dict[str, dict[str, str]] = {}
     for record in parsed.get("recommendations", []):
-        term = str(record.get("term", "")).strip().casefold()
-        default = normalize_phonetic_text(str(record.get("default", "")))
-        alternate = normalize_phonetic_text(str(record.get("alternate", "")))
+        raw_term = str(record.get("term", "")).strip()
+        term = raw_term.casefold()
+        default = _clean_rec(raw_term, str(record.get("default", "")))
+        alternate = _clean_rec(raw_term, str(record.get("alternate", "")))
         if term and default:
             result[term] = {"default": default, "alternate": alternate or default}
     return result
@@ -658,9 +704,10 @@ def resolve_pronunciations_with_llm(
             recs = parsed.get("recommendations", [])
             result: dict[str, dict[str, str]] = {}
             for r in recs:
-                term = str(r.get("term", "")).strip().casefold()
-                d = normalize_phonetic_text(str(r.get("default", "")))
-                a = normalize_phonetic_text(str(r.get("alternate", "")))
+                raw_term = str(r.get("term", "")).strip()
+                term = raw_term.casefold()
+                d = _clean_rec(raw_term, str(r.get("default", "")))
+                a = _clean_rec(raw_term, str(r.get("alternate", "")))
                 if term and d:
                     result[term] = {"default": d, "alternate": a or d}
             return result
@@ -838,6 +885,12 @@ def build_pronunciation_inventory(
             if key in cached_recs:
                 rec_default = cached_recs[key].get("default", "")
                 rec_alternate = cached_recs[key].get("alternate", "")
+                # Auto-repair cached squashed recommendations (e.g. BraelinJanquay -> Braelin Yanquay)
+                is_squashed_space = (" " in display_term and " " not in rec_default)
+                is_squashed_hyphen = ("-" in display_term and "-" not in rec_default and " " not in rec_default)
+                if is_squashed_space or is_squashed_hyphen:
+                    rec_default = ""
+                    rec_alternate = ""
             if not rec_default:
                 ctx = contexts.get(key, [""])[0]
                 generated = generate_phonetic_recommendations(display_term, ctx)

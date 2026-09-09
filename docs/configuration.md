@@ -225,6 +225,20 @@ High-confidence external rejection automatically invalidates and regenerates
 only that WAV up to `max_audio_regenerations`; only an exhausted retry or an
 inconclusive decision enters the manual queue.
 
+#### `external_validation.audio_triage`
+
+To protect API and Web quotas from rapid exhaustion (especially on the Gemini Free Tier budget of 450 requests/day), segments with solid objective metrics and only benign soft warnings (such as minor speech-rate variations or short-phrase monotone flags) are auto-accepted locally without invoking external models. External Gemini validation is reserved strictly for high/critical-risk items:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `min_quality_score` | `0.75` | Minimum composite score for local acceptance; lower scores escalate to Gemini |
+| `max_effective_text_error` | `0.12` | Maximum allowable text error / WER for local acceptance; higher errors escalate to Gemini |
+| `min_speaker_similarity` | `0.60` | Minimum voice similarity for dialogue lines before triggering external Gemini audit |
+
+During chapter validation, candidate segments are sorted by risk severity (lowest quality score and highest text error first) so the most critical segments are evaluated first before quotas can deplete.
+
+#### Gemini Web Fallback Setup
+
 The web fallback is disabled until its dedicated Chrome profile is initialized:
 
 ```powershell

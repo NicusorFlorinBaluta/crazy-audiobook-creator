@@ -570,6 +570,28 @@
         </div>
     </div>
 
+    <!-- Book cover artwork modal -->
+    <div class="modal-overlay hidden" id="cover-modal" role="presentation">
+        <div class="modal cover-viewer-modal" role="dialog" aria-modal="true" aria-labelledby="cover-modal-title" tabindex="-1">
+            <div class="modal-header">
+                <div>
+                    <h2 id="cover-modal-title">Book Cover Artwork</h2>
+                    <p class="cover-modal-subtitle" id="cover-modal-subtitle"></p>
+                </div>
+                <button class="modal-close" id="cover-modal-close" type="button" aria-label="Close artwork view">&times;</button>
+            </div>
+            <div class="modal-body cover-viewer-body">
+                <div class="cover-viewer-img-wrap">
+                    <img id="cover-modal-img" alt="Full book cover artwork">
+                </div>
+            </div>
+            <div class="modal-footer cover-viewer-footer">
+                <a class="btn btn-ghost btn-sm" id="cover-modal-open-tab" target="_blank" rel="noopener noreferrer">↗ Open in new tab</a>
+                <button class="btn btn-primary btn-sm" id="cover-modal-done" type="button">Close</button>
+            </div>
+        </div>
+    </div>
+
     <!-- ============================================ -->
     <!-- Toast notifications                          -->
     <!-- ============================================ -->

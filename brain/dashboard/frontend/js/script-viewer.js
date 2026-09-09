@@ -365,6 +365,8 @@ window.ScriptViewer = (() => {
             const card = document.createElement('article');
             card.className = 'character-card voice-profile-card';
             card.dataset.voiceId = mainVoice.voice_id;
+            card.dataset.ownerId = ownerId;
+            card.dataset.candidateIds = candidates.map(c => c.voice_id).join(' ');
             card.dataset.search = `${cardDisplayName} ${mainVoice.name || ''} ${mainVoice.description || ''}`.toLowerCase();
             card.dataset.assigned = String(assigned.length > 0);
             card.dataset.alternatives = String(candidates.length > 1);
@@ -448,15 +450,19 @@ window.ScriptViewer = (() => {
                 );
                 regenerateVoice(
                     selected?.value || mainVoice.voice_id,
-                    card.querySelector('.voice-description-input').value
+                    card.querySelector('.voice-description-input').value,
+                    card,
+                    regenerateButton
                 );
             });
             card.querySelector('.voice-upload-submit')?.addEventListener(
                 'click',
-                () => uploadVoiceSample(
+                (e) => uploadVoiceSample(
                     mainVoice.voice_id,
                     card.querySelector('.voice-upload-file').files[0],
-                    card.querySelector('.voice-upload-transcript').value
+                    card.querySelector('.voice-upload-transcript').value,
+                    card,
+                    e.currentTarget
                 )
             );
 
@@ -575,7 +581,16 @@ window.ScriptViewer = (() => {
         document.getElementById('casting-toolbar')?.classList.toggle('no-results', visible === 0);
     }
 
-    async function uploadVoiceSample(voiceId, file, transcript) {
+    function getCardForVoice(voiceId) {
+        if (!els.charGrid || !voiceId) return null;
+        return els.charGrid.querySelector(`[data-voice-id="${CSS.escape(voiceId)}"]`)
+            || els.charGrid.querySelector(`[data-owner-id="${CSS.escape(voiceId)}"]`)
+            || els.charGrid.querySelector(`[data-candidate-ids~="${CSS.escape(voiceId)}"]`)
+            || els.charGrid.querySelector(`input[value="${CSS.escape(voiceId)}"]`)?.closest('.character-card')
+            || null;
+    }
+
+    async function uploadVoiceSample(voiceId, file, transcript, triggerCard = null, triggerButton = null) {
         const projectId = window.state?.currentProjectId;
         if (!projectId) return;
         if (!file) {
@@ -587,14 +602,16 @@ window.ScriptViewer = (() => {
             return;
         }
         
-        const cardEl = els.charGrid.querySelector(`[data-voice-id="${CSS.escape(voiceId)}"]`);
+        const cardEl = triggerCard || getCardForVoice(voiceId);
+        let previewArea = null;
         if (cardEl) {
+            cardEl.classList.add('is-regenerating');
             const badge = cardEl.querySelector('.voice-ready-badge');
             if (badge) {
                 badge.className = 'voice-ready-badge preparing active-loading';
                 badge.innerHTML = '<span class="voice-spinner-dot"></span> Uploading...';
             }
-            const previewArea = cardEl.querySelector('.char-voice-preview');
+            previewArea = cardEl.querySelector('.voice-comparison-player') || cardEl.querySelector('.char-voice-preview');
             if (previewArea) {
                 previewArea.innerHTML = `
                     <div class="voice-preview-loading">
@@ -606,6 +623,10 @@ window.ScriptViewer = (() => {
 
         const buttons = [...els.charGrid.querySelectorAll('.voice-upload-submit')];
         buttons.forEach(button => { button.disabled = true; });
+        if (triggerButton) {
+            triggerButton.classList.add('btn-loading');
+            triggerButton.innerHTML = '<span class="voice-spinner-dot"></span> Importing…';
+        }
         showToast('Uploading and validating reference voice...', 'info');
         
         try {
@@ -634,28 +655,30 @@ window.ScriptViewer = (() => {
         } catch (error) {
             showToast(error.message, 'error');
             if (cardEl) {
+                cardEl.classList.remove('is-regenerating');
                 const badge = cardEl.querySelector('.voice-ready-badge');
                 if (badge) {
                     badge.className = 'voice-ready-badge failed';
                     badge.innerHTML = 'Upload failed';
                 }
                 // Show the error message directly in the card so it's not missed
-                const previewArea = cardEl.querySelector('.char-voice-preview');
                 if (previewArea) {
                     previewArea.innerHTML = `
-                        <div class="voice-preview-loading" style="display: block; word-break: break-word; color: var(--danger, #f44); text-align: left; font-size: 0.85rem; padding: 0.75rem;">
+                        <div class="voice-preview-error">
                             <strong style="display: block; margin-bottom: 4px;">❌ Upload failed:</strong>
                             ${escapeHtml(error.message)}
                         </div>`;
                 }
             }
+            buttons.forEach(button => {
+                button.disabled = false;
+                button.classList.remove('btn-loading');
+            });
             // Delay re-render so the user can read the error
             setTimeout(async () => {
                 await fetchVoices(projectId);
                 renderCharacters();
-            }, 8000);
-        } finally {
-            buttons.forEach(button => { button.disabled = false; });
+            }, 3000);
         }
     }
 
@@ -894,7 +917,7 @@ window.ScriptViewer = (() => {
         }
     }
 
-    async function regenerateVoice(voiceId, voiceDescription) {
+    async function regenerateVoice(voiceId, voiceDescription, triggerCard = null, triggerButton = null) {
         const projectId = window.state?.currentProjectId;
         if (!projectId) return;
         const description = voiceDescription.trim();
@@ -902,26 +925,88 @@ window.ScriptViewer = (() => {
             showToast('Describe the voice in at least 12 characters', 'warning');
             return;
         }
-        const cardEl = els.charGrid.querySelector(`[data-voice-id="${CSS.escape(voiceId)}"]`);
+        const cardEl = triggerCard || getCardForVoice(voiceId);
+        let targetLabel = 'preview';
+        let button = triggerButton || (cardEl ? cardEl.querySelector('.voice-regenerate') : null);
+        let previewArea = null;
+        let selectedCandidateBtn = null;
+        let banner = null;
+
         if (cardEl) {
+            cardEl.classList.add('is-regenerating');
+
+            // Determine candidate option label (e.g. Option A, Option B)
+            const allRadios = [...cardEl.querySelectorAll('.voice-candidates-toggles input[type="radio"]')];
+            if (allRadios.length > 0) {
+                const checkedRadio = cardEl.querySelector('.voice-candidates-toggles input[type="radio"]:checked')
+                    || allRadios.find(r => r.value === voiceId);
+                const radioIndex = allRadios.findIndex(r => r === checkedRadio || r.value === voiceId);
+                if (radioIndex >= 0) {
+                    const targetOption = String.fromCharCode(65 + radioIndex);
+                    targetLabel = `option ${targetOption}`;
+                    selectedCandidateBtn = (checkedRadio || allRadios[radioIndex])?.closest('.btn');
+                    if (selectedCandidateBtn) {
+                        selectedCandidateBtn.classList.add('voice-candidate-regenerating');
+                    }
+                }
+            }
+
+            // Header badge: active glowing dot with regenerating label
             const badge = cardEl.querySelector('.voice-ready-badge');
             if (badge) {
                 badge.className = 'voice-ready-badge preparing active-loading';
-                badge.innerHTML = '<span class="voice-spinner-dot"></span> Generating...';
+                badge.innerHTML = `<span class="voice-spinner-dot"></span> Regenerating ${targetLabel}...`;
             }
-            const previewArea = cardEl.querySelector('.char-voice-preview');
+
+            // In-card banner for prominent visual indicator
+            banner = cardEl.querySelector('.voice-regenerating-banner');
+            if (!banner) {
+                banner = document.createElement('div');
+                banner.className = 'voice-regenerating-banner';
+                const header = cardEl.querySelector('.char-header');
+                if (header && header.nextSibling) {
+                    header.parentNode.insertBefore(banner, header.nextSibling);
+                } else {
+                    cardEl.prepend(banner);
+                }
+            }
+            banner.innerHTML = `
+                <span class="voice-spinner-dot"></span>
+                <div class="voice-regenerating-info">
+                    <strong>Regenerating ${targetLabel}</strong>
+                    <span>Synthesizing voice audio &amp; validating distinctness…</span>
+                </div>`;
+
+            // Candidate status line
+            const statusEl = cardEl.querySelector('.selected-candidate-status');
+            if (statusEl) {
+                statusEl.textContent = `Regenerating ${targetLabel}…`;
+            }
+
+            // Preview player container: replace player with animated waveform skeleton
+            previewArea = cardEl.querySelector('.voice-comparison-player') || cardEl.querySelector('.char-voice-preview');
             if (previewArea) {
                 previewArea.innerHTML = `
                     <div class="voice-preview-loading">
                         <div class="voice-pulse-wave"><span></span><span></span><span></span><span></span></div>
-                        <span class="voice-loading-text">Synthesizing & validating new voice preview...</span>
+                        <span class="voice-loading-text">Synthesizing &amp; validating ${targetLabel} preview with TTS server…</span>
                     </div>`;
             }
+
+            // Disable text input during synthesis
+            const textInput = cardEl.querySelector('.voice-description-input');
+            if (textInput) textInput.disabled = true;
         }
 
+        // Disable all regenerate buttons across the grid, give triggering button active busy feedback
         const buttons = [...els.charGrid.querySelectorAll('.voice-regenerate')];
-        buttons.forEach(button => { button.disabled = true; });
-        showToast('Generating and validating a new voice preview…', 'info');
+        buttons.forEach(b => { b.disabled = true; });
+        if (button) {
+            button.classList.add('btn-loading');
+            button.innerHTML = `<span class="voice-spinner-dot"></span> Regenerating ${targetLabel}…`;
+        }
+
+        showToast(`Generating and validating ${targetLabel}…`, 'info');
         try {
             const response = await fetch(
                 `api/projects/${encodeURIComponent(projectId)}/voices/${encodeURIComponent(voiceId)}/regenerate`,
@@ -942,9 +1027,33 @@ window.ScriptViewer = (() => {
             renderCharacters();
         } catch (error) {
             showToast(error.message, 'error');
-            buttons.forEach(button => { button.disabled = false; });
-            await fetchVoices(projectId);
-            renderCharacters();
+            if (cardEl) {
+                cardEl.classList.remove('is-regenerating');
+                if (selectedCandidateBtn) selectedCandidateBtn.classList.remove('voice-candidate-regenerating');
+                if (banner) banner.remove();
+                const badge = cardEl.querySelector('.voice-ready-badge');
+                if (badge) {
+                    badge.className = 'voice-ready-badge failed';
+                    badge.innerHTML = 'Regeneration failed';
+                }
+                const textInput = cardEl.querySelector('.voice-description-input');
+                if (textInput) textInput.disabled = false;
+                if (previewArea) {
+                    previewArea.innerHTML = `
+                        <div class="voice-preview-error">
+                            <strong style="display: block; margin-bottom: 4px;">❌ Regeneration failed:</strong>
+                            ${escapeHtml(error.message)}
+                        </div>`;
+                }
+            }
+            buttons.forEach(b => {
+                b.disabled = false;
+                b.classList.remove('btn-loading');
+            });
+            setTimeout(async () => {
+                await fetchVoices(projectId);
+                renderCharacters();
+            }, 3000);
         }
     }
 

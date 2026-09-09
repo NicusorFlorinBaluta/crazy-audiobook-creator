@@ -806,6 +806,34 @@ class ExportMetadataTests(unittest.TestCase):
         self.assertIn("grouping=ISBN 9780000000001", command)
         self.assertIn("+faststart", command)
 
+    def test_export_embeds_cover_art_with_valid_input_ordering(self) -> None:
+        exporter = M4BExporter()
+        with patch("voice.mastering.m4b_exporter.subprocess.run") as run, \
+             patch("voice.mastering.m4b_exporter.Path.exists", return_value=True):
+            run.return_value.returncode = 0
+            run.return_value.stderr = ""
+            exporter._run_ffmpeg(
+                concat_file=Path("concat.txt"),
+                metadata_file=Path("chapters.txt"),
+                output_file=Path("output.m4b"),
+                book_metadata=AudiobookMetadata(
+                    title="Book",
+                    author="Author",
+                ),
+                cover_art="cover.jpg",
+                config=ExportConfig(),
+            )
+
+        command = run.call_args.args[0]
+        cover_idx = command.index("cover.jpg")
+        self.assertEqual(command[cover_idx - 1], "-i")
+        map_metadata_idx = command.index("-map_metadata")
+        self.assertLess(cover_idx, map_metadata_idx, "All inputs (-i) must appear before output options (-map_metadata)")
+        self.assertIn("-map", command)
+        self.assertIn("2:v", command)
+        self.assertIn("attached_pic", command)
+        self.assertIn("copy", command)
+
 
 if __name__ == "__main__":
     unittest.main()

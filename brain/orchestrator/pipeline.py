@@ -3473,9 +3473,25 @@ class Pipeline:
             )
         except Exception as exc:
             logger.warning("External audio QA could not load voice references: %s", exc)
-        for result in response.quality_results:
-            if not result.selected:
-                continue
+        def _risk_priority(q: Any) -> tuple[int, float, float]:
+            is_crit = (
+                not getattr(q, "passed_hard_gates", True)
+                or (getattr(q, "status", None) and getattr(q.status, "value", "") == "failed")
+                or getattr(q, "quality_score", 1.0) < 0.75
+                or getattr(q, "effective_text_error", 0.0) > 0.12
+                or (getattr(q, "speaker_similarity", None) is not None and q.speaker_similarity < 0.60)
+                or bool(getattr(q, "clipping_detected", False))
+                or bool(getattr(q, "has_long_silence", False))
+            )
+            return (
+                0 if is_crit else 1,
+                float(getattr(q, "quality_score", 1.0)),
+                -float(getattr(q, "effective_text_error", 0.0)),
+            )
+
+        selected_results = [r for r in response.quality_results if r.selected]
+        selected_results.sort(key=_risk_priority)
+        for result in selected_results:
             line = line_by_id.get(result.line_id)
             audio_path = segment_dir / f"{result.line_id}.wav"
             human_review = review_by_id.get(result.line_id)

@@ -203,6 +203,7 @@ class ValidationLoop:
                     generation_context=context,
                 )
 
+            is_non_spoken_pause = not any(c.isalnum() for c in (synthesis_text or ""))
             if needs_regeneration:
                 synthesis_cache_misses += 1
                 synthesis_elapsed = 0.0
@@ -211,53 +212,60 @@ class ValidationLoop:
                     output_path.with_suffix(".pt").unlink(missing_ok=True)
                 except OSError:
                     pass
-                for generation_attempt in range(1, retry_limit + 1):
-                    self._raise_if_cancelled(cancel_check)
-                    try:
-                        operation_started = time.perf_counter()
+                if is_non_spoken_pause:
+                    silence_sr = getattr(self.engine, "sample_rate", 24000)
+                    silence_samples = int(silence_sr * 0.1)  # 100ms clean silence
+                    output_path.parent.mkdir(parents=True, exist_ok=True)
+                    sf.write(str(output_path), np.zeros(silence_samples, dtype=np.float32), silence_sr)
+                    logger.info("Emitted clean 100ms silence for non-spoken pause marker %s", line.line_id)
+                else:
+                    for generation_attempt in range(1, retry_limit + 1):
+                        self._raise_if_cancelled(cancel_check)
                         try:
-                            self.engine.generate_speech(
-                                text=synthesis_text,
-                                voice_reference_path=voice_ref,
-                                ref_text=ref_text,
-                                emotion_instruction=synthesis_emotion,
-                                speed=synthesis_speed,
-                                voice_fx=synthesis_fx,
-                                output_path=output_path,
-                                seed=self._line_seed(
-                                    project_id,
-                                    line.line_id,
-                                    synthesis_text,
-                                    line.voice_id or line.speaker,
-                                    generation_attempt,
-                                ),
+                            operation_started = time.perf_counter()
+                            try:
+                                self.engine.generate_speech(
+                                    text=synthesis_text,
+                                    voice_reference_path=voice_ref,
+                                    ref_text=ref_text,
+                                    emotion_instruction=synthesis_emotion,
+                                    speed=synthesis_speed,
+                                    voice_fx=synthesis_fx,
+                                    output_path=output_path,
+                                    seed=self._line_seed(
+                                        project_id,
+                                        line.line_id,
+                                        synthesis_text,
+                                        line.voice_id or line.speaker,
+                                        generation_attempt,
+                                    ),
+                                )
+                            finally:
+                                attempt_elapsed = time.perf_counter() - operation_started
+                                timings["tts_synthesis"] = timings.get("tts_synthesis", 0.0) + attempt_elapsed
+                                synthesis_elapsed += attempt_elapsed
+                                self._merge_engine_generation_metrics(
+                                    tts_substage_metrics,
+                                    getattr(
+                                        self.engine,
+                                        "last_generation_metrics",
+                                        {},
+                                    ),
+                                )
+                            if not self._valid_audio(output_path):
+                                raise RuntimeError("TTS returned no valid audio artifact")
+                            last_error = None
+                            break
+                        except Exception as exc:
+                            last_error = exc
+                            self._unlink_audio_artifacts(output_path)
+                            logger.exception(
+                                "Generation failed for %s (attempt %d/%d): %s",
+                                line.line_id,
+                                generation_attempt,
+                                retry_limit,
+                                exc,
                             )
-                        finally:
-                            attempt_elapsed = time.perf_counter() - operation_started
-                            timings["tts_synthesis"] = timings.get("tts_synthesis", 0.0) + attempt_elapsed
-                            synthesis_elapsed += attempt_elapsed
-                            self._merge_engine_generation_metrics(
-                                tts_substage_metrics,
-                                getattr(
-                                    self.engine,
-                                    "last_generation_metrics",
-                                    {},
-                                ),
-                            )
-                        if not self._valid_audio(output_path):
-                            raise RuntimeError("TTS returned no valid audio artifact")
-                        last_error = None
-                        break
-                    except Exception as exc:
-                        last_error = exc
-                        self._unlink_audio_artifacts(output_path)
-                        logger.exception(
-                            "Generation failed for %s (attempt %d/%d): %s",
-                            line.line_id,
-                            generation_attempt,
-                            retry_limit,
-                            exc,
-                        )
                 if last_error is not None:
                     generation_errors[line.line_id] = str(last_error)
                     segment_metrics[line.line_id] = {
@@ -413,6 +421,9 @@ class ValidationLoop:
             uncached_lines.append(line)
 
         for line in uncached_lines:
+            if not any(c.isalnum() for c in (line.spoken_text or line.text or "")):
+                speaker_similarity[line.line_id] = 1.0
+                continue
             voice_ref, _, _ = reference_context[line.line_id]
             try:
                 operation_started = time.perf_counter()
@@ -917,6 +928,46 @@ class ValidationLoop:
                 "[Validator] %s emotion_adjusted=True effective_wer_threshold=%.2f",
                 line_id,
                 effective_wer_threshold,
+            )
+
+        if not any(c.isalnum() for c in (expected_text or "")):
+            logger.info("[Validator] %s is a non-spoken pause marker; auto-passing validation.", line_id)
+            duration = 0.1
+            try:
+                duration = float(sf.info(audio_file).duration)
+            except Exception:
+                pass
+            return QualityResult(
+                line_id=line_id,
+                status=ValidationStatus.PASS,
+                wer=0.0,
+                transcribed_text="",
+                duration_seconds=duration,
+                expected_duration_seconds=duration,
+                peak_dbfs=-60.0,
+                noise_floor_db=-60.0,
+                clipping_detected=False,
+                duration_ok=True,
+                has_long_silence=False,
+                pacing_anomaly=False,
+                text_similarity=1.0,
+                effective_text_error=0.0,
+                acceptance_reason="non_spoken_pause_marker",
+                speaker_similarity=1.0,
+                quality_score=1.0,
+                attempt=attempt,
+                metrics={
+                    "duration_seconds": duration,
+                    "expected_duration_seconds": duration,
+                    "peak_dbfs": -60.0,
+                    "noise_floor_db": -60.0,
+                    "clipping_detected": False,
+                    "duration_ok": True,
+                    "has_long_silence": False,
+                    "pacing_anomaly": False,
+                },
+                warnings=[],
+                passed_hard_gates=True,
             )
 
         transcription_started = time.perf_counter()

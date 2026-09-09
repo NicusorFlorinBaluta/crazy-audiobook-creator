@@ -968,6 +968,42 @@ class ValidationLoopTests(unittest.TestCase):
         self.assertFalse(whisper.is_loaded)
         self.assertTrue(engine.is_loaded)
 
+    def test_non_spoken_pause_marker_skips_tts_and_auto_passes(self) -> None:
+        """Non-spoken separator/em-dash lines must emit silence and auto-pass without neural TTS or Whisper."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            loop, engine = self.make_loop(root)
+
+            # Process a chapter with an em-dash pause line
+            response = loop.process_chapter(
+                project_id="book",
+                chapter_number=1,
+                lines=[
+                    ScriptLine(
+                        line_id="ch01_0001",
+                        speaker="narrator",
+                        text="—",
+                        pause_after_ms=900,
+                    )
+                ],
+                workspace=root,
+                validate=True,
+            )
+
+            # Neural TTS must not have been called
+            self.assertEqual(len(engine.calls), 0)
+
+            # Segment audio must be valid 100ms silence
+            segment_path = root / "book" / "segments" / "ch01_0001.wav"
+            self.assertTrue(segment_path.exists())
+            info = sf.info(str(segment_path))
+            self.assertAlmostEqual(info.duration, 0.1, places=2)
+
+            # Validation must have passed cleanly
+            self.assertEqual(response.status, "success")
+            self.assertEqual(response.generated, 1)
+            self.assertEqual(response.failed_validation, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -292,17 +292,22 @@ class M4BExporter:
             str(concat_file),
             "-i",
             str(metadata_file),
-            "-map_metadata",
-            "1",
         ]
 
-        # Add cover art if available
-        if cover_art and Path(cover_art).exists():
-            cmd.extend(["-i", cover_art])
+        # Add cover art input if available
+        has_cover = bool(cover_art and Path(cover_art).exists())
+        if has_cover:
+            cmd.extend(["-i", str(cover_art)])
+
+        # Map streams
+        if has_cover:
             cmd.extend(["-map", "0:a", "-map", "2:v"])
+            cmd.extend(["-c:v", "copy"])
             cmd.extend(["-disposition:v", "attached_pic"])
         else:
             cmd.extend(["-map", "0:a"])
+
+        cmd.extend(["-map_metadata", "1", "-map_chapters", "1"])
 
         # Audio encoding
         cmd.extend(

@@ -95,6 +95,13 @@ const els = {
     metadataModalClose: document.getElementById('metadata-modal-close'),
     metadataCancel: document.getElementById('metadata-cancel'),
     metadataApply: document.getElementById('metadata-apply'),
+    coverModal: document.getElementById('cover-modal'),
+    coverModalClose: document.getElementById('cover-modal-close'),
+    coverModalDone: document.getElementById('cover-modal-done'),
+    coverModalImg: document.getElementById('cover-modal-img'),
+    coverModalTitle: document.getElementById('cover-modal-title'),
+    coverModalSubtitle: document.getElementById('cover-modal-subtitle'),
+    coverModalOpenTab: document.getElementById('cover-modal-open-tab'),
     toastContainer: document.getElementById('toast-container'),
     voiceStatusDot: document.getElementById('voice-status-dot'),
     voiceStatusText: document.getElementById('voice-status-text')
@@ -262,6 +269,11 @@ function setupEventListeners() {
     });
     els.metadataModal.addEventListener('click', event => {
         if (event.target === els.metadataModal) closeMetadataModal();
+    });
+    els.coverModalClose?.addEventListener('click', closeCoverModal);
+    els.coverModalDone?.addEventListener('click', closeCoverModal);
+    els.coverModal?.addEventListener('click', event => {
+        if (event.target === els.coverModal) closeCoverModal();
     });
     
     // Drag and Drop Upload
@@ -506,14 +518,15 @@ function handleTabKeydown(event) {
 }
 
 function handleGlobalKeydown(event) {
-    const activeModal = [els.uploadModal, els.metadataModal].find(
+    const activeModal = [els.uploadModal, els.metadataModal, els.coverModal].find(
         modal => modal && !modal.classList.contains('hidden')
     );
     if (!activeModal) return;
     if (event.key === 'Escape') {
         event.preventDefault();
         if (activeModal === els.uploadModal) closeUploadModal();
-        else closeMetadataModal();
+        else if (activeModal === els.metadataModal) closeMetadataModal();
+        else if (activeModal === els.coverModal) closeCoverModal();
         return;
     }
     if (event.key !== 'Tab') return;
@@ -1774,8 +1787,27 @@ function renderProjectHeader(project) {
         image.src = project.cover_url;
         image.alt = `Cover of ${project.title || 'audiobook'}`;
         cover.appendChild(image);
+        cover.classList.add('is-clickable');
+        cover.setAttribute('role', 'button');
+        cover.setAttribute('tabindex', '0');
+        cover.setAttribute('title', 'Click to view full cover artwork');
+        cover.setAttribute('aria-label', `View full cover artwork for ${project.title || 'audiobook'}`);
+        cover.onclick = () => openCoverModal(project.cover_url, project.title, project.author);
+        cover.onkeydown = (e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                openCoverModal(project.cover_url, project.title, project.author);
+            }
+        };
     } else {
         cover.textContent = '📖';
+        cover.classList.remove('is-clickable');
+        cover.removeAttribute('role');
+        cover.removeAttribute('tabindex');
+        cover.removeAttribute('title');
+        cover.removeAttribute('aria-label');
+        cover.onclick = null;
+        cover.onkeydown = null;
     }
     
     const status = String(project.status || 'created').toLowerCase();
@@ -1807,6 +1839,40 @@ async function apiErrorMessage(response, fallback) {
     } catch (_) {
         return fallback;
     }
+}
+
+function openCoverModal(coverUrl, title, author) {
+    if (!els.coverModal || !coverUrl) return;
+    state.lastModalTrigger = document.activeElement;
+    if (els.coverModalImg) {
+        els.coverModalImg.src = coverUrl;
+        els.coverModalImg.alt = `Full cover artwork for ${title || 'audiobook'}`;
+    }
+    if (els.coverModalTitle) {
+        els.coverModalTitle.textContent = title || 'Book Cover Artwork';
+    }
+    if (els.coverModalSubtitle) {
+        els.coverModalSubtitle.textContent = author ? `By ${author}` : '';
+        els.coverModalSubtitle.style.display = author ? 'block' : 'none';
+    }
+    if (els.coverModalOpenTab) {
+        els.coverModalOpenTab.href = coverUrl;
+    }
+    els.coverModal.classList.remove('hidden');
+    const modalDialog = els.coverModal.querySelector('.cover-viewer-modal');
+    if (modalDialog) modalDialog.focus();
+}
+
+function closeCoverModal() {
+    if (!els.coverModal) return;
+    els.coverModal.classList.add('hidden');
+    if (els.coverModalImg) {
+        els.coverModalImg.removeAttribute('src');
+    }
+    if (state.lastModalTrigger?.focus) {
+        state.lastModalTrigger.focus();
+    }
+    state.lastModalTrigger = null;
 }
 
 function closeMetadataModal() {

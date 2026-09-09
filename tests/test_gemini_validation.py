@@ -756,5 +756,193 @@ class EscalationFailureReportingTests(unittest.TestCase):
         self.assertFalse(_is_malformed_request("503 Service Unavailable"))
 
 
+class AudioValidationFastExitAndFallbackTests(unittest.TestCase):
+    def test_usage_budget_is_exhausted(self) -> None:
+        from brain.validators.gemini_validation import ExternalValidationError, _UsageBudget
+
+        with tempfile.TemporaryDirectory() as directory:
+            budget_path = Path(directory) / "usage.json"
+            budget = _UsageBudget(budget_path, {"test-model": 2})
+
+            self.assertFalse(budget.is_exhausted("test-model"))
+            budget.reserve("test-model")
+            self.assertFalse(budget.is_exhausted("test-model"))
+            budget.reserve("test-model")
+            self.assertTrue(budget.is_exhausted("test-model"))
+            with self.assertRaises(ExternalValidationError):
+                budget.reserve("test-model")
+
+    def test_gemini_api_429_quota_fast_exit(self) -> None:
+        from unittest.mock import MagicMock, patch
+
+        from brain.validators.gemini_validation import ExternalValidationError, GeminiApiClient
+
+        with tempfile.TemporaryDirectory() as directory:
+            client = GeminiApiClient(
+                {
+                    "enabled": True,
+                    "api_key_env": "TEST_GEMINI_KEY",
+                    "max_attempts": 4,
+                    "daily_request_budgets": {"test-model": 10},
+                },
+                Path(directory),
+            )
+            client.api_key = "test-key"
+
+            mock_response = MagicMock()
+            mock_response.status_code = 429
+            mock_response.text = '{"error": {"code": 429, "message": "Quota exceeded", "status": "RESOURCE_EXHAUSTED"}}'
+
+            with patch("httpx.post", return_value=mock_response) as mock_post:
+                with self.assertRaises(ExternalValidationError) as ctx:
+                    client.generate_json(model="test-model", prompt="test", schema={})
+                self.assertIn("quota exhausted", str(ctx.exception).lower())
+                # Must exit on first attempt, NOT loop 4 times with backoff
+                self.assertEqual(mock_post.call_count, 1)
+
+    def test_provider_health_quota_cooldown(self) -> None:
+        from brain.validators.gemini_validation import _ProviderHealth
+
+        with tempfile.TemporaryDirectory() as directory:
+            health = _ProviderHealth(Path(directory) / "health.json", threshold=3, cooldown_seconds=60)
+            health.record(
+                "gemini_api_triage",
+                success=False,
+                latency_ms=5,
+                error="Local daily safety budget exhausted for lite (450/450)",
+            )
+            snapshot = health.snapshot()
+            # Must set long cooldown (>= 3600s) on quota exhaustion
+            remaining = snapshot["gemini_api_triage"]["cooldown_remaining_seconds"]
+            self.assertGreater(remaining, 3500)
+            self.assertTrue(snapshot["gemini_api_triage"]["circuit_open"])
+
+    def test_validate_audio_clean_local_acceptance_when_external_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            service = _service(root)
+            # Both API and Web disabled / unavailable
+            service.api.config["enabled"] = False
+            service.web.config["enabled"] = False
+
+            q_result = QualityResult(
+                line_id="ch01_0001",
+                chapter_number=1,
+                character_id="narrator",
+                status=ValidationStatus.ACCEPTED_WITH_WARNING,
+                passed_hard_gates=True,
+                warnings=["minor pacing difference"],
+                wer=0.08,
+                quality_score=0.88,
+            )
+            validated = service.validate_audio(
+                project_dir=root,
+                audio_path=root / "dummy.wav",
+                line_text="Hello world",
+                result=q_result,
+            )
+            self.assertFalse(validated.manual_review_required)
+            self.assertEqual(validated.manual_review_reason, "")
+
+    def test_validate_audio_hard_gate_failure_is_not_overridden(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            service = _service(root)
+            service.api.config["enabled"] = False
+            service.web.config["enabled"] = False
+
+            q_result = QualityResult(
+                line_id="ch01_0002",
+                chapter_number=1,
+                character_id="narrator",
+                status=ValidationStatus.FAIL,
+                passed_hard_gates=False,
+                warnings=["audio clipping detected"],
+                wer=0.45,
+                quality_score=0.4,
+            )
+            validated = service.validate_audio(
+                project_dir=root,
+                audio_path=root / "dummy.wav",
+                line_text="Hello world",
+                result=q_result,
+            )
+    def test_validate_audio_benign_soft_warnings_auto_accepted_without_api_calls(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            service = _service(root)
+            service.api = _FakeApi([])
+            service.web = _FakeWeb()
+
+            # Segment has high quality score, low text error, and soft warnings only
+            q_result = QualityResult(
+                line_id="ch01_0003",
+                chapter_number=1,
+                character_id="narrator",
+                status=ValidationStatus.ACCEPTED_WITH_WARNING,
+                passed_hard_gates=True,
+                warnings=["minor speech rate variance (pacing_anomaly)", "monotone_warning"],
+                wer=0.04,
+                effective_text_error=0.04,
+                quality_score=0.86,
+                clipping_detected=False,
+                has_long_silence=False,
+            )
+            validated = service.validate_audio(
+                project_dir=root,
+                audio_path=root / "dummy.wav",
+                line_text="The journey began at dawn.",
+                result=q_result,
+            )
+            self.assertFalse(validated.manual_review_required)
+            self.assertEqual(validated.manual_review_reason, "")
+            self.assertGreaterEqual(validated.validation_confidence, 0.85)
+            # Must NOT call external API or burn quota for benign soft warnings
+            self.assertEqual(len(service.api.calls), 0)
+
+    def test_validate_audio_critical_risk_escalates_to_api(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            service = _service(root)
+            service.api = _FakeApi(
+                [
+                    {
+                        "item_id": "ch01_0004",
+                        "decision": "reject",
+                        "confidence": 0.95,
+                        "reason": "Severe hallucinated speech detected.",
+                        "defects": ["hallucination"],
+                    }
+                ]
+            )
+            service.web = _FakeWeb()
+
+            # Segment has critical text error (hallucination)
+            q_result = QualityResult(
+                line_id="ch01_0004",
+                chapter_number=1,
+                character_id="narrator",
+                status=ValidationStatus.FAIL,
+                passed_hard_gates=True,
+                warnings=["severe text mismatch"],
+                wer=0.35,
+                effective_text_error=0.35,
+                quality_score=0.55,
+                clipping_detected=False,
+                has_long_silence=False,
+            )
+            validated = service.validate_audio(
+                project_dir=root,
+                audio_path=root / "dummy.wav",
+                line_text="The journey began at dawn.",
+                result=q_result,
+            )
+            self.assertTrue(validated.manual_review_required)
+            self.assertIn("rejected this segment", validated.manual_review_reason)
+            # Must call external API for critical risks
+            self.assertEqual(len(service.api.calls), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
+

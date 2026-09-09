@@ -59,6 +59,8 @@ pass, a marginal duration/noise/composite-score result is
 Warnings remain visible and queryable. Hard failures and legacy unresolved
 `flagged` attempts are retried up to `max_retries`.
 
+Under external Gemini audio QA triage, segments that pass hard gates with solid composite quality (`quality_score >= 0.75`), low transcription error (`effective_text_error <= 0.12`), and matching speaker embeddings are auto-accepted locally with high confidence even if minor soft diagnostics (such as speech-rate variances or short-phrase monotone flags) are present. External API triage is reserved strictly for high/critical-risk discrepancies to prevent Free Tier rate limit exhaustion.
+
 Only `pass` and `accepted_with_warning` are accepted outcomes. Any other final
 status appears in `failed_line_ids`, leaves the chapter incomplete, and blocks
 mastering.

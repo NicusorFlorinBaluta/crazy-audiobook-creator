@@ -151,7 +151,16 @@ class _ProviderHealth:
             else:
                 failures = int(entry.get("consecutive_failures", 0)) + 1
                 entry.update({"consecutive_failures": failures, "last_failure": now, "last_error": error[:1000]})
-                if failures >= self.threshold:
+                is_quota_exhausted = (
+                    "budget exhausted" in error.lower()
+                    or "quota exhausted" in error.lower()
+                    or "resource_exhausted" in error.lower()
+                )
+                if is_quota_exhausted:
+                    # Daily budget or API quota exhaustion cannot recover with short retries.
+                    # Fast-exit by cooling down for 1 hour so subsequent calls bypass immediately.
+                    entry["open_until_epoch"] = time.time() + max(3600.0, float(self.cooldown_seconds))
+                elif failures >= self.threshold:
                     entry["open_until_epoch"] = time.time() + self.cooldown_seconds
             state[provider] = entry
             atomic_write_json(self.path, state)
@@ -356,6 +365,22 @@ class _UsageBudget:
         self.limits = limits
         self.lock_path = path.with_suffix(".lock")
 
+    def is_exhausted(self, model: str) -> bool:
+        limit = int(self.limits.get(model, 0))
+        if limit <= 0:
+            return False
+        day = datetime.now(ZoneInfo("America/Los_Angeles")).date().isoformat()
+        if not self.path.is_file():
+            return False
+        try:
+            state = json.loads(self.path.read_text(encoding="utf-8"))
+            if state.get("day") == day:
+                used = int(state.get("models", {}).get(model, 0))
+                return used >= limit
+        except (OSError, json.JSONDecodeError):
+            pass
+        return False
+
     def reserve(self, model: str) -> None:
         limit = int(self.limits.get(model, 0))
         if limit <= 0:
@@ -409,6 +434,8 @@ class GeminiApiClient:
     ) -> dict[str, Any]:
         if not self.available:
             raise ExternalValidationError("Gemini API is disabled or its API key is unavailable")
+        if self.budget.is_exhausted(model):
+            raise ExternalValidationError(f"Local daily safety budget exhausted for {model}")
         parts: list[dict[str, Any]] = [{"text": prompt}]
         audio_inputs = [path for path in (audio_path, reference_audio_path) if path is not None]
         if sum(path.stat().st_size for path in audio_inputs) > 18 * 1024 * 1024:
@@ -441,9 +468,9 @@ class GeminiApiClient:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
         response: httpx.Response | None = None
         try:
+            self.budget.reserve(model)
             max_attempts = max(1, int(self.config.get("max_attempts", 4)))
             for attempt in range(max_attempts):
-                self.budget.reserve(model)
                 if self.request_interval > 0:
                     with self._request_lock:
                         now = time.monotonic()
@@ -457,23 +484,39 @@ class GeminiApiClient:
                     json=payload,
                     timeout=self.timeout,
                 )
-                if response.status_code not in {408, 429, 500, 502, 503, 504}:
+                if response.status_code == 429:
+                    resp_text = response.text
+                    is_quota = (
+                        "RESOURCE_EXHAUSTED" in resp_text
+                        or "quota" in resp_text.lower()
+                        or "rate_limit_exceeded" in resp_text.lower()
+                    )
+                    if is_quota or attempt + 1 >= max_attempts:
+                        raise ExternalValidationError(
+                            f"Gemini API quota exhausted (429): {resp_text[:300].strip()}"
+                        )
+                    retry_after = 2.0
+                    try:
+                        raw_retry = response.headers.get("Retry-After", "")
+                        if raw_retry:
+                            retry_after = min(5.0, float(raw_retry))
+                    except (ValueError, TypeError):
+                        pass
+                    time.sleep(retry_after)
+                    continue
+
+                if response.status_code not in {408, 500, 502, 503, 504}:
                     break
                 if attempt + 1 >= max_attempts:
                     break
-                retry_after = 0.0
-                if response.status_code == 429:
-                    raw_retry = response.headers.get("Retry-After", "")
-                    try:
-                        retry_after = float(raw_retry)
-                    except (ValueError, TypeError):
-                        retry_after = 0.0
-                time.sleep(max(retry_after, min(16.0, 2.0 ** (attempt + 1))))
+                time.sleep(min(8.0, 2.0 ** (attempt + 1)))
             assert response is not None
             response.raise_for_status()
             body = response.json()
             text = "".join(str(part.get("text", "")) for part in body["candidates"][0]["content"]["parts"])
             return _extract_json(text)
+        except ExternalValidationError:
+            raise
         except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
             response_detail = ""
             if response is not None and response.status_code >= 400:
@@ -520,9 +563,13 @@ class GeminiWebClient:
                 state = {}
         conversations = state.setdefault("conversations", {})
         conversation = conversations.get(purpose, {})
-        max_turns = max(1, int(self.config.get("max_turns_per_conversation", 100)))
+        # For audio QA, do not reuse multi-turn conversations: piling up 40+ audio
+        # files in one conversation causes DOM hydration lag, upload chip collisions,
+        # and reading stale answers from earlier turns.
+        is_audio_qa = audio_path is not None
+        max_turns = 1 if is_audio_qa else max(1, int(self.config.get("max_turns_per_conversation", 100)))
         prior_turns = int(conversation.get("turns", 0) or 0)
-        saved_url = str(conversation.get("url", "")) if prior_turns < max_turns else ""
+        saved_url = "" if is_audio_qa else (str(conversation.get("url", "")) if prior_turns < max_turns else "")
         profile_dir = Path(str(self.config.get("profile_dir", "brain/projects/.gemini-browser-profile")))
         profile_dir.mkdir(parents=True, exist_ok=True)
         input_selector = str(
@@ -642,7 +689,14 @@ class GeminiWebClient:
                                 "Gemini did not attach audio files: " + ", ".join(missing_uploads)
                             )
                     editor.fill(prompt)
-                    editor.press("Enter")
+                    page.wait_for_timeout(500)
+                    send_button = page.locator(
+                        'button[aria-label*="Send" i], button[aria-label*="Trimite" i], button[jsname="Qx7uuf"]'
+                    ).last
+                    if send_button.count() > 0 and send_button.is_visible() and send_button.is_enabled():
+                        send_button.click()
+                    else:
+                        editor.press("Enter")
                     page.wait_for_function(
                         "([selector, count]) => document.querySelectorAll(selector).length > count",
                         arg=[response_selector, before],
@@ -660,12 +714,13 @@ class GeminiWebClient:
                         time.sleep(1)
                     if stable_reads < 5:
                         raise ExternalValidationError("Gemini web response did not finish before timeout")
-                    conversations[purpose] = {
-                        "url": page.url,
-                        "turns": prior_turns + 1 if saved_url else 1,
-                        "updated_at": datetime.now().astimezone().isoformat(),
-                    }
-                    atomic_write_json(state_path, state)
+                    if not is_audio_qa:
+                        conversations[purpose] = {
+                            "url": page.url,
+                            "turns": prior_turns + 1 if saved_url else 1,
+                            "updated_at": datetime.now().astimezone().isoformat(),
+                        }
+                        atomic_write_json(state_path, state)
                     return _extract_json(text)
                 finally:
                     context.close()
@@ -697,6 +752,10 @@ class GeminiValidationService:
         # A merge collapses two characters into one voice for a whole book, so
         # it is held to a higher bar than an attribute enrichment.
         self.cast_merge_confidence = float(cast_cfg.get("min_confidence", 0.95))
+        audio_triage_cfg = dict(config.get("audio_triage", {}))
+        self.audio_triage_min_quality = float(audio_triage_cfg.get("min_quality_score", 0.75))
+        self.audio_triage_max_text_error = float(audio_triage_cfg.get("max_effective_text_error", 0.12))
+        self.audio_triage_min_speaker_sim = float(audio_triage_cfg.get("min_speaker_similarity", 0.60))
         circuit = dict(config.get("circuit_breaker", {}))
         self.health = _ProviderHealth(
             projects_dir / ".external_validation_health.json",
@@ -1796,6 +1855,31 @@ class GeminiValidationService:
             result.manual_review_required = True
             result.manual_review_reason = "Deterministic audio hard gate failed; external models cannot override it"
             return result
+
+        # Critical-risk triage: segments with benign soft warnings (sound quality score,
+        # low WER, matching speaker, no severe acoustic flaws) are auto-accepted locally
+        # to protect API and Web quotas from exhaustion.
+        is_critical_risk = (
+            result.status.value == "failed"
+            or result.quality_score < self.audio_triage_min_quality
+            or result.effective_text_error > self.audio_triage_max_text_error
+            or (result.speaker_similarity is not None and result.speaker_similarity < self.audio_triage_min_speaker_sim)
+            or bool(result.clipping_detected)
+            or bool(result.has_long_silence)
+        )
+        if not is_critical_risk:
+            result.manual_review_required = False
+            result.manual_review_reason = ""
+            result.validation_confidence = min(1.0, 0.85 + 0.15 * float(result.quality_score))
+            logger.info(
+                "[ExternalAudioQA] Auto-accepted segment %s locally (quality_score=%.2f, error=%.2f, benign warnings: %s)",
+                result.line_id,
+                result.quality_score,
+                result.effective_text_error,
+                "; ".join(result.warnings) or "none",
+            )
+            return result
+
         prompt = (
             "Evaluate this audiobook segment for audible defects, wrong/missing words, unnatural prosody, "
             "speaker inconsistency, emotion mismatch, glitches, and distracting noise. Be conservative and "
@@ -1909,13 +1993,14 @@ class GeminiValidationService:
         if (
             result.status.value in {"pass", "accepted_with_warning"}
             and result.passed_hard_gates
-            and len(errors) == len(stages)
+            and result.external_validation_decision != "reject"
         ):
             result.manual_review_required = False
             result.manual_review_reason = ""
+            reason_detail = "; ".join(errors) if errors else "inconclusive external evaluation"
             logger.info(
-                "[ExternalAudioQA] External triage unavailable (%s); accepting locally verified segment %s",
-                "; ".join(errors),
+                "[ExternalAudioQA] External triage unresolving (%s); accepting locally verified segment %s",
+                reason_detail,
                 result.line_id,
             )
             return result

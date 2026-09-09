@@ -279,7 +279,10 @@ def collect_review_gate(project_id: str, project_dir: Path, job_queue: Any) -> R
             "fail",
             "flagged",
         }
-        blocking = is_hard_failure and (disposition not in RESOLVED_SEGMENT_DISPOSITIONS)
+        # Non-spoken separator/pause markers (e.g. em-dash, '---') never block release.
+        line_text = script_line.get("text") or details.get("text") or ""
+        is_non_spoken = bool(line_text) and not any(c.isalnum() for c in line_text)
+        blocking = is_hard_failure and (disposition not in RESOLVED_SEGMENT_DISPOSITIONS) and not is_non_spoken
 
         items.append(
             ReviewItem(

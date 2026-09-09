@@ -142,6 +142,20 @@ class DashboardBasePathTests(unittest.TestCase):
         self.assertIn("button.textContent = 'Assigning...'", viewer)
         self.assertIn("button.disabled = true", viewer)
 
+    def test_voice_regeneration_has_busy_feedback_on_card_and_button(self):
+        viewer = (FRONTEND / "js/script-viewer.js").read_text(encoding="utf-8")
+        css = (FRONTEND / "css/styles.css").read_text(encoding="utf-8")
+        self.assertIn("cardEl.classList.add('is-regenerating')", viewer)
+        self.assertIn("card.dataset.candidateIds", viewer)
+        self.assertIn("card.dataset.ownerId = ownerId", viewer)
+        self.assertIn(".voice-comparison-player", viewer)
+        self.assertIn("button.classList.add('btn-loading')", viewer)
+        self.assertIn("Regenerating ${targetLabel}", viewer)
+        self.assertIn("voice-regenerating-banner", viewer)
+        self.assertIn(".character-card.is-regenerating", css)
+        self.assertIn(".voice-regenerating-banner", css)
+        self.assertIn(".btn.btn-loading", css)
+
     def test_voice_option_change_restarts_preview_from_beginning(self):
         viewer = (FRONTEND / "js/script-viewer.js").read_text(encoding="utf-8")
         self.assertIn("player.pause()", viewer)
@@ -181,6 +195,27 @@ class DashboardBasePathTests(unittest.TestCase):
         )
         self.assertNotIn("container.querySelectorAll('.btn')", viewer)
         self.assertIn("voice-selection-row", viewer)
+
+    def test_cover_artwork_viewer_modal_contracts(self):
+        index_html = (FRONTEND / "index.html").read_text(encoding="utf-8")
+        app_js = (FRONTEND / "js/app.js").read_text(encoding="utf-8")
+        styles = (FRONTEND / "css/styles.css").read_text(encoding="utf-8")
+
+        # HTML modal structure
+        self.assertIn('id="cover-modal"', index_html)
+        self.assertIn('id="cover-modal-img"', index_html)
+        self.assertIn('id="cover-modal-close"', index_html)
+        self.assertIn('id="cover-modal-open-tab"', index_html)
+
+        # CSS styles
+        self.assertIn(".project-cover.is-clickable", styles)
+        self.assertIn(".cover-viewer-modal", styles)
+        self.assertIn(".cover-viewer-img-wrap", styles)
+
+        # JS wiring
+        self.assertIn("openCoverModal", app_js)
+        self.assertIn("closeCoverModal", app_js)
+        self.assertIn("els.coverModal", app_js)
 
 
 if __name__ == "__main__":

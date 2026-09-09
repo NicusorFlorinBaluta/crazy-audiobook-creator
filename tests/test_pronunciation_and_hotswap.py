@@ -85,6 +85,26 @@ class PronunciationAndHotSwapTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pache_rec["default"], "Pahchee")
         self.assertEqual(pache_rec["alternate"], "Paych")
 
+        # Multi-word names: spaces MUST be preserved, never concatenated
+        braelin_rec = generate_phonetic_recommendations("Braelin Janquay")
+        self.assertEqual(braelin_rec["default"], "Braelin Yanquay")
+        self.assertIn(" ", braelin_rec["default"])
+        self.assertNotIn("BraelinJanquay", braelin_rec["default"])
+
+        uncle_jax_rec = generate_phonetic_recommendations("Uncle Jax")
+        self.assertEqual(uncle_jax_rec["default"], "Uncle Yax")
+        self.assertIn(" ", uncle_jax_rec["default"])
+
+        # Hyphenated terms: hyphens MUST be preserved, never concatenated
+        tentowns_rec = generate_phonetic_recommendations("Ten-Towns")
+        self.assertEqual(tentowns_rec["default"], "Ten-Towns")
+        self.assertIn("-", tentowns_rec["default"])
+        self.assertNotIn("Tentowns", tentowns_rec["default"])
+
+        caer_rec = generate_phonetic_recommendations("Caer-Konig")
+        self.assertEqual(caer_rec["default"], "Caer-Konig")
+        self.assertIn("-", caer_rec["default"])
+
     def test_english_dictionary_filtering(self) -> None:
         """Verify standard English words are excluded from unresolved candidate suggestions."""
         from shared.pronunciation import extract_concise_sentence, is_english_word
@@ -587,6 +607,63 @@ class PronunciationAndHotSwapTests(unittest.IsolatedAsyncioTestCase):
             verified_only, v_sources = load_pronunciation_dictionary(proj_dir, include_defaults=False)
             self.assertNotIn("Bruenor", verified_only)
             self.assertEqual(verified_only.get("Drizzt"), "Drizzt-Custom")
+            # Cattibrie was mapped to itself; with include_defaults=False it MUST be retained as verified
+            self.assertEqual(verified_only.get("Cattibrie"), "Cattibrie")
+            self.assertEqual(v_sources.get("Cattibrie"), "project")
+
+    def test_keep_original_self_mapping_verified_in_inventory(self) -> None:
+        """Verify explicit keep-original mappings like Jax: Jax are marked verified in inventory, not reverted."""
+        with tempfile.TemporaryDirectory() as directory:
+            proj_dir = Path(directory)
+            book_script = {
+                "metadata": {"title": "Test Book", "author": "Author"},
+                "character_registry": {"characters": {}},
+                "chapters": [
+                    {
+                        "chapter_number": 1,
+                        "chapter_title": "One",
+                        "lines": [
+                            {"line_id": "ch01_0001", "speaker": "narrator", "text": "Uncle Jax walked in."},
+                            {"line_id": "ch01_0002", "speaker": "dusk", "text": "Hello, Jax. Where is Braelin Janquay?"},
+                            {"line_id": "ch01_0003", "speaker": "narrator", "text": "Braelin Janquay was in Ten-Towns."},
+                            {"line_id": "ch01_0004", "speaker": "narrator", "text": "Jax smiled. Uncle Jax was wise."},
+                        ],
+                    }
+                ],
+            }
+            (proj_dir / "book_script.json").write_text(json.dumps(book_script), encoding="utf-8")
+            (proj_dir / "characters.json").write_text(
+                json.dumps({"characters": {"braelin": {"name": "Braelin Janquay"}}}),
+                encoding="utf-8",
+            )
+            # Recommendations with default Yax for Jax, and squashed BraelinJanquay
+            recs = {
+                "jax": {"default": "Yax", "alternate": "Jax"},
+                "braelin janquay": {"default": "BraelinJanquay", "alternate": "BraelinJanquay"},
+            }
+            (proj_dir / "pronunciation_recommendations.json").write_text(json.dumps(recs), encoding="utf-8")
+            # User explicitly verified Jax: Jax (keep original)
+            (proj_dir / "pronunciation_dict.json").write_text(json.dumps({"Jax": "Jax"}), encoding="utf-8")
+
+            inv = build_pronunciation_inventory(proj_dir, force=True)
+            terms = {item["term"]: item for item in inv["candidates"]}
+
+            # 1. Jax MUST be verified with spoken_text == "Jax", NOT reverted to review_required with "Yax"
+            self.assertIn("Jax", terms)
+            self.assertEqual(terms["Jax"]["status"], "verified")
+            self.assertEqual(terms["Jax"]["spoken_text"], "Jax")
+            self.assertEqual(terms["Jax"]["effective_spoken"], "Jax")
+
+            # 2. Braelin Janquay MUST have auto-repaired space-preserved recommendation, not squashed
+            self.assertIn("Braelin Janquay", terms)
+            self.assertEqual(terms["Braelin Janquay"]["status"], "review_required")
+            self.assertIn(" ", terms["Braelin Janquay"]["recommendation_default"])
+            self.assertNotEqual(terms["Braelin Janquay"]["recommendation_default"], "BraelinJanquay")
+            self.assertEqual(terms["Braelin Janquay"]["recommendation_default"], "Braelin Yanquay")
+
+            # 3. Cached recommendations file on disk must be repaired
+            recs_on_disk = json.loads((proj_dir / "pronunciation_recommendations.json").read_text(encoding="utf-8"))
+            self.assertEqual(recs_on_disk["braelin janquay"]["default"], "Braelin Yanquay")
 
     async def test_export_pronunciations_with_scopes(self) -> None:
         """Verify export_pronunciations filters correctly by scope and case-insensitively overwrites defaults."""
