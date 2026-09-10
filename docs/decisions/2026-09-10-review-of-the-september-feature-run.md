@@ -367,6 +367,114 @@ live cast pass      both books, both tiers, 3 API requests total
 Each regression test for a shipped defect was verified to fail when the defect is
 reinstated, following the convention set by `25e7d8a`.
 
+## Fixing without reading: the layer that replaced the review queue
+
+Most of this record describes turning defects into review items. For this
+project that is close to useless, and the 2026-09-04 record already says why,
+about cast merges:
+
+> Approving a merge means reading the verbatim excerpts that justify it, which
+> is a plot summary of a book the operator has not read yet.
+
+The same is true of an attribution. Nine new blocking items were created here
+before that registered — nine obligations to read passages from unread books.
+So the rule changed: **anything resolvable without a human reading should be.**
+
+### 1. A refutation plus a scene is often an answer
+
+A deterministic check says who did *not* speak. Three now do:
+
+| refutation | evidence |
+| --- | --- |
+| `possessive_contradiction` | one speaker owns and disowns the same thing in one turn |
+| `gendering_tag` | the attached tag genders the speaker differently |
+| `addressed_not_speaking` | the tag says the stored speaker was spoken **to** |
+
+The third comes straight from the 2026-09-06 principle — *"a speech tag names
+several people, only its subject speaks"* — read for what it also yields: that
+name is the **addressee**, and nobody is spoken to by themselves. Only
+`<verb> to <name>` and `<pronoun> <verb> <name>` are read, and a possessive is
+excluded: *"his arm around Dusk's shoulders"* is about Dusk without addressing
+him.
+
+If the surrounding scene leaves exactly **one** other speaker the refutation
+allows, that is the answer, and nobody reads anything.
+
+```
+                              refuted  unique  ambiguous  none
+the-finest-edge-of-twilight         1       1          0     0
+isles-of-the-emberdark              9       3          5     1
+```
+
+The one `none` is the known false positive — *"your way home"* against *"our
+way back"* — where the rule correctly declines. It acts only where the text
+leaves one answer.
+
+### 2. Where the text leaves two, ask a closed question
+
+Block adjudication is the wrong tool for the rest: it decides a whole block
+jointly, bringing its blast radius to a six-line problem, and it agrees with
+the per-line path 99.4% of the time anyway.
+
+The better move is narrower. *"Who speaks this line?"* is the open question the
+per-line adjudicator already answered wrongly and Gemini answers differently on
+different runs. By this point the deterministic layer has established what it
+did not have then — who did not speak, and the complete candidate set — so the
+model can be asked to **choose from a list** instead of attributing freely.
+
+That is a different task, and empirically a far more stable one:
+
+```
+                                     open question          closed question
+ch11_0148   dahlia 1.00 then effron 0.74     —          (resolved deterministically)
+ch07_0188                                    —          vathi      3/3  1.00
+ch36_0270                                    —          starling   3/3  0.95
+ch47_0205                                    —          chrysalis  3/3  0.98
+ch47_0209                                    —          chrysalis  3/3  0.98
+ch60_0113                                    —          dajer      3/3  0.98
+ch38_0118                                    —          dajer      3/3  0.98
+```
+
+Every one agrees with a hand reading. Two (`vathi`, `chrysalis`) had been worked
+out by hand hours earlier, independently, and `ch38_0118` is self-evident: the
+line is *"My name is Colonel Dajer,"*.
+
+Three guards, because the model is the weakest link: the answer must be in the
+candidate list, all runs must agree, and mean confidence must clear 0.85. It is
+opt-in behind `--llm`, and provenance is recorded as `constrained_choice`
+rather than `deterministic_unique_candidate`, because a later reader must be
+able to tell which lines the text settled and which a model chose.
+
+Blocking review items: **1 → 0** and **8 → 2**, with no spoilers spent.
+
+### Would this generalise to every low-confidence line?
+
+Tempting, and not yet supported. The tier changed four things at once — a
+closed candidate set, the refutation as a stated fact, a window seven times
+wider, and unanimity across runs — so nothing here isolates which of them did
+the work. Assuming it was the context would repeat the mistake this record
+documents twice already.
+
+What *is* measurable without a model is the cost. Widening the per-line window
+from (4, 6) to (20, 30) on the sixteen lines the per-line path left at
+0.80–0.83:
+
+```
+narrow (w4/s6)     25,978 chars   ~6,500 tokens
+wide   (w20/s30)  114,465 chars  ~28,600 tokens
+                                   4.4x prefill
+```
+
+Prefill is roughly 15% of compute on this hardware (see `benchmarks/`), so
+widening *everything* costs something like 1.5x wall-clock across ~1,038 calls.
+Widening only the low-confidence tail — sixteen of 616 lines, 2.6% — costs
+almost nothing. That asymmetry is the argument for cascading rather than
+widening globally: spend the context where the cheap attempt already said it
+was unsure.
+
+Whether it *helps* is a separate question and is being measured on those
+sixteen lines: same prompt, same code path, only the window changes.
+
 ## The one defect that cannot be auto-fixed
 
 `ch11_0148` is the only finding the possessive check reports on

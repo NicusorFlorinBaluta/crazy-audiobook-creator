@@ -7,7 +7,13 @@ import re
 from datetime import UTC, datetime
 from typing import Any
 
-from brain.director.script_generator import _HE_SPEECH_TAG, _SHE_SPEECH_TAG, ScriptGenerator
+from brain.director.script_generator import (
+    _HE_SPEECH_TAG,
+    _SHE_SPEECH_TAG,
+    _SPEECH_VERB_SET,
+    _SUBJECT_PRONOUNS,
+    ScriptGenerator,
+)
 from brain.validators.tiered_adjudicator import _reads_as_attached_tag
 from shared.constants import Gender
 from shared.models import CharacterRegistry, ExtractedBook, ScriptChapter, ScriptLine
@@ -155,6 +161,48 @@ def detect_possessive_contradictions(
     return findings
 
 
+def tag_addressee(tag: str, registry: CharacterRegistry) -> str | None:
+    """Who the speech tag says is being *spoken to*.
+
+    The 2026-09-06 record establishes the principle -- "a speech tag names
+    several people, only its subject speaks" -- and applies it to stop a name
+    after the verb being read as an inverted subject. The same reading yields
+    something useful in its own right: that name is the **addressee**, and a
+    character cannot be spoken to by themselves.
+
+    Only the two unambiguous shapes are read, because a wrong addressee would
+    refute a correct attribution:
+
+    * ``<speech verb> to <name>`` -- "the man said to Dusk."
+    * ``<pronoun> <speech verb> <name>`` -- "he asked Breezy."
+
+    A possessive is not an addressee: "moving as if to put his arm around
+    Dusk's shoulders" is about Dusk without addressing him.
+    """
+    if not tag:
+        return None
+    lowered = " " + re.sub(r"\s+", " ", tag).strip().casefold() + " "
+    verbs = "|".join(sorted(_SPEECH_VERB_SET, key=len, reverse=True))
+    pronouns = "|".join(sorted(_SUBJECT_PRONOUNS, key=len, reverse=True))
+
+    for character_id, character in registry.characters.items():
+        if character_id == "narrator":
+            continue
+        names = {str(character_id).replace("_", " "), str(character.name or "")}
+        names |= {str(alias) for alias in (character.aliases or [])}
+        for name in names:
+            cleaned = name.strip().casefold()
+            if len(cleaned) < 3:
+                continue
+            token = re.escape(cleaned).replace(r"\ ", r"\s+")
+            # "...said to Dusk" / "...asked Breezy" with a pronoun subject.
+            if re.search(rf"\b(?:{verbs})\s+to\s+{token}(?!'s)\b", lowered) or re.search(
+                rf"\b(?:{pronouns})\s+(?:\w+ly\s+)?(?:{verbs})\s+{token}(?!'s)\b", lowered
+            ):
+                return character_id
+    return None
+
+
 def _refutations(
     chapter: ScriptChapter,
     registry: CharacterRegistry,
@@ -187,6 +235,23 @@ def _refutations(
         character = registry.characters.get(line.speaker)
         if character and character.gender in (Gender.MALE, Gender.FEMALE) and character.gender != gender:
             found.append((index, "gendering_tag", line.speaker, gender))
+
+    # A character cannot be spoken to by themselves. This catches the shape the
+    # gender rule cannot: "the man said to Dusk." refutes Dusk without any
+    # gender disagreement, because Dusk is male and so is "the man".
+    for index, line in enumerate(lines):
+        if not line.speaker or line.speaker == "narrator" or index + 1 >= len(lines):
+            continue
+        following = lines[index + 1]
+        if following.speaker != "narrator":
+            continue
+        tag = str(following.text or "").strip()
+        if not _reads_as_attached_tag(tag):
+            continue
+        if tag_addressee(tag, registry) == line.speaker and not any(
+            existing_index == index for existing_index, _, _, _ in found
+        ):
+            found.append((index, "addressed_not_speaking", line.speaker, None))
     return found
 
 
