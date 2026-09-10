@@ -269,23 +269,61 @@ def _set_entry_aliases(entry: Any, aliases: list[str]) -> None:
         entry.aliases = aliases
 
 
-def _capitalised_midsentence_count(term: str, source_text: str) -> int:
-    """Times `term` appears capitalised and not at a sentence start.
+# A fragment must be capitalised in at least this share of the places it is
+# used on its own. Measured across three books: real names sit at 0.86-1.00
+# (Entreri, Helka, Dajer, Bloodsworn 1.00; Tainted 0.91; Frond 0.86) and
+# compound debris at 0.00-0.20 (Troll 0.04, Half 0.02, Being 0.02, Wolf 0.09).
+# Nothing observed falls between 0.20 and 0.86.
+_NAME_CAPITALISATION_SHARE = 0.5
 
-    Sentence-initial capitals are free -- "Being" opening a sentence says
-    nothing about whether the book uses it as a name. Capitalisation *inside* a
-    sentence is what separates a proper noun from an ordinary word, and it is
-    the same signal `_validation_terms` already uses to build a book-local
-    glossary.
+
+def _reads_as_a_name(term: str, full_name: str, source_text: str) -> bool:
+    """Does the book use `term` on its own, and use it as a name when it does?
+
+    Two failure modes, one test. `Feeders` never appears outside
+    "Raven-Feeders", so as an alias it can match nothing -- but alias lookup is
+    casefolded (`script_generator` lowercases both sides), so it *can* still hit
+    the ordinary word. `Troll`, split out of "Half-Troll", appears 135 times in
+    lower case and 6 capitalised: as an alias it is 135 chances to mis-attribute
+    and 6 to help.
+
+    So occurrences inside the full name are ignored -- they are evidence for the
+    name, not for the fragment -- and of what remains, the capitalised share
+    must carry the majority. A fragment with no standalone use at all fails,
+    because it cannot help and can only hurt.
     """
     if not term or not source_text:
-        return 0
+        return False
+    # The cast records "The Battle-Grim" while the prose often writes just
+    # "Battle-Grim", so an article-less form must be excluded too -- otherwise
+    # every bare mention of the compound is counted as standalone use of the
+    # fragment inside it, which is exactly what it is not.
+    wholes = {full_name.strip()} if full_name else set()
+    for whole in list(wholes):
+        stripped = re.sub(r"^(?:the|a|an)\s+", "", whole, flags=re.IGNORECASE).strip()
+        # Only when something is left *besides* the fragment. For "The
+        # Bloodsworn" the article-less form is "Bloodsworn" -- the fragment
+        # itself -- and excluding it would erase all the evidence there is,
+        # condemning exactly the epithet-only characters this must protect.
+        if stripped and stripped.lower() not in {whole.lower(), term.lower()}:
+            wholes.add(stripped)
+    inside: list[tuple[int, int]] = []
+    for whole in wholes:
+        inside += [(m.start(), m.end()) for m in re.finditer(re.escape(whole), source_text, re.IGNORECASE)]
+
+    def _outside(pattern: str, haystack: str) -> int:
+        return sum(
+            1
+            for m in re.finditer(pattern, haystack)
+            if not any(start <= m.start() and m.end() <= end for start, end in inside)
+        )
+
     probe = term[:1].upper() + term[1:]
-    count = 0
-    for match in re.finditer(rf"\b{re.escape(probe)}\b", source_text):
-        if not _SENTENCE_START.search(source_text[max(0, match.start() - 40) : match.start()]):
-            count += 1
-    return count
+    capitalised = _outside(rf"\b{re.escape(probe)}\b", source_text)
+    any_case = _outside(rf"\b{re.escape(term.lower())}\b", source_text.lower())
+    if any_case == 0:
+        return False
+    return capitalised / any_case >= _NAME_CAPITALISATION_SHARE
 
 
 def prune_ambiguous_fragment_aliases(
@@ -340,7 +378,7 @@ def prune_ambiguous_fragment_aliases(
     # of them the analyser produced by splitting a name apart.
     protected: set[str] = set()
     single_word: set[str] = set()
-    is_fragment: set[str] = set()
+    fragment_of: dict[str, set[str]] = {}
     for char_id, entry in characters.items():
         name = str(_entry_name(entry) or "")
         derived = {word.lower() for word in re.split(r"[\s_\-]+", name) if word}
@@ -357,7 +395,7 @@ def prune_ambiguous_fragment_aliases(
                 continue
             single_word.add(key)
             if candidate.lower() in derived:
-                is_fragment.add(key)
+                fragment_of.setdefault(key, set()).add(name)
 
     # Decide per alias *string*, not per owner. Removing an ambiguous alias from
     # only some owners would leave one claimant standing and turn a correct
@@ -372,7 +410,10 @@ def prune_ambiguous_fragment_aliases(
         # `master`, held by both `hoid` and `white_haired_being`, actually did
         # on 2026-09-10.
         if len(owners.get(key, set())) > 1
-        or (key in is_fragment and _capitalised_midsentence_count(key, source_text) == 0)
+        # A fragment survives if it reads as a name beside *any* of the names it
+        # was split out of. Requiring all of them would let one noisy owner
+        # delete a good alias from everyone else.
+        or (key in fragment_of and not any(_reads_as_a_name(key, whole, source_text) for whole in fragment_of[key]))
     }
     if not doomed_keys:
         return []

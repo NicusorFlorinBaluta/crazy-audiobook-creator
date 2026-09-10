@@ -257,7 +257,7 @@ used by both, reading the configured values and comparing against the enum.
 
 ```
 ruff check .        All checks passed        (was 19 errors, 3 of them F821)
-pytest              735 passed, 2 skipped    (was 713; +22 tests)
+pytest              738 passed, 2 skipped    (was 713; +25 tests)
 BLE001 ratchet      116                      (was 139; ratchet target was 118)
 live cast pass      both books, both tiers, 3 API requests total
 ```
@@ -537,8 +537,64 @@ character's name — attribution already handles that collision, and deleting th
 name would punish its owner for someone else's mis-claim.
 
 Runs in `_consolidate_accumulated_characters`, which is the first point that
-sees both the whole roster and the source. Seven tests, two verified to fail
-with the ambiguity rule disabled.
+sees both the whole roster and the source.
+
+#### Triangulated on a third book, which changed the rule
+
+*The Shadow of the Gods* (John Gwynne, 56 chapters, 923k chars) names people in
+a different idiom: Norse given names plus hyphenated epithets — `Battle-Grim`,
+`Wave-Jarl`, `Sea-Wolf`, `Raven-Feeders` — and shared titles (`Jarl`, 97
+mid-sentence occurrences). It exposed a case the first two books did not.
+
+`_derive_character_aliases` splits an id into words, so `the_battle_grim` yields
+`Battle` and `Grim`. Both are capitalised in the text, so the first rule kept
+them — but almost every capital is *inside the compound*:
+
+```
+frag       total   inside compound   outside   any-case outside
+Grim         128               127          1                  5
+Feeders       34                34          0                  2
+Troll         36                30          6                135
+Half          32                30          2                 82
+Wolf          24                19          5                 56
+```
+
+Alias lookup is casefolded (`script_generator` lowercases both sides), so
+`Troll` as an alias is 135 chances to mis-attribute against 6 to help. The test
+became: ignore occurrences inside the full name, and of what is left require the
+capitalised form to hold the majority. Measured across all three books, that
+separates cleanly with nothing in between:
+
+```
+real names   Entreri 1.00  Helka 1.00  Dajer 1.00  Bloodsworn 1.00
+             Tainted 0.91  Frond 0.86
+debris       Grim 0.20  Battle 0.13  Wolf 0.09  Troll 0.04  Half 0.02
+             Being 0.02  Feeders 0.00  Shin 0.00
+```
+
+Two earlier attempts at this test failed and are recorded above: a frequency
+threshold, and a standalone count that excluded sentence-initial use.
+
+**The third book also caught a regression before it shipped.** Excluding the
+article-less form of the name ("Battle-Grim" for "The Battle-Grim") is necessary
+for compounds — but for "The Bloodsworn" the article-less form *is* the
+fragment, so excluding it erased all the evidence and condemned `Bloodsworn` and
+`Tainted`: precisely the epithet-only characters the rule exists to protect.
+Guarded, and pinned by a test that fails without the guard.
+
+Final measurement, all three books:
+
+```
+                              aliases removed   entries newly left with none
+the-finest-edge-of-twilight                19                             0
+isles-of-the-emberdark                     53                             0
+the-shadow-of-the-gods                     12                             0
+```
+
+Nothing loses its own name. `Soil`, dropped as a common noun, still resolves:
+`_detect_new_characters` matches an exact id before it consults aliases.
+
+Thirteen tests; three verified to fail when the rule they pin is removed.
 
 ## Related
 

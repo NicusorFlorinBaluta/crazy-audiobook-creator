@@ -223,7 +223,17 @@ class FragmentAliasPruneTests(unittest.TestCase):
                 "aliases": ["White-Haired Being", "White-Haired", "Being", "White", "Haired"],
             }
         }
-        source = "A white-haired figure stood there. Being early was his habit. White snow fell."
+        # Proportions matter, not presence: each fragment is overwhelmingly an
+        # ordinary lower-case word outside the name it was split from, which is
+        # what it looks like in the real book (`Being` scores 2 capitalised
+        # against 95 any-case there).
+        source = (
+            "The White-Haired Being spoke once. A white-haired figure stood there. "
+            "It was a strange being, that being, and being early was his habit; "
+            "being late was not, for being seen mattered to a being like him. "
+            "The white snow fell on white stone, and white banners hung over white walls. "
+            "His haired scalp itched; the haired beast circled the haired thing."
+        )
         removed = prune_ambiguous_fragment_aliases(cast, source)
         self.assertEqual({r["alias"] for r in removed}, {"Being", "White", "Haired"})
         self.assertEqual(cast["white_haired_being"]["aliases"], ["White-Haired Being", "White-Haired"])
@@ -300,6 +310,70 @@ class FragmentAliasPruneTests(unittest.TestCase):
         self.assertIn("Effron", cast["effron"]["aliases"])
         self.assertIn("Effron", cast["effron_child"]["aliases"])
         self.assertNotIn("Son", cast["effron_child"]["aliases"])
+
+    def test_a_compound_name_does_not_leak_its_halves(self) -> None:
+        """Triangulated on a third book, whose names are hyphenated compounds.
+
+        `_derive_character_aliases` turns the id `the_battle_grim` into the
+        aliases `Battle` and `Grim`. In the book, `Grim` appears 128 times and
+        127 of those are inside "Battle-Grim"; `Troll`, split out of
+        "Half-Troll", appears 6 times capitalised and 135 times in lower case.
+        Alias lookup is casefolded, so keeping them is 135 chances to
+        mis-attribute against 6 to help.
+        """
+        cast = {
+            "the_battle_grim": {"name": "The Battle-Grim", "aliases": ["The Battle-Grim", "Battle", "Grim"]},
+            "einar_half_troll": {"name": "Einar Half-Troll", "aliases": ["Einar Half-Troll", "Half", "Troll"]},
+        }
+        source = (
+            "The Battle-Grim rowed on. Battle-Grim oars struck the water, and the Battle-Grim sang. "
+            "It was a grim day for a grim errand, grim as the grim sea. "
+            "Einar Half-Troll laughed. The troll had a troll's stink, half a troll and half a man, "
+            "half again as tall, the troll-kin of the half-world."
+        )
+        removed = {r["alias"] for r in prune_ambiguous_fragment_aliases(cast, source)}
+        self.assertEqual(removed, {"Battle", "Grim", "Half", "Troll"})
+        self.assertEqual(cast["the_battle_grim"]["aliases"], ["The Battle-Grim"])
+        self.assertIn("Einar Half-Troll", cast["einar_half_troll"]["aliases"])
+
+    def test_an_epithet_only_character_keeps_its_epithet(self) -> None:
+        """The article-stripping that fixes compounds must not eat these.
+
+        "The Bloodsworn" and "The Tainted" are named by epithet and nothing
+        else. Excluding the article-less form of the name would exclude every
+        occurrence of the epithet itself, leaving no evidence and condemning
+        exactly the characters this rule exists to protect. Caught by
+        triangulating on the third book before it shipped.
+        """
+        cast = {
+            "the_bloodsworn": {"name": "The Bloodsworn", "aliases": ["The Bloodsworn", "Bloodsworn"]},
+            "the_tainted": {"name": "The Tainted", "aliases": ["The Tainted", "Tainted"]},
+        }
+        source = (
+            "The Bloodsworn came ashore. Bloodsworn shields locked, and the Bloodsworn roared. "
+            "The Tainted were hunted; a Tainted child was worth silver, and the Tainted knew it."
+        )
+        self.assertEqual(prune_ambiguous_fragment_aliases(cast, source), [])
+        self.assertIn("Bloodsworn", cast["the_bloodsworn"]["aliases"])
+        self.assertIn("Tainted", cast["the_tainted"]["aliases"])
+
+    def test_a_shared_title_is_dropped_from_every_holder(self) -> None:
+        """Three characters hold `Jarl`; it therefore identifies none of them."""
+        cast = {
+            "jarl_helka": {"name": "Jarl Helka", "aliases": ["Jarl Helka", "Jarl", "Helka"]},
+            "jarl_storr": {"name": "Jarl Storr", "aliases": ["Jarl Storr", "Jarl", "Storr"]},
+            "wave_jarl": {"name": "Wave-Jarl", "aliases": ["Wave-Jarl", "Wave", "Jarl"]},
+        }
+        source = (
+            "Jarl Helka rode out. Helka met Jarl Storr, and Storr bowed to Helka. "
+            "The Wave-Jarl waited at anchor. Every jarl in the land had come."
+        )
+        prune_ambiguous_fragment_aliases(cast, source)
+        for cid in cast:
+            with self.subTest(cid=cid):
+                self.assertNotIn("Jarl", cast[cid]["aliases"])
+                self.assertTrue(cast[cid]["aliases"], "each holder keeps its own name")
+        self.assertIn("Helka", cast["jarl_helka"]["aliases"], "a real name beside the title survives")
 
     def test_no_source_text_means_no_pruning(self) -> None:
         cast = {"a": {"name": "White-Haired Being", "aliases": ["White-Haired Being", "Being"]}}
