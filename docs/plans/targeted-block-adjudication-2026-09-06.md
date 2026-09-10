@@ -10,14 +10,36 @@
 > and the feature ran in production for four days with Risk 1 (blast radius: 66
 > blocks carry 6+ suspicious turns) unmitigated. Set back to `false`.
 >
+> **Rollout step 3 has since been run** (2026-09-10), retroactively, over the
+> 616 lines the block path decided while the flag was on. Use
+> `scripts/diff_block_vs_per_line_attribution.py` to repeat it.
+>
+> ```
+> re-examined 616 of 616   agree 596 (96.8%)   DISAGREE 4   escalated 16   failed 0
+> ```
+>
+> All four disagreements were read: three favour the per-line answer
+> (`ch13_0362`, `ch09_0307`, `ch17_0168`), one favours the block answer
+> (`ch01_0250`), and every one sits where the neighbouring labels are already
+> wrong, so both paths reason from corrupted premises.
+>
 > **Outstanding before this may be enabled:**
 >
 > 1. Risk 2's mitigation is unbuilt — there is still no independent post-hoc
 >    consistency check outside the adjudicator. Guardrail 4 (reciprocal turns)
 >    is pre-existing and checks adjacent pairs, not block self-consistency.
-> 2. Rollout steps 3-4 (dry-run both paths over one book, diff every
->    disagreement) have not been run.
-> 3. The acceptance criteria below are unmeasured.
+>    The diff above does **not** substitute for it: a per-line path reading the
+>    same corrupted neighbours can agree with a block error, so 96.8% agreement
+>    bounds nothing about the failure mode Risk 2 names.
+> 2. Acceptance criterion 2 **failed**. The plan required `ch11_0147/0148` to
+>    resolve to `dahlia`; they are still `effron`, and `0148` was resolved by
+>    `local_qwen_micro`, not the block path. The feature ran on 616 lines
+>    without fixing the cascade it was built for.
+> 3. Criterion 1 holds on what is checkable: 0 tagged-line contradictions. But
+>    the tag guardrail sees only 490 of ~1,064 tags in this book (see the
+>    2026-09-06 decision record), so that figure covers less than it appears to.
+> 4. The remaining criteria — unconfirmed-run count, review-queue size,
+>    wall-clock — are still unmeasured.
 
 Addresses the gap left by
 [../decisions/2026-09-06-speech-tags-outrank-adjudication.md](../decisions/2026-09-06-speech-tags-outrank-adjudication.md):

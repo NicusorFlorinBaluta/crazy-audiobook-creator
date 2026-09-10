@@ -201,6 +201,39 @@ now reach a human instead of being accepted at 0.98.
 
 ## What this does not fix
 
+> **Correction, 2026-09-10.** The 490 below is not the number of speech tags in
+> the book. It is the number this machinery can **see**. Every tag check here
+> requires the following narrator line to begin lower-case — the mark of a line
+> continuing the quoted sentence — and that excludes another **574** narrator
+> lines of the form `<Name> <speech verb>`, written as their own sentence.
+>
+> The exclusion is deliberate and its reasoning is sound as far as it goes:
+> `_attached_tag_evidence` warns that capital-led narration may be a reaction
+> ("Dahlia laughed at that.") and "reading those as tags is how a bystander ends
+> up owning the line." Measured on this book, that is true of reaction verbs and
+> false of speech verbs:
+>
+> ```
+> capital-led, speech-verb        capital-led, reaction-verb
+>   trailing    253 (36%)           trailing      4 (2%)
+>   leading       1 (0%)            leading       8 (4%)
+>   both-same   296 (42%)           both-same     3 (1%)
+>   neither       4 (1%)            neither       6 (3%)
+>   unparsed    152 (22%)           unparsed    194 (90%)
+> ```
+>
+> Of 554 capital-led speech-verb tags the parser can read, **549 are consistent
+> with a trailing tag and exactly 1 names the following speaker instead**. The
+> parser is not the limitation either — `_dialogue_tag_evidence("Gregory replied
+> with a blank stare.")` returns `gregory_antoine` today; it is simply never
+> asked. One stored speaker in the ignored set contradicts its tag
+> (`ch09_0108`), and a second (`ch13_0362`) was found by the block-adjudication
+> diff.
+>
+> Not yet changed. See
+> [the review record](2026-09-10-review-of-the-september-feature-run.md) for the
+> proposal and its risks.
+
 Speech tags cover **490 of 3,125 spoken lines (16%)**. Nothing here can see the
 other 84%. The same chapter still demonstrates it: `ch11_0149` is now correctly
 `effron`, but `ch11_0147` and `ch11_0148` remain `effron` and read as Dahlia's

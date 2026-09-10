@@ -35,6 +35,15 @@ spoken dialogue lines          : 3,127
   contradicted by their own tag:    11   (2.2% of tagged lines)
 ```
 
+> **Correction, 2026-09-10.** 490 is the count of tags the scanner *looks at* —
+> those on a narrator line beginning lower-case. Another **574** narrator lines
+> read `<Name> <speech verb>` as their own sentence and are skipped by the
+> lower-case test. See
+> [decisions/2026-09-06-speech-tags-outrank-adjudication.md](decisions/2026-09-06-speech-tags-outrank-adjudication.md)
+> for the measurement and
+> [decisions/2026-09-10-review-of-the-september-feature-run.md](decisions/2026-09-10-review-of-the-september-feature-run.md)
+> for the proposal.
+
 Two of the eleven were still scanner artifacts (a possessive alias). Of the
 genuine nine, **five had been written by `deterministic_named_tag` at
 confidence 1.0 with review suppressed** — not model flakiness, a deterministic
