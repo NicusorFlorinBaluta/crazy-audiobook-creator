@@ -98,6 +98,7 @@ def repair(project_dir: Path, *, apply: bool) -> dict[str, int]:
     )
     counts = {"renamed": 0, "flagged": 0, "chapters_written": 0}
     records: list[dict[str, Any]] = []
+    chapters: list[ScriptChapter] = []
 
     for path in sorted((project_dir / "script").glob("chapter_*.json")):
         if path.name.endswith(".meta.json"):
@@ -187,6 +188,7 @@ def repair(project_dir: Path, *, apply: bool) -> dict[str, int]:
         if apply and dirty:
             atomic_write_text(path, chapter.model_dump_json(indent=2))
             counts["chapters_written"] += 1
+        chapters.append(chapter)
 
     for record in records:
         if record["action"] == "renamed":
@@ -196,6 +198,16 @@ def repair(project_dir: Path, *, apply: bool) -> dict[str, int]:
                 "    %s  %s stays, flagged for review (%s)   %r",
                 record["line_id"], record["speaker"], record["tag_says"], record["tag"],
             )
+
+    if apply and counts["renamed"]:
+        # A rename moves a line between characters, and `dialogue_count` is
+        # what `cast_identity.choose_primary` uses to decide which side of a
+        # merge survives. Leaving it stale would be a quiet second bug.
+        ScriptGenerator.sync_dialogue_counts(chapters, registry)
+        atomic_write_text(
+            project_dir / "characters.json", registry.model_dump_json(indent=2)
+        )
+        logger.info("    resynced dialogue_count and rewrote characters.json")
 
     if apply and records:
         atomic_write_text(
