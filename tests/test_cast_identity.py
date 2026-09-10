@@ -28,6 +28,7 @@ from brain.director.cast_identity import (
     distinct_participant_veto,
     find_unlinked_speakers,
     merge_veto,
+    prune_ambiguous_fragment_aliases,
 )
 
 # Excerpt shapes taken from the real book, which is where the discriminator was
@@ -175,6 +176,135 @@ class MergeVetoTests(unittest.TestCase):
     def test_self_merge_and_unknown_ids_are_refused(self) -> None:
         self.assertIsNotNone(merge_veto("jarlaxle", "jarlaxle", _cast(), ""))
         self.assertIsNotNone(merge_veto("jarlaxle", "nobody", _cast(), ""))
+
+
+class FragmentAliasPruneTests(unittest.TestCase):
+    """`_derive_character_aliases` splits names into words; most words are not names.
+
+    "White-Haired Being" arrives carrying `Being`, `White` and `Haired`. Those
+    mislead the whole-cast roster prompt, which reads aliases and no book text,
+    and a fragment two characters both claim makes the speech-tag parser abstain
+    for both. The rule removes a fragment only when it is ambiguous (more than
+    one owner) or never used as a name (never capitalised mid-sentence).
+    """
+
+    def test_a_character_named_only_by_a_generic_phrase_keeps_its_identity(self) -> None:
+        """The case that constrains this whole rule.
+
+        Some books never give a character a proper name -- "The Dark One", "The
+        Master", "The Elder Ones" -- for most or all of the book. Stripping
+        generic words would leave them unidentifiable, so the full name form is
+        never a candidate for removal, whatever it is made of.
+        """
+        cast = {
+            "the_master": {"name": "The Master", "aliases": ["The Master"]},
+            "the_dark_one": {"name": "The Dark One", "aliases": ["The Dark One", "Dark", "One"]},
+            "elder_ones": {"name": "The Elder Ones", "aliases": ["The Elder Ones", "Ones"]},
+        }
+        source = (
+            "He knelt before The Master, and the Master did not speak. "
+            "Only the Dark One remembered, for the Dark One had been there. "
+            "The Elder Ones watched; the Ones above do not forget."
+        )
+        prune_ambiguous_fragment_aliases(cast, source)
+        for cid, required in (
+            ("the_master", "The Master"),
+            ("the_dark_one", "The Dark One"),
+            ("elder_ones", "The Elder Ones"),
+        ):
+            with self.subTest(cid=cid):
+                self.assertIn(required, cast[cid]["aliases"], "the full name is never removable")
+                self.assertTrue(cast[cid]["aliases"])
+
+    def test_word_salad_fragments_are_dropped(self) -> None:
+        cast = {
+            "white_haired_being": {
+                "name": "White-Haired Being",
+                "aliases": ["White-Haired Being", "White-Haired", "Being", "White", "Haired"],
+            }
+        }
+        source = "A white-haired figure stood there. Being early was his habit. White snow fell."
+        removed = prune_ambiguous_fragment_aliases(cast, source)
+        self.assertEqual({r["alias"] for r in removed}, {"Being", "White", "Haired"})
+        self.assertEqual(cast["white_haired_being"]["aliases"], ["White-Haired Being", "White-Haired"])
+
+    def test_a_fragment_two_characters_claim_is_dropped_from_both(self) -> None:
+        """`Brie` belongs to Catti-brie and to Breezy, so it names neither.
+
+        The parser already abstains on a name with two owners, so removing it
+        costs no attribution -- but it stops the roster stage seeing a shared
+        alias and proposing a merge, which is what happened live with `master`.
+        """
+        cast = {
+            "catti_brie": {"name": "Catti-brie", "aliases": ["Catti-brie", "Catti", "Brie"]},
+            "breezy": {"name": "Breezy Do'Urden", "aliases": ["Breezy Do'Urden", "Breezy", "Brie"]},
+        }
+        source = "Catti-brie spoke to Breezy. Then Catti nodded, and Brie laughed at Brie."
+        prune_ambiguous_fragment_aliases(cast, source)
+        self.assertNotIn("Brie", cast["catti_brie"]["aliases"])
+        self.assertNotIn("Brie", cast["breezy"]["aliases"])
+        self.assertIn("Catti", cast["catti_brie"]["aliases"], "an unambiguous fragment survives")
+
+    def test_a_surname_mentioned_once_is_still_a_surname(self) -> None:
+        """Frequency is not a criterion; `Applecheeks` occurs once in a real book."""
+        cast = {"numtummy": {"name": "Numtummy Applecheeks", "aliases": ["Numtummy Applecheeks", "Applecheeks"]}}
+        source = "The halfling called Applecheeks grinned at him from the doorway."
+        prune_ambiguous_fragment_aliases(cast, source)
+        self.assertIn("Applecheeks", cast["numtummy"]["aliases"])
+
+    def test_an_entry_is_never_stripped_to_nothing(self) -> None:
+        """`child_girl` owns only `Child`, which `child_boy` also claims."""
+        cast = {
+            "child_girl": {"name": "Girl", "aliases": ["Child"]},
+            "child_boy": {"name": "Boy", "aliases": ["Child"]},
+        }
+        prune_ambiguous_fragment_aliases(cast, "The Child ran. Another Child followed.")
+        self.assertTrue(cast["child_girl"]["aliases"], "a character must remain addressable")
+
+    def test_an_unambiguous_model_supplied_alias_is_left_alone(self) -> None:
+        """A model-supplied name only one character claims is not a candidate."""
+        cast = {"insect_god": {"name": "Insect God", "aliases": ["Insect God", "The Thing", "Insect"]}}
+        prune_ambiguous_fragment_aliases(cast, "It spoke without a mouth.")
+        self.assertIn("The Thing", cast["insect_god"]["aliases"])
+        self.assertNotIn("Insect", cast["insect_god"]["aliases"])
+
+    def test_an_ambiguous_alias_goes_even_when_nobody_derived_it(self) -> None:
+        """The alias that actually caused a bogus merge proposal, live.
+
+        On 2026-09-10 the roster stage proposed merging `hoid` with
+        `white_haired_being`. Nothing in the text links them; both simply
+        carried the alias `master`, which neither name nor id contains, so a
+        fragment-only rule would leave it in place. Two claimants means it
+        identifies neither, and the roster prompt reads it as evidence.
+        """
+        cast = {
+            "hoid": {"name": "Hoid", "aliases": ["Hoid", "Master"]},
+            "white_haired_being": {"name": "White-Haired Being", "aliases": ["White-Haired Being", "master"]},
+        }
+        prune_ambiguous_fragment_aliases(cast, "The Master walked on. Hoid smiled at that.")
+        self.assertEqual(cast["hoid"]["aliases"], ["Hoid"])
+        self.assertEqual(cast["white_haired_being"]["aliases"], ["White-Haired Being"])
+
+    def test_an_alias_that_is_another_character_s_real_name_is_protected(self) -> None:
+        """`Effron` is a person; `effron_child` merely mis-claims it.
+
+        Deleting the name would punish its owner for the mis-claim. Attribution
+        already handles the collision (2026-09-06: an alias may not be another
+        character's canonical name), so this pass leaves names alone.
+        """
+        cast = {
+            "effron": {"name": "Effron", "aliases": ["Effron"]},
+            "effron_child": {"name": "Effron's Son", "aliases": ["Effron's Son", "Effron", "Son"]},
+        }
+        prune_ambiguous_fragment_aliases(cast, "Effron turned away. Effron had said enough.")
+        self.assertIn("Effron", cast["effron"]["aliases"])
+        self.assertIn("Effron", cast["effron_child"]["aliases"])
+        self.assertNotIn("Son", cast["effron_child"]["aliases"])
+
+    def test_no_source_text_means_no_pruning(self) -> None:
+        cast = {"a": {"name": "White-Haired Being", "aliases": ["White-Haired Being", "Being"]}}
+        self.assertEqual(prune_ambiguous_fragment_aliases(cast, ""), [])
+        self.assertIn("Being", cast["a"]["aliases"])
 
 
 class ChoosePrimaryTests(unittest.TestCase):

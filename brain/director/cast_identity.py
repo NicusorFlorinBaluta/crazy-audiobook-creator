@@ -247,6 +247,158 @@ def distinct_participant_veto(
     return None
 
 
+# A sentence boundary, so a capital that merely opens a sentence is not read
+# as evidence of a proper noun.
+_SENTENCE_START = re.compile(r"(?:^|[.!?][\"')\]]?\s+|[\"“(\[]\s*)$")
+
+
+def _entry_name(entry: Any) -> str:
+    """Name of a cast entry, which may be a dict or a Character."""
+    return str(entry.get("name", "") if isinstance(entry, dict) else getattr(entry, "name", "") or "")
+
+
+def _entry_aliases(entry: Any) -> list[str]:
+    aliases = entry.get("aliases") if isinstance(entry, dict) else getattr(entry, "aliases", None)
+    return [str(a) for a in (aliases or [])]
+
+
+def _set_entry_aliases(entry: Any, aliases: list[str]) -> None:
+    if isinstance(entry, dict):
+        entry["aliases"] = aliases
+    else:
+        entry.aliases = aliases
+
+
+def _capitalised_midsentence_count(term: str, source_text: str) -> int:
+    """Times `term` appears capitalised and not at a sentence start.
+
+    Sentence-initial capitals are free -- "Being" opening a sentence says
+    nothing about whether the book uses it as a name. Capitalisation *inside* a
+    sentence is what separates a proper noun from an ordinary word, and it is
+    the same signal `_validation_terms` already uses to build a book-local
+    glossary.
+    """
+    if not term or not source_text:
+        return 0
+    probe = term[:1].upper() + term[1:]
+    count = 0
+    for match in re.finditer(rf"\b{re.escape(probe)}\b", source_text):
+        if not _SENTENCE_START.search(source_text[max(0, match.start() - 40) : match.start()]):
+            count += 1
+    return count
+
+
+def prune_ambiguous_fragment_aliases(
+    characters: dict[str, Any],
+    source_text: str,
+) -> list[dict[str, str]]:
+    """Drop single-word alias fragments that name nobody in particular.
+
+    `_derive_character_aliases` splits a multi-word name and its id into words
+    and records them as aliases, so "White-Haired Being" arrives carrying
+    `Being`, `White` and `Haired`, and `first_company_vice_president_of_supply`
+    carries `Supply`, `Company`, `Vice` and `President`. Those are not names.
+    They mislead the whole-cast roster prompt, which reads aliases and no book
+    text -- the one merge it proposed live on 2026-09-10 was driven by `master`
+    appearing on two unrelated entries -- and a fragment claimed by several
+    characters makes the speech-tag parser abstain for all of them.
+
+    A single-word alias is removed only when it is **ambiguous or not used as a
+    name**:
+
+    * more than one cast entry claims it, or
+    * the analyser derived it by splitting, and it never appears capitalised
+      mid-sentence in the source.
+
+    Frequency is deliberately not a criterion. A surname mentioned once is still
+    a surname: `Applecheeks` occurs a single time in one of the test books and
+    belongs to a character with ten lines.
+
+    Three things are never touched, because a character the book only ever calls
+    "The Master", "The Dark One" or "The Elder Ones" must keep its identity:
+
+    * any multi-word form,
+    * any alias that is some entry's own name, however generic it reads,
+    * the last alias standing -- an entry is never left with none.
+
+    Removal is decided per alias *string* and applied to every owner. Taking an
+    ambiguous name off only some of its claimants would leave one standing and
+    turn a correct abstention into a confident wrong answer.
+
+    Mutates `characters` in place. Returns one record per removal, so the caller
+    can report what happened.
+    """
+    if not source_text or not characters:
+        return []
+
+    owners: dict[str, set[str]] = {}
+    for char_id, entry in characters.items():
+        for alias in _entry_aliases(entry):
+            owners.setdefault(alias.strip().casefold(), set()).add(char_id)
+
+    # Which alias strings are single words, whose full name they are, and which
+    # of them the analyser produced by splitting a name apart.
+    protected: set[str] = set()
+    single_word: set[str] = set()
+    is_fragment: set[str] = set()
+    for char_id, entry in characters.items():
+        name = str(_entry_name(entry) or "")
+        derived = {word.lower() for word in re.split(r"[\s_\-]+", name) if word}
+        derived |= {word.lower() for word in char_id.split("_") if word}
+        for alias in _entry_aliases(entry):
+            candidate = alias.strip()
+            key = candidate.casefold()
+            if not candidate:
+                continue
+            # A name is never removable, however generic it reads. This is what
+            # keeps "The Master" and "The Dark One" intact.
+            if len(candidate.split()) != 1 or key == name.casefold():
+                protected.add(key)
+                continue
+            single_word.add(key)
+            if candidate.lower() in derived:
+                is_fragment.add(key)
+
+    # Decide per alias *string*, not per owner. Removing an ambiguous alias from
+    # only some owners would leave one claimant standing and turn a correct
+    # abstention into a confident wrong answer: drop `Brie` from `catti_brie`
+    # alone and "Brie said" starts resolving to her daughter.
+    doomed_keys = {
+        key
+        for key in single_word - protected
+        # Two claimants means the name identifies neither, and the speech-tag
+        # parser already abstains on it -- but the roster prompt does not, and
+        # reads the shared alias as evidence of a duplicate. That is what
+        # `master`, held by both `hoid` and `white_haired_being`, actually did
+        # on 2026-09-10.
+        if len(owners.get(key, set())) > 1
+        or (key in is_fragment and _capitalised_midsentence_count(key, source_text) == 0)
+    }
+    if not doomed_keys:
+        return []
+
+    removed: list[dict[str, str]] = []
+    for char_id, entry in characters.items():
+        aliases = _entry_aliases(entry)
+        if not aliases:
+            continue
+        name = str(_entry_name(entry) or "")
+        surviving = [a for a in aliases if a.strip().casefold() not in doomed_keys]
+        doomed = [a for a in aliases if a.strip().casefold() in doomed_keys]
+        if not doomed:
+            continue
+        if not surviving:
+            # Never strip an entry down to nothing; keep the longest so the
+            # character remains addressable at all.
+            rescued = max(doomed, key=len)
+            doomed.remove(rescued)
+            surviving.append(rescued)
+        _set_entry_aliases(entry, surviving)
+        for alias in doomed:
+            removed.append({"character_id": char_id, "alias": alias, "name": name})
+    return removed
+
+
 def merge_veto(
     primary_id: str,
     duplicate_id: str,

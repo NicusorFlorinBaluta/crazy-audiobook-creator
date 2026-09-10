@@ -1463,7 +1463,7 @@ class CharacterAnalyzer:
         allowing identity reveals (a hooded stranger whose alias is the real
         name) because a reveal character is never conjoined with itself.
         """
-        from brain.director.cast_identity import merge_veto
+        from brain.director.cast_identity import merge_veto, prune_ambiguous_fragment_aliases
 
         keys = list(accumulated_chars.keys())
         merged_into: dict[str, str] = {}
@@ -1553,7 +1553,25 @@ class CharacterAnalyzer:
                     target_info["aliases"] = sorted(existing_aliases)
                     merged_into[variant_id] = target_id
 
-        return {k: v for k, v in accumulated_chars.items() if k not in merged_into}
+        surviving = {k: v for k, v in accumulated_chars.items() if k not in merged_into}
+
+        # Alias hygiene, once the cast is settled and every claim on a name is
+        # visible. `_derive_character_aliases` works one character at a time and
+        # cannot know that `Brie` is claimed by two of them, or that `Being` is
+        # never used as a name; this pass can, because it sees the whole roster
+        # and the source. It only ever removes single-word fragments the deriver
+        # split out, never the full name, so a character the book calls nothing
+        # but "The Master" keeps its identity.
+        if source_text:
+            pruned = prune_ambiguous_fragment_aliases(surviving, source_text)
+            if pruned:
+                logger.info(
+                    "[CharacterAnalyzer] Dropped %d ambiguous alias fragment(s): %s",
+                    len(pruned),
+                    ", ".join(f"{p['alias']!r} from {p['character_id']}" for p in pruned[:8]),
+                )
+
+        return surviving
 
     def _adjudicate_name_candidates(
         self,

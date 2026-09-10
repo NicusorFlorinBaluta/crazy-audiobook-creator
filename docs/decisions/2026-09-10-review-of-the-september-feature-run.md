@@ -257,7 +257,7 @@ used by both, reading the configured values and comparing against the enum.
 
 ```
 ruff check .        All checks passed        (was 19 errors, 3 of them F821)
-pytest              726 passed, 2 skipped    (was 713; +13 tests)
+pytest              735 passed, 2 skipped    (was 713; +22 tests)
 BLE001 ratchet      116                      (was 139; ratchet target was 118)
 live cast pass      both books, both tiers, 3 API requests total
 ```
@@ -274,8 +274,6 @@ code remains covered by fakes alone.
 
 The block-adjudication rollout gate (dry-run both paths, diff every
 disagreement) remains unrun — the flag is off, not validated.
-
-**Fragment aliases** are measured but unfixed; see Lever 3.
 
 Two artefacts of the testing itself, recorded so they are not misread later:
 running with `api.enabled: false` to reach the web tier makes `_call_stage`
@@ -456,7 +454,7 @@ is saved at the end of the attribution stage — the sync is "make the stored
 count match the script", which has nothing to do with whether adjudication
 changed anything.
 
-### Still open: fragment aliases
+### Fragment aliases (done, 2026-09-10, second pass)
 
 `_derive_character_aliases` splits a multi-word name and records the first and
 last word as standalone aliases:
@@ -472,11 +470,75 @@ last word as standalone aliases:
 are not names, and they are what the roster model reads — the one web-tier
 proposal was driven by `master`/`Master` appearing on both sides.
 
-**Not fixed here.** The measurement in Lever 2 is the warning: for characters
-the book never named, the generic fragment can be the only term they own, and
-suppressing it cost real vetoes. The same risk applies to removing these
-aliases, and attribution resolves lines through them. It needs its own measured
-pass, not a change tacked onto this one.
+#### The constraint that shapes the rule
+
+Some books never give a character a proper name at all. "The Dark One", "The
+Master", "The Elder Ones" can be the only handle a character has, for most of a
+book or all of it. Any rule that suppresses generic words would leave those
+characters unidentifiable — and Lever 2 already measured the same trap from the
+other side: `officer`, `one` and `first` had to be excluded because for "Police
+Officer" and "First of the Sky" the generic word is the only term they own.
+
+So the rule never touches a **name**. `prune_ambiguous_fragment_aliases` removes
+only *single-word* aliases, never a multi-word form, never an alias that is some
+entry's own name, and never the last one standing. Checked directly:
+
+```
+the_master    ['The Master']                  -> unchanged
+the_dark_one  ['The Dark One', 'Dark', 'One'] -> full name always retained
+elder_ones    ['The Elder Ones', 'Ones']      -> full name always retained
+```
+
+#### What is removed, and why frequency is not the test
+
+A single-word alias goes when it is ambiguous or is not used as a name:
+
+* more than one entry claims it, or
+* the analyser derived it by splitting, and it never appears capitalised
+  mid-sentence in the source.
+
+Sentence-initial capitals are excluded — "Being" opening a sentence proves
+nothing. **Frequency is deliberately not a criterion.** A first draft required
+three mid-sentence hits and dropped `Applecheeks` (one occurrence, a character
+with ten lines), `Mallabritches` and `Terdidy`. A surname mentioned once is
+still a surname.
+
+A second draft only counted occurrences *outside* the full name, to stop "One"
+inside "the Dark One" voting for itself. That over-dropped too: it excludes
+sentence-initial use, so `Shin` looked unused when *"Shin nodded."* is a
+perfectly good standalone reference. Both refinements were discarded.
+
+#### Removal is per alias string, not per owner
+
+A test caught this before it shipped. Dropping `Brie` from `catti_brie` — where
+it is a fragment — but leaving it on `breezy`, where the model supplied it,
+turns a correct abstention into a confident **wrong** answer: with one claimant
+left, *"Brie said"* starts resolving to the daughter. Ambiguous names are now
+removed from every owner or from none.
+
+That also settles the alias behind the live bogus proposal. `master` is a
+fragment for neither `hoid` nor `white_haired_being`, so a fragment-only rule
+would have left it; two claimants is enough.
+
+#### Measured on both books
+
+```
+                              aliases removed   entries newly left with none
+the-finest-edge-of-twilight                10                             0
+isles-of-the-emberdark                     40                             0
+```
+
+Every removal inspected: `Brie` from both owners, `master`/`Master` from both,
+`Being`/`White`/`Haired`, `(Male)`/`(Female)`, the `Second`/`First`/`Above`
+collisions, and the word salad from descriptive ids
+(`First Company Vice President of Supply` shed `Supply`, `First`, `Vice`,
+`President`). `Effron` is **kept** on both claimants because it is a real
+character's name — attribution already handles that collision, and deleting the
+name would punish its owner for someone else's mis-claim.
+
+Runs in `_consolidate_accumulated_characters`, which is the first point that
+sees both the whole roster and the source. Seven tests, two verified to fail
+with the ambiguity rule disabled.
 
 ## Related
 
