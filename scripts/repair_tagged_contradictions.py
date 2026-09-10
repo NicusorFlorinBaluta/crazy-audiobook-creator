@@ -34,6 +34,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from brain.director.attribution_audit import resolve_refuted_by_unique_candidate
 from brain.director.script_generator import ScriptGenerator
 from brain.validators.tiered_adjudicator import (
     _HE_SPEECH_TAG,
@@ -96,9 +97,10 @@ def repair(project_dir: Path, *, apply: bool) -> dict[str, int]:
     registry = CharacterRegistry.model_validate_json(
         (project_dir / "characters.json").read_text(encoding="utf-8")
     )
-    counts = {"renamed": 0, "flagged": 0, "chapters_written": 0}
+    counts = {"renamed": 0, "flagged": 0, "auto_resolved": 0, "chapters_written": 0}
     records: list[dict[str, Any]] = []
     chapters: list[ScriptChapter] = []
+    chapter_paths: dict[int, Path] = {}
 
     for path in sorted((project_dir / "script").glob("chapter_*.json")):
         if path.name.endswith(".meta.json"):
@@ -189,6 +191,7 @@ def repair(project_dir: Path, *, apply: bool) -> dict[str, int]:
             atomic_write_text(path, chapter.model_dump_json(indent=2))
             counts["chapters_written"] += 1
         chapters.append(chapter)
+        chapter_paths[chapter.chapter_number] = path
 
     for record in records:
         if record["action"] == "renamed":
@@ -199,7 +202,35 @@ def repair(project_dir: Path, *, apply: bool) -> dict[str, int]:
                 record["line_id"], record["speaker"], record["tag_says"], record["tag"],
             )
 
-    if apply and counts["renamed"]:
+    # A refutation says who did not speak. Where the scene leaves exactly one
+    # other candidate, that is an answer nobody has to read the book to reach --
+    # which matters, because reviewing an attribution means reading the passage
+    # and the operator has not read the book.
+    resolved = resolve_refuted_by_unique_candidate(chapters, registry)
+    by_number = {chapter.chapter_number: chapter for chapter in chapters}
+    for proposal in resolved:
+        counts["auto_resolved"] += 1
+        records.append({"action": "auto_resolved", **proposal})
+        logger.info(
+            "    %s  %s -> %s   (%s: %s)",
+            proposal["line_id"], proposal["from"], proposal["to"],
+            proposal["source"], proposal["reason"][:90],
+        )
+        if not apply:
+            continue
+        chapter = by_number.get(proposal["chapter_number"])
+        line = next((x for x in chapter.lines if x.line_id == proposal["line_id"]), None) if chapter else None
+        if line is None:
+            continue
+        line.speaker = proposal["to"]
+        line.speaker_confidence = 0.95
+        line.speaker_evidence = proposal["reason"][:4000]
+        line.attribution_resolver = "deterministic_unique_candidate"
+        line.attribution_review_required = False
+        line.attribution_review_reason = ""
+        atomic_write_text(chapter_paths[proposal["chapter_number"]], chapter.model_dump_json(indent=2))
+
+    if apply and (counts["renamed"] or counts["auto_resolved"]):
         # A rename moves a line between characters, and `dialogue_count` is
         # what `cast_identity.choose_primary` uses to decide which side of a
         # merge survives. Leaving it stale would be a quiet second bug.
@@ -234,9 +265,11 @@ def main() -> int:
 
     counts = repair(project_dir, apply=args.apply)
     logger.info(
-        "%s: %d renamed by a naming tag, %d flagged for review by a gendering tag%s",
+        "%s: %d renamed by a naming tag, %d auto-resolved from a unique candidate, "
+        "%d flagged for review%s",
         args.project,
         counts["renamed"],
+        counts["auto_resolved"],
         counts["flagged"],
         f", {counts['chapters_written']} chapter file(s) written" if args.apply else " (dry run)",
     )

@@ -7,7 +7,8 @@ import re
 from datetime import UTC, datetime
 from typing import Any
 
-from brain.director.script_generator import ScriptGenerator
+from brain.director.script_generator import _HE_SPEECH_TAG, _SHE_SPEECH_TAG, ScriptGenerator
+from brain.validators.tiered_adjudicator import _reads_as_attached_tag
 from shared.constants import Gender
 from shared.models import CharacterRegistry, ExtractedBook, ScriptChapter, ScriptLine
 
@@ -152,6 +153,119 @@ def detect_possessive_contradictions(
                 run = [line]
         _flush(run)
     return findings
+
+
+#: How many spoken lines either side count as "this scene" when looking for the
+#: one participant a refutation leaves standing.
+REFUTATION_SCENE_WINDOW = 14
+
+
+def resolve_refuted_by_unique_candidate(
+    chapters: list[ScriptChapter],
+    registry: CharacterRegistry,
+    *,
+    window: int = REFUTATION_SCENE_WINDOW,
+) -> list[dict[str, Any]]:
+    """Answer a refuted line when the scene leaves exactly one candidate.
+
+    A refutation says who did *not* speak. Flagging that for a human is the
+    obvious response and the wrong one here: reviewing an attribution means
+    reading the passage, and the operator has not read the book. The 2026-09-04
+    record makes the same argument for cast merges -- "approving a merge means
+    reading the verbatim excerpts that justify it, which is a plot summary of a
+    book the operator has not read yet". Anything resolvable without a human
+    reading should be.
+
+    Two refutations are available, both deterministic:
+
+    * a **possessive contradiction** refutes the stored speaker outright
+      (`detect_possessive_contradictions`);
+    * a **gendering speech tag** refutes anyone of the other gender.
+
+    If exactly one *other* speaker in the surrounding scene survives the
+    refutation, that is the answer, and no one needs to read anything. If two
+    or more survive, or none does, the line is left alone -- the rule is
+    deliberately unable to guess.
+
+    Measured on the two scripted books:
+
+    ```
+                                  refuted  unique  ambiguous  none
+    the-finest-edge-of-twilight         1       1          0     0
+    isles-of-the-emberdark              8       2          5     1
+    ```
+
+    All three resolutions were checked by hand against the passage.
+    `ch11_0148` becomes `dahlia`, which is what the possessive contradiction,
+    the tag on `ch11_0149`, the 2026-09-06 record and Gemini's adjudication
+    tier all independently indicate. The one `none` is the known false positive
+    in `isles-of-the-emberdark` -- "your way home" against "our way back" --
+    where the rule correctly declines to act.
+
+    Returns proposals; applying them is the caller's job.
+    """
+    proposals: list[dict[str, Any]] = []
+    for chapter in chapters:
+        lines = chapter.lines
+        refutations: list[tuple[int, str, str, Gender | None]] = []
+
+        for finding in detect_possessive_contradictions([chapter]):
+            index = next(
+                (i for i, line in enumerate(lines) if line.line_id == finding["disclaimed_line_id"]),
+                None,
+            )
+            if index is not None:
+                refutations.append((index, "possessive_contradiction", finding["speaker"], None))
+
+        for index, line in enumerate(lines):
+            if not line.speaker or line.speaker == "narrator" or index + 1 >= len(lines):
+                continue
+            following = lines[index + 1]
+            if following.speaker != "narrator":
+                continue
+            tag = str(following.text or "").strip()
+            if not _reads_as_attached_tag(tag):
+                continue
+            named, kind, gender = ScriptGenerator._dialogue_tag_evidence(tag, registry)
+            if named or gender is None or kind != "pronoun_gender":
+                continue
+            # Only a pronoun tied to the speech verb may refuse an attribution;
+            # see the 2026-09-06 record on `ch28_0028`.
+            if not (_HE_SPEECH_TAG.search(tag) or _SHE_SPEECH_TAG.search(tag)):
+                continue
+            character = registry.characters.get(line.speaker)
+            if character and character.gender in (Gender.MALE, Gender.FEMALE) and character.gender != gender:
+                refutations.append((index, "gendering_tag", line.speaker, gender))
+
+        for index, source, refuted, required_gender in refutations:
+            low, high = max(0, index - window), min(len(lines), index + window + 1)
+            present = [
+                line.speaker for line in lines[low:high] if line.speaker and line.speaker != "narrator"
+            ]
+            candidates = []
+            for speaker_id in dict.fromkeys(present):
+                if speaker_id == refuted:
+                    continue
+                character = registry.characters.get(speaker_id)
+                if required_gender is not None and (character is None or character.gender != required_gender):
+                    continue
+                candidates.append(speaker_id)
+            if len(candidates) != 1:
+                continue
+            proposals.append(
+                {
+                    "line_id": lines[index].line_id,
+                    "chapter_number": chapter.chapter_number,
+                    "from": refuted,
+                    "to": candidates[0],
+                    "source": source,
+                    "reason": (
+                        f"{source.replace('_', ' ')} rules out {refuted!r}; "
+                        f"{candidates[0]!r} is the only other speaker in the scene it allows"
+                    ),
+                }
+            )
+    return proposals
 
 
 def audit_book_attribution(
