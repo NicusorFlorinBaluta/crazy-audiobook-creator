@@ -1,6 +1,6 @@
 # Targeted block adjudication — plan, 2026-09-06
 
-**Status:** Implemented, **disabled, and recommended for removal.**
+**Status:** Implemented, measured, and **removed on 2026-09-10.**
 
 > **Verdict, 2026-09-10.** The rollout gate was run in full (below). Block
 > adjudication does not earn its place, and the flag stays off.
@@ -30,17 +30,35 @@
 > lines, no LLM call, no blast radius, one finding per book. A cheaper answer to
 > the same problem, arrived at while building this one's safety net.
 >
-> **Recommendation: delete the block path** (`_adjudicate_block_tier1`,
+> A fourth error surfaced later the same day, while measuring something else.
+> `ch17_0168` was stored as `jarlaxle` for the line *"You would claim that in any
+> case."* — an answer to a claim Jarlaxle had just made, and the reply
+> `ch17_0169` addresses *"old friend"*. Both carry `local_qwen_block`. Nobody
+> answers their own claim that way; the speaker is Zaknafein. The tally is
+> therefore worse than the diff measured, because the diff could only compare
+> the two paths, not check either against the book.
+>
+> **Deleted, 2026-09-10.** `_adjudicate_block_tier1`,
 > `_group_suspicious_into_blocks`, `_is_block_targeted`,
-> `_find_unconfirmed_run_line_ids`, `_extract_block_json`, `DialogueBlock`, the
-> `block_adjudication` config and the `local_qwen_block` resolver) and keep the
-> problem statement below, which is still true and still unsolved: speech tags
-> settle 490 of 3,125 spoken lines, and nothing sees the other 84%.
+> `_unconfirmed_run_ids_for`, `_find_unconfirmed_run_line_ids`,
+> `_has_tag_confirmation`, `_extract_block_json`, `DialogueBlock`, the
+> `block_adjudication` config block, the `--block-adjudication` /
+> `--max-suspicious-per-call` / `--all-blocks` flags on
+> `scripts/repair_attributions.py`, the `blocks_adjudicated` and
+> `block_fallbacks` counters, and the `local_qwen_block` resolver — 544 lines
+> from the adjudicator alone. `scripts/diff_block_vs_per_line_attribution.py`
+> went with it: it measured a path that no longer exists, and its result is
+> recorded here. `_LOCAL_RESOLVER_TIERS` still *reads* `local_qwen_block` from
+> scripts written before today; nothing writes it.
 >
-> Not deleted yet — that is the operator's call, and the code is inert with the
-> flag off.
+> The problem statement below is kept, because it is still true and still
+> unsolved: speech tags settle 490 of 3,125 spoken lines, and nothing sees the
+> other 84%. What replaced this attempt at it is the cheaper pair — the
+> deterministic refutations, and the wide-context cascade for lines the narrow
+> window cannot settle.
 >
-> Reproduce with `scripts/diff_block_vs_per_line_attribution.py`.
+> The diff is reproducible only from git history now (`git show
+> 8cf3878:scripts/diff_block_vs_per_line_attribution.py`).
 
 > **Correction, 2026-09-10.** This line said "defaulted off" and the config
 > sample below shows `enabled: false`, but `brain/config.yaml` shipped
@@ -51,8 +69,9 @@
 > blocks carry 6+ suspicious turns) unmitigated. Set back to `false`.
 >
 > **Rollout step 3 has since been run** (2026-09-10), retroactively, over the
-> 616 lines the block path decided while the flag was on. Use
-> `scripts/diff_block_vs_per_line_attribution.py` to repeat it.
+> 616 lines the block path decided while the flag was on. The script that did
+> it was deleted with the feature; recover it from
+> `git show 8cf3878:scripts/diff_block_vs_per_line_attribution.py` to repeat it.
 >
 > ```
 > re-examined 616 of 616   agree 596 (96.8%)   DISAGREE 4   escalated 16   failed 0

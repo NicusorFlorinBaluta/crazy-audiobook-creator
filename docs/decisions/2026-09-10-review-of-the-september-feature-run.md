@@ -193,14 +193,20 @@ disagreed              4   -- per-line right 3, block right 1
 10–20% wall-clock and 16 saved escalations, weighed against blast radius,
 coarser resume, noisier re-runs, and Risk 2.
 
-The plan is now marked *disabled and recommended for removal*. The decisive
-argument is not the diff but §Risk 2's own mitigation: the ch11 cascade block
-adjudication was built for, and never selected, is caught by
+The decisive argument is not the diff but §Risk 2's own mitigation: the ch11
+cascade block adjudication was built for, and never selected, is caught by
 `detect_possessive_contradictions` in forty deterministic lines with no LLM
 call. The cheaper tool solves the motivating case better.
 
-The code is left in place, inert behind `enabled: false`, because deleting a
-feature is the operator's call and there is no cost to it sitting there.
+**Removed the same day** (see §*The measurement found a fourth
+block-adjudication error* below for the finding that settled it): 544 lines out
+of the adjudicator, plus the config block, the three CLI flags, two summary
+counters, the `local_qwen_block` resolver and the diff script that measured it.
+`_LOCAL_RESOLVER_TIERS` still reads that resolver from scripts written before
+today; nothing writes it. Eleven block-only tests went with it; the thirteen in
+`test_block_adjudication.py` that were never about blocks — the possessive
+check, the refutation guard, the unique-candidate resolver — moved to
+`tests/test_deterministic_refutation.py`.
 
 ### What the diff actually found: a blind spot in the tag guardrail
 

@@ -201,19 +201,13 @@ external_validation:
     max_short_response_chars: 80
     ollama_temperature: 0.1
     dry_run: false
-    block_adjudication:
-      # Off until the rollout gate in
-      # docs/plans/targeted-block-adjudication-2026-09-06.md is cleared:
-      # dry-run both paths over one book, diff every disagreement, and
-      # confirm tagged-line contradictions stay at 0 of 490.
-      enabled: false
-      max_suspicious_per_call: 8
-      only_unconfirmed_runs: true   # the 124, not all 176 blocks
+    # `block_adjudication` was removed on 2026-09-10 after failing its own
+    # rollout gate: 612 of 616 lines identical to the per-line path, net -2
+    # correct. See docs/plans/targeted-block-adjudication-2026-09-06.md.
     # Second look, with ~4x the context, at lines the narrow window could not
-    # settle -- and only those. Measured on the 16 sub-threshold lines of one
-    # book (2.6% of 616): all 16 cleared the bar, one was a genuine correction,
-    # at +15% wall-clock on those calls alone. Every line that reaches it was
-    # otherwise bound for a paid Gemini call.
+    # settle -- and only those. Over an unbiased 150-line sample: 4 retried
+    # (2.7%), all 4 settled locally, no escalations left, +3.4% on the pass.
+    # Every line that reaches it was otherwise bound for a paid Gemini call.
     wide_context_retry:
       enabled: true
       window_radius: 20   # detector default is 5

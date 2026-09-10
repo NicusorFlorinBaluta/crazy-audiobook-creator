@@ -65,22 +65,6 @@ def main():
     parser.add_argument(
         "--local-conf", type=float, default=0.85, help="Confidence threshold for Tier 1 local Qwen auto-accept"
     )
-    parser.add_argument(
-        "--block-adjudication",
-        action="store_true",
-        help="Enable targeted block adjudication for multi-turn dialogue",
-    )
-    parser.add_argument(
-        "--max-suspicious-per-call",
-        type=int,
-        default=8,
-        help="Max suspicious turns per block adjudication call (default: 8)",
-    )
-    parser.add_argument(
-        "--all-blocks",
-        action="store_true",
-        help="Target all blocks instead of only unconfirmed runs",
-    )
     args = parser.parse_args()
 
     # Default to dry-run if apply not specified
@@ -170,17 +154,11 @@ def main():
         project_path.parent,
     )
 
-    block_adj_cfg = config.get("external_validation", {}).get("tiered_attribution", {}).get("block_adjudication", {})
-    block_enabled = args.block_adjudication or bool(block_adj_cfg.get("enabled", False))
-
     adjudicator = TieredAttributionAdjudicator(
         ollama=ollama,
         external_validator=external_validator,
         registry=registry,
         local_auto_accept=args.local_conf,
-        block_adjudication_enabled=block_enabled,
-        max_suspicious_per_call=args.max_suspicious_per_call,
-        only_unconfirmed_runs=not args.all_blocks,
         wide_context_retry=not args.no_wide_context,
     )
 
@@ -193,8 +171,6 @@ def main():
     total_local_resolved = 0
     total_escalated = 0
     total_repairs = 0
-    total_blocks_adjudicated = 0
-    total_block_fallbacks = 0
 
     for ch in chapter_scripts:
         ch_num = ch.chapter_number
@@ -220,8 +196,6 @@ def main():
         total_suspicious += ch_report.summary["total_suspicious"]
         total_local_resolved += ch_report.summary["local_resolved"]
         total_escalated += ch_report.summary["escalated_to_tier2"]
-        total_blocks_adjudicated += ch_report.summary.get("blocks_adjudicated", 0)
-        total_block_fallbacks += ch_report.summary.get("block_fallbacks", 0)
 
         # Print fixes for this chapter
         ch_repairs = [
@@ -271,9 +245,6 @@ def main():
     print(f"  Total suspicious turns: {total_suspicious}")
     print(f"  Local Qwen resolved:    {total_local_resolved}")
     print(f"  Escalated to Tier 2:    {total_escalated}")
-    if args.block_adjudication:
-        print(f"  Blocks adjudicated:     {total_blocks_adjudicated}")
-        print(f"  Block fallbacks:        {total_block_fallbacks}")
     print(f"  Total speaker repairs:  {total_repairs}")
     print(f"  Dry run mode:           {dry_run}")
     print("=" * 70)
@@ -311,9 +282,6 @@ def main():
         "total_repairs": total_repairs,
         "dry_run": dry_run,
     }
-    if block_enabled:
-        summary_dict["blocks_adjudicated"] = total_blocks_adjudicated
-        summary_dict["block_fallbacks"] = total_block_fallbacks
 
     atomic_write_json(
         report_path,
