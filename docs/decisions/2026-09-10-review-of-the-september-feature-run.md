@@ -472,8 +472,72 @@ almost nothing. That asymmetry is the argument for cascading rather than
 widening globally: spend the context where the cheap attempt already said it
 was unsure.
 
-Whether it *helps* is a separate question and is being measured on those
-sixteen lines: same prompt, same code path, only the window changes.
+Whether it *helps* was then measured on those sixteen lines: same prompt, same
+code path, only the window changes, three runs each.
+
+```
+        agrees_with_stored  stable_3of3  mean_conf  above_0.85  wall
+narrow        16/16            16/16       0.917      13/16     5.3s/line
+wide          15/16            16/16       0.954      16/16     6.1s/line
+```
+
+Three things fall out, and they separate the variables the tier had confounded.
+
+**Context buys confidence, not stability.** Every line was already unanimous
+across runs in *both* conditions. So the stability the constrained-choice tier
+gained did not come from the wider window — it came from closing the question.
+Those are different levers with different effects, and conflating them was the
+error in the paragraph above.
+
+**The cost is small, and not what the prefill arithmetic suggested.** 4.4x the
+prompt is +15% wall-clock, because prefill runs at ~760 tok/s against ~64 tok/s
+decode. Widening everything is therefore affordable; it is just poorly targeted,
+since 97% of lines are already confident.
+
+**And it found a real error.** On `ch11_0222` the narrow window said `effron` at
+0.80 and the wide window said `dahlia` at 0.98. The wide answer is right, and
+the text says so outright — the next narrator line is *"That had Effron's hair
+on the back of his neck standing up. Something about the timbre of Dahlia…"*, so
+the line unsettled Effron and was not his. Effron owns the tower
+(`ch11_0149`, tag-confirmed), so *"visit you at your tower"* addresses him.
+
+That line had been resolved by `local_qwen_block` at 0.95 — one more line block
+adjudication got wrong that the per-line path, given room, gets right.
+
+### The recommendation: cascade, do not widen globally
+
+Re-run with a wide window **only where the cheap attempt lands below the
+auto-accept bar**, before escalating to Gemini. On this sample that is 16 of 616
+lines (2.6%), costs +15% on those alone, settles all of them locally, and
+corrected one. Widening all 1,038 calls buys the same benefit for 40x the extra
+compute.
+
+What this does **not** support is using the constrained-choice tier generally.
+Its candidate list only exists because a deterministic check refuted a speaker
+first. With no refutation there is no list, and the question is open again --
+which is the question both models are unreliable at.
+
+### Rejected: widening the possessive check to scene scope
+
+`ch11_0222` is a possessive contradiction the check does not see, because
+`ch11_0149` ("my tower") and `ch11_0222` ("your tower") sit in different
+unbroken runs. Widening the scope to ±60 spoken lines catches it — and takes
+the finding count from 2 to 19 across the two books:
+
+```
+run-scoped     book 1: 1   book 2: 1
+scene-scoped   book 1: 6   book 2: 13
+```
+
+Most of the additions are legitimate. Within one unbroken turn, "your tower"
+and "my tower" cannot both be true. Across a scene the addressee changes, so
+one speaker saying "my people" and "your people" is ordinary English, and
+`people`, `own`, `side`, `time`, `kind` and `camp` are exactly what the wider
+scope turns up. Precision falls from about a half to about a seventh.
+
+That is the co-occurrence veto again — a rule widened past the evidence that
+justified it — so the scope stays where it is, and cases like `ch11_0222` are
+left to the wide-context cascade, which found this one.
 
 ## The one defect that cannot be auto-fixed
 

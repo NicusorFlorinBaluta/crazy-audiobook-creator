@@ -16,6 +16,7 @@ path, only the window changes.
 import json
 import logging
 import sys
+import time
 from collections import Counter
 from pathlib import Path
 
@@ -67,6 +68,7 @@ def build(chapter, idx, wr, sr):
 
 RUNS = 3
 summary = {"narrow": [], "wide": []}
+elapsed = {"narrow": 0.0, "wide": 0.0}
 for r in targets:
     ch = chapters[r["chapter"]]
     idx = next(i for i, l in enumerate(ch.lines) if l.line_id == r["line_id"])
@@ -74,12 +76,14 @@ for r in targets:
     out = {}
     for label, (wr, sr) in (("narrow", (4, 6)), ("wide", (20, 30))):
         answers = []
+        t0 = time.perf_counter()
         for _ in range(RUNS):
             try:
                 res = adj._adjudicate_turn_tier1(build(ch, idx, wr, sr), ch)
                 answers.append((res.resolved_speaker or "?", res.confidence))
             except Exception as exc:
                 answers.append((f"ERR:{type(exc).__name__}", 0.0))
+        elapsed[label] += time.perf_counter() - t0
         ids = [a for a, _ in answers]
         top, n = Counter(ids).most_common(1)[0]
         conf = sum(c for i, c in answers if i == top) / max(1, n)
@@ -95,4 +99,5 @@ for label in ("narrow", "wide"):
     print(f"{label:7} agrees_with_stored={sum(1 for a,_,_ in v if a):2}/{len(v)}  "
           f"stable_3of3={sum(1 for _,s,_ in v if s):2}/{len(v)}  "
           f"mean_conf={sum(c for _,_,c in v)/len(v):.3f}  "
-          f"above_0.85={sum(1 for _,_,c in v if c>=0.85):2}/{len(v)}")
+          f"above_0.85={sum(1 for _,_,c in v if c>=0.85):2}/{len(v)}  "
+          f"wall={elapsed[label]/RUNS:6.1f}s ({elapsed[label]/RUNS/len(v):.1f}s per line)")
