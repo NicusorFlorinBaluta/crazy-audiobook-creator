@@ -121,6 +121,78 @@ def _check_gender_pronoun_consistency(
     return True, "gender_consistent"
 
 
+# Verbs that report speech. A narrator sentence built on one of these is a
+# speech tag; one built on a reaction verb ("Dahlia laughed at that.") is not,
+# and reading a reaction as a tag is how a bystander ends up owning the line.
+_SPEECH_TAG_VERBS = (
+    "said|says|asked|asks|replied|replies|answered|answers|stated|states|added|adds|"
+    "muttered|mutters|growled|growls|whispered|whispers|shouted|shouts|called|calls|"
+    "snarled|snarls|breathed|breathes|offered|offers|insisted|insists|countered|counters|"
+    # `continued on` is walking, not speaking: "Dusk continued on, remaining
+    # methodical." was read as a tag and pulled a name out of the narration
+    # three sentences later. `went on` stays, because that idiom *is* speech.
+    "agreed|agrees|admitted|admits|observed|observes|remarked|remarks|"
+    r"continued(?!\s+on)|continues(?!\s+on)|"
+    "interrupted|interrupts|corrected|corrects|protested|protests|explained|explains|"
+    "murmured|murmurs|repeated|repeats|announced|announces|declared|declares|"
+    "returned|returns|finished|finishes|went on|goes on"
+)
+
+# "Dahlia said no more and let him go." is the shape of a *refusal* to speak.
+# It matches "<Name> said" and is not a tag for the quote above it.
+_TAG_NEGATION = re.compile(
+    rf"\b(?:{_SPEECH_TAG_VERBS})\s+(?:no|nothing|not|never|none)\b",
+    re.IGNORECASE,
+)
+
+# "<Name> <optional adverb> <speech verb>" at the very start of the sentence.
+_CAPITAL_LED_TAG = re.compile(
+    rf"^[A-Z][\w'’-]*(?:\s+[A-Z][\w'’-]*)?\s+(?:\w+ly\s+)?(?:{_SPEECH_TAG_VERBS})\b"
+)
+
+
+def _reads_as_attached_tag(tag: str) -> bool:
+    """Is this narrator line the author naming who just spoke?
+
+    Two shapes qualify.
+
+    A **lower-case** first letter means the line grammatically continues the
+    quoted sentence -- `"Get out," he snarled.` -- so it is a tag by
+    construction, whatever its verb.
+
+    A **capital** first letter starts a new sentence, which may be a reaction
+    rather than a tag. Those qualify only when the sentence opens with a name
+    and a speech verb. Measured across two books (2026-09-10,
+    `scripts/audit_capital_led_speech_tags.py`), that distinction holds:
+
+    ```
+                        speech-verb   reaction-verb
+      trailing              391             6
+      leading                 6            12      <- names the NEXT speaker
+      both-same             986             4
+      unparsed              194           415
+    ```
+
+    Of 1,390 capital-led speech-verb tags that parse to a name, 6 name the
+    following speaker rather than the preceding one -- 0.4%. Reaction verbs are
+    90-96% unparseable and the few that parse lean the wrong way, so they stay
+    excluded.
+
+    Before this, only the lower-case shape counted, which saw 490 of roughly
+    1,064 tags in `the-finest-edge-of-twilight-book` -- slightly under half.
+    """
+    if not tag:
+        return False
+    lead = next((char for char in tag if char.isalpha()), "")
+    if not lead:
+        return False
+    if lead.islower():
+        return True
+    if _TAG_NEGATION.search(tag):
+        return False
+    return bool(_CAPITAL_LED_TAG.match(tag.strip()))
+
+
 def _label_support(
     lines: list[dict[str, Any]] | list[ScriptLine],
     index: int,
@@ -146,8 +218,7 @@ def _label_support(
     if following_speaker != "narrator":
         return "  [unverified]"
     tag = str(following.get("text") if isinstance(following, dict) else getattr(following, "text", "") or "").strip()
-    lead = next((char for char in tag if char.isalpha()), "")
-    if not lead or not lead.islower():
+    if not _reads_as_attached_tag(tag):
         return "  [unverified]"
 
     named, kind, gender = ScriptGenerator._dialogue_tag_evidence(tag, registry)
@@ -193,8 +264,7 @@ def _attached_tag_evidence(
     if str(following.get("speaker") or "") != "narrator":
         return None, None, ""
     tag = str(following.get("text") or "").strip()
-    lead = next((char for char in tag if char.isalpha()), "")
-    if not lead or not lead.islower():
+    if not _reads_as_attached_tag(tag):
         return None, None, ""
     exact, kind, gender = ScriptGenerator._dialogue_tag_evidence(tag, registry)
     if (
@@ -278,8 +348,7 @@ def _has_tag_confirmation(
     if following_line is None or following_line.speaker != "narrator":
         return False
     tag = str(following_line.text or "").strip()
-    lead = next((char for char in tag if char.isalpha()), "")
-    if not lead or not lead.islower():
+    if not _reads_as_attached_tag(tag):
         return False
 
     named, kind, gender = ScriptGenerator._dialogue_tag_evidence(tag, registry)
@@ -878,8 +947,7 @@ class TieredAttributionAdjudicator:
                 nxt_line = lines[pos + 1]
                 if nxt_line.speaker == "narrator":
                     tag_text = str(nxt_line.text or "").strip()
-                    lead = next((c for c in tag_text if c.isalpha()), "")
-                    if lead and lead.islower():
+                    if _reads_as_attached_tag(tag_text):
                         exact, kind, gender = ScriptGenerator._dialogue_tag_evidence(tag_text, self.registry)
                         if (
                             gender is not None

@@ -31,6 +31,7 @@ from brain.director.script_generator import ScriptGenerator
 from brain.validators.tiered_adjudicator import (
     TieredAttributionAdjudicator,
     _attached_tag_evidence,
+    _reads_as_attached_tag,
 )
 from shared.constants import Gender
 from shared.models import Character, CharacterRegistry
@@ -316,3 +317,88 @@ def test_a_descriptor_shared_by_twins_stays_ambiguous(registry) -> None:
 
     named, _kind, _gender = ScriptGenerator._dialogue_tag_evidence("Ilnezhara laughed and said,", registry)
     assert named == "ilnezhara", "their own names must still resolve"
+
+
+class TestAttachedTagGate:
+    """Which narrator lines count as the author naming who just spoke.
+
+    The gate used to be "does it start with a lower-case letter" -- a proxy for
+    "does it grammatically continue the quoted sentence". Precise, but it saw
+    only 490 of roughly 1,064 tags in `the-finest-edge-of-twilight-book`, and
+    that is where `ch13_0362` slipped through: labelled `breezy` with "Savahn
+    flatly stated." on the next line.
+
+    Capital-led narration is admitted when it opens with a name and a *speech*
+    verb. Measured across two books
+    (`scripts/audit_capital_led_speech_tags.py`), that separates tags from
+    reactions cleanly:
+
+                            speech-verb   reaction-verb
+          trailing              391             6
+          leading                 6            12
+          both-same             986             4
+          unparsed              194           415
+
+    6 of 1,390 parsed speech-verb tags name the *following* speaker rather than
+    the preceding one -- 0.4%. Reaction verbs lean the other way and are 90-96%
+    unparseable, so they stay out.
+    """
+
+    @pytest.mark.parametrize(
+        "tag",
+        [
+            "he replied, then whispered in her ear,",
+            "said the dwarf.",
+            "asked Breezy.",
+        ],
+    )
+    def test_a_lower_case_lead_is_still_a_tag_whatever_its_verb(self, tag: str) -> None:
+        """A lower-case start continues the quoted sentence, so the verb is moot."""
+        assert _reads_as_attached_tag(tag)
+
+    @pytest.mark.parametrize(
+        "tag",
+        [
+            "Gregory replied with a blank stare.",
+            "Savahn flatly stated.",
+            "Jarlaxle admitted with a chuckle, but he grew more serious.",
+            "Catti-brie went on, her voice low.",
+        ],
+    )
+    def test_a_capital_led_speech_verb_is_a_tag(self, tag: str) -> None:
+        assert _reads_as_attached_tag(tag)
+
+    @pytest.mark.parametrize(
+        "tag",
+        [
+            "Dahlia laughed at that.",
+            "She turned away from the window.",
+            "Breezy nodded slowly.",
+            "The room fell silent.",
+        ],
+    )
+    def test_a_reaction_is_not_a_tag(self, tag: str) -> None:
+        """The original reason for the gate, and still the reason it is narrow.
+
+        `_attached_tag_evidence` can overrule the model at confidence 1.0 with
+        review suppressed, so a bystander reading here writes a wrong speaker
+        that nobody is asked to check.
+        """
+        assert not _reads_as_attached_tag(tag)
+
+    def test_a_refusal_to_speak_is_not_a_tag(self) -> None:
+        """"Dahlia said no more" matches "<Name> said" and is the opposite."""
+        assert not _reads_as_attached_tag("Dahlia said no more and let him go.")
+
+    def test_continuing_to_walk_is_not_continuing_to_speak(self) -> None:
+        """Caught on the second book: "Dusk continued on" is motion.
+
+        It was read as a tag and pulled a name out of narration three sentences
+        later, contradicting a correct attribution.
+        """
+        assert not _reads_as_attached_tag("Dusk continued on, remaining methodical. As he knelt by the fire,")
+        assert _reads_as_attached_tag("Dusk continued, his voice flat.")
+
+    def test_the_gate_admits_the_line_that_slipped_through(self) -> None:
+        """`ch13_0362`: labelled `breezy`, tagged "Savahn flatly stated."."""
+        assert _reads_as_attached_tag("Savahn flatly stated.")
