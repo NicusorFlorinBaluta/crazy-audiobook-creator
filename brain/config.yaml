@@ -209,6 +209,15 @@ external_validation:
       enabled: false
       max_suspicious_per_call: 8
       only_unconfirmed_runs: true   # the 124, not all 176 blocks
+    # Second look, with ~4x the context, at lines the narrow window could not
+    # settle -- and only those. Measured on the 16 sub-threshold lines of one
+    # book (2.6% of 616): all 16 cleared the bar, one was a genuine correction,
+    # at +15% wall-clock on those calls alone. Every line that reaches it was
+    # otherwise bound for a paid Gemini call.
+    wide_context_retry:
+      enabled: true
+      window_radius: 20   # detector default is 5
+      scene_radius: 30    # detector default is 8
 
 
   character_augmentation:

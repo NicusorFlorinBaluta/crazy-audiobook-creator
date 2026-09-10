@@ -20,7 +20,11 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from brain.director.attribution_detector import SuspiciousTurn, _is_dialogue_line
+from brain.director.attribution_detector import (
+    SuspiciousTurn,
+    _is_dialogue_line,
+    rebuild_turn_with_context,
+)
 from brain.director.ollama_client import OllamaClient, OllamaError
 from brain.director.script_generator import (
     _GENERIC_ROLE_DESCRIPTORS,
@@ -149,6 +153,32 @@ _TAG_NEGATION = re.compile(
 _CAPITAL_LED_TAG = re.compile(
     rf"^[A-Z][\w'’-]*(?:\s+[A-Z][\w'’-]*)?\s+(?:\w+ly\s+)?(?:{_SPEECH_TAG_VERBS})\b"
 )
+
+#: Tiers that mean "the local model settled this line". Every consumer that
+#: asks "was this resolved locally?" must accept all of them; a tuple here
+#: rather than a literal at each site, because the block tier was added by
+#: extending five separate literals and the sixth was missed.
+_LOCAL_RESOLVER_TIERS = ("local_qwen", "local_qwen_wide", "local_qwen_block")
+
+#: What each of those writes to `line.attribution_resolver`, so a line's stored
+#: provenance says which attempt actually settled it.
+_RESOLVER_PROVENANCE = {
+    "local_qwen": "local_qwen_micro",
+    "local_qwen_wide": "local_qwen_wide",
+    "local_qwen_block": "local_qwen_block",
+}
+_EVIDENCE_LABEL = {
+    "local_qwen": "micro",
+    "local_qwen_wide": "wide-context",
+    "local_qwen_block": "block",
+}
+
+#: Radii for the wide-context retry, in lines either side of the target.
+#: Roughly four times the detector's default. Prefill is cheap relative to
+#: decode, so the extra context is not what makes a retried line slower -- the
+#: second call is. See `_retry_with_wide_context` for the measured cost.
+WIDE_RETRY_WINDOW_RADIUS = 20
+WIDE_RETRY_SCENE_RADIUS = 30
 
 
 def _reads_as_attached_tag(tag: str) -> bool:
@@ -506,6 +536,9 @@ class TieredAttributionAdjudicator:
         block_adjudication_enabled: bool = False,
         max_suspicious_per_call: int = 8,
         only_unconfirmed_runs: bool = True,
+        wide_context_retry: bool = True,
+        wide_window_radius: int = WIDE_RETRY_WINDOW_RADIUS,
+        wide_scene_radius: int = WIDE_RETRY_SCENE_RADIUS,
     ):
         self.ollama = ollama
         self.external_validator = external_validator
@@ -518,6 +551,9 @@ class TieredAttributionAdjudicator:
         # one-suspicious group can never be split smaller than itself.
         self.max_suspicious_per_call = max(1, int(max_suspicious_per_call))
         self.only_unconfirmed_runs = only_unconfirmed_runs
+        self.wide_context_retry = wide_context_retry
+        self.wide_window_radius = max(1, int(wide_window_radius))
+        self.wide_scene_radius = max(1, int(wide_scene_radius))
 
     def adjudicate(
         self,
@@ -676,16 +712,14 @@ class TieredAttributionAdjudicator:
                             res.resolved_speaker,
                             res.reason,
                         )
-            elif res.resolver_tier in ("local_qwen", "local_qwen_block") and res.resolved_speaker:
+            elif res.resolver_tier in _LOCAL_RESOLVER_TIERS and res.resolved_speaker:
                 local_resolved_count += 1
                 if not dry_run:
                     prev_speaker = line.speaker
                     line.speaker = res.resolved_speaker
                     line.speaker_confidence = res.confidence
-                    resolver_name = (
-                        "local_qwen_block" if res.resolver_tier == "local_qwen_block" else "local_qwen_micro"
-                    )
-                    evidence_label = "block" if res.resolver_tier == "local_qwen_block" else "micro"
+                    resolver_name = _RESOLVER_PROVENANCE.get(res.resolver_tier, "local_qwen_micro")
+                    evidence_label = _EVIDENCE_LABEL.get(res.resolver_tier, "micro")
                     line.speaker_evidence = (
                         f"Tier 1 Qwen 27B {evidence_label}-adjudication: {res.evidence_quote} ({res.reason})"
                     )[:4000]
@@ -757,6 +791,11 @@ class TieredAttributionAdjudicator:
             "tag_overruled": tag_overruled_count,
             "blocks_adjudicated": blocks_adjudicated_count,
             "block_fallbacks": block_fallbacks_count,
+            # Lines the narrow window escalated and the wide retry settled --
+            # each one is a Gemini call not made. Watch it against
+            # `escalated_to_tier2`: if the cascade stops paying, this falls
+            # toward zero while escalations hold steady.
+            "wide_context_resolved": sum(1 for r in results if r.resolver_tier == "local_qwen_wide"),
             "dry_run": dry_run,
         }
 
@@ -1209,8 +1248,14 @@ class TieredAttributionAdjudicator:
         self,
         turn: SuspiciousTurn,
         chapter: ScriptChapter | None,
+        *,
+        allow_wide_retry: bool = True,
     ) -> AdjudicationResult:
-        """Run single-turn Qwen micro-prompt and apply guardrails 1-3."""
+        """Run single-turn Qwen micro-prompt and apply guardrails 1-3.
+
+        `allow_wide_retry=False` is the recursion guard for the wide-context
+        second attempt; see `_retry_with_wide_context`.
+        """
         # Build scene character context
         active_ids = {
             neighbor["speaker"]
@@ -1394,7 +1439,7 @@ class TieredAttributionAdjudicator:
             escalate_reasons.append(f"Confidence {confidence:.2f} < threshold {self.local_auto_accept:.2f}")
         full_reason = "; ".join(escalate_reasons) or reason
 
-        return AdjudicationResult(
+        escalation = AdjudicationResult(
             line_id=turn.line_id,
             chapter_number=turn.chapter_number,
             text=turn.text,
@@ -1405,6 +1450,111 @@ class TieredAttributionAdjudicator:
             reason=full_reason,
             evidence_quote=evidence_quote,
             guardrail_results=guardrail_status,
+        )
+        if allow_wide_retry and self.wide_context_retry and chapter is not None:
+            widened = self._retry_with_wide_context(turn, chapter, escalation)
+            if widened is not None:
+                return widened
+        return escalation
+
+    def _retry_with_wide_context(
+        self,
+        turn: SuspiciousTurn,
+        chapter: ScriptChapter,
+        narrow: AdjudicationResult,
+    ) -> AdjudicationResult | None:
+        """Second look at a line the narrow window could not settle.
+
+        Only lines already bound for Gemini get here, so the choice is not
+        "one local call or none" but "one local call or a paid remote one".
+
+        Measured on the 16 sub-threshold lines of `the-finest-edge-of-twilight`
+        (`scripts/experiment_attribution_context_ab.py`, three runs each):
+
+        ```
+                agrees_with_stored  stable_3of3  mean_conf  above_0.85  wall
+        narrow        16/16            16/16       0.917      13/16     5.3s
+        wide          15/16            16/16       0.954      16/16     6.1s
+        ```
+
+        Two things that reading settles. Context buys **confidence, not
+        stability** -- both widths were unanimous across all three runs on
+        every line, so the stability the constrained-choice tier gained came
+        from closing the question, not from the wider window. And the single
+        disagreement, `ch11_0222`, was wide catching a real error: the narrator
+        line just after it reads "That had Effron's hair on the back of his
+        neck standing up. Something about the timbre of Dahlia...", which the
+        narrow window cut off.
+
+        So this runs as a **cascade, not a default width**, and the cost of
+        that is small. Over an unbiased 150-line sample of the same book's
+        suspicious turns, run through this code path:
+
+        ```
+        retried (narrow escalated)  4 (2.7%)   settled by the retry  4
+        mean 5.0s with no retry, 12.9s when retried   pass wall +3.4%
+        ```
+
+        Note what the +3.4% is made of. The extra context is nearly free --
+        prefill is cheap next to decode -- so what a retried line pays for is
+        the *second call*, not its size. Widening every line instead would cost
+        the same per call and buy nothing on the 97% that are already confident.
+
+        A single run, deliberately: both widths were 3-of-3 stable, so repeats
+        measure nothing here. Unanimity is worth paying for where the model is
+        known to waver (the constrained-choice tier), not here.
+
+        Returns `None` when the wide attempt also fails, and the caller keeps
+        the narrow escalation untouched. The retry can only ever turn an
+        escalation into a local resolution; it can never change a line the
+        narrow pass already decided, nor make an escalation worse.
+        """
+        wide_turn = rebuild_turn_with_context(
+            turn,
+            chapter,
+            window_radius=self.wide_window_radius,
+            scene_radius=self.wide_scene_radius,
+        )
+        if wide_turn is None or len(wide_turn.surrounding_lines) <= len(turn.surrounding_lines):
+            # Nothing more to show it -- a short chapter, or the line is gone.
+            return None
+
+        try:
+            result = self._adjudicate_turn_tier1(wide_turn, chapter, allow_wide_retry=False)
+        except Exception as exc:  # noqa: BLE001 - a retry must never break the pass
+            logger.warning("[TieredAttribution] Wide-context retry failed on %s: %s", turn.line_id, exc)
+            return None
+
+        if result.resolver_tier not in _LOCAL_RESOLVER_TIERS or not result.resolved_speaker:
+            logger.debug(
+                "[TieredAttribution] Wide-context retry did not settle %s either (%s)",
+                turn.line_id,
+                result.reason,
+            )
+            return None
+
+        logger.info(
+            "[TieredAttribution] Wide context settled %s as %s (conf %.2f -> %.2f): %s",
+            turn.line_id,
+            result.resolved_speaker,
+            narrow.confidence,
+            result.confidence,
+            result.reason,
+        )
+        return AdjudicationResult(
+            line_id=result.line_id,
+            chapter_number=result.chapter_number,
+            text=result.text,
+            original_speaker=result.original_speaker,
+            resolved_speaker=result.resolved_speaker,
+            resolver_tier="local_qwen_wide",
+            confidence=result.confidence,
+            reason=(
+                f"{result.reason} [resolved on retry with +/-{self.wide_window_radius} lines of "
+                f"context, after the narrow window escalated: {narrow.reason}]"
+            ),
+            evidence_quote=result.evidence_quote,
+            guardrail_results=result.guardrail_results,
         )
 
     def _apply_reciprocal_turn_guardrail(
@@ -1435,7 +1585,7 @@ class TieredAttributionAdjudicator:
                     cur_res.resolved_speaker
                     if (
                         cur_res
-                        and cur_res.resolver_tier in ("local_qwen", "local_qwen_block")
+                        and cur_res.resolver_tier in _LOCAL_RESOLVER_TIERS
                         and cur_res.resolved_speaker
                     )
                     else cur.speaker
@@ -1444,7 +1594,7 @@ class TieredAttributionAdjudicator:
                     nxt_res.resolved_speaker
                     if (
                         nxt_res
-                        and nxt_res.resolver_tier in ("local_qwen", "local_qwen_block")
+                        and nxt_res.resolver_tier in _LOCAL_RESOLVER_TIERS
                         and nxt_res.resolved_speaker
                     )
                     else nxt.speaker
@@ -1467,7 +1617,7 @@ class TieredAttributionAdjudicator:
                             continue
 
                         # If both are untagged, invalidate local_qwen and escalate to Gemini!
-                        if cur_res and cur_res.resolver_tier in ("local_qwen", "local_qwen_block"):
+                        if cur_res and cur_res.resolver_tier in _LOCAL_RESOLVER_TIERS:
                             cur_res.resolver_tier = "gemini_api"
                             cur_res.reason += (
                                 " [Rejected by Guardrail 4: Untagged reciprocal Q&A same-speaker conflict]"
@@ -1480,7 +1630,7 @@ class TieredAttributionAdjudicator:
                                 "[TieredAttribution] Guardrail 4 rejected local resolution on %s",
                                 cur.line_id,
                             )
-                        if nxt_res and nxt_res.resolver_tier in ("local_qwen", "local_qwen_block"):
+                        if nxt_res and nxt_res.resolver_tier in _LOCAL_RESOLVER_TIERS:
                             nxt_res.resolver_tier = "gemini_api"
                             nxt_res.reason += (
                                 " [Rejected by Guardrail 4: Untagged reciprocal Q&A same-speaker conflict]"

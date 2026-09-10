@@ -142,6 +142,9 @@ def main() -> int:
         local_auto_accept=float(tiered.get("local_auto_accept_confidence", 0.85)),
         ollama_temperature=float(tiered.get("ollama_temperature", 0.1)),
         block_adjudication_enabled=False,  # the per-line path, deliberately
+        # This measures the narrow window against the block path. Letting the
+        # cascade fire would mix a third condition into a two-way diff.
+        wide_context_retry=False,
     )
 
     started = time.time()
@@ -158,7 +161,7 @@ def main() -> int:
 
             if tier == "exception":
                 verdict = "failed"
-            elif tier not in ("local_qwen", "deterministic_tag", "deterministic_attached_tag"):
+            elif tier not in ("local_qwen", "local_qwen_wide", "deterministic_tag", "deterministic_attached_tag"):
                 verdict = "escalated"
             elif per_line == line.speaker:
                 verdict = "agree"

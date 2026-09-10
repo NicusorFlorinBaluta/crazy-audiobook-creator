@@ -504,13 +504,92 @@ the line unsettled Effron and was not his. Effron owns the tower
 That line had been resolved by `local_qwen_block` at 0.95 — one more line block
 adjudication got wrong that the per-line path, given room, gets right.
 
-### The recommendation: cascade, do not widen globally
+### The decision: cascade, do not widen globally — built
 
 Re-run with a wide window **only where the cheap attempt lands below the
 auto-accept bar**, before escalating to Gemini. On this sample that is 16 of 616
-lines (2.6%), costs +15% on those alone, settles all of them locally, and
-corrected one. Widening all 1,038 calls buys the same benefit for 40x the extra
-compute.
+lines (2.6%); widening all 1,038 calls buys the same benefit for 40x the extra
+compute, on lines that are already confident.
+
+This is now wired, as `TieredAttributionAdjudicator._retry_with_wide_context`,
+behind `external_validation.tiered_attribution.wide_context_retry` (on by
+default). The design constraint it is built to is that the cascade must be
+**strictly additive**: it can turn an escalation into a local resolution and
+nothing else.
+
+* Only a result already bound for `gemini_api` reaches it, so the choice is
+  never "one local call or none" — it is "one local call, or a paid remote one".
+* The retry's answer runs through the *same* guardrails. A wider window is not
+  a reason to relax alias resolution or the gender checks.
+* If the retry also fails — low confidence, an unresolvable name, an exception —
+  the **narrow** escalation is returned untouched. It cannot make a line worse.
+* One retry, never two (`allow_wide_retry=False` on the inner call).
+* A single run, deliberately. Both widths were 3-of-3 stable in the A/B, so
+  repeats measure nothing here; unanimity is worth paying for where the model is
+  known to waver, which is the constrained-choice tier, not this.
+
+A line the retry settles is stored as `local_qwen_wide`, and the reason keeps
+why the narrow window gave up — otherwise the record shows a confident answer
+with no trace of the doubt that produced it. `wide_context_resolved` in the run
+summary counts them; watched against `escalated_to_tier2`, it says whether the
+cascade is still paying.
+
+`build_turn_window` moved out of `detect_suspicious_turns` to module level in
+`attribution_detector.py` so the retry rebuilds a turn shaped exactly like a
+detected one. Two builders would drift, and the difference would surface as an
+attribution change nobody could account for.
+
+#### What it costs a whole pass
+
+The A/B compared one narrow call against one wide call on the same line. That is
+not the number an operator cares about, and taken alone it misleads: it makes
+the cost look like the extra context, when the cost is actually the second call.
+So the wired path was measured again over an **unbiased 150-line sample** of the
+same book's suspicious turns, at production radii:
+
+```
+lines                       150
+retried (narrow escalated)    4  (2.7%)
+  settled by the retry        4
+  still escalating to Gemini  0
+mean secs, no retry         5.0
+mean secs, retried         12.9
+pass wall                   +3.4%
+```
+
+**+3.4% on the pass, and every escalation in the sample disappeared.** The retry
+rate matches the 2.6% predicted from the 616-line diff, which is the reassuring
+part: the cascade fires about as often as the analysis said it would.
+
+A separate run over the 16 known sub-threshold lines — the hardest sample there
+is — put 5 of 6 retries away locally, leaving `ch21_0004` for Gemini. The
+cascade does not claim to settle everything, only to try cheaply first.
+
+One caution on the per-call figures: the A/B's +15% assumed ~64 tok/s decode,
+and this run logged closer to 19 tok/s. Decode speed and answer length move
+these numbers around far more than window size does. The +3.4% pass figure is
+the durable one.
+
+#### The measurement found a fourth block-adjudication error
+
+`ch17_0168` came back as `zaknafein` at 0.95 against a stored `jarlaxle`. Reading
+the passage, the model is right:
+
+> ch17_0167 **jarlaxle** (tag-confirmed) — *"…but in this case, it is simply incorrect."*
+> ch17_0168 **jarlaxle** ← stored — *"You would claim that in any case."*
+> ch17_0169 **jarlaxle** — *"Not with you, old friend. Were I here to cause trouble…"*
+
+Nobody answers their own claim with *"You would claim that in any case."* The
+line is Zaknafein's scepticism and `ch17_0169` is Jarlaxle's reply — as the
+*"old friend"* address confirms. Both stored lines carry
+`attribution_resolver: local_qwen_block`.
+
+This is **not** a cascade finding — the narrow window caught it on a single
+call, and it surfaced only because re-running an already-adjudicated book
+re-asks settled lines. It is one more entry in the case against block
+adjudication, alongside `ch11_0222` and `ch11_0147`/`ch11_0148`. The fix is not
+to hand-edit the line; it is the removal already recommended below, after which
+a re-run resolves it correctly on the per-line path.
 
 What this does **not** support is using the constrained-choice tier generally.
 Its candidate list only exists because a deterministic check refuted a speaker

@@ -23,7 +23,10 @@ import yaml
 from brain.director.attribution_detector import detect_suspicious_turns
 from brain.director.ollama_client import OllamaClient
 from brain.validators.gemini_validation import GeminiValidationService
-from brain.validators.tiered_adjudicator import TieredAttributionAdjudicator
+from brain.validators.tiered_adjudicator import (
+    _LOCAL_RESOLVER_TIERS,
+    TieredAttributionAdjudicator,
+)
 from shared.artifacts import atomic_write_json, atomic_write_text
 from shared.constants import DEFAULT_OLLAMA_MODEL
 from shared.models import CharacterRegistry, ScriptChapter
@@ -53,6 +56,11 @@ def main():
         "--dry-run", action="store_true", help="Preview proposed attribution fixes without modifying scripts"
     )
     parser.add_argument("--apply", action="store_true", help="Write changes to disk")
+    parser.add_argument(
+        "--no-wide-context",
+        action="store_true",
+        help="Escalate straight to Tier 2 instead of retrying sub-threshold lines with a wider window",
+    )
     parser.add_argument("--escalate-gemini", action="store_true", help="Escalate unresolved Tier 1 lines to Gemini API")
     parser.add_argument(
         "--local-conf", type=float, default=0.85, help="Confidence threshold for Tier 1 local Qwen auto-accept"
@@ -173,6 +181,7 @@ def main():
         block_adjudication_enabled=block_enabled,
         max_suspicious_per_call=args.max_suspicious_per_call,
         only_unconfirmed_runs=not args.all_blocks,
+        wide_context_retry=not args.no_wide_context,
     )
 
     print(
@@ -218,7 +227,7 @@ def main():
         ch_repairs = [
             r
             for r in ch_report.results
-            if r.resolver_tier in ("local_qwen", "local_qwen_block")
+            if r.resolver_tier in _LOCAL_RESOLVER_TIERS
             and r.resolved_speaker
             and r.resolved_speaker != r.original_speaker
         ]

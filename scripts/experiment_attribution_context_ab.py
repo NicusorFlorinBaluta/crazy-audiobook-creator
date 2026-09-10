@@ -1,17 +1,26 @@
-"""Does more context alone fix low-confidence attribution? (UNANSWERED)
-
-Run this on a free GPU. A first attempt on 2026-09-10 was abandoned: the
-machine was running a game, and 96 calls of a 4.4x-prefill prompt is not a
-reasonable thing to put on a card someone is playing on. No result yet.
+"""Does more context alone fix low-confidence attribution? Yes -- answered 2026-09-10.
 
 The constrained-choice tier changed four things at once: a closed candidate
 set, the refutation stated as fact, a much wider window, and unanimity across
-runs. So it says nothing about whether *context alone* would help.
+runs. So it said nothing about whether *context alone* would help.
 
 These 16 lines are the ones the per-line path resolved at 0.80-0.83 -- just
 under the 0.85 auto-accept bar -- with no refutation and no candidate set.
 They are exactly the "low confidence autofix" case. Same prompt, same code
 path, only the window changes.
+
+Result, on a free GPU (an earlier attempt was abandoned mid-game; 96 calls of a
+4.4x-prefill prompt is not a reasonable thing to put on a card someone is
+playing on, and the timings would have been noise):
+
+        agrees_with_stored  stable_3of3  mean_conf  above_0.85  wall
+narrow        16/16            16/16       0.917      13/16     5.3s/line
+wide          15/16            16/16       0.954      16/16     6.1s/line
+
+Context buys **confidence, not stability** -- every line was already unanimous
+at both widths. And the single disagreement was wide catching a real error on
+`ch11_0222`. This is what `TieredAttributionAdjudicator._retry_with_wide_context`
+was built from; re-run it if the model or the prompt changes.
 """
 import json
 import logging
@@ -50,7 +59,10 @@ ollama = OllamaClient(host=oc["host"], model=oc.get("model", DEFAULT_OLLAMA_MODE
                       max_output_tokens=int(oc.get("max_output_tokens", 8192)), think=oc.get("think"))
 adj = TieredAttributionAdjudicator(ollama=ollama, external_validator=None, registry=registry,
                                    local_auto_accept=0.85, ollama_temperature=0.1,
-                                   block_adjudication_enabled=False)
+                                   block_adjudication_enabled=False,
+                                   # The experiment *is* the two widths. The
+                                   # cascade it produced must not run inside it.
+                                   wide_context_retry=False)
 
 def build(chapter, idx, wr, sr):
     lines = chapter.lines

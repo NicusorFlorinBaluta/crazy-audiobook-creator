@@ -1785,7 +1785,11 @@ class Pipeline:
         if tiered_cfg.get("enabled", True):
             try:
                 from brain.director.attribution_detector import detect_suspicious_turns
-                from brain.validators.tiered_adjudicator import TieredAttributionAdjudicator
+                from brain.validators.tiered_adjudicator import (
+                    WIDE_RETRY_SCENE_RADIUS,
+                    WIDE_RETRY_WINDOW_RADIUS,
+                    TieredAttributionAdjudicator,
+                )
 
                 min_conf = float(tiered_cfg.get("min_detection_confidence", 0.70))
                 max_short = int(tiered_cfg.get("max_short_response_chars", 80))
@@ -1796,6 +1800,10 @@ class Pipeline:
                 block_enabled = bool(block_cfg.get("enabled", False))
                 max_suspicious_per_call = int(block_cfg.get("max_suspicious_per_call", 8))
                 only_unconfirmed_runs = bool(block_cfg.get("only_unconfirmed_runs", True))
+                wide_cfg = tiered_cfg.get("wide_context_retry", {})
+                wide_enabled = bool(wide_cfg.get("enabled", True))
+                wide_window_radius = int(wide_cfg.get("window_radius", WIDE_RETRY_WINDOW_RADIUS))
+                wide_scene_radius = int(wide_cfg.get("scene_radius", WIDE_RETRY_SCENE_RADIUS))
 
                 suspicious = detect_suspicious_turns(
                     chapter_scripts,
@@ -1817,6 +1825,9 @@ class Pipeline:
                         block_adjudication_enabled=block_enabled,
                         max_suspicious_per_call=max_suspicious_per_call,
                         only_unconfirmed_runs=only_unconfirmed_runs,
+                        wide_context_retry=wide_enabled,
+                        wide_window_radius=wide_window_radius,
+                        wide_scene_radius=wide_scene_radius,
                     )
                     attribution_tick = 0.0
 

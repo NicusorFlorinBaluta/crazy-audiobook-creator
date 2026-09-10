@@ -63,6 +63,80 @@ class SuspiciousTurn:
         return asdict(self)
 
 
+def build_turn_window(
+    chapter: ScriptChapter,
+    idx: int,
+    *,
+    reason: str,
+    pattern: str,
+    window_radius: int = 5,
+    scene_radius: int = 8,
+) -> SuspiciousTurn:
+    """Build one `SuspiciousTurn` for `chapter.lines[idx]` at the given radii.
+
+    Module-level rather than a closure inside `detect_suspicious_turns` so the
+    adjudicator's wide-context retry can rebuild a turn that is shaped exactly
+    like a detected one. Two builders would drift, and the difference would show
+    up as an attribution change nobody could account for.
+    """
+    lines = chapter.lines
+    total = len(lines)
+    target = lines[idx]
+
+    w_start = max(0, idx - window_radius)
+    w_end = min(total, idx + window_radius + 1)
+    surrounding = [
+        {
+            "line_id": neighbor.line_id,
+            "text": neighbor.text,
+            "speaker": neighbor.speaker,
+            "speaker_confidence": neighbor.speaker_confidence,
+            "dialogue_kind": neighbor.dialogue_kind,
+            "is_target": (neighbor.line_id == target.line_id),
+        }
+        for neighbor in lines[w_start:w_end]
+    ]
+    s_start = max(0, idx - scene_radius)
+    s_end = min(total, idx + scene_radius + 1)
+    scene = " ".join(neighbor.text.strip() for neighbor in lines[s_start:s_end])
+
+    return SuspiciousTurn(
+        line_id=target.line_id,
+        chapter_number=chapter.chapter_number,
+        text=target.text,
+        current_speaker=target.speaker,
+        detection_reason=reason,
+        detection_pattern=pattern,
+        surrounding_lines=surrounding,
+        scene_text=scene,
+    )
+
+
+def rebuild_turn_with_context(
+    turn: SuspiciousTurn,
+    chapter: ScriptChapter,
+    *,
+    window_radius: int,
+    scene_radius: int,
+) -> SuspiciousTurn | None:
+    """The same turn, seen through a wider window. `None` if the line is gone.
+
+    Everything the detector concluded is carried over unchanged -- why the line
+    was flagged does not depend on how much of the scene is shown.
+    """
+    idx = next((i for i, line in enumerate(chapter.lines) if line.line_id == turn.line_id), None)
+    if idx is None:
+        return None
+    return build_turn_window(
+        chapter,
+        idx,
+        reason=turn.detection_reason,
+        pattern=turn.detection_pattern,
+        window_radius=window_radius,
+        scene_radius=scene_radius,
+    )
+
+
 def detect_suspicious_turns(
     chapters: list[ScriptChapter],
     *,
@@ -86,13 +160,12 @@ def detect_suspicious_turns(
 
     for chapter in chapters:
         lines = chapter.lines
-        total = len(lines)
         if not lines:
             continue
 
         dialogue_indices = [idx for idx, line in enumerate(lines) if _is_dialogue_line(line)]
 
-        # `lines`, `total` and `chapter` are bound as defaults rather than
+        # `chapter` is bound as a default rather than
         # captured. The closure is only ever called within this iteration
         # today, so the capture is currently harmless -- but it is harmless by
         # accident, and would silently attribute one chapter's turns to another
@@ -102,37 +175,15 @@ def detect_suspicious_turns(
             reason: str,
             pattern: str,
             *,
-            lines: list = lines,
-            total: int = total,
             chapter=chapter,
         ) -> SuspiciousTurn:
-            target = lines[idx]
-            w_start = max(0, idx - window_radius)
-            w_end = min(total, idx + window_radius + 1)
-            surrounding = [
-                {
-                    "line_id": neighbor.line_id,
-                    "text": neighbor.text,
-                    "speaker": neighbor.speaker,
-                    "speaker_confidence": neighbor.speaker_confidence,
-                    "dialogue_kind": neighbor.dialogue_kind,
-                    "is_target": (neighbor.line_id == target.line_id),
-                }
-                for neighbor in lines[w_start:w_end]
-            ]
-            s_start = max(0, idx - scene_radius)
-            s_end = min(total, idx + scene_radius + 1)
-            scene = " ".join(neighbor.text.strip() for neighbor in lines[s_start:s_end])
-
-            return SuspiciousTurn(
-                line_id=target.line_id,
-                chapter_number=chapter.chapter_number,
-                text=target.text,
-                current_speaker=target.speaker,
-                detection_reason=reason,
-                detection_pattern=pattern,
-                surrounding_lines=surrounding,
-                scene_text=scene,
+            return build_turn_window(
+                chapter,
+                idx,
+                reason=reason,
+                pattern=pattern,
+                window_radius=window_radius,
+                scene_radius=scene_radius,
             )
 
         # -------------------------------------------------------------
