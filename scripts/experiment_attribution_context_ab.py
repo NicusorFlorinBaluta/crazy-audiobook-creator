@@ -52,7 +52,9 @@ adj = TieredAttributionAdjudicator(ollama=ollama, external_validator=None, regis
                                    block_adjudication_enabled=False)
 
 def build(chapter, idx, wr, sr):
-    lines = chapter.lines; n = len(lines); t = lines[idx]
+    lines = chapter.lines
+    n = len(lines)
+    t = lines[idx]
     a, b = max(0, idx - wr), min(n, idx + wr + 1)
     c, d = max(0, idx - sr), min(n, idx + sr + 1)
     return SuspiciousTurn(
