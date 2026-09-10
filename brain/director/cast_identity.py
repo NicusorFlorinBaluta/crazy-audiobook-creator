@@ -88,6 +88,34 @@ _UNVETOABLE = {
     "guard",
     "soldier",
     "servant",
+    # Ranks and divine appellatives, the same class as king/queen/lord/lady
+    # above and omitted only by oversight. `insect_god` carried the bare alias
+    # "God" while `patji` carried "The God", and matching one against the other
+    # produced five "co-occurrences" that were entirely prose about Patji.
+    #
+    # Each of these was measured on both books (2026-09-10): adding it costs
+    # **zero** vetoes. `officer`, `one` and `first` were measured too and are
+    # deliberately EXCLUDED -- they cost 2, 2 and 3 real refusals, because for
+    # characters the book never named ("Police Officer", "One of the Ones
+    # Above", "First of the Sky") the generic word is the only term they own.
+    # `second` measured free but is the same class as `first` in this cast, so
+    # it is excluded for consistency rather than shaved to the measurement.
+    "god",
+    "goddess",
+    "captain",
+    "admiral",
+    "colonel",
+    "general",
+    "sergeant",
+    "chief",
+    "lieutenant",
+    "major",
+    "president",
+    "doctor",
+    "professor",
+    "priest",
+    "voice",
+    "thing",
 }
 
 
@@ -205,14 +233,16 @@ def distinct_participant_veto(
         if re.search(p, source_text, re.IGNORECASE):
             return "the source depicts them interacting as distinct individuals (interaction veto)"
 
-    # 3. Concurrent occurrence across >= 3 separate sentences (within 300 chars without sentence boundary)
-    p_sentence_fwd = rf"\b(?:{left})\b[^.!?\n]{{1,300}}\b(?:{right})\b"
-    p_sentence_rev = rf"\b(?:{right})\b[^.!?\n]{{1,300}}\b(?:{left})\b"
-    cooccur = len(re.findall(p_sentence_fwd, source_text, re.IGNORECASE)) + len(
-        re.findall(p_sentence_rev, source_text, re.IGNORECASE)
-    )
-    if cooccur >= 3:
-        return f"the source depicts them concurrently across {cooccur} separate sentences (co-occurrence veto)"
+    # There is deliberately no proximity or co-occurrence rule here. It was
+    # measured on the real book and is *anti*-correlated with the answer:
+    # within 200 characters the distinct twins Ilnezhara/Tazmikella co-occur
+    # 6 times, while the alias pairs Jarlaxle/Uncle Jax and Regis/Rumblebelly
+    # co-occur 10 and 15 times -- prose introduces an alias right beside the
+    # name it replaces. Such a rule therefore refuses hardest exactly the
+    # merges this feature exists to find: a name-and-appellative duplicate
+    # such as `avelyere` / "the veteran wizard", which shares no token with
+    # its twin and so is only ever proposed by the roster stage.
+    # See docs/decisions/2026-09-04-whole-cast-duplicate-detection.md.
 
     return None
 

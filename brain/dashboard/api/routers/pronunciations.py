@@ -7,12 +7,13 @@ Split out of `main.py`. Shared runtime state and path helpers come from
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
 import hashlib
 import json
 import logging
 import re
 import shutil
+from datetime import UTC, datetime
+from typing import Any
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
@@ -20,6 +21,7 @@ from pydantic import BaseModel, Field
 
 from brain.dashboard.api import runtime
 from brain.orchestrator.delivery_manager import DeliveryManager
+from brain.orchestrator.voice_client import VoiceClientError
 from shared.artifacts import atomic_write_json
 from shared.models import GenerateLineRequest, ScriptLine
 from shared.pronunciation import (
@@ -122,7 +124,7 @@ async def toggle_preview_mode(project_id: str, request: PreviewModeRequest):
                 runtime.pipeline.stop(project_id)
                 try:
                     await asyncio.to_thread(runtime.pipeline.voice_client.cancel_project, project_id)
-                except Exception as exc:
+                except (VoiceClientError, RuntimeError, OSError) as exc:
                     logger.debug("Voice cancel project during preview mode entry: %s", exc)
             paused_by_us = True
             await asyncio.sleep(0.5)
@@ -138,7 +140,7 @@ async def toggle_preview_mode(project_id: str, request: PreviewModeRequest):
                         (vid for vid in voices if "narrator" in vid.lower()),
                         next(iter(voices.keys()), None),
                     )
-                except Exception:
+                except (OSError, ValueError, UnicodeDecodeError):
                     voice_id = None
         voice_id = voice_id or "narrator"
 
@@ -150,7 +152,7 @@ async def toggle_preview_mode(project_id: str, request: PreviewModeRequest):
                     try:
                         await asyncio.to_thread(runtime.pipeline.voice_client.health_check_once, 0.8)
                         is_healthy = True
-                    except Exception:
+                    except (VoiceClientError, RuntimeError, OSError):
                         is_healthy = False
                 if not is_healthy:
                     await asyncio.to_thread(runtime.pipeline._start_voice_server)
@@ -162,7 +164,7 @@ async def toggle_preview_mode(project_id: str, request: PreviewModeRequest):
                     timeout=120,
                 )
                 warmup_info = res.model_dump()
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - spawns the voice server; surface is open
                 logger.warning("Preview mode warmup error: %s", exc)
                 warmup_info = {"error": str(exc)}
 
@@ -180,25 +182,24 @@ async def toggle_preview_mode(project_id: str, request: PreviewModeRequest):
             "voice_id": voice_id,
             "warmup": warmup_info,
         }
-    else:
-        prev_state = _active_preview_modes.pop(project_id, {})
-        was_paused_by_us = prev_state.get("paused_by_us") or job.get("paused_by_preview_mode", False)
-        resumed = False
+    prev_state = _active_preview_modes.pop(project_id, {})
+    was_paused_by_us = prev_state.get("paused_by_us") or job.get("paused_by_preview_mode", False)
+    resumed = False
 
-        if request.resume_pipeline and was_paused_by_us and runtime._pipeline_starter:
-            runtime.job_queue.update_job(project_id, {"paused_by_preview_mode": False})
-            try:
-                await runtime.start_pipeline(project_id)
-                resumed = True
-            except Exception as exc:
-                logger.warning("Could not auto-resume pipeline after preview mode: %s", exc)
+    if request.resume_pipeline and was_paused_by_us and runtime._pipeline_starter:
+        runtime.job_queue.update_job(project_id, {"paused_by_preview_mode": False})
+        try:
+            await runtime.start_pipeline(project_id)
+            resumed = True
+        except Exception as exc:  # noqa: BLE001 - starts the whole pipeline; surface is open
+            logger.warning("Could not auto-resume pipeline after preview mode: %s", exc)
 
-        return {
-            "status": "success",
-            "preview_mode": False,
-            "can_resume": bool(was_paused_by_us),
-            "pipeline_resumed": resumed,
-        }
+    return {
+        "status": "success",
+        "preview_mode": False,
+        "can_resume": bool(was_paused_by_us),
+        "pipeline_resumed": resumed,
+    }
 
 
 @router.get("/api/projects/{project_id}/pronunciations")
@@ -274,8 +275,8 @@ async def update_pronunciation(project_id: str, request: PronunciationRequest):
                     if c.get("term", "").casefold() == term.casefold():
                         sample_ctx = (c.get("contexts") or [None])[0]
                         break
-            except Exception:
-                pass
+            except (OSError, ValueError, TypeError) as exc:
+                logger.debug("Could not read sample context for %r: %s", term, exc)
         asyncio.create_task(
             generate_preview_audio(
                 project_id=project_id,
@@ -394,14 +395,14 @@ async def export_pronunciations(project_id: str, scope: str = "all"):
             t = (c.get("term") or "").strip()
             if t:
                 canonical_map[t.casefold()] = t
-    except Exception as exc:
+    except (OSError, ValueError, KeyError, TypeError) as exc:
         logger.debug("Could not build inventory for canonical casing in export: %s", exc)
 
     project_dict: dict[str, str] = {}
     if dict_path.is_file():
         try:
             project_dict = json.loads(dict_path.read_text(encoding="utf-8"))
-        except Exception:
+        except (OSError, ValueError, UnicodeDecodeError):
             project_dict = {}
 
     defaults_dict: dict[str, str] = {}
@@ -413,7 +414,7 @@ async def export_pronunciations(project_id: str, scope: str = "all"):
                     defaults_dict[k] = v["default"]
                 elif isinstance(v, str) and v.strip():
                     defaults_dict[k] = v.strip()
-        except Exception:
+        except (OSError, ValueError, UnicodeDecodeError):
             defaults_dict = {}
 
     # Index by casefold to guarantee case-insensitive reconciliation and canonical display casing
@@ -437,19 +438,19 @@ async def export_pronunciations(project_id: str, scope: str = "all"):
 
     scope_lower = (scope or "all").lower()
     if scope_lower in ("verified", "custom"):
-        export_entries = {term: spoken for term, spoken in project_folded.values()}
+        export_entries = dict(project_folded.values())
     elif scope_lower == "defaults":
-        export_entries = {term: spoken for term, spoken in defaults_folded.values()}
+        export_entries = dict(defaults_folded.values())
     else:  # 'all'
         # Base on defaults, strictly overwritten by project-specific overrides case-insensitively
         merged_folded = dict(defaults_folded)
         merged_folded.update(project_folded)
-        export_entries = {term: spoken for term, spoken in merged_folded.values()}
+        export_entries = dict(merged_folded.values())
 
     payload = {
         "format": "crazy-audiobook-lexicon-v1",
         "project_id": project_id,
-        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "exported_at": datetime.now(UTC).isoformat(),
         "scope": scope_lower,
         "count": len(export_entries),
         "lexicon": export_entries,
@@ -529,7 +530,7 @@ async def generate_preview_audio(
                 try:
                     await asyncio.to_thread(runtime.pipeline.voice_client.health_check_once, 0.8)
                     is_healthy = True
-                except Exception:
+                except (VoiceClientError, RuntimeError, OSError):
                     is_healthy = False
 
             if not is_healthy:
@@ -553,7 +554,7 @@ async def generate_preview_audio(
             if seg_path.is_file() and seg_path.stat().st_size > 44:
                 shutil.copyfile(seg_path, audio_path)
                 has_tts = True
-        except Exception as exc:
+        except (VoiceClientError, RuntimeError, OSError, shutil.Error) as exc:
             logger.warning("TTS native preview generation failed: %s", exc)
             tts_error = str(exc)
             has_tts = False

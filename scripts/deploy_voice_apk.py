@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -86,16 +87,30 @@ def deploy_remote(apk_size: int) -> None:
         return
 
     ssh = paramiko.SSHClient()
-    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    # Verify the host key instead of trusting whatever answers. AutoAddPolicy
+    # would accept a substituted host silently, and this call ships an APK with
+    # the operator's credentials attached.
+    try:
+        ssh.load_system_host_keys()
+    except (OSError, paramiko.SSHException) as exc:
+        print(f"WARNING: Could not load known_hosts: {exc}")
+    ssh.set_missing_host_key_policy(paramiko.RejectPolicy())
     try:
         ssh.connect(REMOTE_HOST, REMOTE_PORT, REMOTE_USER, REMOTE_PASS, timeout=10)
-    except Exception as exc:
+    except paramiko.SSHException as exc:
+        print(f"WARNING: Could not connect to {REMOTE_HOST}: {exc}. Remote upload skipped.")
+        print("         If this is the host key check, enrol the host once with:")
+        print(f"             ssh-keyscan -p {REMOTE_PORT} {REMOTE_HOST} >> ~/.ssh/known_hosts")
+        return
+    except Exception as exc:  # noqa: BLE001 - deployment is best-effort
         print(f"WARNING: Could not connect to {REMOTE_HOST}: {exc}. Remote upload skipped.")
         return
 
     try:
         sftp = ssh.open_sftp()
-        tmp_remote = "/tmp/Voice-CrazyAudiobook-debug.apk"
+        # Staging path on the REMOTE host, written over an authenticated SFTP
+        # session; not a local temporary file.
+        tmp_remote = "/tmp/Voice-CrazyAudiobook-debug.apk"  # noqa: S108
         t0 = time.time()
         print(f"Uploading {apk_size:,} bytes to staging ({tmp_remote})...")
         sftp.put(str(APK_BUILD_PATH), tmp_remote)
@@ -137,18 +152,21 @@ def verify_endpoints(expected_size: int) -> None:
     ]
 
     for label, url in endpoints:
+        if urllib.parse.urlparse(url).scheme not in {"http", "https"}:
+            print(f"  [!] {label} ({url}): refused, only http(s) endpoints are probed")
+            continue
         try:
-            req = urllib.request.Request(url, method="HEAD")
-            with urllib.request.urlopen(req, timeout=3) as resp:
+            req = urllib.request.Request(url, method="HEAD")  # noqa: S310 - scheme checked above
+            with urllib.request.urlopen(req, timeout=3) as resp:  # noqa: S310 - scheme checked above
                 length = int(resp.headers.get("Content-Length", 0))
                 status = "OK" if length == expected_size else f"MISMATCH (got {length:,})"
                 print(f"  [+] {label} ({url}): HTTP {resp.status} - {status}")
         except Exception as exc:
             # Try GET if HEAD returned 405
             try:
-                req_get = urllib.request.Request(url, method="GET")
+                req_get = urllib.request.Request(url, method="GET")  # noqa: S310 - scheme checked above
                 req_get.add_header("Range", "bytes=0-0")
-                with urllib.request.urlopen(req_get, timeout=3) as resp:
+                with urllib.request.urlopen(req_get, timeout=3) as resp:  # noqa: S310 - scheme checked above
                     cr = resp.headers.get("Content-Range", "")
                     total = int(cr.split("/")[-1]) if "/" in cr else int(resp.headers.get("Content-Length", 0))
                     status = "OK" if total == expected_size else f"MISMATCH (got {total:,})"

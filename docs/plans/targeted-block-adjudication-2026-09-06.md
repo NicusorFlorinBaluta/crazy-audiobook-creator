@@ -1,6 +1,23 @@
 # Targeted block adjudication — plan, 2026-09-06
 
-**Status:** Implemented (behind external_validation.tiered_attribution.block_adjudication flag, defaulted off)
+**Status:** Implemented, flag OFF, rollout gate NOT cleared.
+
+> **Correction, 2026-09-10.** This line said "defaulted off" and the config
+> sample below shows `enabled: false`, but `brain/config.yaml` shipped
+> `enabled: true` in the same commit (`8dcf3f6`), carrying the `# opt-in until
+> measured on a second book` comment from the false version. `git log -L`
+> confirms it was never false. Steps 3 and 4 of Rollout were therefore skipped
+> and the feature ran in production for four days with Risk 1 (blast radius: 66
+> blocks carry 6+ suspicious turns) unmitigated. Set back to `false`.
+>
+> **Outstanding before this may be enabled:**
+>
+> 1. Risk 2's mitigation is unbuilt — there is still no independent post-hoc
+>    consistency check outside the adjudicator. Guardrail 4 (reciprocal turns)
+>    is pre-existing and checks adjacent pairs, not block self-consistency.
+> 2. Rollout steps 3-4 (dry-run both paths over one book, diff every
+>    disagreement) have not been run.
+> 3. The acceptance criteria below are unmeasured.
 
 Addresses the gap left by
 [../decisions/2026-09-06-speech-tags-outrank-adjudication.md](../decisions/2026-09-06-speech-tags-outrank-adjudication.md):

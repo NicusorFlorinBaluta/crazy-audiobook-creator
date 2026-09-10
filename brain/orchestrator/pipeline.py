@@ -9,6 +9,7 @@ State is persisted to SQLite so the pipeline can resume after interruption.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -1949,6 +1950,16 @@ class Pipeline:
         # completed script work. Generation/export call this gate with enforce=True.
         self._assert_attribution_audit(project_dir, enforce=False)
 
+        # Reconcile the stored counts with the script that was actually written.
+        # `sync_dialogue_counts` also runs inside the adjudicator, but only when
+        # that pass resolved something -- so a book it had nothing to fix kept
+        # pass-1's estimate forever. Measured on Isles of the Emberdark: 24 of
+        # 68 characters were stored at 0 while speaking 10-33 lines each,
+        # including `mother_frond` (33). The count is not cosmetic --
+        # `cast_identity.choose_primary` decides which side of a merge survives
+        # by it, and the whole-cast roster prompt shows it to the model.
+        self.script_generator.sync_dialogue_counts(chapter_scripts, registry)
+
         book_script = BookScript(
             metadata=book.metadata,
             character_registry=registry,
@@ -3474,17 +3485,15 @@ class Pipeline:
         except Exception as exc:
             logger.warning("External audio QA could not load voice references: %s", exc)
         def _risk_priority(q: Any) -> tuple[int, float, float]:
-            is_crit = (
-                not getattr(q, "passed_hard_gates", True)
-                or (getattr(q, "status", None) and getattr(q.status, "value", "") == "failed")
-                or getattr(q, "quality_score", 1.0) < 0.75
-                or getattr(q, "effective_text_error", 0.0) > 0.12
-                or (getattr(q, "speaker_similarity", None) is not None and q.speaker_similarity < 0.60)
-                or bool(getattr(q, "clipping_detected", False))
-                or bool(getattr(q, "has_long_silence", False))
-            )
+            """Worst first, so quota is spent on the riskiest segments.
+
+            The critical test is the validator's own, not a copy: a local copy
+            drifted from `external_validation.audio_triage` and compared the
+            status against "failed", which `ValidationStatus.FAIL` ("fail")
+            never equals.
+            """
             return (
-                0 if is_crit else 1,
+                0 if self.external_validator.is_critical_risk_segment(q) else 1,
                 float(getattr(q, "quality_score", 1.0)),
                 -float(getattr(q, "effective_text_error", 0.0)),
             )

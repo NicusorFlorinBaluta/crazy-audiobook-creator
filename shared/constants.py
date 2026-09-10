@@ -236,3 +236,36 @@ def apply_torch_alloc_conf(env: dict[str, str]) -> dict[str, str]:
     for name in TORCH_ALLOC_ENV_VARS:
         env.setdefault(name, TORCH_ALLOC_CONF)
     return env
+
+
+# ---------------------------------------------------------------------------
+# Non-spoken separator markers
+# ---------------------------------------------------------------------------
+
+#: Length of the silence emitted in place of a scene-break marker. A separator
+#: is a beat between scenes, so it needs to be audible as a pause rather than
+#: merely not-a-word; 100 ms is below the threshold where a listener hears a
+#: break at all.
+PAUSE_MARKER_SILENCE_SECONDS = 0.9
+
+#: Characters a line may consist of and still be a separator rather than
+#: speech. Deliberately narrow: "no alphanumerics" would also swallow a line of
+#: dialogue that is only "?", "!" or "...", which a narrator does speak.
+_SEPARATOR_CHARS = set("-\u2010\u2011\u2012\u2013\u2014\u2015_=~*#\u2022\u00b7\u2219\u25cf\u2217 \t\r\n")
+
+
+def is_non_spoken_separator(text: str | None) -> bool:
+    """Say whether a line is a scene-break marker rather than something to read.
+
+    True for ``---``, ``***``, ``* * *``, an em-dash rule and similar; false for
+    an empty line, and false for punctuation that is genuinely spoken content
+    such as ``"?"`` or ``"..."``.
+    """
+    if not text:
+        return False
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if any(char.isalnum() for char in stripped):
+        return False
+    return all(char in _SEPARATOR_CHARS for char in stripped)

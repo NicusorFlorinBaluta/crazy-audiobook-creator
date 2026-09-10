@@ -144,8 +144,8 @@ def exit_preview_mode(project_id: str) -> bool:
     if _preview_mode_exiter is not None:
         try:
             return bool(_preview_mode_exiter(project_id))
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 - the caller only needs "did not exit"
+            logger.warning("Could not exit preview mode for %s: %s", project_id, exc)
     return False
 
 

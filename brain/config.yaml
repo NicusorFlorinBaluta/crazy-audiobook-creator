@@ -202,7 +202,11 @@ external_validation:
     ollama_temperature: 0.1
     dry_run: false
     block_adjudication:
-      enabled: true            # opt-in until measured on a second book
+      # Off until the rollout gate in
+      # docs/plans/targeted-block-adjudication-2026-09-06.md is cleared:
+      # dry-run both paths over one book, diff every disagreement, and
+      # confirm tagged-line contradictions stay at 0 of 490.
+      enabled: false
       max_suspicious_per_call: 8
       only_unconfirmed_runs: true   # the 124, not all 176 blocks
 
@@ -235,7 +239,16 @@ external_validation:
     #   text is put in front of you.
     # true: hold every merge for approval instead. Safer, but the evidence is
     #   verbatim source text, so approving means reading spoilers.
-    require_approval: false
+    #
+    # Set true on 2026-09-10. The deterministic veto layer cannot separate two
+    # distinct entities that share a generic appellative and are never conjoined
+    # -- `patji` ("The God") and `insect_god` ("God") in Isles of the Emberdark,
+    # the same shape as the documented `zaknafein` / `drizzt` miss. For those the
+    # only remaining gate is the grounding stage and min_confidence, and the
+    # Gemini stages have never been exercised against the live API. Holding the
+    # merge costs one decision per proposal; getting it wrong gives two
+    # characters one voice for a whole book.
+    require_approval: true
   circuit_breaker:
     failure_threshold: 3
     cooldown_seconds: 900

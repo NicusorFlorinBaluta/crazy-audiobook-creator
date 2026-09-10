@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
-from shared.constants import ValidationStatus
+from shared.constants import PAUSE_MARKER_SILENCE_SECONDS, ValidationStatus
 from shared.models import ScriptLine
 from voice.tts_server.embedding_store import EmbeddingStore
 from voice.validator.validation_loop import ValidationLoop
@@ -82,6 +82,15 @@ class FakeWhisper:
 
     def transcribe(self, audio_file: str) -> str:
         return "hello"
+
+    def transcribe_strict(self, audio_file: str, language: str | None = None) -> str:
+        """Mirror the real contract: subclasses override `transcribe` only.
+
+        `ValidationLoop` calls the strict form so that an engine failure raises
+        instead of being scored as an empty transcript; the fakes never fail, so
+        delegating keeps every existing override working.
+        """
+        return self.transcribe(audio_file)
 
     def calculate_wer(self, reference: str, hypothesis: str) -> float:
         return 0.0 if reference.lower() == hypothesis.lower() else 1.0
@@ -993,16 +1002,110 @@ class ValidationLoopTests(unittest.TestCase):
             # Neural TTS must not have been called
             self.assertEqual(len(engine.calls), 0)
 
-            # Segment audio must be valid 100ms silence
+            # Segment audio must be silence long enough to hear as a scene break
             segment_path = root / "book" / "segments" / "ch01_0001.wav"
             self.assertTrue(segment_path.exists())
             info = sf.info(str(segment_path))
-            self.assertAlmostEqual(info.duration, 0.1, places=2)
+            self.assertAlmostEqual(info.duration, PAUSE_MARKER_SILENCE_SECONDS, places=2)
+            self.assertGreaterEqual(
+                info.duration,
+                0.5,
+                "a scene break shorter than half a second is not audible as a pause",
+            )
 
             # Validation must have passed cleanly
             self.assertEqual(response.status, "success")
             self.assertEqual(response.generated, 1)
             self.assertEqual(response.failed_validation, 0)
+
+    def test_punctuation_only_dialogue_is_still_spoken(self) -> None:
+        """A line of "?" is speech, not a separator, and must reach the engine.
+
+        The separator test is `no alphanumerics` plus `only separator glyphs`.
+        The first half alone would silently replace a spoken "?" or "..." with
+        silence, dropping authored dialogue from the book.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            loop, engine = self.make_loop(root)
+
+            loop.process_chapter(
+                project_id="book",
+                chapter_number=1,
+                lines=[
+                    ScriptLine(line_id="ch01_0001", speaker="narrator", text="?"),
+                    ScriptLine(line_id="ch01_0002", speaker="narrator", text="..."),
+                    ScriptLine(line_id="ch01_0003", speaker="narrator", text="***"),
+                ],
+                workspace=root,
+                validate=False,
+            )
+
+            synthesised = {call.get("text") if isinstance(call, dict) else call for call in engine.calls}
+            self.assertEqual(len(engine.calls), 2, f"expected only '?' and '...' to be synthesised, got {engine.calls}")
+            self.assertNotIn("***", str(synthesised))
+
+
+class SttUnavailableTests(unittest.TestCase):
+    """An STT outage must not be scored as a 100% transcription mismatch.
+
+    On 2026-09-07 Whisper was handed the BCP-47 tag "en-US", which it rejects.
+    `transcribe` caught the ValueError and returned "", WER scored that empty
+    string as 1.0, and 275 of 277 pristine segments were blocked with
+    "Deterministic audio hard gate failed; external models cannot override
+    it". Normalising the language code fixed that trigger; this pins the
+    failure mode itself, which any future engine fault would reproduce.
+    """
+
+    def test_engine_failure_raises_instead_of_returning_an_empty_transcript(self) -> None:
+        from voice.validator.whisper_validator import TranscriptionUnavailableError, WhisperValidator
+
+        validator = WhisperValidator.__new__(WhisperValidator)
+        validator._is_loaded = True
+        validator._backend = "faster_whisper"
+        validator.vad_filter = True
+
+        class _Boom:
+            def transcribe(self, *_args, **_kwargs):
+                raise ValueError("Unsupported language: en-us")
+
+        validator._model = _Boom()
+
+        # The lenient form stays lenient for benchmarks and ad-hoc scripts.
+        self.assertEqual(validator.transcribe("x.wav", language="en-US"), "")
+        # The scoring form refuses to hand back a transcript it never got.
+        with self.assertRaises(TranscriptionUnavailableError):
+            validator.transcribe_strict("x.wav", language="en-US")
+
+    def test_stt_outage_is_reported_as_not_run_not_as_a_mismatch(self) -> None:
+        from voice.validator.whisper_validator import TranscriptionUnavailableError
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            loop, _engine = ValidationLoopTests().make_loop(root)
+
+            class _BrokenWhisper(FakeWhisper):
+                def transcribe_strict(self, audio_file, language=None):
+                    raise TranscriptionUnavailableError("engine fell over")
+
+            loop.whisper = _BrokenWhisper()
+            response = loop.process_chapter(
+                project_id="book",
+                chapter_number=1,
+                lines=[ScriptLine(line_id="ch01_0001", speaker="narrator", text="Hello there.")],
+                workspace=root,
+                validate=True,
+            )
+
+            result = response.quality_results[0]
+            self.assertEqual(result.acceptance_reason, "stt_unavailable")
+            self.assertNotEqual(result.acceptance_reason, "transcription_mismatch")
+            self.assertEqual(result.wer, 0.0, "an outage is not a 100% word error rate")
+            self.assertTrue(
+                result.passed_hard_gates,
+                "the text gate never ran, so it must not report a deterministic failure",
+            )
+            self.assertTrue(any("Speech-to-text was unavailable" in w for w in result.warnings))
 
 
 if __name__ == "__main__":

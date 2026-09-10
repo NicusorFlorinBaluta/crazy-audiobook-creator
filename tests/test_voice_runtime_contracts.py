@@ -536,7 +536,14 @@ class LineSeedDerivationTests(unittest.TestCase):
 class PipelineVoiceBootstrapProgressTests(unittest.TestCase):
     def test_run_voice_bootstrap_streams_progress_to_job_queue(self) -> None:
         from brain.orchestrator.pipeline import Pipeline
-        from shared.models import BootstrapVoicesResponse, Character, CharacterRegistry, Gender, ScriptChapter, ScriptLine
+        from shared.models import (
+            BootstrapVoicesResponse,
+            Character,
+            CharacterRegistry,
+            Gender,
+            ScriptChapter,
+            ScriptLine,
+        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             pdir = Path(tmpdir) / "test_proj"

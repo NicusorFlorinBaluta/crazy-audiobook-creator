@@ -1,7 +1,9 @@
 # Pronunciation Lexicon Ergonomics & Whisper STT Language Normalization
 
 **Date:** 2026-09-07  
-**Status:** Current  
+**Status:** Current (the STT diagnosis in 3.B was correct but the fix was
+partial; the failure *mode* was closed on 2026-09-10, see
+[the review record](2026-09-10-review-of-the-september-feature-run.md))  
 
 ---
 
@@ -63,6 +65,22 @@ During full-book testing and quality review of *The Finest Edge of Twilight*, tw
   - Normalizes `auto`, `none`, empty strings to `None`.
 - Added resilient auto-detect fallback: if Whisper raises an exception containing `"language"`, it immediately retries with `language=None` rather than aborting and returning an empty transcript.
 - Updated `pipeline.py` and `validation_loop.py` to normalize language before dispatch.
+
+> **Follow-up, 2026-09-10.** The three items above fix the *trigger*. The
+> *mechanism* named in 3.B — "the top-level exception handler caught this and
+> returned `''`... the Word Error Rate was evaluated as 1.0" — survived them:
+> `transcribe` still returned `""` for any failure, and nothing downstream could
+> distinguish that from audio containing no speech. Any later fault (OOM, a
+> corrupt file, a model-unload race) would reproduce the same 275-item flood
+> under the same misleading reason.
+>
+> Closed by `TranscriptionUnavailableError` and `transcribe_strict()`.
+> `transcribe()` keeps the lenient contract for benchmarks and ad-hoc scripts;
+> `ValidationLoop` uses the strict form, and on an outage keeps the acoustic
+> gates (which never needed STT), suppresses the text verdict, records
+> `acceptance_reason="stt_unavailable"` instead of a deterministic hard-gate
+> failure, and zeroes the WER rather than storing a measurement of audio nobody
+> examined.
 
 ---
 

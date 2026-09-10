@@ -18,12 +18,14 @@ import numpy as np
 import soundfile as sf
 
 from shared.constants import (
+    PAUSE_MARKER_SILENCE_SECONDS,
     QUALITY_SCORE_PASS_THRESHOLD,
     QUALITY_WEIGHT_ARTIFACT,
     QUALITY_WEIGHT_DURATION,
     QUALITY_WEIGHT_WER,
     VALIDATION_SCHEMA_VERSION,
     ValidationStatus,
+    is_non_spoken_separator,
 )
 from shared.models import (
     ChapterQualityReport,
@@ -35,7 +37,7 @@ from voice.tts_server.qwen3_engine import Qwen3TTSEngine, mood_tier_for
 from voice.tts_server.voice_library import VoiceLibraryManager
 from voice.validator.audio_analyzer import AudioAnalyzer
 from voice.validator.prosody_scorer import ProsodyScorer
-from voice.validator.whisper_validator import WhisperValidator
+from voice.validator.whisper_validator import TranscriptionUnavailableError, WhisperValidator
 
 logger = logging.getLogger(__name__)
 
@@ -203,7 +205,7 @@ class ValidationLoop:
                     generation_context=context,
                 )
 
-            is_non_spoken_pause = not any(c.isalnum() for c in (synthesis_text or ""))
+            is_non_spoken_pause = is_non_spoken_separator(synthesis_text)
             if needs_regeneration:
                 synthesis_cache_misses += 1
                 synthesis_elapsed = 0.0
@@ -214,10 +216,14 @@ class ValidationLoop:
                     pass
                 if is_non_spoken_pause:
                     silence_sr = getattr(self.engine, "sample_rate", 24000)
-                    silence_samples = int(silence_sr * 0.1)  # 100ms clean silence
+                    silence_samples = int(silence_sr * PAUSE_MARKER_SILENCE_SECONDS)
                     output_path.parent.mkdir(parents=True, exist_ok=True)
                     sf.write(str(output_path), np.zeros(silence_samples, dtype=np.float32), silence_sr)
-                    logger.info("Emitted clean 100ms silence for non-spoken pause marker %s", line.line_id)
+                    logger.info(
+                        "Emitted %.2fs of clean silence for scene-break marker %s",
+                        PAUSE_MARKER_SILENCE_SECONDS,
+                        line.line_id,
+                    )
                 else:
                     for generation_attempt in range(1, retry_limit + 1):
                         self._raise_if_cancelled(cancel_check)
@@ -324,7 +330,7 @@ class ValidationLoop:
             )
             try:
                 segment_metrics[line.line_id].update(self.engine.get_vram_info())
-            except Exception as exc:
+            except (AttributeError, OSError, RuntimeError, ValueError) as exc:
                 logger.debug("Could not read VRAM info; these segment metrics will omit it: %s", exc)
             total_duration += info.duration
             generated_ids.append(line.line_id)
@@ -421,7 +427,7 @@ class ValidationLoop:
             uncached_lines.append(line)
 
         for line in uncached_lines:
-            if not any(c.isalnum() for c in (line.spoken_text or line.text or "")):
+            if is_non_spoken_separator(line.spoken_text or line.text):
                 speaker_similarity[line.line_id] = 1.0
                 continue
             voice_ref, _, _ = reference_context[line.line_id]
@@ -432,7 +438,7 @@ class ValidationLoop:
                     voice_ref,
                 )
                 record_timing("speaker_similarity", operation_started)
-            except Exception as exc:
+            except (OSError, RuntimeError, ValueError, TypeError) as exc:
                 logger.warning(
                     "Speaker similarity unavailable for %s: %s",
                     line.line_id,
@@ -593,7 +599,7 @@ class ValidationLoop:
                                 "retry_speaker_similarity",
                                 operation_started,
                             )
-                        except Exception:
+                        except (OSError, RuntimeError, ValueError, TypeError):
                             attempt_similarity[line.line_id] = None
                         retried += 1
                     except Exception as exc:
@@ -930,13 +936,13 @@ class ValidationLoop:
                 effective_wer_threshold,
             )
 
-        if not any(c.isalnum() for c in (expected_text or "")):
+        if is_non_spoken_separator(expected_text):
             logger.info("[Validator] %s is a non-spoken pause marker; auto-passing validation.", line_id)
-            duration = 0.1
+            duration = PAUSE_MARKER_SILENCE_SECONDS
             try:
                 duration = float(sf.info(audio_file).duration)
-            except Exception:
-                pass
+            except (OSError, RuntimeError) as exc:
+                logger.debug("Could not read duration of pause marker %s: %s", audio_file, exc)
             return QualityResult(
                 line_id=line_id,
                 status=ValidationStatus.PASS,
@@ -971,9 +977,28 @@ class ValidationLoop:
             )
 
         transcription_started = time.perf_counter()
-        transcribed = (
-            self.whisper.transcribe(audio_file, language=language) if language else self.whisper.transcribe(audio_file)
-        )
+        # An engine failure must never be scored as a transcript. Returning ""
+        # here and running it through WER yields 1.0 for audio nobody examined,
+        # which is how 275 pristine segments were blocked on 2026-09-07 with
+        # "Deterministic audio hard gate failed". `stt_unavailable` keeps the
+        # acoustic gates (which do not need STT) and reports the text gate as
+        # not run, instead of as failed.
+        stt_unavailable = False
+        try:
+            transcribed = (
+                self.whisper.transcribe_strict(audio_file, language=language)
+                if language
+                else self.whisper.transcribe_strict(audio_file)
+            )
+        except TranscriptionUnavailableError as exc:
+            stt_unavailable = True
+            transcribed = ""
+            logger.exception(
+                "[Validator] %s could not be transcribed (%s); acoustic checks still apply, "
+                "text verification is recorded as not run.",
+                line_id,
+                exc,
+            )
         if timing_accumulator is not None:
             timing_accumulator["whisper_transcription"] = (
                 timing_accumulator.get("whisper_transcription", 0.0) + time.perf_counter() - transcription_started
@@ -1074,7 +1099,21 @@ class ValidationLoop:
                 and (speaker_similarity is None or speaker_similarity < self.speaker_similarity_threshold)
             )
         )
-        if length_sensitive_wer_failure or hard_audio_failure:
+        if stt_unavailable:
+            # The text gate was not evaluated, so it must not report a verdict
+            # *or* a measurement. A stored WER of 1.0 for audio nobody listened
+            # to is a false reading that every downstream threshold, report and
+            # average would treat as real.
+            length_sensitive_wer_failure = False
+            semantic_text_mismatch = False
+            reported_wer = 0.0
+            effective_text_error = 0.0
+            text_similarity = 0.0
+
+        if stt_unavailable:
+            status = ValidationStatus.FAIL
+            acceptance_reason = "stt_unavailable"
+        elif length_sensitive_wer_failure or hard_audio_failure:
             status = ValidationStatus.FAIL
             acceptance_reason = (
                 "semantic_transcription_mismatch"
@@ -1145,6 +1184,10 @@ class ValidationLoop:
             warnings=[],
             passed_hard_gates=not hard_audio_failure and not length_sensitive_wer_failure,
         )
+        if stt_unavailable:
+            res.warnings.append(
+                "Speech-to-text was unavailable, so this segment's wording was never verified."
+            )
 
         # Phase 5.1/5.2 Report-only drift and join checks
         if reference_pitch_median > 0 and analysis.get("pitch_median", 0.0) > 0:
@@ -1458,7 +1501,7 @@ class ValidationLoop:
         try:
             info = sf.info(str(path))
             return info.frames > 0 and info.samplerate > 0 and info.duration > 0
-        except Exception:
+        except (OSError, RuntimeError, ValueError):
             return False
 
     def _checkpoint_accepted_result(

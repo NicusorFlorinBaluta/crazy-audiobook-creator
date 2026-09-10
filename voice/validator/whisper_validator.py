@@ -14,6 +14,15 @@ from difflib import SequenceMatcher
 logger = logging.getLogger(__name__)
 
 
+class TranscriptionUnavailableError(RuntimeError):
+    """Raised when the STT engine could not produce a transcript at all.
+
+    Distinct from an empty transcript, which is a legitimate result meaning the
+    audio contained no recognisable speech. Callers that score a transcript
+    must treat this as "not validated" rather than as a total mismatch.
+    """
+
+
 class WhisperValidator:
     """Validate TTS audio using Whisper speech-to-text."""
 
@@ -122,14 +131,35 @@ class WhisperValidator:
         return code or None
 
     def transcribe(self, audio_file: str, language: str | None = None) -> str:
-        """Transcribe an audio file to text.
+        """Transcribe an audio file, returning "" if the engine could not run.
+
+        Kept for callers that only want a best-effort transcript (benchmarks,
+        voice design, ad-hoc scripts). Anything that *scores* the result must
+        use :meth:`transcribe_strict` instead: an empty string here is
+        indistinguishable from silence, and scoring it yields WER 1.0 for audio
+        that was never actually examined. That is what produced 275 spurious
+        hard-gate failures on 2026-09-07.
+        """
+        try:
+            return self.transcribe_strict(audio_file, language=language)
+        except TranscriptionUnavailableError as exc:
+            logger.warning("[WhisperValidator] STT transcription failed for '%s': %s", audio_file, exc)
+            return ""
+
+    def transcribe_strict(self, audio_file: str, language: str | None = None) -> str:
+        """Transcribe an audio file to text, raising if the engine cannot run.
 
         Args:
             audio_file: Path to the .wav file.
             language: Optional language code (e.g. 'en', 'es'). BCP-47 tags like 'en-US' are normalized.
 
         Returns:
-            Transcribed text.
+            Transcribed text. An empty string means the engine ran and heard
+            nothing, which is a real result; engine failure raises instead.
+
+        Raises:
+            TranscriptionUnavailableError: the STT engine could not produce a
+                transcript at all.
         """
         if not self._is_loaded:
             self.load()
@@ -214,8 +244,10 @@ class WhisperValidator:
                     return _do_transcribe(None)
                 except Exception as retry_err:
                     logger.warning("[WhisperValidator] Fallback auto-detection transcription failed: %s", retry_err)
-            logger.warning("[WhisperValidator] STT transcription failed for '%s': %s", audio_file, e)
-            return ""
+                    raise TranscriptionUnavailableError(
+                        f"STT failed for {audio_file!r} with language {clean_lang!r} and on auto-detect retry: {retry_err}"
+                    ) from retry_err
+            raise TranscriptionUnavailableError(f"STT failed for {audio_file!r}: {e}") from e
 
     def calculate_wer(
         self,

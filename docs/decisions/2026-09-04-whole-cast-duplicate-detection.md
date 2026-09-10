@@ -130,10 +130,37 @@ To resolve both without risking false-positive vetoes on legitimate identity rev
 - **Direct Syntactic Conjunctions:** `A and B`, `A, B, and C`.
 - **Interactive Narrative Beats:** `A (said|spoke|replied|asked|shouted|whispered|nodded|turned|looked) to B`,
   and adversative clauses `A ..., but B ...`.
-- **Bounded Sentence Co-occurrence:** Bounded distance matching (`{1,300}` chars
+- ~~**Bounded Sentence Co-occurrence:** Bounded distance matching (`{1,300}` chars
   without sentence boundaries) requiring $\ge 3$ independent sentence co-occurrences
   between non-overlapping distinct terms. Identity reveals and appositive aliases
-  appear together at most 0–1 time across a book (in the reveal/apposition sentence).
+  appear together at most 0–1 time across a book (in the reveal/apposition sentence).~~
+
+  **Reversed 2026-09-10.** The claim in the last sentence is contradicted by the
+  measurement in *"The conjunction veto, and why proximity was rejected"* above,
+  in this same record: appositive alias pairs co-occur **10** and **15** times
+  within 200 characters, not 0–1. A threshold of 3 within a *wider* 300-character
+  window therefore fires on aliases far more readily than on distinct people —
+  which is exactly why proximity was rejected as a discriminator in the first
+  place. The rule was measured against fixtures where both sides shared every
+  term, so `distinct_participant_veto` returned early and the rule never
+  executed; nothing in the test suite ever exercised it.
+
+  Where it *did* execute is the case this feature exists for. A duplicate
+  recorded by proper name and again by appellative shares no token, so only the
+  roster stage can propose it, and the two sides have disjoint terms:
+
+  ```
+  cast:  avelyere ("Avelyere")  +  veteran_wizard ("The Veteran Wizard")
+  text:  four sentences naming both in apposition
+  conjunction veto (retained)  -> None          (correct: allow the merge)
+  co-occurrence veto (removed) -> refused, "3 separate sentences"
+  ```
+
+  Removed. The two retained rules — syntactic conjunction and interaction beats
+  — still catch every Catti-brie / Breezy form the update was written for, since
+  all three are interaction beats (*"said to"*, *"looked to"*, *"…, but …"*).
+  Regression tests: `test_repeated_apposition_does_not_veto_a_name_and_appellative`
+  and `test_interaction_veto_still_separates_family_members`.
 - **Familial Honorifics:** Extended `_UNVETOABLE` to include familial titles
   (`uncle`, `aunt`, `grandda`, `grandma`, `grandpa`, `cousin`, etc.) so appositions
   remain safe from accidental vetoes.

@@ -19,6 +19,7 @@ import unittest
 from pathlib import Path
 
 from brain.director.cast_identity import (
+    _vetoable_terms,
     alias_veto,
     apply_alias,
     apply_merge,
@@ -678,6 +679,94 @@ class CheckpointLifetimeTests(unittest.TestCase):
         c2 = {"name": "Uncle Jax", "aliases": ["Uncle Jax", "Jarlaxle"]}
         reason = distinct_participant_veto(APPOSITION, c1, "jarlaxle", c2, "uncle_jax")
         self.assertIsNone(reason)
+
+    def test_repeated_apposition_does_not_veto_a_name_and_appellative(self) -> None:
+        """The duplicate shape this whole feature exists to merge.
+
+        `avelyere` and "the veteran wizard" share no token, so the roster stage
+        is the only thing that can ever propose them -- and the source names
+        them together in every sentence that introduces the appellative. A
+        proximity or co-occurrence rule therefore refuses hardest exactly the
+        merges the feature was built to find, which is why the 2026-09-04
+        record measured proximity and rejected it: within 200 characters the
+        distinct twins co-occur 6 times while the alias pairs co-occur 10 and
+        15. A co-occurrence veto shipped anyway on 2026-09-06 and broke this.
+        """
+        cast = {
+            "avelyere": {"name": "Avelyere", "aliases": [], "gender": "female", "dialogue_count": 44},
+            "veteran_wizard": {
+                "name": "The Veteran Wizard",
+                "aliases": [],
+                "gender": "female",
+                "dialogue_count": 6,
+            },
+        }
+        # Four sentences, each naming both in apposition -- the shape prose uses
+        # to introduce an appellative beside the name it stands in for.
+        book = chr(10).join([
+            "Avelyere lifted her hand, and the veteran wizard's spell took shape.",
+            "Catti-brie had studied under Avelyere once, the veteran wizard's methods exacting.",
+            'It was Avelyere who answered, the veteran wizard speaking softly.',
+            'Avelyere frowned; the veteran wizard was rarely wrong.',
+        ])
+        self.assertEqual(conjunction_count(book, ["Avelyere"], ["veteran wizard"]), 0)
+        self.assertIsNone(merge_veto("avelyere", "veteran_wizard", cast, book))
+
+    def test_bare_rank_and_divine_appellatives_cannot_carry_a_veto(self) -> None:
+        """A bare "God" or "Captain" alias is as generic as "king" or "lord".
+
+        `insect_god` carried the alias "God" and `patji` carried "The God";
+        matching one against the other found five "co-occurrences" that were
+        entirely prose about Patji. Ranks and divine titles now join the
+        generic list -- measured on both books as costing zero real vetoes.
+        """
+        for generic in ("God", "The God", "Captain", "Colonel", "the Admiral", "Voice"):
+            with self.subTest(term=generic):
+                # The id is derived from the name, so it is generic too; passing
+                # a distinctive id would leave a vetoable term behind and make
+                # this pass for the wrong reason.
+                char_id = generic.lower().replace(" ", "_")
+                self.assertEqual(
+                    _vetoable_terms({"name": generic, "aliases": []}, char_id),
+                    [],
+                    f"{generic!r} must not be able to carry a veto on its own",
+                )
+        # ...but a rank qualified by a real name still can.
+        self.assertTrue(_vetoable_terms({"name": "Colonel Dajer", "aliases": []}, "dajer"))
+        self.assertTrue(_vetoable_terms({"name": "Insect God", "aliases": []}, "insect_god"))
+
+    def test_a_generic_word_a_named_character_depends_on_is_not_suppressed(self) -> None:
+        """`officer`, `one` and `first` were measured and deliberately left out.
+
+        For characters the book never named -- "Police Officer", "One of the
+        Ones Above", "First of the Sky" -- the generic word is the only term
+        they own, and suppressing it cost 2, 2 and 3 real refusals across the
+        two books. Shaving the list to the measurement would have removed them.
+        """
+        for name in ("Police Officer", "One of the Ones Above", "First of the Sky"):
+            with self.subTest(name=name):
+                self.assertTrue(
+                    _vetoable_terms({"name": name, "aliases": []}, name.lower().replace(" ", "_")),
+                    f"{name!r} would lose its only vetoable term",
+                )
+
+    def test_interaction_veto_still_separates_family_members(self) -> None:
+        """Removing the co-occurrence rule must not give back the Catti-brie bug.
+
+        All three forms the book actually uses for these two are interaction
+        beats, which rule 2 catches on its own.
+        """
+        c1 = {"name": "Catti-brie", "aliases": ["Catti-brie", "Catti"]}
+        c2 = {"name": "Brie", "aliases": ["Breezy", "Briennelle"]}
+        for text in (
+            '"Do not believe that you are escaping this," Catti-brie said to Breezy.',
+            "Catti-brie moved as if to hug her, but Breezy held her hand up.",
+            "Breezy looked to Catti-brie for an answer.",
+        ):
+            with self.subTest(text=text):
+                reason = distinct_participant_veto(text, c1, "catti_brie", c2, "brie")
+                self.assertIsNotNone(reason, f"must still refuse: {text}")
+                self.assertIn("interacting as distinct individuals", reason)
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from shared.constants import is_non_spoken_separator
 from shared.pronunciation import build_pronunciation_inventory
 
 RESOLVED_SEGMENT_DISPOSITIONS = {"acceptable", "regenerate"}
@@ -279,9 +280,11 @@ def collect_review_gate(project_id: str, project_dir: Path, job_queue: Any) -> R
             "fail",
             "flagged",
         }
-        # Non-spoken separator/pause markers (e.g. em-dash, '---') never block release.
+        # Scene-break markers (e.g. '---', '***') never block release. This uses
+        # the same predicate as synthesis and validation, so a line cannot be
+        # skipped by one and demanded by another.
         line_text = script_line.get("text") or details.get("text") or ""
-        is_non_spoken = bool(line_text) and not any(c.isalnum() for c in line_text)
+        is_non_spoken = is_non_spoken_separator(line_text)
         blocking = is_hard_failure and (disposition not in RESOLVED_SEGMENT_DISPOSITIONS) and not is_non_spoken
 
         items.append(

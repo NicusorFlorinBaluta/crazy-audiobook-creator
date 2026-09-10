@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from brain.director.attribution_detector import SuspiciousTurn, _is_dialogue_line
-from brain.director.ollama_client import OllamaClient
+from brain.director.ollama_client import OllamaClient, OllamaError
 from brain.director.script_generator import (
     _GENERIC_ROLE_DESCRIPTORS,
     _HE_SPEECH_TAG,
@@ -445,7 +445,9 @@ class TieredAttributionAdjudicator:
         self.gemini_auto_accept = gemini_auto_accept
         self.ollama_temperature = ollama_temperature
         self.block_adjudication_enabled = block_adjudication_enabled
-        self.max_suspicious_per_call = max_suspicious_per_call
+        # A non-positive cap would make `_split_group` recurse forever: a
+        # one-suspicious group can never be split smaller than itself.
+        self.max_suspicious_per_call = max(1, int(max_suspicious_per_call))
         self.only_unconfirmed_runs = only_unconfirmed_runs
 
     def adjudicate(
@@ -476,6 +478,7 @@ class TieredAttributionAdjudicator:
         # Phase 1: Tier 1 Local Qwen Micro-Adjudication
         # -------------------------------------------------------------
         total_turns = len(suspicious_turns)
+        self._unconfirmed_run_cache: dict[int, set[str]] = {}
         current_done = 0
         blocks_adjudicated_count = 0
         block_fallbacks_count = 0
@@ -489,7 +492,7 @@ class TieredAttributionAdjudicator:
                     block_results: list[AdjudicationResult] | None = None
                     try:
                         block_results = self._adjudicate_block_tier1(block.suspicious_turns, chapter)
-                    except Exception as exc:
+                    except Exception as exc:  # noqa: BLE001 - any failure must fall back to per-line
                         logger.warning(
                             "[TieredAttribution] Block adjudication failed for block in ch%d (%s): %s; falling back to per-line",
                             block.chapter_number,
@@ -699,7 +702,7 @@ class TieredAttributionAdjudicator:
         try:
             preview_path.parent.mkdir(parents=True, exist_ok=True)
             atomic_write_json(preview_path, report.to_dict())
-        except Exception as exc:
+        except (OSError, TypeError, ValueError) as exc:
             logger.warning("[TieredAttribution] Failed writing report to %s: %s", preview_path, exc)
 
         return report
@@ -807,8 +810,19 @@ class TieredAttributionAdjudicator:
             return True
         if not chapter:
             return False
-        unconfirmed_ids = _find_unconfirmed_run_line_ids(chapter, self.registry)
+        unconfirmed_ids = self._unconfirmed_run_ids_for(chapter)
         return any((chapter.lines[idx].line_id in unconfirmed_ids) for idx in block.spoken_line_indices)
+
+    def _unconfirmed_run_ids_for(self, chapter: ScriptChapter) -> set[str]:
+        """Per-chapter cache: the scan is whole-chapter, the callers are per-block."""
+        cache = getattr(self, "_unconfirmed_run_cache", None)
+        if cache is None:
+            cache = {}
+            self._unconfirmed_run_cache = cache
+        key = id(chapter)
+        if key not in cache:
+            cache[key] = _find_unconfirmed_run_line_ids(chapter, self.registry)
+        return cache[key]
 
     def _adjudicate_block_tier1(
         self,
@@ -1197,7 +1211,7 @@ class TieredAttributionAdjudicator:
                 format="json",
             )
             parsed = _extract_json(raw_response)
-        except Exception as exc:
+        except (OllamaError, OSError, ValueError, TypeError, KeyError) as exc:
             logger.warning("[TieredAttribution] Qwen failed on %s: %s", turn.line_id, exc)
             return AdjudicationResult(
                 line_id=turn.line_id,

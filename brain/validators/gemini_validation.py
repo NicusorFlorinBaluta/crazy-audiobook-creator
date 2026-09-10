@@ -16,7 +16,7 @@ import os
 import re
 import threading
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
@@ -25,6 +25,7 @@ import httpx
 from pydantic import BaseModel, Field
 
 from shared.artifacts import atomic_write_json
+from shared.constants import ValidationStatus
 from shared.models import QualityResult, ScriptChapter
 from shared.single_instance import SingleInstanceLock
 
@@ -102,6 +103,43 @@ class ExternalValidationError(RuntimeError):
     """Raised when an external validator cannot produce a trustworthy result."""
 
 
+def next_daily_quota_reset_epoch(now: datetime | None = None) -> float:
+    """Epoch of the next America/Los_Angeles midnight.
+
+    Both quotas that matter roll over there: `_UsageBudget` keys its day in that
+    zone, and Google's free tier resets per-day limits at Pacific midnight. A
+    cooldown for an exhausted daily quota should last exactly until then --
+    a fixed hour is wrong in both directions. Exhaust the budget at 10:00 PT and
+    an hourly circuit wakes up to fail thirteen more times; exhaust it at 23:30
+    PT and the circuit stays shut for half an hour after the quota came back.
+    """
+    current = now or datetime.now(ZoneInfo("America/Los_Angeles"))
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=ZoneInfo("America/Los_Angeles"))
+    current = current.astimezone(ZoneInfo("America/Los_Angeles"))
+    reset = (current + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return reset.timestamp()
+
+
+class QuotaExhaustedError(ExternalValidationError):
+    """Raised when a provider's per-day quota or local safety budget is spent.
+
+    Distinct from a per-minute rate limit, which recovers on its own. Only this
+    class opens the long provider cooldown; it is a type rather than a message
+    pattern because the message embeds the server's response body, which
+    contains ``RESOURCE_EXHAUSTED`` for both kinds of 429.
+
+    `retry_at_epoch` says when the quota actually returns, so the circuit can be
+    held exactly that long instead of for an arbitrary interval.
+    """
+
+    def __init__(self, message: str, retry_at_epoch: float | None = None):
+        super().__init__(message)
+        self.retry_at_epoch = (
+            float(retry_at_epoch) if retry_at_epoch is not None else next_daily_quota_reset_epoch()
+        )
+
+
 _VALIDATION_RECOVERABLE_ERRORS = (
     ExternalValidationError,
     ValueError,
@@ -111,6 +149,16 @@ _VALIDATION_RECOVERABLE_ERRORS = (
     json.JSONDecodeError,
     Exception,
 )
+
+
+def _human_duration(seconds: float) -> str:
+    """Readable span, so a wait until tomorrow does not print as 50400s."""
+    total = max(0, int(seconds))
+    if total < 60:
+        return f"{total}s"
+    if total < 3600:
+        return f"{total // 60}m{total % 60:02d}s"
+    return f"{total // 3600}h{(total % 3600) // 60:02d}m"
 
 
 class _ProviderHealth:
@@ -133,11 +181,27 @@ class _ProviderHealth:
         open_until = float(state.get("open_until_epoch") or 0)
         if open_until > time.time():
             remaining = max(1, round(open_until - time.time()))
+            if state.get("open_reason") == "daily_quota_exhausted":
+                resumes = datetime.fromtimestamp(open_until, ZoneInfo("America/Los_Angeles"))
+                raise QuotaExhaustedError(
+                    f"{provider} daily quota is spent; it resets at "
+                    f"{resumes:%Y-%m-%d %H:%M %Z} ({_human_duration(remaining)} from now)",
+                    retry_at_epoch=open_until,
+                )
             raise ExternalValidationError(
-                f"{provider} circuit is cooling down for {remaining}s after repeated failures"
+                f"{provider} circuit is cooling down for {_human_duration(remaining)} after repeated failures"
             )
 
-    def record(self, provider: str, *, success: bool, latency_ms: int, error: str = "") -> None:
+    def record(
+        self,
+        provider: str,
+        *,
+        success: bool,
+        latency_ms: int,
+        error: str = "",
+        quota_exhausted: bool = False,
+        retry_at_epoch: float | None = None,
+    ) -> None:
         lock = SingleInstanceLock(_lock_name("external-health", self.path))
         if not lock.acquire():
             return
@@ -147,19 +211,25 @@ class _ProviderHealth:
             now = datetime.now(UTC).isoformat()
             entry["last_latency_ms"] = latency_ms
             if success:
-                entry.update({"consecutive_failures": 0, "last_success": now, "last_error": "", "open_until_epoch": 0})
+                entry.update(
+                    {
+                        "consecutive_failures": 0,
+                        "last_success": now,
+                        "last_error": "",
+                        "open_until_epoch": 0,
+                        "open_reason": "",
+                    }
+                )
             else:
                 failures = int(entry.get("consecutive_failures", 0)) + 1
                 entry.update({"consecutive_failures": failures, "last_failure": now, "last_error": error[:1000]})
-                is_quota_exhausted = (
-                    "budget exhausted" in error.lower()
-                    or "quota exhausted" in error.lower()
-                    or "resource_exhausted" in error.lower()
-                )
-                if is_quota_exhausted:
-                    # Daily budget or API quota exhaustion cannot recover with short retries.
-                    # Fast-exit by cooling down for 1 hour so subsequent calls bypass immediately.
-                    entry["open_until_epoch"] = time.time() + max(3600.0, float(self.cooldown_seconds))
+                if quota_exhausted:
+                    # A spent daily quota does not come back on a timer of our
+                    # choosing; it comes back at Pacific midnight. Hold the
+                    # circuit until exactly then, so calls in between fast-exit
+                    # and the very next call after the reset is allowed through.
+                    entry["open_until_epoch"] = retry_at_epoch or next_daily_quota_reset_epoch()
+                    entry["open_reason"] = "daily_quota_exhausted"
                 elif failures >= self.threshold:
                     entry["open_until_epoch"] = time.time() + self.cooldown_seconds
             state[provider] = entry
@@ -401,11 +471,63 @@ class _UsageBudget:
             models = state.setdefault("models", {})
             used = int(models.get(model, 0))
             if used >= limit:
-                raise ExternalValidationError(f"Local daily safety budget exhausted for {model} ({used}/{limit})")
+                raise QuotaExhaustedError(f"Local daily safety budget exhausted for {model} ({used}/{limit})")
             models[model] = used + 1
             atomic_write_json(self.path, state)
         finally:
             lock.release()
+
+
+_PER_DAY_QUOTA_MARKERS = (
+    "perday",
+    "per_day",
+    "perdayperproject",
+    "requestsperday",
+    "daily limit",
+    "per day",
+)
+
+
+def _is_daily_quota_exhaustion(resp_text: str) -> bool:
+    """Say whether a 429 body is a per-DAY quota, not a per-minute rate limit.
+
+    Google returns ``RESOURCE_EXHAUSTED`` and the word "quota" for both, so the
+    status alone cannot tell them apart. The discriminator is the violated
+    ``quotaId``: ``GenerateRequestsPerMinutePerProjectPerModel`` recovers within
+    a minute, ``...PerDayPerProjectPerModel`` does not recover until midnight
+    Pacific. Treating a per-minute limit as exhaustion opens the provider
+    circuit for an hour over something that clears in seconds, so anything that
+    is not positively identified as a per-day limit is treated as retryable.
+    """
+    if not resp_text:
+        return False
+    collapsed = resp_text.lower().replace("-", "").replace(" ", "")
+    if any(marker.replace(" ", "") in collapsed for marker in _PER_DAY_QUOTA_MARKERS):
+        return True
+    # A local safety-budget message never carries a quotaId.
+    return "daily safety budget exhausted" in resp_text.lower()
+
+
+def _retry_delay_seconds(response: Any, resp_text: str, default: float) -> float:
+    """Seconds to wait before retrying a 429, from Retry-After or RetryInfo."""
+    raw_retry = ""
+    try:
+        raw_retry = response.headers.get("Retry-After", "") or ""
+    except (AttributeError, TypeError):
+        raw_retry = ""
+    if raw_retry:
+        try:
+            return max(0.0, min(30.0, float(raw_retry)))
+        except (ValueError, TypeError):
+            pass
+    # google.rpc.RetryInfo, e.g. {"retryDelay": "41s"}
+    match = re.search(r'"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s?"', resp_text or "")
+    if match:
+        try:
+            return max(0.0, min(30.0, float(match.group(1))))
+        except (ValueError, TypeError):
+            pass
+    return default
 
 
 class GeminiApiClient:
@@ -435,7 +557,7 @@ class GeminiApiClient:
         if not self.available:
             raise ExternalValidationError("Gemini API is disabled or its API key is unavailable")
         if self.budget.is_exhausted(model):
-            raise ExternalValidationError(f"Local daily safety budget exhausted for {model}")
+            raise QuotaExhaustedError(f"Local daily safety budget exhausted for {model}")
         parts: list[dict[str, Any]] = [{"text": prompt}]
         audio_inputs = [path for path in (audio_path, reference_audio_path) if path is not None]
         if sum(path.stat().st_size for path in audio_inputs) > 18 * 1024 * 1024:
@@ -468,9 +590,23 @@ class GeminiApiClient:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
         response: httpx.Response | None = None
         try:
-            self.budget.reserve(model)
             max_attempts = max(1, int(self.config.get("max_attempts", 4)))
             for attempt in range(max_attempts):
+                # Every attempt is a real request against the provider's quota,
+                # so every attempt is charged to the local safety budget. Only
+                # the first reservation may abort the call outright; running out
+                # mid-retry simply stops retrying, because a partial answer is
+                # not owed to a request that has already been paid for.
+                try:
+                    self.budget.reserve(model)
+                except QuotaExhaustedError:
+                    if attempt == 0:
+                        raise
+                    logger.warning(
+                        "[ExternalValidation] Local safety budget for %s ran out mid-retry; stopping retries",
+                        model,
+                    )
+                    break
                 if self.request_interval > 0:
                     with self._request_lock:
                         now = time.monotonic()
@@ -486,22 +622,19 @@ class GeminiApiClient:
                 )
                 if response.status_code == 429:
                     resp_text = response.text
-                    is_quota = (
-                        "RESOURCE_EXHAUSTED" in resp_text
-                        or "quota" in resp_text.lower()
-                        or "rate_limit_exceeded" in resp_text.lower()
-                    )
-                    if is_quota or attempt + 1 >= max_attempts:
-                        raise ExternalValidationError(
-                            f"Gemini API quota exhausted (429): {resp_text[:300].strip()}"
+                    if _is_daily_quota_exhaustion(resp_text):
+                        # Per-day quota: no amount of waiting inside this call
+                        # recovers it. Fail fast so the circuit opens for an hour.
+                        raise QuotaExhaustedError(
+                            f"Gemini API daily quota exhausted (429): {resp_text[:300].strip()}"
                         )
-                    retry_after = 2.0
-                    try:
-                        raw_retry = response.headers.get("Retry-After", "")
-                        if raw_retry:
-                            retry_after = min(5.0, float(raw_retry))
-                    except (ValueError, TypeError):
-                        pass
+                    if attempt + 1 >= max_attempts:
+                        raise ExternalValidationError(
+                            f"Gemini API rate limited (429), retries exhausted: {resp_text[:300].strip()}"
+                        )
+                    # Per-minute rate limit: recovers on its own in under a
+                    # minute, so honour the server's own delay and retry.
+                    retry_after = _retry_delay_seconds(response, resp_text, default=2.0)
                     time.sleep(retry_after)
                     continue
 
@@ -767,6 +900,27 @@ class GeminiValidationService:
     def health_snapshot(self) -> dict[str, Any]:
         return self.health.snapshot()
 
+    def is_critical_risk_segment(self, result: Any) -> bool:
+        """Say whether a segment is risky enough to spend external quota on.
+
+        Shared with `Pipeline._external_audio_qa` so the ordering of candidates
+        and the gate that admits them cannot drift apart, and so both honour
+        `external_validation.audio_triage` rather than hardcoded copies.
+        """
+        status_value = getattr(getattr(result, "status", None), "value", None) or str(
+            getattr(result, "status", "") or ""
+        )
+        speaker_similarity = getattr(result, "speaker_similarity", None)
+        return bool(
+            not getattr(result, "passed_hard_gates", True)
+            or status_value in {ValidationStatus.FAIL.value, ValidationStatus.FLAGGED.value}
+            or float(getattr(result, "quality_score", 1.0)) < self.audio_triage_min_quality
+            or float(getattr(result, "effective_text_error", 0.0)) > self.audio_triage_max_text_error
+            or (speaker_similarity is not None and float(speaker_similarity) < self.audio_triage_min_speaker_sim)
+            or bool(getattr(result, "clipping_detected", False))
+            or bool(getattr(result, "has_long_silence", False))
+        )
+
     def _call_stage(self, stage: str, operation: Any) -> tuple[Any, int]:
         self.health.before(stage)
         started = time.perf_counter()
@@ -774,7 +928,14 @@ class GeminiValidationService:
             value = operation()
         except Exception as exc:
             latency = round((time.perf_counter() - started) * 1000)
-            self.health.record(stage, success=False, latency_ms=latency, error=str(exc))
+            self.health.record(
+                stage,
+                success=False,
+                latency_ms=latency,
+                error=str(exc),
+                quota_exhausted=isinstance(exc, QuotaExhaustedError),
+                retry_at_epoch=getattr(exc, "retry_at_epoch", None),
+            )
             raise
         latency = round((time.perf_counter() - started) * 1000)
         self.health.record(stage, success=True, latency_ms=latency)
@@ -898,6 +1059,19 @@ class GeminiValidationService:
         merges: list[dict[str, Any]] = []
         review: list[dict[str, Any]] = []
         for proposal in proposals:
+            if proposal.left_id == proposal.right_id:
+                # Observed live on 2026-09-10: the roster stage returned
+                # ("starling", "starling"). `merge_veto` refuses a self-merge,
+                # but that runs in the caller, so without this the pair costs a
+                # full grounding call before anything looks at it.
+                trace.append(
+                    {
+                        "pair": [proposal.left_id, proposal.right_id],
+                        "outcome": "rejected",
+                        "reason": "proposal names the same character twice",
+                    }
+                )
+                continue
             if proposal.left_id not in roster or proposal.right_id not in roster:
                 trace.append(
                     {
@@ -1859,15 +2033,7 @@ class GeminiValidationService:
         # Critical-risk triage: segments with benign soft warnings (sound quality score,
         # low WER, matching speaker, no severe acoustic flaws) are auto-accepted locally
         # to protect API and Web quotas from exhaustion.
-        is_critical_risk = (
-            result.status.value == "failed"
-            or result.quality_score < self.audio_triage_min_quality
-            or result.effective_text_error > self.audio_triage_max_text_error
-            or (result.speaker_similarity is not None and result.speaker_similarity < self.audio_triage_min_speaker_sim)
-            or bool(result.clipping_detected)
-            or bool(result.has_long_silence)
-        )
-        if not is_critical_risk:
+        if not self.is_critical_risk_segment(result):
             result.manual_review_required = False
             result.manual_review_reason = ""
             result.validation_confidence = min(1.0, 0.85 + 0.15 * float(result.quality_score))
@@ -1990,10 +2156,16 @@ class GeminiValidationService:
                 result.manual_review_reason = f"External audio QA rejected this segment: {decision.reason}"
                 return result
             prompt += "\nA previous validator was inconclusive: " + decision.model_dump_json()
+        # `external_validation_decision` holds only the LAST stage that answered,
+        # so reading it would let a later low-confidence "accept" erase an earlier
+        # stage's "reject". Every decision is in the history; scan all of them.
+        any_stage_rejected = any(
+            str(entry.get("decision") or "") == "reject" for entry in result.external_validation_history
+        )
         if (
             result.status.value in {"pass", "accepted_with_warning"}
             and result.passed_hard_gates
-            and result.external_validation_decision != "reject"
+            and not any_stage_rejected
         ):
             result.manual_review_required = False
             result.manual_review_reason = ""

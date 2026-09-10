@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import subprocess
+import sys
 import unittest
 from pathlib import Path
 
@@ -70,6 +72,46 @@ class LazyImportsResolveTests(unittest.TestCase):
 
         self.assertEqual(
             broken, [], "unresolvable first-party imports inside function bodies:\n  " + "\n  ".join(broken)
+        )
+
+
+class UndefinedNamesTests(unittest.TestCase):
+    """No module may reference a name it never defines or imports.
+
+    The sibling test above catches an import of something that does not exist.
+    This catches the mirror case: using something that was never imported at
+    all. Found on 2026-09-10 in `_pregenerate_pronunciation_previews`, which
+    called `hashlib.sha256(...)` in a module that never imports `hashlib`:
+
+        preview_hash = hashlib.sha256(...).hexdigest()[:16]
+
+    It raised `NameError` on the first candidate of every run. The whole stage
+    body sits in a `try` whose handler logs
+    "Pronunciation preview pre-generation encountered an issue", so a feature
+    that had never once produced a preview reported itself as a transient
+    hiccup for two days.
+
+    `pyproject.toml` already declares the Pyflakes rules non-negotiable at
+    zero. This asserts it, so the declaration is checked rather than trusted.
+    """
+
+    def test_no_undefined_names_anywhere(self) -> None:
+        completed = subprocess.run(
+            [sys.executable, "-m", "ruff", "check", ".", "--select", "F821", "--output-format", "concise"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if completed.returncode not in (0, 1):
+            self.skipTest(f"ruff unavailable: {completed.stderr.strip()[:200]}")
+        findings = [line for line in completed.stdout.splitlines() if ": F821" in line]
+        self.assertEqual(
+            findings,
+            [],
+            "undefined names (each is a NameError waiting for its branch to run):"
+            + '\n  '
+            + '\n  '.join(findings),
         )
 
 

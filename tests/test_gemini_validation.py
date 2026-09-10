@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -547,6 +548,10 @@ class GeminiAudioValidationTests(unittest.TestCase):
                 auto_accept = 0.9
 
                 @staticmethod
+                def is_critical_risk_segment(_result):
+                    return True
+
+                @staticmethod
                 def validate_audio(**kwargs):
                     quality = kwargs["result"]
                     quality.external_validation_decision = "reject"
@@ -775,7 +780,7 @@ class AudioValidationFastExitAndFallbackTests(unittest.TestCase):
     def test_gemini_api_429_quota_fast_exit(self) -> None:
         from unittest.mock import MagicMock, patch
 
-        from brain.validators.gemini_validation import ExternalValidationError, GeminiApiClient
+        from brain.validators.gemini_validation import GeminiApiClient, QuotaExhaustedError
 
         with tempfile.TemporaryDirectory() as directory:
             client = GeminiApiClient(
@@ -789,19 +794,89 @@ class AudioValidationFastExitAndFallbackTests(unittest.TestCase):
             )
             client.api_key = "test-key"
 
-            mock_response = MagicMock()
-            mock_response.status_code = 429
-            mock_response.text = '{"error": {"code": 429, "message": "Quota exceeded", "status": "RESOURCE_EXHAUSTED"}}'
-
-            with patch("httpx.post", return_value=mock_response) as mock_post:
-                with self.assertRaises(ExternalValidationError) as ctx:
+            # A per-DAY quota cannot recover inside this call: fail on attempt 1.
+            per_day = MagicMock()
+            per_day.status_code = 429
+            per_day.text = (
+                '{"error": {"code": 429, "status": "RESOURCE_EXHAUSTED", "details": ['
+                '{"@type": "type.googleapis.com/google.rpc.QuotaFailure", "violations": [{'
+                '"quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier"}]}]}}'
+            )
+            with patch("httpx.post", return_value=per_day) as mock_post:
+                with self.assertRaises(QuotaExhaustedError) as ctx:
                     client.generate_json(model="test-model", prompt="test", schema={})
                 self.assertIn("quota exhausted", str(ctx.exception).lower())
                 # Must exit on first attempt, NOT loop 4 times with backoff
                 self.assertEqual(mock_post.call_count, 1)
 
-    def test_provider_health_quota_cooldown(self) -> None:
-        from brain.validators.gemini_validation import _ProviderHealth
+    def test_gemini_api_429_per_minute_rate_limit_retries(self) -> None:
+        """A per-MINUTE 429 clears on its own; it must not be read as exhaustion.
+
+        Google returns RESOURCE_EXHAUSTED and the word "quota" for both kinds,
+        so only the quotaId separates them. Treating a rate limit as exhaustion
+        opened the provider circuit for an hour over something that clears in
+        seconds, and every remaining critical segment was then accepted locally
+        with no external check at all.
+        """
+        from unittest.mock import MagicMock, patch
+
+        from brain.validators.gemini_validation import (
+            ExternalValidationError,
+            GeminiApiClient,
+            QuotaExhaustedError,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            client = GeminiApiClient(
+                {
+                    "enabled": True,
+                    "api_key_env": "TEST_GEMINI_KEY",
+                    "max_attempts": 3,
+                    "request_interval_seconds": 0,
+                    "daily_request_budgets": {"test-model": 100},
+                },
+                Path(directory),
+            )
+            client.api_key = "test-key"
+
+            per_minute = MagicMock()
+            per_minute.status_code = 429
+            per_minute.headers = {}
+            per_minute.text = (
+                '{"error": {"code": 429, "message": "You exceeded your current quota.", '
+                '"status": "RESOURCE_EXHAUSTED", "details": ['
+                '{"@type": "type.googleapis.com/google.rpc.QuotaFailure", "violations": [{'
+                '"quotaId": "GenerateRequestsPerMinutePerProjectPerModel-FreeTier"}]},'
+                '{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "0s"}]}}'
+            )
+            with patch("httpx.post", return_value=per_minute) as mock_post:
+                with self.assertRaises(ExternalValidationError) as ctx:
+                    client.generate_json(model="test-model", prompt="test", schema={})
+                # Retried, and NOT reported as exhaustion -- so the circuit stays shut.
+                self.assertEqual(mock_post.call_count, 3)
+                self.assertNotIsInstance(ctx.exception, QuotaExhaustedError)
+                self.assertIn("rate limited", str(ctx.exception).lower())
+
+            # Every attempt is charged to the local safety budget, not just the first.
+            self.assertEqual(
+                json.loads((Path(directory) / ".gemini_api_usage.json").read_text(encoding="utf-8"))["models"][
+                    "test-model"
+                ],
+                3,
+            )
+
+    def test_quota_cooldown_lasts_until_the_quota_returns(self) -> None:
+        """A spent daily quota is held until Pacific midnight, not for a fixed hour.
+
+        A fixed hour is wrong in both directions: exhaust the budget at 10:00 PT
+        and an hourly circuit wakes up to fail thirteen more times before the
+        quota is back; exhaust it at 23:30 PT and the circuit stays shut for
+        half an hour after it returned.
+        """
+        from brain.validators.gemini_validation import (
+            _ProviderHealth,
+            next_daily_quota_reset_epoch,
+        )
 
         with tempfile.TemporaryDirectory() as directory:
             health = _ProviderHealth(Path(directory) / "health.json", threshold=3, cooldown_seconds=60)
@@ -810,12 +885,44 @@ class AudioValidationFastExitAndFallbackTests(unittest.TestCase):
                 success=False,
                 latency_ms=5,
                 error="Local daily safety budget exhausted for lite (450/450)",
+                quota_exhausted=True,
             )
-            snapshot = health.snapshot()
-            # Must set long cooldown (>= 3600s) on quota exhaustion
-            remaining = snapshot["gemini_api_triage"]["cooldown_remaining_seconds"]
-            self.assertGreater(remaining, 3500)
-            self.assertTrue(snapshot["gemini_api_triage"]["circuit_open"])
+            state = json.loads((Path(directory) / "health.json").read_text(encoding="utf-8"))
+            entry = state["gemini_api_triage"]
+            self.assertEqual(entry["open_reason"], "daily_quota_exhausted")
+            # Held to the reset boundary, whenever that happens to be.
+            self.assertAlmostEqual(entry["open_until_epoch"], next_daily_quota_reset_epoch(), delta=2)
+            self.assertTrue(health.snapshot()["gemini_api_triage"]["circuit_open"])
+
+    def test_quota_circuit_reports_when_the_quota_comes_back(self) -> None:
+        """`before()` must say the quota is spent, not that something failed."""
+        from brain.validators.gemini_validation import QuotaExhaustedError, _ProviderHealth
+
+        with tempfile.TemporaryDirectory() as directory:
+            health = _ProviderHealth(Path(directory) / "health.json", threshold=3, cooldown_seconds=60)
+            health.record(
+                "gemini_api_triage",
+                success=False,
+                latency_ms=5,
+                error="Local daily safety budget exhausted",
+                quota_exhausted=True,
+            )
+            with self.assertRaises(QuotaExhaustedError) as ctx:
+                health.before("gemini_api_triage")
+            self.assertIn("daily quota is spent", str(ctx.exception))
+            self.assertIn("resets at", str(ctx.exception))
+
+    def test_a_success_clears_the_quota_circuit(self) -> None:
+        from brain.validators.gemini_validation import _ProviderHealth
+
+        with tempfile.TemporaryDirectory() as directory:
+            health = _ProviderHealth(Path(directory) / "health.json", threshold=3, cooldown_seconds=60)
+            health.record("gemini_api_triage", success=False, latency_ms=5, error="x", quota_exhausted=True)
+            health.record("gemini_api_triage", success=True, latency_ms=5)
+            snapshot = health.snapshot()["gemini_api_triage"]
+            self.assertFalse(snapshot["circuit_open"])
+            self.assertEqual(snapshot["open_reason"], "")
+            health.before("gemini_api_triage")  # must not raise
 
     def test_validate_audio_clean_local_acceptance_when_external_unavailable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -941,6 +1048,125 @@ class AudioValidationFastExitAndFallbackTests(unittest.TestCase):
             self.assertIn("rejected this segment", validated.manual_review_reason)
             # Must call external API for critical risks
             self.assertEqual(len(service.api.calls), 1)
+
+    def test_a_self_pair_proposal_costs_no_grounding_call(self) -> None:
+        """The roster stage really does return ("starling", "starling").
+
+        Observed live on 2026-09-10 from gemini-3.5-flash-lite. `merge_veto`
+        refuses a self-merge, but that runs in the caller, so without a cheap
+        pre-filter the pair reaches the grounding stage and spends a second
+        API call to be told nothing.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            service = _service(root)
+            service.cast_adjudication_enabled = True
+            service.api = _FakeApi(
+                [
+                    {
+                        "proposals": [
+                            {
+                                "left_id": "starling",
+                                "right_id": "starling",
+                                "confidence": 0.9,
+                                "reason": "same name",
+                            }
+                        ]
+                    }
+                ]
+            )
+            service.web = _FakeWeb()
+
+            roster = {
+                "starling": {"name": "Starling", "aliases": [], "gender": "female", "dialogue_count": 486},
+                "dusk": {"name": "Dusk", "aliases": [], "gender": "male", "dialogue_count": 300},
+            }
+            result = service.adjudicate_cast(
+                project_dir=root,
+                roster=roster,
+                evidence_for=lambda a, b: ["should never be asked for"],
+            )
+
+            self.assertEqual(result["merges"], [])
+            # One roster call and nothing else.
+            self.assertEqual(len(service.api.calls), 1)
+            self.assertEqual(
+                [t.get("reason") for t in result["trace"]],
+                ["proposal names the same character twice"],
+            )
+
+    def test_a_low_confidence_reject_is_not_erased_by_a_later_accept(self) -> None:
+        """An earlier stage's rejection must survive a later stage's acceptance.
+
+        `external_validation_decision` holds only the LAST stage that answered.
+        Reading that scalar meant a low-confidence "reject" from triage was
+        overwritten by a low-confidence "accept" from a later stage, and the
+        segment was then auto-accepted with `manual_review_required = False`.
+        Only critical-risk segments reach this loop at all, so it was the worst
+        possible place to drop a rejection. The full history is scanned instead.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            service = _service(root)
+            # Both below auto_accept (0.9), so neither returns early and the
+            # loop falls through to the end-of-stages decision.
+            service.api = _FakeApi(
+                [
+                    {
+                        "item_id": "ch01_0009",
+                        "decision": "reject",
+                        "confidence": 0.60,
+                        "reason": "Possible clipped consonant.",
+                        "defects": ["clipping"],
+                    },
+                    {
+                        "item_id": "ch01_0009",
+                        "decision": "accept",
+                        "confidence": 0.62,
+                        "reason": "Sounds fine to me.",
+                        "defects": [],
+                    },
+                ]
+            )
+            service.web = _FakeWeb(
+                [
+                    {
+                        "item_id": "ch01_0009",
+                        "decision": "accept",
+                        "confidence": 0.55,
+                        "reason": "No audible defect.",
+                        "defects": [],
+                    }
+                ]
+            )
+
+            q_result = QualityResult(
+                line_id="ch01_0009",
+                chapter_number=1,
+                character_id="narrator",
+                status=ValidationStatus.ACCEPTED_WITH_WARNING,
+                passed_hard_gates=True,
+                warnings=["soft warning"],
+                wer=0.05,
+                effective_text_error=0.05,
+                quality_score=0.60,
+                clipping_detected=False,
+                has_long_silence=False,
+            )
+            validated = service.validate_audio(
+                project_dir=root,
+                audio_path=root / "dummy.wav",
+                line_text="The journey began at dawn.",
+                result=q_result,
+            )
+
+            decisions = [entry["decision"] for entry in validated.external_validation_history]
+            self.assertIn("reject", decisions, "the rejection must be on the record")
+            self.assertEqual(validated.external_validation_decision, "accept", "last writer still wins the scalar")
+            self.assertTrue(
+                validated.manual_review_required,
+                "a segment any stage rejected must reach a human, not be auto-accepted",
+            )
 
 
 if __name__ == "__main__":
