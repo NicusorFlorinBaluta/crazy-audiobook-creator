@@ -155,9 +155,140 @@ def detect_possessive_contradictions(
     return findings
 
 
+def _refutations(
+    chapter: ScriptChapter,
+    registry: CharacterRegistry,
+) -> list[tuple[int, str, str, Gender | None]]:
+    """Lines the text itself refutes, with what it refutes them for."""
+    lines = chapter.lines
+    found: list[tuple[int, str, str, Gender | None]] = []
+
+    for finding in detect_possessive_contradictions([chapter]):
+        index = next((i for i, line in enumerate(lines) if line.line_id == finding["disclaimed_line_id"]), None)
+        if index is not None:
+            found.append((index, "possessive_contradiction", finding["speaker"], None))
+
+    for index, line in enumerate(lines):
+        if not line.speaker or line.speaker == "narrator" or index + 1 >= len(lines):
+            continue
+        following = lines[index + 1]
+        if following.speaker != "narrator":
+            continue
+        tag = str(following.text or "").strip()
+        if not _reads_as_attached_tag(tag):
+            continue
+        named, kind, gender = ScriptGenerator._dialogue_tag_evidence(tag, registry)
+        if named or gender is None or kind != "pronoun_gender":
+            continue
+        # Only a pronoun tied to the speech verb may refuse an attribution;
+        # see the 2026-09-06 record on `ch28_0028`.
+        if not (_HE_SPEECH_TAG.search(tag) or _SHE_SPEECH_TAG.search(tag)):
+            continue
+        character = registry.characters.get(line.speaker)
+        if character and character.gender in (Gender.MALE, Gender.FEMALE) and character.gender != gender:
+            found.append((index, "gendering_tag", line.speaker, gender))
+    return found
+
+
 #: How many spoken lines either side count as "this scene" when looking for the
 #: one participant a refutation leaves standing.
 REFUTATION_SCENE_WINDOW = 14
+
+
+#: Context handed to the constrained-choice tier. Far wider than the per-line
+#: adjudicator's window, because the question is one line rather than many and
+#: the extra prefill is paid once.
+CONSTRAINED_CHOICE_WINDOW = 30
+
+#: Identical answers required across independent runs. An answer that moves
+#: between runs is not an answer: on the open question, Gemini gave `dahlia`
+#: at 1.00 and `effron` at 0.74 for `ch11_0148` minutes apart.
+CONSTRAINED_CHOICE_RUNS = 3
+
+
+def refuted_candidate_sets(
+    chapters: list[ScriptChapter],
+    registry: CharacterRegistry,
+    *,
+    window: int = REFUTATION_SCENE_WINDOW,
+) -> list[dict[str, Any]]:
+    """Every refuted line with the candidates the scene allows.
+
+    `resolve_refuted_by_unique_candidate` acts on the entries with exactly one
+    candidate. This exposes the rest -- the ones where the text alone cannot
+    choose -- so a model can be asked a *closed* question about them.
+    """
+    out: list[dict[str, Any]] = []
+    for chapter in chapters:
+        lines = chapter.lines
+        for index, source, refuted, required_gender in _refutations(chapter, registry):
+            low, high = max(0, index - window), min(len(lines), index + window + 1)
+            present = [ln.speaker for ln in lines[low:high] if ln.speaker and ln.speaker != "narrator"]
+            candidates = []
+            for speaker_id in dict.fromkeys(present):
+                if speaker_id == refuted:
+                    continue
+                character = registry.characters.get(speaker_id)
+                if required_gender is not None and (character is None or character.gender != required_gender):
+                    continue
+                candidates.append(speaker_id)
+            out.append(
+                {
+                    "line_id": lines[index].line_id,
+                    "chapter_number": chapter.chapter_number,
+                    "index": index,
+                    "refuted": refuted,
+                    "source": source,
+                    "required_gender": required_gender.value if required_gender else None,
+                    "candidates": candidates,
+                }
+            )
+    return out
+
+
+def build_constrained_choice_prompt(
+    chapter: ScriptChapter,
+    index: int,
+    refuted: str,
+    candidates: list[str],
+    registry: CharacterRegistry,
+    *,
+    why: str,
+    window: int = CONSTRAINED_CHOICE_WINDOW,
+) -> str:
+    """Ask which of a fixed list speaks one line, given a wide scene.
+
+    The open question -- "who speaks this line?" -- is the one the per-line
+    adjudicator already answered wrongly, and the one Gemini answers
+    differently on different runs. By the time this is called the
+    deterministic layer has established two things it did not have then: who
+    did *not* speak, and the complete set of who could have. That turns
+    attribution into a multiple-choice question, which is a different and much
+    easier task.
+    """
+    lines = chapter.lines
+    low, high = max(0, index - window), min(len(lines), index + window + 1)
+    context = "\n".join(
+        f"{'>>> TARGET ' if i == index else '           '}[{lines[i].line_id}] {lines[i].speaker}: {lines[i].text}"
+        for i in range(low, high)
+    )
+    roster = "\n".join(
+        f"  - {cid}: {registry.characters[cid].name} ({registry.characters[cid].gender.value})"
+        for cid in candidates
+        if cid in registry.characters
+    )
+    return (
+        "You are resolving ONE line of audiobook dialogue.\n\n"
+        f"ESTABLISHED FACT: {refuted!r} did NOT speak the TARGET line, because {why}.\n"
+        "This is settled by the author's own text and is not open to revision.\n\n"
+        f"The speaker is exactly one of these, and no one else:\n{roster}\n\n"
+        f"SCENE ({high - low} lines of context):\n{context}\n\n"
+        "Choose which candidate speaks the TARGET line. Weigh who is being addressed, "
+        "who answers whom, and any action beats. If the scene genuinely does not "
+        "distinguish them, say so with low confidence rather than guessing.\n\n"
+        'Return ONLY JSON: {"speaker_id": "<one of the candidates>", '
+        '"confidence": 0.0-1.0, "evidence": "verbatim phrase from the scene"}'
+    )
 
 
 def resolve_refuted_by_unique_candidate(
@@ -207,37 +338,7 @@ def resolve_refuted_by_unique_candidate(
     proposals: list[dict[str, Any]] = []
     for chapter in chapters:
         lines = chapter.lines
-        refutations: list[tuple[int, str, str, Gender | None]] = []
-
-        for finding in detect_possessive_contradictions([chapter]):
-            index = next(
-                (i for i, line in enumerate(lines) if line.line_id == finding["disclaimed_line_id"]),
-                None,
-            )
-            if index is not None:
-                refutations.append((index, "possessive_contradiction", finding["speaker"], None))
-
-        for index, line in enumerate(lines):
-            if not line.speaker or line.speaker == "narrator" or index + 1 >= len(lines):
-                continue
-            following = lines[index + 1]
-            if following.speaker != "narrator":
-                continue
-            tag = str(following.text or "").strip()
-            if not _reads_as_attached_tag(tag):
-                continue
-            named, kind, gender = ScriptGenerator._dialogue_tag_evidence(tag, registry)
-            if named or gender is None or kind != "pronoun_gender":
-                continue
-            # Only a pronoun tied to the speech verb may refuse an attribution;
-            # see the 2026-09-06 record on `ch28_0028`.
-            if not (_HE_SPEECH_TAG.search(tag) or _SHE_SPEECH_TAG.search(tag)):
-                continue
-            character = registry.characters.get(line.speaker)
-            if character and character.gender in (Gender.MALE, Gender.FEMALE) and character.gender != gender:
-                refutations.append((index, "gendering_tag", line.speaker, gender))
-
-        for index, source, refuted, required_gender in refutations:
+        for index, source, refuted, required_gender in _refutations(chapter, registry):
             low, high = max(0, index - window), min(len(lines), index + window + 1)
             present = [
                 line.speaker for line in lines[low:high] if line.speaker and line.speaker != "narrator"

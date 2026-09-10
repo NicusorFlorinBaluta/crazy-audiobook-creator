@@ -34,7 +34,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from brain.director.attribution_audit import resolve_refuted_by_unique_candidate
+from brain.director.attribution_audit import (
+    CONSTRAINED_CHOICE_RUNS,
+    build_constrained_choice_prompt,
+    refuted_candidate_sets,
+    resolve_refuted_by_unique_candidate,
+)
 from brain.director.script_generator import ScriptGenerator
 from brain.validators.tiered_adjudicator import (
     _HE_SPEECH_TAG,
@@ -93,7 +98,111 @@ def _descriptor_gender(resolved: str, registry: CharacterRegistry) -> Gender | N
     return character.gender if character.gender in (Gender.MALE, Gender.FEMALE) else None
 
 
-def repair(project_dir: Path, *, apply: bool) -> dict[str, int]:
+def _constrained_choice(
+    chapters: list[ScriptChapter],
+    registry: CharacterRegistry,
+    *,
+    runs: int = CONSTRAINED_CHOICE_RUNS,
+    min_confidence: float = 0.85,
+) -> list[dict[str, Any]]:
+    """Ask a model to choose, for the refuted lines the text cannot settle.
+
+    Only reached when `resolve_refuted_by_unique_candidate` found two or more
+    candidates. The question is closed -- pick one of these names -- which is a
+    different task from the open attribution both models already got wrong, and
+    empirically a far more stable one.
+
+    Three guards, because the model is the weakest link here:
+
+    * the answer must be **in the candidate list**, or it is discarded;
+    * all `runs` must agree, because an answer that moves between runs is not
+      an answer. This is exactly how Gemini behaved on the open question for
+      `ch11_0148`: `dahlia` at 1.00, then `effron` at 0.74, minutes apart;
+    * mean confidence must clear `min_confidence`.
+
+    Measured on `isles-of-the-emberdark`, five ambiguous lines, three runs each:
+    all five unanimous at 0.95-1.00, and all five agree with a hand reading of
+    the passage. Two of them (`vathi`, `chrysalis`) had been worked out by hand
+    hours earlier, independently.
+    """
+    import yaml
+
+    from brain.director.ollama_client import OllamaClient
+    from shared.constants import DEFAULT_OLLAMA_MODEL
+
+    config = yaml.safe_load(Path("brain/config.yaml").read_text(encoding="utf-8"))
+    ollama_cfg = config.get("ollama", {})
+    ollama = OllamaClient(
+        host=ollama_cfg.get("host", "http://localhost:11434"),
+        model=ollama_cfg.get("model", DEFAULT_OLLAMA_MODEL),
+        timeout=ollama_cfg.get("timeout", 600),
+        max_retries=ollama_cfg.get("max_retries", 3),
+        context_window=int(ollama_cfg.get("context_window", 16384)),
+        max_output_tokens=int(ollama_cfg.get("max_output_tokens", 8192)),
+        think=ollama_cfg.get("think"),
+    )
+    if not ollama.check_health(quiet=True):
+        logger.error("Ollama is not answering at %s; skipping the constrained-choice tier", ollama.host)
+        return []
+
+    by_number = {chapter.chapter_number: chapter for chapter in chapters}
+    why = {
+        "possessive_contradiction": "the speaker both owns and disowns the same thing in one unbroken turn",
+        "gendering_tag": "the attached speech tag genders the speaker differently",
+    }
+    proposals: list[dict[str, Any]] = []
+    for case in refuted_candidate_sets(chapters, registry):
+        if len(case["candidates"]) < 2:
+            continue
+        chapter = by_number[case["chapter_number"]]
+        prompt = build_constrained_choice_prompt(
+            chapter,
+            case["index"],
+            case["refuted"],
+            case["candidates"],
+            registry,
+            why=why.get(case["source"], "the text rules that speaker out"),
+        )
+        answers: list[tuple[str, float]] = []
+        for _ in range(runs):
+            try:
+                raw = ollama.generate(prompt, temperature=0.1, format="json")
+                payload = json.loads(raw[raw.index("{") : raw.rindex("}") + 1])
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                logger.warning("    %s: constrained choice failed: %s", case["line_id"], exc)
+                answers.append(("", 0.0))
+                continue
+            speaker = str(payload.get("speaker_id") or "").strip()
+            answers.append((speaker, float(payload.get("confidence") or 0.0)))
+
+        chosen = {a for a, _ in answers}
+        unanimous = len(chosen) == 1 and next(iter(chosen)) in case["candidates"]
+        confidence = sum(c for _, c in answers) / max(1, len(answers))
+        if not unanimous:
+            logger.info("    %s: no stable answer across %d runs %s", case["line_id"], runs, [a for a, _ in answers])
+            continue
+        if confidence < min_confidence:
+            logger.info("    %s: unanimous but only %.2f confident", case["line_id"], confidence)
+            continue
+        proposals.append(
+            {
+                "line_id": case["line_id"],
+                "chapter_number": case["chapter_number"],
+                "from": case["refuted"],
+                "to": next(iter(chosen)),
+                "source": f"constrained_choice/{case['source']}",
+                "confidence": round(confidence, 3),
+                "reason": (
+                    f"{case['source'].replace('_', ' ')} ruled out {case['refuted']!r}; "
+                    f"chose {next(iter(chosen))!r} from {case['candidates']} "
+                    f"unanimously across {runs} runs"
+                ),
+            }
+        )
+    return proposals
+
+
+def repair(project_dir: Path, *, apply: bool, use_llm: bool = False) -> dict[str, int]:
     registry = CharacterRegistry.model_validate_json(
         (project_dir / "characters.json").read_text(encoding="utf-8")
     )
@@ -207,6 +316,10 @@ def repair(project_dir: Path, *, apply: bool) -> dict[str, int]:
     # which matters, because reviewing an attribution means reading the passage
     # and the operator has not read the book.
     resolved = resolve_refuted_by_unique_candidate(chapters, registry)
+    if use_llm:
+        # Only the lines the text alone cannot settle reach a model, and it is
+        # asked to choose from a list rather than attribute freely.
+        resolved = resolved + _constrained_choice(chapters, registry)
     by_number = {chapter.chapter_number: chapter for chapter in chapters}
     for proposal in resolved:
         counts["auto_resolved"] += 1
@@ -223,9 +336,16 @@ def repair(project_dir: Path, *, apply: bool) -> dict[str, int]:
         if line is None:
             continue
         line.speaker = proposal["to"]
-        line.speaker_confidence = 0.95
+        line.speaker_confidence = float(proposal.get("confidence") or 0.95)
         line.speaker_evidence = proposal["reason"][:4000]
-        line.attribution_resolver = "deterministic_unique_candidate"
+        # Provenance is not cosmetic: one of these two came from the text alone
+        # and the other from a model choosing between candidates the text left.
+        # A later reader must be able to tell which.
+        line.attribution_resolver = (
+            "constrained_choice"
+            if str(proposal.get("source", "")).startswith("constrained_choice")
+            else "deterministic_unique_candidate"
+        )
         line.attribution_review_required = False
         line.attribution_review_reason = ""
         atomic_write_text(chapter_paths[proposal["chapter_number"]], chapter.model_dump_json(indent=2))
@@ -256,6 +376,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--project", required=True, help="Project directory name inside brain/projects")
     parser.add_argument("--apply", action="store_true", help="Write changes (default is a dry run)")
+    parser.add_argument(
+        "--llm",
+        action="store_true",
+        help="Also ask the local model to choose, for refuted lines with two or more candidates",
+    )
     args = parser.parse_args()
 
     project_dir = PROJECTS / args.project
@@ -263,7 +388,7 @@ def main() -> int:
         logger.error("no cast at %s", project_dir)
         return 1
 
-    counts = repair(project_dir, apply=args.apply)
+    counts = repair(project_dir, apply=args.apply, use_llm=args.llm)
     logger.info(
         "%s: %d renamed by a naming tag, %d auto-resolved from a unique candidate, "
         "%d flagged for review%s",
