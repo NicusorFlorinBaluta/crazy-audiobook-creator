@@ -180,10 +180,27 @@ already wrong, so both paths are reasoning from corrupted premises:
 | `ch17_0168` | jarlaxle | zaknafein | **per-line** — *"You would claim that in any case"* rebuts Jarlaxle, who then answers *"Not with you, old friend"* |
 | `ch01_0250` | effron | dahlia | **block** — *"Can you not even call me mother?"* is Dahlia's, so *"No."* is Effron's |
 
-This is not a verdict on block adjudication. 96.8% agreement is reassuring, but
-the plan's Risk 2 says its failure mode is *self-consistent, plausible* error,
-and a per-line path reading the same corrupted neighbours can agree with it and
-both be wrong. The gate stays closed.
+Reading the 16 "escalated" lines settles it. On every one, the per-line path
+gave the **same speaker** as the block path and simply landed below the 0.85
+auto-accept threshold. So:
+
+```
+same answer          612 / 616  = 99.4%
+disagreed              4   -- per-line right 3, block right 1
+```
+
+**Measurable effect on quality: minus two correct lines out of 616.** Against
+10–20% wall-clock and 16 saved escalations, weighed against blast radius,
+coarser resume, noisier re-runs, and Risk 2.
+
+The plan is now marked *disabled and recommended for removal*. The decisive
+argument is not the diff but §Risk 2's own mitigation: the ch11 cascade block
+adjudication was built for, and never selected, is caught by
+`detect_possessive_contradictions` in forty deterministic lines with no LLM
+call. The cheaper tool solves the motivating case better.
+
+The code is left in place, inert behind `enabled: false`, because deleting a
+feature is the operator's call and there is no cost to it sitting there.
 
 ### What the diff actually found: a blind spot in the tag guardrail
 
@@ -342,13 +359,61 @@ used by both, reading the configured values and comparing against the enum.
 
 ```
 ruff check .        All checks passed        (was 19 errors, 3 of them F821)
-pytest              738 passed, 2 skipped    (was 713; +25 tests)
+pytest              764 passed, 2 skipped    (was 713; +51 tests)
 BLE001 ratchet      116                      (was 139; ratchet target was 118)
 live cast pass      both books, both tiers, 3 API requests total
 ```
 
 Each regression test for a shipped defect was verified to fail when the defect is
 reinstated, following the convention set by `25e7d8a`.
+
+## The one defect that cannot be auto-fixed
+
+`ch11_0148` is the only finding the possessive check reports on
+`the-finest-edge-of-twilight-book`, and it is real: Effron disowns the tower on
+that line and owns it on the next, which its own tag confirms as his. So the
+line is not Effron's.
+
+Every automatic resolver disagrees:
+
+```
+local qwen3.8:27b            effron   0.98
+gemini-3.5-flash-lite        effron   0.95
+possessive contradiction     "not effron"
+```
+
+Escalating it to Gemini made things **worse**: the model restated `effron` and
+the escalation path cleared `attribution_review_required`, turning a proven
+defect into a confidently accepted wrong answer.
+
+### A refutation now outranks a model
+
+A deterministic finding is a fact about the text, so it is marked
+`[deterministic] ` in the review reason and a model may not restate the speaker
+it refutes. Any *other* answer settles the line normally — once the speaker
+changes, the contradiction is gone.
+
+The marker is captured before any tier runs, because each tier rewrites the
+review reason as it reports; reading it inside the loop loses it after the
+first stage.
+
+Run live, twice, on the same line:
+
+```
+run 1   triage effron 0.95  -> refused -> adjudication dahlia 1.00  -> accepted
+run 2   triage effron 0.95  -> refused -> adjudication effron 0.74  -> below
+                                                                       threshold,
+                                                                       stays flagged
+```
+
+`dahlia` is the answer the 2026-09-06 record argues for and the one block
+adjudication was built to produce and never did. But **Gemini is not stable
+here** — the same line, the same prompt, two different answers minutes apart.
+
+That is the answer to "can it be auto-fixed?": **no.** Not by the local model,
+not by Gemini, not reliably by anything. What can be done is refuse to let a
+model overwrite the refutation, and leave the line flagged for a human. It is
+flagged now.
 
 ## What this review did not check, and one gap it exposed
 

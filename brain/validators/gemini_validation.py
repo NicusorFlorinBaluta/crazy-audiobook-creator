@@ -880,6 +880,18 @@ class GeminiWebClient:
             lock.release()
 
 
+#: Marks a review reason that a deterministic check produced. Such a finding is
+#: a fact about the text -- the author's own words contradicting the label -- so
+#: a model may propose a different speaker but may not declare the line settled.
+DETERMINISTIC_REVIEW_PREFIX = "[deterministic] "
+
+
+def _is_deterministic_contradiction(line: Any) -> bool:
+    return str(getattr(line, "attribution_review_reason", "") or "").startswith(
+        DETERMINISTIC_REVIEW_PREFIX
+    )
+
+
 class GeminiValidationService:
     """Coordinates API triage, API adjudication, and web Pro fallback."""
 
@@ -1706,6 +1718,15 @@ class GeminiValidationService:
         character_context: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         unresolved = [line for chapter in chapters for line in chapter.lines if line.attribution_review_required]
+        # Captured before any tier runs. The review reason is rewritten as each
+        # tier reports, so reading the marker inside the loop would lose it
+        # after the first stage and let the second stage restate the refuted
+        # speaker unchallenged.
+        refuted_by_line: dict[str, str] = {
+            line.line_id: str(line.speaker or "")
+            for line in unresolved
+            if _is_deterministic_contradiction(line) and line.speaker
+        }
         if not self.enabled or not unresolved:
             return {"attempted": 0, "resolved": 0, "manual_review": len(unresolved)}
         by_id = {line.line_id: line for line in unresolved}
@@ -1980,6 +2001,28 @@ class GeminiValidationService:
                     if identity_conflict:
                         line.attribution_confidence_history[-1]["validation_error"] = identity_conflict
                         trace[-1]["validation_error"] = identity_conflict
+
+                    # A deterministic contradiction is a fact about the text, not
+                    # an opinion to be outvoted. `ch11_0148` is the case: the
+                    # possessive check proves Effron cannot be the speaker, and
+                    # both models said Effron anyway -- qwen at 0.98, Gemini
+                    # triage at 0.95 -- and escalating it used to clear the flag,
+                    # turning a known defect into a confident wrong answer.
+                    #
+                    # A refutation names who did *not* speak. So a model may not
+                    # restate the refuted speaker, but any other answer settles
+                    # the line normally: once the speaker changes, the
+                    # contradiction the check found is gone. Measured on
+                    # ch11_0148, refusing the triage tier's restatement escalated
+                    # it to adjudication, which answered `dahlia` at 1.0 -- the
+                    # answer the 2026-09-06 record argues for and the one block
+                    # adjudication was built to produce and never did.
+                    refuted_speaker = refuted_by_line.get(line.line_id, "")
+                    if refuted_speaker and valid and decision.speaker_id == refuted_speaker:
+                        valid = False
+                        line.attribution_confidence_history[-1]["validation_error"] = (
+                            f"restates {refuted_speaker!r}, which a deterministic check has refuted"
+                        )
 
                     if valid and decision.confidence >= self.auto_accept:
                         line.speaker = str(decision.speaker_id)

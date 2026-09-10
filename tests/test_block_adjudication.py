@@ -7,12 +7,17 @@ hallucinated responses, and a reproduction fixture for ch11_0145..0152.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from brain.director.attribution_audit import detect_possessive_contradictions
 from brain.director.attribution_detector import SuspiciousTurn
+from brain.validators.gemini_validation import (
+    DETERMINISTIC_REVIEW_PREFIX,
+    _is_deterministic_contradiction,
+)
 from brain.validators.tiered_adjudicator import (
     TieredAttributionAdjudicator,
     _extract_block_json,
@@ -663,3 +668,51 @@ class TestPossessiveContradictionCheck:
         found = detect_possessive_contradictions([chapter])
         assert len(found) == 1, "the known false positive is documented, not suppressed"
         assert found[0]["noun"] == "way"
+
+
+class TestDeterministicRefutationOutranksAModel:
+    """A model may not restate a speaker the text has already refuted.
+
+    `ch11_0148` is the case that forced this. The possessive check proves
+    Effron cannot be the speaker -- he disowns the tower on that line and owns
+    it on the next, which is tag-confirmed as his. Both models say Effron
+    anyway: qwen at 0.98, Gemini triage at 0.95. Escalation used to clear the
+    review flag on that basis, turning a proven defect into a confident wrong
+    answer.
+
+    Measured live, twice, on the same line: one run had adjudication answer
+    `dahlia` at 1.0 once triage's restatement was refused; the next run had it
+    answer `effron` at 0.74, below the threshold, so the line stayed flagged.
+    Gemini is not stable here. The guard is correct either way -- it never lets
+    the refuted speaker be restated at high confidence, and a line the models
+    cannot better is left for a human.
+    """
+
+    def test_the_marker_identifies_a_deterministic_finding(self) -> None:
+        line = SimpleNamespace(
+            attribution_review_reason=DETERMINISTIC_REVIEW_PREFIX + "'effron' both owns and does not own 'tower'"
+        )
+        assert _is_deterministic_contradiction(line)
+
+    def test_an_ordinary_review_reason_is_not_one(self) -> None:
+        line = SimpleNamespace(attribution_review_reason="Confidence 0.80 < threshold 0.85")
+        assert not _is_deterministic_contradiction(line)
+
+    def test_a_missing_reason_is_not_one(self) -> None:
+        assert not _is_deterministic_contradiction(SimpleNamespace(attribution_review_reason=""))
+        assert not _is_deterministic_contradiction(SimpleNamespace())
+
+    def test_the_detector_output_carries_the_marker_verbatim(self) -> None:
+        """The audit's `reason` is what gets prefixed, so the two must agree."""
+        chapter = ScriptChapter(
+            chapter_number=11,
+            chapter_title="Eleven",
+            lines=[
+                ScriptLine(line_id="ch11_0148", speaker="effron", text='"...a guest in your tower."'),
+                ScriptLine(line_id="ch11_0149", speaker="effron", text='"...into my tower, mother,"'),
+            ],
+        )
+        finding = detect_possessive_contradictions([chapter])[0]
+        flagged = SimpleNamespace(attribution_review_reason=DETERMINISTIC_REVIEW_PREFIX + finding["reason"])
+        assert _is_deterministic_contradiction(flagged)
+        assert "effron" in flagged.attribution_review_reason

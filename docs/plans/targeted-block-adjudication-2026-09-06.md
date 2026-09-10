@@ -1,6 +1,46 @@
 # Targeted block adjudication — plan, 2026-09-06
 
-**Status:** Implemented, flag OFF, rollout gate NOT cleared.
+**Status:** Implemented, **disabled, and recommended for removal.**
+
+> **Verdict, 2026-09-10.** The rollout gate was run in full (below). Block
+> adjudication does not earn its place, and the flag stays off.
+>
+> Measured over the 616 lines it decided on `the-finest-edge-of-twilight-book`,
+> against the per-line path on the same text:
+>
+> ```
+> same answer            612 / 616  = 99.4%
+>   agreed outright        596
+>   agreed, block more confident   16   (per-line would have escalated these)
+> disagreed                4   -- per-line right 3, block right 1
+> ```
+>
+> So its measurable effect on quality is **minus two correct lines out of 616**.
+> The plan's own accounting said an 83% cut in calls buys "roughly 10–20%
+> wall-clock", and it saves 16 Gemini escalations. Against that: blast radius
+> (66 blocks carry 6+ suspicious turns), coarser resume, noisier re-runs, and
+> Risk 2's invisible-error mode.
+>
+> It also never did the job it was built for. Acceptance criterion 2 required
+> `ch11_0147/0148` to resolve to `dahlia`; they are still `effron`, and the
+> targeting never selected them — they carry `local` and `local_qwen_micro`.
+>
+> The decisive point is that the ch11 cascade **is** now caught, by
+> `attribution_audit.detect_possessive_contradictions` — forty deterministic
+> lines, no LLM call, no blast radius, one finding per book. A cheaper answer to
+> the same problem, arrived at while building this one's safety net.
+>
+> **Recommendation: delete the block path** (`_adjudicate_block_tier1`,
+> `_group_suspicious_into_blocks`, `_is_block_targeted`,
+> `_find_unconfirmed_run_line_ids`, `_extract_block_json`, `DialogueBlock`, the
+> `block_adjudication` config and the `local_qwen_block` resolver) and keep the
+> problem statement below, which is still true and still unsolved: speech tags
+> settle 490 of 3,125 spoken lines, and nothing sees the other 84%.
+>
+> Not deleted yet — that is the operator's call, and the code is inert with the
+> flag off.
+>
+> Reproduce with `scripts/diff_block_vs_per_line_attribution.py`.
 
 > **Correction, 2026-09-10.** This line said "defaulted off" and the config
 > sample below shows `enabled: false`, but `brain/config.yaml` shipped
