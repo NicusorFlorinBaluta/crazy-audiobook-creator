@@ -147,6 +147,73 @@ response mislabels an entire exchange.
 mitigation — an independent post-hoc consistency check outside the adjudicator —
 is still unbuilt, and is now listed as a gate item rather than assumed present.
 
+### The dry-run the plan asked for, run after the fact
+
+616 lines of `the-finest-edge-of-twilight-book` were decided by the block path
+while the flag was wrongly on. Rollout step 3 —
+
+> "Dry-run both paths over the same book and diff the assignments. Inspect every
+> line where they disagree — that set is small enough to read."
+
+— was never run, so it was run now. The per-line path cannot simply be re-run
+over the current scripts, because block adjudication left those lines at high
+confidence and the detector no longer flags them; each was rebuilt into the
+`SuspiciousTurn` the detector would have produced and handed to
+`_adjudicate_turn_tier1` alone.
+
+```
+re-examined  616 of 616
+  agree      596        (96.8%)
+  DISAGREE     4
+  escalated   16        (the per-line path would have sent these to Gemini)
+  failed       0
+```
+
+Reading all four, three favour the per-line answer and one favours the block
+answer — and every one sits in a stretch where the *neighbouring* labels are
+already wrong, so both paths are reasoning from corrupted premises:
+
+| line | block said | per-line said | who is right |
+| --- | --- | --- | --- |
+| `ch13_0362` | breezy | savahn | **per-line** — the next narrator line is *"Savahn flatly stated."* |
+| `ch09_0307` | gregory_antoine | jarlaxle | **per-line** — the beat before is *"Jarlaxle admitted… but he grew more serious"*, and Gregory stutters *"I—"* after |
+| `ch17_0168` | jarlaxle | zaknafein | **per-line** — *"You would claim that in any case"* rebuts Jarlaxle, who then answers *"Not with you, old friend"* |
+| `ch01_0250` | effron | dahlia | **block** — *"Can you not even call me mother?"* is Dahlia's, so *"No."* is Effron's |
+
+This is not a verdict on block adjudication. 96.8% agreement is reassuring, but
+the plan's Risk 2 says its failure mode is *self-consistent, plausible* error,
+and a per-line path reading the same corrupted neighbours can agree with it and
+both be wrong. The gate stays closed.
+
+### What the diff actually found: a blind spot in the tag guardrail
+
+`ch13_0362` is labelled `breezy` and the very next narrator line is **"Savahn
+flatly stated."** The 2026-09-06 record's whole point is that *the attached tag
+outranks the model* — so why did nothing catch it?
+
+Because every tag check in the codebase requires the following narrator line to
+begin with a **lower-case** letter, the mark of a line continuing the quoted
+sentence (*"he said"*). A tag written as its own sentence starts with a capital
+and is skipped by all of them. Counted on this book:
+
+```
+lower-case-led tags (the guardrail reads these) : 490
+capital-led "<Name> <verb>" tags (it does not)  : 574
+```
+
+The 490 in the 2026-09-06 result table is not the number of speech tags in the
+book. It is the number the guardrail can **see** — slightly under half.
+
+The parser is not the limitation, the gate is: `_dialogue_tag_evidence("Gregory
+replied with a blank stare.")` returns `gregory_antoine` quite happily. One
+stored speaker in that ignored set contradicts its tag (`ch09_0108`, stored
+`perrywinkle_shin`, tag names Gregory). `"Savahn flatly stated."` defeats the
+parser too, for a second reason — the adverb between name and verb.
+
+Not fixed here. Widening the gate touches the most load-bearing guardrail in the
+attribution path, and the 2026-09-06 record earned its result by measuring
+before changing. It needs its own pass, with the same discipline.
+
 ## 4. A rejection erased by a later acceptance
 
 The end-of-stages fallback changed from `len(errors) == len(stages)` ("every
