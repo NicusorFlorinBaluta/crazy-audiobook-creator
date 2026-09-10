@@ -621,10 +621,29 @@ class GeminiApiClient:
                     timeout=self.timeout,
                 )
                 if response.status_code == 429:
-                    resp_text = response.text
-                    if _is_daily_quota_exhaustion(resp_text):
+                    # `str()` because everything below parses this: httpx always
+                    # gives a string, but a stubbed response need not.
+                    resp_text = str(response.text)
+                    per_day = _is_daily_quota_exhaustion(resp_text)
+                    # `_is_daily_quota_exhaustion` is a heuristic over a body
+                    # shape this project has not yet observed in the wild: the
+                    # rework of 2026-09-10 was driven by documentation and is
+                    # covered only by fakes. Log the evidence and the verdict
+                    # together, so the first real 429 either confirms the
+                    # classification or shows exactly how it is wrong.
+                    quota_ids = re.findall(r'"quotaId"\s*:\s*"([^"]+)"', resp_text) or ["(none)"]
+                    logger.warning(
+                        "[ExternalValidation] 429 from %s | classified=%s | quotaId=%s | retry_after=%.1fs | body=%s",
+                        model,
+                        "per-day (fail fast)" if per_day else "per-minute (retry)",
+                        ",".join(quota_ids),
+                        _retry_delay_seconds(response, resp_text, default=2.0),
+                        resp_text[:400].replace("\n", " "),
+                    )
+                    if per_day:
                         # Per-day quota: no amount of waiting inside this call
-                        # recovers it. Fail fast so the circuit opens for an hour.
+                        # recovers it. Fail fast so the circuit stays shut until
+                        # the quota actually returns at Pacific midnight.
                         raise QuotaExhaustedError(
                             f"Gemini API daily quota exhausted (429): {resp_text[:300].strip()}"
                         )
