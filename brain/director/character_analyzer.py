@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from brain.director import cast_identity
+from brain.director.cast_identity import prune_ambiguous_fragment_aliases
 from brain.director.ollama_client import OllamaClient
 from shared.constants import Gender
 from shared.models import (
@@ -530,6 +531,25 @@ class CharacterAnalyzer:
                     checkpoint_path,
                     exc,
                 )
+
+        # Alias hygiene again, on the finished cast. The pass inside
+        # `_consolidate_accumulated_characters` runs mid-analysis and cannot see
+        # what comes after it -- unnamed speakers provisioned from source tags,
+        # name-variant merges, aliases recovered downstream. Measured on
+        # `the-shadow-of-the-gods` (119 characters): consolidation dropped 18
+        # fragments and a further **69** were still present at the end,
+        # including `Winged` held by both `golden_winged_woman` and
+        # `white_winged_woman`, and `Grey`/`Haired` split out of
+        # "Grey-Haired Man". Running it twice is safe -- a second pass finds
+        # nothing, because the first already removed everything it would.
+        source_text = "\n".join(chapter.text for chapter in book.chapters)
+        final_pruned = prune_ambiguous_fragment_aliases(registry.characters, source_text)
+        if final_pruned:
+            logger.info(
+                "[CharacterAnalyzer] Dropped %d further alias fragment(s) from the finished cast: %s",
+                len(final_pruned),
+                ", ".join(f"{p['alias']!r} from {p['character_id']}" for p in final_pruned[:8]),
+            )
 
         return registry
 
