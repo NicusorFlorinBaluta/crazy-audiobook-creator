@@ -25,12 +25,27 @@
 >
 > **Outstanding before this may be enabled:**
 >
-> 1. Risk 2's mitigation is unbuilt — there is still no independent post-hoc
->    consistency check outside the adjudicator. Guardrail 4 (reciprocal turns)
->    is pre-existing and checks adjacent pairs, not block self-consistency.
->    The diff above does **not** substitute for it: a per-line path reading the
->    same corrupted neighbours can agree with a block error, so 96.8% agreement
->    bounds nothing about the failure mode Risk 2 names.
+> 1. ~~Risk 2's mitigation is unbuilt~~ — **built 2026-09-10**.
+>    `attribution_audit.detect_possessive_contradictions` looks for one speaker
+>    both owning and not owning the same thing inside a single unbroken turn,
+>    which is the exact signature of the ch11 error:
+>
+>    ```
+>    ch11_0148 [effron] "...a guest in YOUR tower."
+>    ch11_0149 [effron] "...invited into MY tower, mother,"
+>    ```
+>
+>    It runs in `audit_book_attribution`, outside the adjudicator, and the block
+>    prompt never sees it — which is the point. Measured, it fires **once per
+>    book**: the real ch11 error in book 1, and one false positive in book 2
+>    (`way`, where "knowing your way home" and "find our way back" are routes).
+>    One item per book is a reading, not a queue, so it is reported and never
+>    blocking.
+>
+>    Note what it does *not* do: it catches this shape of contradiction, not
+>    self-consistent error in general. The diff below is likewise no substitute
+>    — a per-line path reading the same corrupted neighbours can agree with a
+>    block error, so 96.8% agreement bounds nothing about Risk 2.
 > 2. Acceptance criterion 2 **failed**. The plan required `ch11_0147/0148` to
 >    resolve to `dahlia`; they are still `effron`, and `0148` was resolved by
 >    `local_qwen_micro`, not the block path. The feature ran on 616 lines

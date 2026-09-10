@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 
+from brain.director.attribution_audit import detect_possessive_contradictions
 from brain.director.attribution_detector import SuspiciousTurn
 from brain.validators.tiered_adjudicator import (
     TieredAttributionAdjudicator,
@@ -578,3 +579,87 @@ def test_uncovered_turn_not_silently_dropped_when_chapter_missing_from_map(twili
     assert len(report.results) == 1
     assert report.results[0].line_id == "ch02_0001"
     assert report.summary["total_suspicious"] == 1
+
+
+class TestPossessiveContradictionCheck:
+    """Risk 2's mitigation: a consistency check kept outside the adjudicator.
+
+    The plan warns that block adjudication is *instructed* to produce a
+    self-consistent assignment, so it resolves the tension that made the ch11
+    error visible in the first place -- "trading loud, detectable errors for
+    smooth, plausible, invisible ones". The mitigation it asks for is an
+    independent post-hoc check that the block prompt never sees.
+
+    The signature it looks for, from the shipped script:
+
+        ch11_0148 [effron] "...never invited me to be a guest in YOUR tower."
+        ch11_0149 [effron] "You will never be invited into MY tower, mother,"
+
+    One speaker, one unbroken turn, both owning and not owning the tower.
+    """
+
+    @staticmethod
+    def _chapter(number: int, rows: list[tuple[str, str, str]]) -> ScriptChapter:
+        return ScriptChapter(
+            chapter_number=number,
+            chapter_title=f"Chapter {number}",
+            lines=[
+                ScriptLine(line_id=lid, speaker=speaker, text=text)
+                for lid, speaker, text in rows
+            ],
+        )
+
+    def test_the_ch11_tower_contradiction_is_caught(self) -> None:
+        chapter = self._chapter(11, [
+            ("ch11_0147", "effron", '"And I have even done you small favors, as you mention."'),
+            ("ch11_0148", "effron", '"You have never invited me to be a guest in your tower."'),
+            ("ch11_0149", "effron", '"You will never be invited into my tower, mother,"'),
+        ])
+        found = detect_possessive_contradictions([chapter])
+        assert len(found) == 1
+        assert found[0]["speaker"] == "effron"
+        assert found[0]["noun"] == "tower"
+        assert found[0]["claimed_line_id"] == "ch11_0149"
+        assert found[0]["disclaimed_line_id"] == "ch11_0148"
+
+    def test_a_contrast_inside_one_line_is_not_a_contradiction(self) -> None:
+        """"Your tower is grander than my tower" is one speaker, two towers."""
+        chapter = self._chapter(1, [
+            ("ch01_0001", "effron", '"Your tower is grander than my tower, mother."'),
+            ("ch01_0002", "effron", '"That has always been true."'),
+        ])
+        assert detect_possessive_contradictions([chapter]) == []
+
+    def test_two_speakers_may_disagree_about_ownership(self) -> None:
+        """The check is about ONE speaker contradicting themselves."""
+        chapter = self._chapter(1, [
+            ("ch01_0001", "dahlia", '"You have never invited me into your tower."'),
+            ("ch01_0002", "effron", '"You will never be invited into my tower."'),
+        ])
+        assert detect_possessive_contradictions([chapter]) == []
+
+    def test_a_narrator_line_does_not_break_the_run(self) -> None:
+        """Speech tags sit between turns; the run is the speaker's, not the text's."""
+        chapter = self._chapter(11, [
+            ("ch11_0148", "effron", '"...a guest in your tower."'),
+            ("ch11_0149", "effron", '"You will never enter my tower."'),
+        ])
+        assert len(detect_possessive_contradictions([chapter])) == 1
+
+    def test_it_is_reported_and_never_blocking(self) -> None:
+        """One item per book is a reading, not a queue.
+
+        Measured on both analysed books it fires exactly once each: the real
+        ch11 error, and one false positive in Isles of the Emberdark where
+        "knowing your way home" and "find our way back" are routes rather than
+        possessions. With a single false positive to learn from, a stop-list of
+        abstract nouns would be fitting to noise, so none is applied and the
+        result informs rather than gates.
+        """
+        chapter = self._chapter(25, [
+            ("ch25_0101", "dusk", '"Setting off without knowing your way home is stupid."'),
+            ("ch25_0103", "dusk", '"No, I don\'t know how we\'ll find our way back,"'),
+        ])
+        found = detect_possessive_contradictions([chapter])
+        assert len(found) == 1, "the known false positive is documented, not suppressed"
+        assert found[0]["noun"] == "way"

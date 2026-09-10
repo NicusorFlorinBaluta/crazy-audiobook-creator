@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from datetime import UTC, datetime
 from typing import Any
@@ -9,6 +10,8 @@ from typing import Any
 from brain.director.script_generator import ScriptGenerator
 from shared.constants import Gender
 from shared.models import CharacterRegistry, ExtractedBook, ScriptChapter, ScriptLine
+
+logger = logging.getLogger(__name__)
 
 AUDIT_VERSION = "speaker-attribution-v5"
 
@@ -62,6 +65,93 @@ def _self_identified_character(
                 matches.add(character_id)
                 break
     return next(iter(matches)) if len(matches) == 1 else None
+
+
+_FIRST_PERSON_POSSESSIVE = re.compile(r"\b(?:my|mine|our)\s+([a-z]{3,})\b", re.IGNORECASE)
+_SECOND_PERSON_POSSESSIVE = re.compile(r"\byour\s+([a-z]{3,})\b", re.IGNORECASE)
+
+
+def detect_possessive_contradictions(
+    chapters: list[ScriptChapter],
+) -> list[dict[str, Any]]:
+    """Find a speaker who both owns and does not own the same thing.
+
+    This is the independent consistency check that
+    `docs/plans/targeted-block-adjudication-2026-09-06.md` names as the
+    mitigation for its Risk 2, and it is deliberately kept **outside** the
+    adjudicator and out of any prompt. The risk it answers:
+
+    > The ch11 error was *detectable* because the block was self-contradictory
+    > about who owns the tower. A block-level model is explicitly instructed to
+    > produce a self-consistent assignment... This trades loud, detectable
+    > errors for smooth, plausible, invisible ones.
+
+    The signature of that error, from the shipped script:
+
+    ```
+    ch11_0148 [effron] "...You have never invited me to be a guest in YOUR tower."
+    ch11_0149 [effron] "You will never be invited into MY tower, mother,"
+    ```
+
+    Both lines are attributed to Effron, and one speaker cannot both own and
+    not own the tower inside a single unbroken turn. So: within a maximal
+    same-speaker run, look for a noun carrying a first-person possessive in one
+    line and a second-person possessive in another.
+
+    Measured on the two analysed books, this fires **once per book**:
+
+    * `the-finest-edge-of-twilight-book` -- `tower`, ch11: the real error.
+    * `isles-of-the-emberdark` -- `way`, ch25: a false positive. "knowing your
+      way home" and "find our way back" are routes, not possessions.
+
+    One item per book is a reading, not a queue, which is why the result is
+    reported rather than enforced. No stop-list of abstract nouns is applied:
+    with a single false positive to learn from, that would be fitting to noise.
+    """
+    findings: list[dict[str, Any]] = []
+    for chapter in chapters:
+        run: list[ScriptLine] = []
+
+        def _flush(run: list[ScriptLine], chapter: ScriptChapter = chapter) -> None:
+            if len(run) < 2:
+                return
+            owned: dict[str, list[str]] = {}
+            addressed: dict[str, list[str]] = {}
+            for line in run:
+                for match in _FIRST_PERSON_POSSESSIVE.finditer(line.text or ""):
+                    owned.setdefault(match.group(1).lower(), []).append(line.line_id)
+                for match in _SECOND_PERSON_POSSESSIVE.finditer(line.text or ""):
+                    addressed.setdefault(match.group(1).lower(), []).append(line.line_id)
+            for noun in sorted(set(owned) & set(addressed)):
+                mine, yours = set(owned[noun]), set(addressed[noun])
+                # Both forms in one line is a contrast ("your tower, not mine"),
+                # not a contradiction. Require them on different lines.
+                if not (mine - yours) or not (yours - mine):
+                    continue
+                findings.append(
+                    {
+                        "chapter_number": chapter.chapter_number,
+                        "speaker": run[0].speaker,
+                        "noun": noun,
+                        "claimed_line_id": sorted(mine - yours)[0],
+                        "disclaimed_line_id": sorted(yours - mine)[0],
+                        "reason": (
+                            f"{run[0].speaker!r} both owns and does not own {noun!r} "
+                            "within one unbroken turn; one of these lines is attributed wrongly"
+                        ),
+                    }
+                )
+
+        for line in chapter.lines:
+            if line.speaker == "narrator":
+                continue
+            if run and run[-1].speaker == line.speaker:
+                run.append(line)
+            else:
+                _flush(run)
+                run = [line]
+        _flush(run)
+    return findings
 
 
 def audit_book_attribution(
@@ -333,6 +423,14 @@ def audit_book_attribution(
                 )
                 continue
 
+    possessive_contradictions = detect_possessive_contradictions(scripts)
+    if possessive_contradictions:
+        logger.warning(
+            "[AttributionAudit] %d self-contradictory possessive claim(s): %s",
+            len(possessive_contradictions),
+            "; ".join(f"{f['speaker']}/{f['noun']} ch{f['chapter_number']}" for f in possessive_contradictions[:5]),
+        )
+
     return {
         "audit_version": AUDIT_VERSION,
         "generated_at": datetime.now(UTC).isoformat(),
@@ -342,8 +440,13 @@ def audit_book_attribution(
             "dialogue_fragments": dialogue_count,
             "narrator_quotations": narrator_quote_count,
             "blocking_issues": len(issues),
+            "possessive_contradictions": len(possessive_contradictions),
         },
         "issues": issues,
+        # Reported, never blocking. See `detect_possessive_contradictions`:
+        # this is the independent check the block-adjudication plan requires,
+        # and it must stay outside the adjudicator and out of every prompt.
+        "possessive_contradictions": possessive_contradictions,
     }
 
 
