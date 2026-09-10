@@ -313,9 +313,27 @@ used by both, reading the configured values and comparing against the enum.
   synthesis, validation and the review gate so the three cannot disagree. On both
   books this changes nothing today — all 62 hits are genuine em-dash separators —
   so it removes a latent risk rather than a live one.
-- Scene-break silence was 100 ms, below the threshold where a listener hears a
+- ~~Scene-break silence was 100 ms, below the threshold where a listener hears a
   break at all. Now `PAUSE_MARKER_SILENCE_SECONDS = 0.9`, which does change those
-  62 lines in book 1.
+  62 lines in book 1.~~
+
+  **Wrong, reverted the same day.** The placeholder is not the pause.
+  `voice.mastering.assembler` owns the timing and inserts
+  `max(previous.pause_after_ms, current.pause_before_ms)` between segments,
+  under an explicit rule: *"One timing owner: adjacent pause directives are
+  combined with max(), never added together."* Checked against the data:
+  every separator line in book 1 carries `pause_after_ms = 900`, and so does
+  the line before it, so the break already runs ~0.9 s + placeholder + ~0.9 s
+  ≈ **1.96 s**. Measured on the seven markers inside the delivered
+  chapters 1–5, the existing segments are 0.16–0.48 s at −52 to −180 dBFS —
+  silent, and short by design.
+
+  Raising the placeholder to 0.9 s would have pushed those breaks to ~2.7 s and
+  introduced exactly the third, uncombined silence source the assembler's rule
+  exists to prevent. Back to 0.1 s.
+
+  This also settles the remediation question it raised: the delivered
+  chapters 1–5 need **no re-master**. The audio was never wrong.
 - `deploy_voice_apk.py` trusted any SSH host key (`AutoAddPolicy`) while sending
   credentials; it now loads `known_hosts`, rejects unknown keys, and prints the
   one-time `ssh-keyscan` enrolment command. URL probes check the scheme first.

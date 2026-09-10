@@ -242,11 +242,22 @@ def apply_torch_alloc_conf(env: dict[str, str]) -> dict[str, str]:
 # Non-spoken separator markers
 # ---------------------------------------------------------------------------
 
-#: Length of the silence emitted in place of a scene-break marker. A separator
-#: is a beat between scenes, so it needs to be audible as a pause rather than
-#: merely not-a-word; 100 ms is below the threshold where a listener hears a
-#: break at all.
-PAUSE_MARKER_SILENCE_SECONDS = 0.9
+#: Length of the placeholder silence written in place of a scene-break marker.
+#:
+#: Deliberately minimal, and **not** the length of the pause a listener hears.
+#: `voice.mastering.assembler` owns the timing: it inserts
+#: ``max(previous.pause_after_ms, current.pause_before_ms)`` between segments,
+#: under the rule "adjacent pause directives are combined with max(), never
+#: added together". Every separator line in the test books carries
+#: ``pause_after_ms = 900``, and so does the line before it, so the break is
+#: already ~0.9 s + this placeholder + ~0.9 s.
+#:
+#: This was briefly raised to 0.9 s on 2026-09-10, on the mistaken reasoning
+#: that 100 ms "is below the threshold where a listener hears a break at all".
+#: True of the placeholder in isolation, irrelevant in context, and it added a
+#: third uncombined source of silence that the assembler's one-timing-owner
+#: rule exists to prevent. Reverted the same day; see the review record.
+PAUSE_MARKER_SILENCE_SECONDS = 0.1
 
 #: Characters a line may consist of and still be a separator rather than
 #: speech. Deliberately narrow: "no alphanumerics" would also swallow a line of

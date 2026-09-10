@@ -1002,15 +1002,19 @@ class ValidationLoopTests(unittest.TestCase):
             # Neural TTS must not have been called
             self.assertEqual(len(engine.calls), 0)
 
-            # Segment audio must be silence long enough to hear as a scene break
+            # A valid, silent placeholder -- not the pause itself. The audible
+            # break is inserted by `voice.mastering.assembler` from
+            # `pause_after_ms`, which is 900 on these lines and on the line
+            # before, and adjacent directives are combined with max(). Making
+            # the placeholder long would add a third, uncombined silence.
             segment_path = root / "book" / "segments" / "ch01_0001.wav"
             self.assertTrue(segment_path.exists())
             info = sf.info(str(segment_path))
             self.assertAlmostEqual(info.duration, PAUSE_MARKER_SILENCE_SECONDS, places=2)
-            self.assertGreaterEqual(
+            self.assertLess(
                 info.duration,
                 0.5,
-                "a scene break shorter than half a second is not audible as a pause",
+                "the placeholder must not compete with the assembler's pause_after_ms",
             )
 
             # Validation must have passed cleanly
