@@ -33,6 +33,7 @@ from brain.validators.tiered_adjudicator import (
     _attached_tag_evidence,
     _reads_as_attached_tag,
 )
+from scripts.repair_tagged_contradictions import _names_a_proper_noun
 from shared.constants import Gender
 from shared.models import Character, CharacterRegistry
 
@@ -402,3 +403,40 @@ class TestAttachedTagGate:
     def test_the_gate_admits_the_line_that_slipped_through(self) -> None:
         """`ch13_0362`: labelled `breezy`, tagged "Savahn flatly stated."."""
         assert _reads_as_attached_tag("Savahn flatly stated.")
+
+
+class TestDescriptorIsNotAName:
+    """A descriptor says who did NOT speak; only a name says who did.
+
+    `scripts/repair_tagged_contradictions.py` rewrites a stored speaker when
+    the attached tag names someone. "the man said to Dusk." resolves through a
+    generic descriptor to a placeholder entry -- decisive that Dusk is the
+    addressee, silent about who spoke. Renaming him to `minor_male` on that
+    basis would be a downgrade dressed up as a correction, so the tool flags it
+    for review instead. Measured on Isles of the Emberdark, this is the
+    difference between 3 wrong renames and 3 correct flags.
+    """
+
+    @staticmethod
+    def _registry() -> CharacterRegistry:
+        return CharacterRegistry(
+            characters={
+                "gregory_antoine": Character(
+                    id="gregory_antoine", name="Gregory Antoine", gender=Gender.MALE,
+                    age_range="adult", voice_description="dry", aliases=["Gregory", "Gregory Antoine"],
+                ),
+                "minor_male": Character(
+                    id="minor_male", name="Minor Male", gender=Gender.MALE,
+                    age_range="adult", voice_description="plain", aliases=[],
+                ),
+            }
+        )
+
+    def test_a_proper_noun_in_the_tag_may_rename(self) -> None:
+        assert _names_a_proper_noun("Gregory replied with a blank stare.", "gregory_antoine", self._registry())
+
+    def test_a_descriptor_may_not(self) -> None:
+        assert not _names_a_proper_noun("the man said to Dusk.", "minor_male", self._registry())
+
+    def test_an_unknown_id_may_not(self) -> None:
+        assert not _names_a_proper_noun("Gregory replied.", "nobody", self._registry())
