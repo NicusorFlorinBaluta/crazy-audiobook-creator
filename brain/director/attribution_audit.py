@@ -855,6 +855,85 @@ def _speech_tag_evidence_by_line(
 DESCRIPTOR_REVIEW_MARKER = "describes the speaker in terms that fit"
 
 
+def apply_action_beat_attributions(
+    chapters: list[ScriptChapter],
+    registry: CharacterRegistry,
+    chapter_texts: dict[int, str] | None,
+    *,
+    apply: bool = True,
+) -> dict[str, Any]:
+    """Correct speakers the author names through an action beat.
+
+    Split out of `apply_refutation_repairs` so the pipeline can run it **before
+    the suspicious-turn detector**, which is where it belongs and where the
+    refutation pass cannot be.
+
+    The refutation layers want adjudicated speakers to reason about, so that
+    pass runs after adjudication. A beat wants nothing of the sort -- it reads
+    the author's own paragraph -- and running it late cost the prologue three
+    lines. `neighbours_of_reattributed` re-examines the neighbours of a line a
+    repair just renamed, and it is fed from the *before* stage, so a beat
+    rename arriving afterwards was invisible to it. Corrected at the top of the
+    stage, `ch01_0295` becoming Effron makes `ch01_0293` a disagreeing
+    neighbour, and the adjudicator gets asked about a line nothing used to
+    flag.
+
+    Idempotent: a beat that already agrees with the stored speaker changes
+    nothing, so `apply_refutation_repairs` can keep calling it too.
+    """
+    counts = {"beat_attributed": 0}
+    records: list[dict[str, Any]] = []
+    if not chapter_texts:
+        return {"counts": counts, "records": records}
+    # Layer 0: the author naming the speaker through an action beat rather than
+    # a speech tag. Runs first because it is the same kind of evidence as a
+    # naming tag -- the author saying who is talking -- and because a rename
+    # here gives the later layers a correct neighbour to reason from.
+    for chapter in chapters:
+        beats = action_beat_attributions(chapter, chapter_texts.get(chapter.chapter_number, ""), registry)
+        if not beats:
+            continue
+        tag_evidence = _speech_tag_evidence_by_line(chapter, registry)
+        for line in chapter.lines:
+            who = beats.get(line.line_id)
+            if not who or who == line.speaker:
+                continue
+            named, tag_gender = tag_evidence.get(line.line_id, (None, None))
+            if named:
+                # A speech tag naming someone outranks a beat (2026-09-06).
+                continue
+            candidate = registry.characters.get(who)
+            if (
+                tag_gender is not None
+                and candidate is not None
+                and candidate.gender in (Gender.MALE, Gender.FEMALE)
+                and candidate.gender != tag_gender
+            ):
+                # The tag cannot say who spoke, but it rules this beat out.
+                continue
+            counts["beat_attributed"] += 1
+            records.append(
+                {
+                    "line_id": line.line_id,
+                    "action": "beat_attributed",
+                    "from": line.speaker,
+                    "to": who,
+                    "reason": f"an action beat in the same paragraph names {who!r} as the speaker",
+                }
+            )
+            if apply:
+                line.speaker = who
+                line.speaker_confidence = 0.95
+                line.speaker_evidence = (
+                    f"Action beat in the same source paragraph names '{who}' as its subject."
+                )[:4000]
+                line.attribution_resolver = "deterministic_action_beat"
+                line.attribution_review_required = False
+                line.attribution_review_reason = ""
+
+    return {"counts": counts, "records": records}
+
+
 def apply_refutation_repairs(
     chapters: list[ScriptChapter],
     registry: CharacterRegistry,
@@ -896,50 +975,11 @@ def apply_refutation_repairs(
     records: list[dict[str, Any]] = []
 
     # Layer 0: the author naming the speaker through an action beat rather than
-    # a speech tag. Runs first because it is the same kind of evidence as a
-    # naming tag -- the author saying who is talking -- and because a rename
-    # here gives the later layers a correct neighbour to reason from.
-    for chapter in chapters if chapter_texts else []:
-        beats = action_beat_attributions(chapter, chapter_texts.get(chapter.chapter_number, ""), registry)
-        if not beats:
-            continue
-        tag_evidence = _speech_tag_evidence_by_line(chapter, registry)
-        for line in chapter.lines:
-            who = beats.get(line.line_id)
-            if not who or who == line.speaker:
-                continue
-            named, tag_gender = tag_evidence.get(line.line_id, (None, None))
-            if named:
-                # A speech tag naming someone outranks a beat (2026-09-06).
-                continue
-            candidate = registry.characters.get(who)
-            if (
-                tag_gender is not None
-                and candidate is not None
-                and candidate.gender in (Gender.MALE, Gender.FEMALE)
-                and candidate.gender != tag_gender
-            ):
-                # The tag cannot say who spoke, but it rules this beat out.
-                continue
-            counts["beat_attributed"] += 1
-            records.append(
-                {
-                    "line_id": line.line_id,
-                    "action": "beat_attributed",
-                    "from": line.speaker,
-                    "to": who,
-                    "reason": f"an action beat in the same paragraph names {who!r} as the speaker",
-                }
-            )
-            if apply:
-                line.speaker = who
-                line.speaker_confidence = 0.95
-                line.speaker_evidence = (
-                    f"Action beat in the same source paragraph names '{who}' as its subject."
-                )[:4000]
-                line.attribution_resolver = "deterministic_action_beat"
-                line.attribution_review_required = False
-                line.attribution_review_reason = ""
+    # a speech tag. Idempotent, and the pipeline also runs it earlier -- see
+    # `apply_action_beat_attributions`.
+    beat_result = apply_action_beat_attributions(chapters, registry, chapter_texts, apply=apply)
+    counts["beat_attributed"] = beat_result["counts"]["beat_attributed"]
+    records.extend(beat_result["records"])
 
     for chapter in chapters:
         lines = chapter.lines

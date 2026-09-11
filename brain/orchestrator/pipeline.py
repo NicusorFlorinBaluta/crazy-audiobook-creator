@@ -25,6 +25,7 @@ from zoneinfo import ZoneInfo
 import yaml
 
 from brain.director.attribution_audit import (
+    apply_action_beat_attributions,
     apply_refutation_repairs,
     audit_book_attribution,
     queue_attribution_audit_issues,
@@ -1833,6 +1834,26 @@ class Pipeline:
                 len(deterministic_before["repaired"]),
             )
 
+        # The author also names the speaker through an action beat sharing the
+        # quote's paragraph, with no speech verb anywhere. That is source
+        # evidence like a named tag, so it belongs here rather than in the
+        # refutation pass below: a rename at this point still reaches the
+        # detector, and `neighbours_of_reattributed` can re-examine what it
+        # unsettles. Run late, it corrected the prologue's ch01_0295 and left
+        # the three lines around it untouched.
+        beat_repairs = apply_action_beat_attributions(
+            chapter_scripts,
+            registry,
+            {chapter.number: chapter.text for chapter in book.chapters},
+        )
+        if beat_repairs["counts"]["beat_attributed"]:
+            logger.info(
+                "[AttributionRepair] Corrected %d line(s) from action beats",
+                beat_repairs["counts"]["beat_attributed"],
+            )
+            for record in beat_repairs["records"]:
+                logger.info("[AttributionRepair]   %s", record)
+
         # --- Tiered dialogue attribution repair (Tier 1 Local Qwen) ---
         ext_cfg = self.config.get("external_validation", {})
         tiered_cfg = ext_cfg.get("tiered_attribution", {})
@@ -1869,7 +1890,8 @@ class Pipeline:
                 # one speaker. See `neighbours_of_reattributed`.
                 stale_neighbours = neighbours_of_reattributed(
                     chapter_scripts,
-                    {str(entry["line_id"]) for entry in deterministic_before["repaired"]},
+                    {str(entry["line_id"]) for entry in deterministic_before["repaired"]}
+                    | {str(record["line_id"]) for record in beat_repairs["records"]},
                     already_flagged={turn.line_id for turn in suspicious},
                 )
                 if stale_neighbours:
