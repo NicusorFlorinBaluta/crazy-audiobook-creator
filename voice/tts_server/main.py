@@ -306,6 +306,8 @@ async def lifespan(app: FastAPI):
     assembler = AudioAssembler(
         crossfade_ms=master_cfg.get("crossfade_ms", 30),
         sample_rate=tts_cfg.get("sample_rate", 24000),
+        chapter_start_silence_ms=int(master_cfg.get("chapter_start_silence_ms", 1000)),
+        chapter_end_silence_ms=int(master_cfg.get("chapter_end_silence_ms", 2000)),
     )
     normalizer = LoudnessNormalizer(
         target_lufs=master_cfg.get("target_lufs", -19),

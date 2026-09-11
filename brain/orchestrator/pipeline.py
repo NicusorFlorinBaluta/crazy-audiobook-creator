@@ -25,9 +25,11 @@ from zoneinfo import ZoneInfo
 import yaml
 
 from brain.director.attribution_audit import (
+    apply_refutation_repairs,
     audit_book_attribution,
     queue_attribution_audit_issues,
     repair_deterministic_named_attribution,
+    write_attribution_audit,
 )
 from brain.director.character_analyzer import (
     _SYSTEM_PROMPT as CHARACTER_SYSTEM_PROMPT,
@@ -656,15 +658,15 @@ class Pipeline:
             book = book.model_copy(
                 update={"chapters": [chapter for chapter in book.chapters if chapter.number in chapter_numbers]}
             )
-        report = audit_book_attribution(
+        report = write_attribution_audit(
+            project_dir,
             book,
             registry,
             scripts,
             confidence_threshold=self.script_generator.speaker_confidence_threshold,
+            chapter_scope=sorted(chapter_numbers) if chapter_numbers is not None else None,
         )
-        report["chapter_scope"] = sorted(chapter_numbers) if chapter_numbers is not None else None
         report_path = project_dir / "attribution_audit.json"
-        atomic_write_json(report_path, report)
         if enforce and not report["passed"]:
             from brain.orchestrator.review_gate import collect_review_gate
 
@@ -1875,6 +1877,41 @@ class Pipeline:
                         )
             except Exception as exc:
                 logger.warning("[TieredAttribution] Tiered adjudication encountered error: %s", exc)
+
+        # --- Deterministic refutation repairs ---
+        # The author's own text against the stored label: a naming tag renames,
+        # a gendering or contradicting-descriptor tag refutes, a refutation with
+        # one candidate left in the scene resolves, and only what survives all
+        # three is put to a model as a closed choice. This ran as a script for
+        # its first week, which meant a book the pipeline scripted never got it
+        # -- and every line it settles is a review item not raised, which
+        # matters because reviewing an attribution means reading the passage.
+        refutation_cfg = ext_cfg.get("refutation_repairs", {})
+        if refutation_cfg.get("enabled", True):
+            try:
+                constrained_choice = bool(refutation_cfg.get("constrained_choice", True))
+                refutation = apply_refutation_repairs(
+                    chapter_scripts,
+                    registry,
+                    ollama=self.ollama if constrained_choice else None,
+                )
+                counts = refutation["counts"]
+                if any(counts.values()):
+                    logger.info(
+                        "[Refutation] renamed %d, auto-resolved %d, flagged %d, retracted %d stale flag(s)",
+                        counts["renamed"],
+                        counts["auto_resolved"],
+                        counts["flagged"],
+                        counts["unflagged"],
+                    )
+                    for record in refutation["records"]:
+                        logger.info("[Refutation]   %s", record)
+                    # A rename moves a line between characters, and
+                    # `dialogue_count` decides which side of a cast merge
+                    # survives. Leaving it stale would be a quiet second bug.
+                    ScriptGenerator.sync_dialogue_counts(chapter_scripts, registry)
+            except Exception as exc:
+                logger.warning("[Refutation] Deterministic refutation pass failed: %s", exc)
 
         post_repair_audit = audit_book_attribution(
             book,

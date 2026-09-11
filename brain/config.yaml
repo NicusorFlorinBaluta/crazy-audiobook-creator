@@ -98,9 +98,6 @@ extraction:
 # Source-preserving script construction
 script:
   joint_analysis: false            # Quality-first: finish the book-wide cast before attribution
-  max_segment_sentences: 4
-  min_segment_words: 3
-  default_speed: 1.0
   group_utterances: true
   utterance_target_chars: 260      # Bounded same-speaker TTS grouping
   utterance_max_words: 45
@@ -114,15 +111,12 @@ script:
   adaptive_split_max_depth: 2       # 60 -> about 30 -> about 15 fragments, then safe fallback
   adaptive_split_min_fragments: 8   # Avoid tiny recursive requests with little quality upside
   dialogue_focused_schema: false     # Experimental v5; enable only after quality benchmark promotion
-  narrator_pause_ms: 500
-  dialogue_pause_ms: 300
-  scene_transition_pause_ms: 1500
-  chapter_start_pause_ms: 1000
-  chapter_end_pause_ms: 2000
-  paragraph_pause_ms: 600
+  # Per-line pacing is derived, not configured: see
+  # `ScriptGenerator._standard_pause_after_ms`, which picks from emotion and
+  # speed. Chapter-edge silence is the assembler's, in voice/config.yaml under
+  # `mastering`. Six *_pause_ms keys used to sit here reading like the timing
+  # controls and were read by nothing at all.
   max_unique_voices: 0            # 0 = unlimited; every named character gets their own voice
-  minor_character_threshold: 3
-  group_minor_characters: false
   chunk_size_words: 1200
   chunk_overlap_words: 0
 # Local dashboard
@@ -164,12 +158,10 @@ dashboard:
   trusted_lan_cidrs:
   - 192.168.50.0/24
   - 100.64.0.0/10
-  static_dir: dashboard/frontend
   max_upload_size_mb: 100
   max_epub_expanded_mb: 1000
   projects_dir: projects
   max_projects: 50
-  auto_cleanup_days: 0
   auto_resume_in_flight: true
 # External metadata lookup is opt-in
 metadata:
@@ -212,6 +204,20 @@ external_validation:
       enabled: true
       window_radius: 20   # detector default is 5
       scene_radius: 30    # detector default is 8
+  # The author's own text against the stored speaker, run after adjudication
+  # and before Gemini escalation. A naming tag renames; a gendering tag, or a
+  # descriptor that contradicts the stored speaker, refutes; a refutation with
+  # exactly one candidate left in the scene resolves outright.
+  #
+  # Every line this settles is a review item not raised -- and reviewing an
+  # attribution means reading the passage, which is a spoiler for a book the
+  # operator has not read.
+  refutation_repairs:
+    enabled: true
+    # The only layer here that costs an LLM call: for refuted lines the text
+    # leaves two or more candidates for, ask the local model to pick one of
+    # them. Closed question, three runs, unanimous or discarded.
+    constrained_choice: true
 
 
   character_augmentation:
@@ -281,13 +287,7 @@ external_validation:
     response_selector: message-content
 # Pipeline state and artifact behavior
 pipeline:
-  auto_start_tts: true
-  auto_master: true
-  auto_export: true
-  cleanup_intermediates: true
   state_db: pipeline_state.db
-  checkpoint_frequency: 5
-  batch_mode: chapter
 # Automatic safe-boundary working hours
 schedule:
   enabled: true

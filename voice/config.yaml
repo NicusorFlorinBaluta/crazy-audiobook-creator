@@ -113,6 +113,14 @@ mastering:
   crossfade_ms: 30
   fade_curve: "cosine"               # "linear" | "cosine" | "exponential"
 
+  # Chapter-edge silence, owned here because the assembler owns chapter edges.
+  # `AudioAssembler` has taken these as constructor arguments since it was
+  # written; nothing passed them, so its defaults were the only values that had
+  # ever applied. brain/config.yaml carried matching `chapter_*_pause_ms` keys
+  # that read like the controls and were read by nothing.
+  chapter_start_silence_ms: 1000     # standard audiobook lead-in
+  chapter_end_silence_ms: 2000
+
   # Noise gate
   noise_gate_enabled: false          # Generated audio normally needs no gate
   noise_gate_threshold: -50

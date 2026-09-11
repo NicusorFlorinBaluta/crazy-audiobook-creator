@@ -26,6 +26,7 @@ import json
 
 import pytest
 
+from brain.director.attribution_audit import tag_names_a_proper_noun
 from brain.director.attribution_detector import SuspiciousTurn
 from brain.director.script_generator import ScriptGenerator
 from brain.validators.tiered_adjudicator import (
@@ -33,7 +34,6 @@ from brain.validators.tiered_adjudicator import (
     _attached_tag_evidence,
     _reads_as_attached_tag,
 )
-from scripts.repair_tagged_contradictions import _names_a_proper_noun
 from shared.constants import Gender
 from shared.models import Character, CharacterRegistry
 
@@ -433,10 +433,10 @@ class TestDescriptorIsNotAName:
         )
 
     def test_a_proper_noun_in_the_tag_may_rename(self) -> None:
-        assert _names_a_proper_noun("Gregory replied with a blank stare.", "gregory_antoine", self._registry())
+        assert tag_names_a_proper_noun("Gregory replied with a blank stare.", "gregory_antoine", self._registry())
 
     def test_a_descriptor_may_not(self) -> None:
-        assert not _names_a_proper_noun("the man said to Dusk.", "minor_male", self._registry())
+        assert not tag_names_a_proper_noun("the man said to Dusk.", "minor_male", self._registry())
 
     def test_an_unknown_id_may_not(self) -> None:
-        assert not _names_a_proper_noun("Gregory replied.", "nobody", self._registry())
+        assert not tag_names_a_proper_noun("Gregory replied.", "nobody", self._registry())

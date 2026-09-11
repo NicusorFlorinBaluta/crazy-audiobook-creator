@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from brain.director.script_generator import (
@@ -15,6 +16,7 @@ from brain.director.script_generator import (
     ScriptGenerator,
 )
 from brain.validators.tiered_adjudicator import _reads_as_attached_tag
+from shared.artifacts import atomic_write_json
 from shared.constants import Gender
 from shared.models import CharacterRegistry, ExtractedBook, ScriptChapter, ScriptLine
 
@@ -432,6 +434,337 @@ def resolve_refuted_by_unique_candidate(
                 }
             )
     return proposals
+
+
+def tag_speaker_evidence(tag: str, registry: CharacterRegistry) -> tuple[str | None, Gender | None]:
+    """What an attached speech tag establishes: a name, a gender, or neither.
+
+    A lone pronoun elsewhere in the sentence is discarded -- see the 2026-09-06
+    record on `ch28_0028`, where "the seated halfling said, ... as she neared"
+    was read as gendering the speaker when the `she` was the traveller.
+    """
+    named, kind, gender = ScriptGenerator._dialogue_tag_evidence(tag, registry)
+    if (
+        gender is not None
+        and kind == "pronoun_gender"
+        and not (_HE_SPEECH_TAG.search(tag) or _SHE_SPEECH_TAG.search(tag))
+    ):
+        gender = None
+    return named, gender
+
+
+def tag_names_a_proper_noun(tag: str, resolved: str, registry: CharacterRegistry) -> bool:
+    """Did the tag reach `resolved` through an actual name, or a descriptor?
+
+    "Gregory replied with a blank stare." names Gregory. "the man said to Dusk."
+    reaches `minor_male` through a generic descriptor -- decisive about who did
+    *not* speak, silent about who did. Only the first may rename a line.
+    """
+    character = registry.characters.get(resolved)
+    if character is None:
+        return False
+    for candidate in [character.name or "", *(character.aliases or [])]:
+        token = candidate.strip()
+        if not token or not token[:1].isupper():
+            continue
+        # Articles and lower-case descriptors never qualify, so a capitalised
+        # first character is the test, applied to the form found in the tag.
+        if re.search(rf"(?<!\w){re.escape(token)}(?!\w)", tag):
+            return True
+    return False
+
+
+def _descriptor_tag_contradicts(
+    tag_match: str,
+    stored_speaker: str,
+    registry: CharacterRegistry,
+) -> bool:
+    """Does a descriptor-only tag actually contradict the stored speaker?
+
+    "the man said" resolves to `minor_male` through a generic description, not
+    through the author naming anybody. What that description establishes is a
+    **gender**, and nothing else. It contradicts the stored speaker when the
+    genders disagree, and says nothing whatever when they agree -- a generic
+    description is compatible with everyone it fits.
+
+    This was once wider, and flagged any descriptor match against a differently
+    named speaker on the theory that narration with a name available would have
+    used it. Three real lines say otherwise:
+
+        ch28_0089  stored `woman_of_family`, tag "the woman said in Yolish"
+                   -- the narration two lines up reads "The woman of the family
+                   caught her".
+        ch38_0057  stored `one_of_the_ones_above_male`, tag "the man said,
+                   moving as if to put his arm around Dusk's shoulders"
+                   -- the line before reads "The man seemed to think he knew
+                   everything".
+        ch38_0118  stored `dajer`, tag "the man said to Dusk." -- and the line
+                   itself is "My name is Colonel Dajer,". The narration calls
+                   him "the man" *because* this is where he is introduced.
+
+    All three stored speakers are correct, and each flag cost a review -- which
+    means reading the passage, in a book the operator has not read. A rule whose
+    only true positives are gender disagreements should test for gender
+    disagreement.
+    """
+    stored = registry.characters.get(stored_speaker)
+    matched = registry.characters.get(tag_match)
+    if stored is None or matched is None:
+        return False
+    return (
+        stored.gender in (Gender.MALE, Gender.FEMALE)
+        and matched.gender in (Gender.MALE, Gender.FEMALE)
+        and stored.gender != matched.gender
+    )
+
+
+def constrained_choice_proposals(
+    chapters: list[ScriptChapter],
+    registry: CharacterRegistry,
+    ollama: Any,
+    *,
+    runs: int = CONSTRAINED_CHOICE_RUNS,
+    min_confidence: float = 0.85,
+) -> list[dict[str, Any]]:
+    """Ask a model to choose, for the refuted lines the text cannot settle.
+
+    Only reached when `resolve_refuted_by_unique_candidate` found two or more
+    candidates. The question is closed -- pick one of these names -- which is a
+    different task from the open attribution both models already got wrong, and
+    empirically a far more stable one.
+
+    Three guards, because the model is the weakest link here:
+
+    * the answer must be **in the candidate list**, or it is discarded;
+    * all `runs` must agree, because an answer that moves between runs is not
+      an answer. This is exactly how Gemini behaved on the open question for
+      `ch11_0148`: `dahlia` at 1.00, then `effron` at 0.74, minutes apart;
+    * mean confidence must clear `min_confidence`.
+
+    Measured on `isles-of-the-emberdark`, five ambiguous lines, three runs each:
+    all five unanimous at 0.95-1.00, and all five agree with a hand reading of
+    the passage. Two of them (`vathi`, `chrysalis`) had been worked out by hand
+    hours earlier, independently.
+
+    The client is injected rather than built here, so the pipeline uses the one
+    it already configured and this never starts a second Ollama connection with
+    different options -- `think` left at the model default once cost 2h13m.
+    """
+    import json
+
+    by_number = {chapter.chapter_number: chapter for chapter in chapters}
+    why = {
+        "possessive_contradiction": "the speaker both owns and disowns the same thing in one unbroken turn",
+        "gendering_tag": "the attached speech tag genders the speaker differently",
+        "addressed_not_speaking": "the attached speech tag says that character is the one being spoken to",
+    }
+    proposals: list[dict[str, Any]] = []
+    for case in refuted_candidate_sets(chapters, registry):
+        if len(case["candidates"]) < 2:
+            continue
+        chapter = by_number[case["chapter_number"]]
+        prompt = build_constrained_choice_prompt(
+            chapter,
+            case["index"],
+            case["refuted"],
+            case["candidates"],
+            registry,
+            why=why.get(case["source"], "the text rules that speaker out"),
+        )
+        answers: list[tuple[str, float]] = []
+        for _ in range(runs):
+            try:
+                raw = ollama.generate(prompt, temperature=0.1, format="json")
+                payload = json.loads(raw[raw.index("{") : raw.rindex("}") + 1])
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                logger.warning("[Refutation] %s: constrained choice failed: %s", case["line_id"], exc)
+                answers.append(("", 0.0))
+                continue
+            answers.append((str(payload.get("speaker_id") or "").strip(), float(payload.get("confidence") or 0.0)))
+
+        chosen = {answer for answer, _ in answers}
+        if not (len(chosen) == 1 and next(iter(chosen)) in case["candidates"]):
+            logger.info(
+                "[Refutation] %s: no stable answer across %d runs %s",
+                case["line_id"], runs, [a for a, _ in answers],
+            )
+            continue
+        confidence = sum(c for _, c in answers) / max(1, len(answers))
+        if confidence < min_confidence:
+            logger.info("[Refutation] %s: unanimous but only %.2f confident", case["line_id"], confidence)
+            continue
+        proposals.append(
+            {
+                "line_id": case["line_id"],
+                "chapter_number": case["chapter_number"],
+                "from": case["refuted"],
+                "to": next(iter(chosen)),
+                "source": f"constrained_choice/{case['source']}",
+                "confidence": round(confidence, 3),
+                "reason": (
+                    f"{case['source'].replace('_', ' ')} ruled out {case['refuted']!r}; "
+                    f"chose {next(iter(chosen))!r} from {case['candidates']} "
+                    f"unanimously across {runs} runs"
+                ),
+            }
+        )
+    return proposals
+
+
+#: Substring identifying a review reason this pass wrote, so a later run under
+#: a corrected rule can retract its own flag without touching anyone else's.
+DESCRIPTOR_REVIEW_MARKER = "describes the speaker in terms that fit"
+
+
+def apply_refutation_repairs(
+    chapters: list[ScriptChapter],
+    registry: CharacterRegistry,
+    *,
+    ollama: Any | None = None,
+    apply: bool = True,
+) -> dict[str, Any]:
+    """Reconcile stored speakers with the author's own text, in memory.
+
+    Four layers, cheapest first, each one only reached because the one before
+    it could not answer:
+
+    1. a tag that **names** someone is the answer -- the stored speaker is
+       replaced at confidence 1.0, as the live path does;
+    2. a tag that yields only a gender, or a descriptor that contradicts the
+       stored speaker, is decisive about who did *not* speak -- those refute;
+    3. where a refutation leaves exactly one candidate in the scene, that is an
+       answer nobody has to read the book to reach;
+    4. where it leaves several, a model is asked to *choose from the list*, and
+       only if `ollama` is supplied.
+
+    Layer 4 is the only one that costs an LLM call. Layers 1-3 are the author's
+    words against the stored label and nothing else.
+
+    Why this must run in the pipeline and not only in a script: reviewing an
+    attribution means reading the passage, and the operator has not read the
+    book. Every line settled here is a spoiler not shown.
+
+    Mutates `chapters` in place when `apply`; the caller owns saving them and
+    resyncing `dialogue_count`. Returns counts plus a record per change.
+    """
+    counts = {"renamed": 0, "flagged": 0, "unflagged": 0, "auto_resolved": 0}
+    records: list[dict[str, Any]] = []
+
+    for chapter in chapters:
+        lines = chapter.lines
+        for index, line in enumerate(lines):
+            if not line.speaker or line.speaker == "narrator" or index + 1 >= len(lines):
+                continue
+            following = lines[index + 1]
+            if following.speaker != "narrator":
+                continue
+            tag = str(following.text or "").strip()
+            if not _reads_as_attached_tag(tag):
+                continue
+
+            named, gender = tag_speaker_evidence(tag, registry)
+            descriptor_match: str | None = None
+            if named and named != line.speaker and not tag_names_a_proper_noun(tag, named, registry):
+                # Reached through a generic descriptor, not through the author
+                # naming anybody. Renaming a character to a placeholder on that
+                # basis would be a downgrade dressed as a correction.
+                descriptor_match, named = named, None
+
+            if named and named != line.speaker:
+                counts["renamed"] += 1
+                records.append(
+                    {"line_id": line.line_id, "action": "renamed", "from": line.speaker, "to": named, "tag": tag[:160]}
+                )
+                if apply:
+                    line.speaker = named
+                    line.speaker_confidence = 1.0
+                    line.speaker_evidence = f"Attached speech tag: {tag}"[:4000]
+                    line.attribution_resolver = "deterministic_attached_tag"
+                    line.attribution_review_required = False
+                    line.attribution_review_reason = ""
+                continue
+
+            reason = ""
+            detail = ""
+            if descriptor_match and _descriptor_tag_contradicts(descriptor_match, line.speaker, registry):
+                reason = (
+                    f"The attached speech tag describes the speaker in terms that fit "
+                    f"{descriptor_match!r}, not {line.speaker!r}. A descriptor cannot name "
+                    "who did speak, only who did not."
+                )
+                detail = f"descriptor -> {descriptor_match}"
+            elif named is None and gender is not None:
+                candidate = registry.characters.get(line.speaker)
+                if candidate and candidate.gender in (Gender.MALE, Gender.FEMALE) and candidate.gender != gender:
+                    reason = (
+                        f"The attached speech tag identifies a {gender.value} speaker; "
+                        f"{line.speaker!r} is {candidate.gender.value}. The tag cannot name "
+                        "who did speak, only who did not."
+                    )
+                    detail = f"gender -> {gender.value}"
+
+            if reason:
+                counts["flagged"] += 1
+                records.append(
+                    {
+                        "line_id": line.line_id,
+                        "action": "flagged",
+                        "speaker": line.speaker,
+                        "tag_says": detail,
+                        "tag": tag[:160],
+                    }
+                )
+                if apply and not line.attribution_review_required:
+                    line.attribution_review_required = True
+                    line.attribution_review_reason = reason
+            elif descriptor_match and line.attribution_review_required and DESCRIPTOR_REVIEW_MARKER in (
+                line.attribution_review_reason or ""
+            ):
+                # A run under the older rule flagged this; the descriptor does
+                # not contradict the stored speaker, so clear it rather than
+                # leave a review item the rule no longer stands behind.
+                counts["unflagged"] += 1
+                records.append(
+                    {
+                        "line_id": line.line_id,
+                        "action": "unflagged",
+                        "speaker": line.speaker,
+                        "tag": tag[:160],
+                    }
+                )
+                if apply:
+                    line.attribution_review_required = False
+                    line.attribution_review_reason = ""
+
+    proposals = resolve_refuted_by_unique_candidate(chapters, registry)
+    if ollama is not None:
+        proposals = proposals + constrained_choice_proposals(chapters, registry, ollama)
+
+    by_number = {chapter.chapter_number: chapter for chapter in chapters}
+    for proposal in proposals:
+        counts["auto_resolved"] += 1
+        records.append({"action": "auto_resolved", **proposal})
+        if not apply:
+            continue
+        chapter = by_number.get(proposal["chapter_number"])
+        line = next((x for x in chapter.lines if x.line_id == proposal["line_id"]), None) if chapter else None
+        if line is None:
+            continue
+        line.speaker = proposal["to"]
+        line.speaker_confidence = float(proposal.get("confidence") or 0.95)
+        line.speaker_evidence = proposal["reason"][:4000]
+        # Provenance is not cosmetic: one of these came from the text alone and
+        # the other from a model choosing between candidates the text left. A
+        # later reader must be able to tell which.
+        line.attribution_resolver = (
+            "constrained_choice"
+            if str(proposal.get("source", "")).startswith("constrained_choice")
+            else "deterministic_unique_candidate"
+        )
+        line.attribution_review_required = False
+        line.attribution_review_reason = ""
+
+    return {"counts": counts, "records": records}
 
 
 def audit_book_attribution(
@@ -872,6 +1205,50 @@ def repair_deterministic_named_attribution(
         "repaired": repaired,
         "conflicted_line_ids": conflicted,
     }
+
+
+def write_attribution_audit(
+    project_dir: Path,
+    book: ExtractedBook,
+    registry: CharacterRegistry,
+    scripts: list[ScriptChapter],
+    *,
+    confidence_threshold: float = 0.55,
+    chapter_scope: list[int] | None = None,
+) -> dict[str, Any]:
+    """Audit these scripts and persist the report to `attribution_audit.json`.
+
+    Anything that rewrites a chapter must call this, or the report stops being
+    a statement about the scripts and becomes a statement about whenever the
+    pipeline last ran. `isles-of-the-emberdark`'s report sat at 2026-09-03 while
+    a week of repairs went into the chapters underneath it, reporting 10 issues
+    where the scripts actually had 17 -- and `passed: false` for a book that
+    had since been repaired. `book_script.json` avoids this by resyncing on
+    read; a report cannot, so it has to be rewritten by whoever invalidates it.
+    """
+    report = audit_book_attribution(book, registry, scripts, confidence_threshold=confidence_threshold)
+    report["chapter_scope"] = sorted(chapter_scope) if chapter_scope is not None else None
+    atomic_write_json(project_dir / "attribution_audit.json", report)
+    return report
+
+
+def refresh_attribution_audit(project_dir: Path, *, confidence_threshold: float = 0.55) -> dict[str, Any]:
+    """Re-audit a project from what is on disk right now, and persist it.
+
+    The entry point for anything outside the pipeline that changes a script --
+    the repair scripts, chiefly -- so a hand-run repair leaves the report as
+    current as a pipeline run would.
+    """
+    book = ExtractedBook.model_validate_json((project_dir / "book.json").read_text(encoding="utf-8"))
+    registry = CharacterRegistry.model_validate_json((project_dir / "characters.json").read_text(encoding="utf-8"))
+    scripts = [
+        ScriptChapter.model_validate_json(path.read_text(encoding="utf-8"))
+        for path in sorted((project_dir / "script").glob("chapter_*.json"))
+        if not path.name.endswith(".meta.json")
+    ]
+    return write_attribution_audit(
+        project_dir, book, registry, scripts, confidence_threshold=confidence_threshold
+    )
 
 
 def queue_attribution_audit_issues(

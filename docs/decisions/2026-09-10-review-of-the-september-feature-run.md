@@ -1003,6 +1003,186 @@ Nothing loses its own name. `Soil`, dropped as a common noun, still resolves:
 
 Thirteen tests; three verified to fail when the rule they pin is removed.
 
+## Follow-up, 2026-09-11: the layer that was never in the pipeline
+
+A sweep of the pipeline after the block-adjudication removal turned up something
+larger than anything the removal touched.
+
+### Everything built that week ran only by hand
+
+```
+detect_possessive_contradictions       brain/  scripts/  tests/
+resolve_refuted_by_unique_candidate            scripts/  tests/
+tag_addressee                          (nothing)
+refuted_candidate_sets                         scripts/
+build_constrained_choice_prompt                scripts/
+repair_deterministic_named_attribution brain/  <- the only one wired in
+```
+
+The possessive check, the addressee refutation, the unique-candidate resolver
+and the constrained-choice tier were reachable only through
+`scripts/repair_tagged_contradictions.py`. Two finished books got them because
+they were run by hand; `the-shadow-of-the-gods`, which has a cast and no script
+yet, would have got none of them.
+
+That inverts the constraint the whole layer was built to satisfy — *fix these
+issues as automatically as possible, because a manual fix means reading the
+passage and the operator has not read the book*. The automation existed, and it
+was the manual step.
+
+**Fixed:** `attribution_audit.apply_refutation_repairs` is the in-memory core,
+called from `_run_script_director` after adjudication and before Gemini
+escalation, behind `external_validation.refutation_repairs`. The script keeps no
+attribution logic of its own — it loads chapters, calls the same function, saves
+what changed. Two copies of attribution logic drift, and the drift is invisible
+until a book ships with it.
+
+Only the constrained-choice tier costs an LLM call, and it takes the pipeline's
+own `OllamaClient` rather than building one. A neighbouring script that built
+its own left `think` at the model default and spent 2h13m on it.
+
+### Two lines shipped with a speaker that did not exist
+
+```
+ch08_0315  speaker='drominadian'  voice_id=None  conf=0.99
+ch08_0317  speaker='drominadian'  voice_id=None  conf=0.99
+```
+
+`drominadian` is in no cast entry in `isles-of-the-emberdark`, so those lines had
+no voice. Written by `_apply_deterministic_attribution_repairs`, where
+`target_speaker = issue.exact_speaker` was applied with no registry check — the
+gender branch immediately below it confines itself to `allowed_speakers`, and
+this one did not. `provision_generic_speakers` cannot rescue it either: it only
+provisions ids in a fixed archetype list, and this was a proper noun parsed out
+of a speech tag.
+
+**Fixed** on both counts: the repair now declines a target the registry does not
+have and logs which tag proposed it, and the two lines are corrected to
+`armored_alien` — who speaks ch08_0308, ch08_0320 and ch08_0322, while Vathi
+answers ch08_0312/0314 and the tag on ch08_0316 reads *"the stranger said"*.
+
+### A report that had stopped describing the scripts
+
+`attribution_audit.json` for `isles-of-the-emberdark` was dated 2026-09-03 and
+reported 10 issues. Re-run against the chapters as they actually were: **17**.
+A week of repairs had gone in underneath it, and the report still read as
+current — `passed: false` for a book that had since been repaired.
+
+`book_script.json` avoids this by resyncing on read when a chapter file is
+newer. A report cannot, so it has to be rewritten by whoever invalidates it:
+`write_attribution_audit` (objects in hand, used by the pipeline) and
+`refresh_attribution_audit` (loads from disk, used by the repair scripts).
+
+### The descriptor rule, narrowed twice in one sitting
+
+The last two review items on `isles-of-the-emberdark` were both false positives
+of one rule: a speech tag reaching `minor_male`/`minor_female` through a generic
+description was treated as contradicting the stored speaker.
+
+The first correction said a description does not contradict *another unnamed
+description* of the same gender — "the woman" is a hypernym of "Woman of the
+Family", not a rival claim. Running it immediately found a third case that broke
+it as well:
+
+```
+ch38_0118  stored `dajer`, tag "the man said to Dusk."
+           and the line itself is "My name is Colonel Dajer,"
+```
+
+The narration calls him "the man" *because this is where he is introduced*. So
+the "narration had a name available and did not use it" reading is wrong too,
+and the rule narrowed again to what a generic description actually establishes:
+**a gender, and nothing else.** It contradicts the stored speaker when the
+genders disagree, and says nothing at all when they agree.
+
+That also deleted the helper the first correction had just added — a
+hand-maintained stop-word list for telling a descriptive cast label from a name.
+A list like that rots, and the simpler rule does not need it.
+
+A rule that stops standing behind a review item has to withdraw it, or the item
+sits in the queue forever and clearing it costs the read this layer exists to
+avoid. `apply_refutation_repairs` retracts flags carrying its own marker and
+leaves everyone else's alone.
+
+### Result
+
+```
+                              audit issues before   after
+isles-of-the-emberdark                        17      13
+the-finest-edge-of-twilight                    1       1
+```
+
+Review-queue items on `isles-of-the-emberdark`: **2 → 0**.
+
+### The 19 config keys, and the two that were real
+
+A sweep for config the code never reads found 19 keys. They were not all the
+same thing, and deleting all of them would have been wrong.
+
+**Two had a real destination and were simply not connected.** `AudioAssembler`
+has taken `chapter_start_silence_ms` and `chapter_end_silence_ms` as constructor
+arguments since it was written, and `voice/tts_server/main.py` never passed
+them, so its defaults were the only values that had ever applied.
+`brain/config.yaml` carried matching `chapter_start_pause_ms: 1000` /
+`chapter_end_pause_ms: 2000` — right numbers, wrong file, read by nobody. They
+are now `mastering.chapter_*_silence_ms` in `voice/config.yaml`, beside the
+assembler's other knobs, and passed. The values match the old defaults exactly,
+so the wiring changes nothing today; it makes the knob real.
+
+**Four were superseded by something richer.** `narrator_pause_ms` and
+`dialogue_pause_ms` by `_standard_pause_after_ms`, which derives pacing from
+emotion and speed — and note that honouring `dialogue_pause_ms: 300` would have
+*changed* current output, since the live dialogue default is 500.
+`max_segment_sentences` and `min_segment_words` by the utterance char/word
+budgets that are actually read.
+
+**Five described behaviour that is unconditional**: `auto_start_tts`,
+`auto_master`, `auto_export`, `cleanup_intermediates`, `batch_mode`. These are
+the dangerous ones — setting `auto_master: false` silently does nothing.
+
+**The rest had no implementation at all**: `scene_transition_pause_ms` and
+`paragraph_pause_ms` (the assembler's only 1500 is the post-announcement gap, a
+different thing), `minor_character_threshold` and `group_minor_characters`
+(superseded in spirit by `max_unique_voices: 0`), `auto_cleanup_days` (cleanup
+is operator-triggered), `checkpoint_frequency` (checkpointing is per chapter),
+and `static_dir` (computed from `__file__`).
+
+Seventeen deleted, two wired. Six of the deleted read like the audiobook timing
+controls, which matters more than their line count: this review already lost
+time to a pause-timing misreading.
+
+### Two audit findings left standing, and why
+
+Both remaining `named_tag` issues on `isles-of-the-emberdark` are the audit
+applying a rule the rest of the pipeline does not:
+
+```
+ch40_0089  narrator     "He squatted near Dusk and muttered,"
+ch40_0090  dajer        "Cursed nephilim."
+
+ch55_0025  narrator     "a guard snapped,"
+ch55_0026  guard_woman  "are to keep these prisoners prisoners."
+```
+
+`ch40_0090` is correct as stored: the subject of that tag is *He*, and Dusk is
+who he squatted **near**. This is the 2026-09-06 principle — *a speech tag names
+several people, only its subject speaks* — which `audit_book_attribution`'s
+`named_tag` check does not apply, and which it needs to, for a preceding tag as
+well as a following one. `ch55_0026` is the same shape plus a duplicate
+descriptor cast entry, `guard` and `guard_woman` for one person.
+
+Recorded rather than fixed. The descriptor rule above had to be narrowed twice
+in one sitting; changing a second detector in the same pass, without measuring
+it across books, is how block adjudication happened.
+
+The nine `absent_character_in_chapter` findings are the same underlying class —
+`deep_voice`, `police_officer`, `nol` — and the cast that produces them
+(`deep_voice`, `guard`, `guard_woman`, `woman_of_family`, `armored_alien`,
+`one_of_the_ones_above_{male,female}`, `minor_{male,female}`) is the next thing
+worth work. Fourteen of the seventeen issues this follow-up started with traced
+to descriptor cast entries overlapping each other and colliding with generic
+tags.
+
 ## Related
 
 - [README.md](README.md) — status convention and index

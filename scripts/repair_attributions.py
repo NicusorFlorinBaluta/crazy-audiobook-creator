@@ -20,6 +20,7 @@ from typing import Any
 
 import yaml
 
+from brain.director.attribution_audit import refresh_attribution_audit
 from brain.director.attribution_detector import detect_suspicious_turns
 from brain.director.ollama_client import OllamaClient
 from brain.validators.gemini_validation import GeminiValidationService
@@ -291,6 +292,12 @@ def main():
         },
     )
     print(f"\nFinal attribution report written to {report_path}")
+
+    if not dry_run and total_repairs:
+        # Rewriting chapters invalidates attribution_audit.json. A report that
+        # nobody refreshes reads as current and is not.
+        audit = refresh_attribution_audit(project_path)
+        print(f"Refreshed attribution_audit.json: passed={audit.get('passed')} issues={len(audit.get('issues', []))}")
 
 
 if __name__ == "__main__":

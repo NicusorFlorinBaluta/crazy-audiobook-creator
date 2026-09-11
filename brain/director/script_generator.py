@@ -2334,6 +2334,25 @@ class ScriptGenerator:
             if target_speaker is None:
                 continue
 
+            # A speaker with no cast entry has no voice. `exact_speaker` comes
+            # straight from a parsed speech tag, so it can name somebody the
+            # registry has never heard of -- the branch above already confines
+            # itself to `allowed_speakers`, and this one did not. Two lines of
+            # `isles-of-the-emberdark` chapter 8 shipped assigned to
+            # `drominadian` at confidence 0.99 with `voice_id: None`, from a tag
+            # naming a character the cast never contained.
+            #
+            # The audit catches it afterwards as `unknown_speaker`, but by then
+            # it is a release-gate failure rather than a repair declined.
+            known = allowed_speakers or (set(registry.characters) if registry is not None else None)
+            if known is not None and target_speaker != "narrator" and target_speaker not in known:
+                logger.warning(
+                    "[AttributionRepair] Declined fragment %s: the tag names %r, which has no cast entry",
+                    issue.fragment_index,
+                    target_speaker,
+                )
+                continue
+
             ScriptGenerator._replace_metadata_line(
                 raw,
                 issue.fragment_index,
