@@ -154,6 +154,39 @@ def _get_script_review_data(project_dir: Path) -> tuple[dict[str, dict[str, Any]
     return script_lines_by_id, attribution_lines
 
 
+#: Every within-chapter trend measures *excess* variation, not too little. The
+#: gate used to describe all three as "monotone", which is the opposite of what
+#: the detector found and sent the reader looking for the wrong problem.
+_TREND_TITLES = {
+    "cross_chapter_voice_drift": "Cross-chapter voice consistency",
+    "within_chapter_pitch_variation": "Uneven pitch within a chapter",
+    "within_chapter_rate_variation": "Uneven speaking rate within a chapter",
+    "within_chapter_pitch_jump": "Abrupt pitch change between lines",
+}
+
+
+def _trend_reason(kind: str, warning: dict[str, Any]) -> str:
+    """Say what was actually measured, with the number that tripped it."""
+    if kind == "cross_chapter_voice_drift":
+        return "This voice differs materially from its book-wide identity baseline. Listen before final release."
+    metric = {
+        "within_chapter_pitch_variation": ("pitch_relative_spread", "pitch varies by {:.0%} across this chapter"),
+        "within_chapter_rate_variation": (
+            "speaking_rate_relative_spread",
+            "speaking rate varies by {:.0%} across this chapter",
+        ),
+        "within_chapter_pitch_jump": (
+            "largest_adjacent_pitch_jump_ratio",
+            "pitch jumps {:.0%} between two adjacent lines",
+        ),
+    }.get(kind)
+    if metric is None:
+        return "Chapter prosody looks uneven for this voice. Listen before final release."
+    value = warning.get(metric[0])
+    measured = metric[1].format(value) if isinstance(value, int | float) else metric[1].replace(" {:.0%}", " widely")
+    return f"This voice's {measured}. Listen before final release."
+
+
 def collect_review_gate(project_id: str, project_dir: Path, job_queue: Any) -> ReviewGate:
     """Collect all known review work without exposing source text by default."""
     items: list[ReviewItem] = []
@@ -348,18 +381,8 @@ def collect_review_gate(project_id: str, project_dir: Path, job_queue: Any) -> R
                         item_id=(
                             f"{kind}:{warning.get('voice_id', 'unknown')}:{warning.get('chapter_number', index + 1)}"
                         ),
-                        title=(
-                            "Cross-chapter voice consistency"
-                            if kind == "cross_chapter_voice_drift"
-                            else "Sustained chapter prosody"
-                        ),
-                        reason=(
-                            "This voice differs materially from its book-wide "
-                            "identity baseline. Listen before final release."
-                            if kind == "cross_chapter_voice_drift"
-                            else "A sustained share of this voice's lines were "
-                            "flagged as monotone. Listen before final release."
-                        ),
+                        title=_TREND_TITLES.get(kind, "Sustained chapter prosody"),
+                        reason=_trend_reason(kind, warning),
                         blocking=False,
                         chapter_number=_int_or_none(warning.get("chapter_number")),
                         details=warning,
