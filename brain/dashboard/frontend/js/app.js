@@ -1328,8 +1328,11 @@ async function fetchAndRenderAttention(projectId, project = state.currentProject
         attentionState.data = data;
         attentionState.projectId = projectId;
         if (newProject) {
+            // Land on what there is to do. "All" on a queue of 291 advisory
+            // items is the same as landing on nothing.
             document.getElementById('attention-status').value =
-                attentionState.data.blocking_count ? 'blocking' : 'all';
+                attentionState.data.blocking_count ? 'blocking'
+                : (attentionState.data.actionable_count ? 'changes' : 'all');
             attentionState.expandedCandidates = new Set();
         }
         if (!attentionState.characters || newProject) {
@@ -1457,6 +1460,7 @@ function renderAttentionInbox(project = state.currentProject) {
         if (type !== 'all' && item.category !== type) return false;
         if (status === 'blocking' && !item.blocking) return false;
         if (status === 'optional' && (item.blocking || resolvedItems.includes(item))) return false;
+        if (status === 'changes' && (!item.changes_output || resolvedItems.includes(item))) return false;
         if (status === 'resolved' && !resolvedItems.includes(item)) return false;
         if (confidence !== 'all' && band !== confidence) return false;
 

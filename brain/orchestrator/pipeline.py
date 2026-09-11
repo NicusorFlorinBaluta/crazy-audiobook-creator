@@ -937,6 +937,36 @@ class Pipeline:
 
         state = self.job_queue.get_job(project_id)
         if state.get("script_completed", False) and not self._script_artifacts_current(project_dir):
+            # A book-wide re-script discards audio. Refuse to start one behind
+            # the operator's back once anything has been published.
+            #
+            # On 2026-09-11 this fired on `the-finest-edge-of-twilight` with 8
+            # chapters generated, 5 mastered and Part 01 delivered. Nothing had
+            # changed in the scripts: the repair scripts had rewritten
+            # `characters.json` (an alias prune), and the chapter fingerprint
+            # covers every dependency character's alias list, so all 32 chapters
+            # read as stale. It reset the voice-review approval and had begun
+            # dropping chapters out of `generated_chapters` before it was
+            # stopped by hand.
+            #
+            # The rule stays as it is for a project still in progress -- a
+            # changed dependency usually does mean the cached script is wrong.
+            # What changes is that a published book will not be re-scripted
+            # without someone saying so, because the cheap recovery
+            # (`scripts/refresh_script_fingerprints.py`, when the repair already
+            # brought the scripts forward) is only reachable if the run stops.
+            published = self._published_delivery_count(project_dir, state)
+            if published and not state.get("allow_script_refresh_after_publish", False):
+                raise _WaitingForReview(
+                    ["script_refresh"],
+                    (
+                        f"Script dependencies changed, which would re-script all chapters and "
+                        f"discard generated audio -- but {published} delivery/deliveries are already "
+                        f"published. If a repair already brought the scripts forward, re-stamp them "
+                        f"with scripts/refresh_script_fingerprints.py; to re-script deliberately, set "
+                        f"allow_script_refresh_after_publish."
+                    ),
+                )
             logger.info(
                 "Script dependencies changed for '%s'; scheduling a book-wide "
                 "script refresh before further audio generation",
@@ -1287,6 +1317,28 @@ class Pipeline:
     # ------------------------------------------------------------------
     # Stage runners
     # ------------------------------------------------------------------
+
+    def _published_delivery_count(self, project_dir: Path, state: dict[str, Any]) -> int:
+        """How many deliveries have been published, from the index or the state.
+
+        The delivery index is authoritative; `published_delivery_count` in the
+        job state is the fallback for a project whose index cannot be read.
+        Either being non-zero means a re-script would invalidate audio a
+        listener already has.
+        """
+        index_path = project_dir / "deliveries" / "index.json"
+        if index_path.is_file():
+            try:
+                index = json.loads(index_path.read_text(encoding="utf-8"))
+                deliveries = index.get("deliveries", [])
+                if isinstance(deliveries, list):
+                    return sum(1 for part in deliveries if isinstance(part, dict) and part.get("status") == "published")
+            except (OSError, ValueError, TypeError) as exc:
+                logger.warning("Could not read %s while checking publication state: %s", index_path, exc)
+        try:
+            return int(state.get("published_delivery_count") or 0)
+        except (TypeError, ValueError):
+            return 0
 
     def _script_artifacts_current(self, project_dir: Path) -> bool:
         """Validate character and chapter-script dependency fingerprints."""

@@ -15,6 +15,11 @@ RESOLVED_SEGMENT_DISPOSITIONS = {"acceptable", "regenerate"}
 RESOLVED_EXTRACTION_DISPOSITIONS = {"include", "exclude", "reference"}
 RESOLVED_ATTRIBUTION_DISPOSITIONS = {"accepted", "overridden", "approved", "fixed", "acceptable"}
 
+#: Categories where acting on an item changes the audio that gets produced.
+#: Everything else in the inbox is an observation -- worth reading, never worth
+#: blocking on, and the reason a 291-item queue reads as noise.
+_CHANGES_OUTPUT_CATEGORIES = {"attribution", "pronunciation", "audio", "extraction"}
+
 
 @dataclass(frozen=True)
 class ReviewItem:
@@ -40,14 +45,32 @@ class ReviewGate:
     def blocking_items(self) -> tuple[ReviewItem, ...]:
         return tuple(item for item in self.items if item.blocking)
 
+    @property
+    def actionable_items(self) -> tuple[ReviewItem, ...]:
+        """Unresolved items whose resolution would change the produced audio.
+
+        An inbox where every entry is advisory teaches the operator to ignore
+        it. `the-finest-edge-of-twilight` carried 291 items and zero blocking:
+        173 unverified pronunciations -- names the engine was audibly getting
+        wrong -- sitting behind 83 observations that change nothing.
+        """
+        return tuple(
+            item
+            for item in self.items
+            if item.category in _CHANGES_OUTPUT_CATEGORIES
+            and item.disposition not in RESOLVED_ATTRIBUTION_DISPOSITIONS
+        )
+
     def to_dict(self) -> dict[str, Any]:
         counts: dict[str, int] = {}
         for item in self.items:
             counts[item.category] = counts.get(item.category, 0) + 1
         return {
-            "items": [item.to_dict() for item in self.items],
+            "items": [{**item.to_dict(), "changes_output": item.category in _CHANGES_OUTPUT_CATEGORIES}
+                      for item in self.items],
             "total_count": len(self.items),
             "blocking_count": len(self.blocking_items),
+            "actionable_count": len(self.actionable_items),
             "counts": counts,
             "release_ready": not self.blocking_items,
         }
