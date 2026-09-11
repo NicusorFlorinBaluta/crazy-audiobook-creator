@@ -469,6 +469,67 @@ def _source_paragraphs(lines: list[ScriptLine], chapter_text: str) -> list[list[
     return groups
 
 
+def _names_mentioned(text: str, registry: CharacterRegistry) -> set[str]:
+    """Characters this narration names, collapsing alias collisions by span.
+
+    Two cast entries claiming the same word are one mention, not two --
+    `effron_child` carries the alias "Effron" beside the real `effron`.
+    """
+    spans: dict[tuple[int, int], set[str]] = {}
+    for character_id, character in registry.characters.items():
+        if character_id == "narrator":
+            continue
+        for label in {str(character.name or ""), *(str(alias) for alias in (character.aliases or []))}:
+            label = label.strip()
+            if len(label) < 3 or not label[:1].isupper():
+                continue
+            for match in re.finditer(rf"(?<!\w){re.escape(label)}(?!\w)", text):
+                spans.setdefault((match.start(), match.end()), set()).add(character_id)
+    out: set[str] = set()
+    reach = -1
+    for (begin, finish), owners in sorted(spans.items()):
+        if begin >= reach:
+            # One span, one person -- pick a stable representative when several
+            # cast entries claim the same word.
+            out.add(sorted(owners)[0])
+            reach = finish
+        else:
+            reach = max(reach, finish)
+    return out
+
+
+def _distinct_name_mentions(text: str, registry: CharacterRegistry) -> int:
+    """How many separate people this narration names.
+
+    Counted as non-overlapping *spans*, not as matching character ids. A
+    misparsed cast entry can carry another character's name as an alias --
+    `effron_child` holds the alias "Effron" alongside the real `effron` -- so
+    counting ids would see "Effron spun around and glared at her." as naming
+    two people and abstain on a perfectly clear beat. Two names are two
+    mentions only when they sit at two places in the sentence.
+    """
+    spans: list[tuple[int, int]] = []
+    for character_id, character in registry.characters.items():
+        if character_id == "narrator":
+            continue
+        for label in {str(character.name or ""), *(str(alias) for alias in (character.aliases or []))}:
+            label = label.strip()
+            if len(label) < 3 or not label[:1].isupper():
+                continue
+            for match in re.finditer(rf"(?<!\w){re.escape(label)}(?!\w)", text):
+                spans.append((match.start(), match.end()))
+    spans.sort()
+    distinct = 0
+    reach = -1
+    for begin, finish in spans:
+        if begin >= reach:
+            distinct += 1
+            reach = finish
+        else:
+            reach = max(reach, finish)
+    return distinct
+
+
 def _is_complete_sentence(text: str) -> bool:
     """Does this narration stand as a sentence, or lead into an embedded quote?
 
@@ -497,6 +558,17 @@ def beat_subject(text: str, registry: CharacterRegistry) -> str | None:
     """
     stripped = str(text or "").strip()
     if not stripped or not stripped[:1].isupper():
+        return None
+    # A beat naming two people cannot say which of them is talking, and the one
+    # in front is not reliably the speaker:
+    #
+    #   Breezy grinned and strode forward, but Holiday grabbed her by the arm
+    #   and held her back. "Fight's over, I say."
+    #
+    # Breezy leads the sentence; Holiday ends the fight and says the line. The
+    # 2026-09-06 caution about speech tags -- several names, one subject --
+    # applies here with less to go on, so this abstains instead of guessing.
+    if _distinct_name_mentions(stripped, registry) > 1:
         return None
     best: tuple[int, str] | None = None
     for character_id, character in registry.characters.items():
@@ -556,14 +628,29 @@ def action_beat_attributions(
         return {}
     out: dict[str, str] = {}
     for group in _source_paragraphs(lines, chapter_text):
+        narration = [lines[i] for i in group if lines[i].speaker == "narrator"]
         claimed = {
-            beat_subject(lines[i].text, registry)
-            for i in group
-            if lines[i].speaker == "narrator" and _is_complete_sentence(lines[i].text)
+            beat_subject(line.text, registry) for line in narration if _is_complete_sentence(line.text)
         } - {None}
         if len(claimed) != 1:
             continue
         who = claimed.pop()
+        # A fragment cannot be a beat, but it can still name a rival. The
+        # paragraph
+        #
+        #   Starling glanced over her shoulder. The captain met her eyes, then
+        #   turned and walked out. "That girl," Crow snapped, "will wish she'd
+        #   never taken this job."
+        #
+        # has one complete-sentence beat (Starling) and one fragment naming
+        # Crow, who is the speaker -- and "snapped" is not in the speech-verb
+        # list, so nothing downstream catches it either. Every mention in the
+        # paragraph has to agree, not just the ones that could be beats.
+        mentioned: set[str] = set()
+        for line in narration:
+            mentioned |= _names_mentioned(str(line.text or ""), registry)
+        if mentioned - {who}:
+            continue
         for i in group:
             line = lines[i]
             if line.speaker and line.speaker != "narrator" and _is_dialogue_line(line):
@@ -725,10 +812,28 @@ def constrained_choice_proposals(
     return proposals
 
 
-def _speech_tag_anchored(chapter: ScriptChapter, registry: CharacterRegistry) -> set[str]:
-    """Lines a speech tag already attributes. A tag outranks an action beat."""
+def _speech_tag_evidence_by_line(
+    chapter: ScriptChapter,
+    registry: CharacterRegistry,
+) -> dict[str, tuple[str | None, Gender | None]]:
+    """What an attached speech tag says about each line: a name, a gender, or neither.
+
+    Both outrank an action beat, for different reasons. A **name** is the author
+    saying who spoke, per the 2026-09-06 record. A **gender** cannot name a
+    winner but still rules the beat's subject out:
+
+        ch23_0107  narrator   Breezy moved for the famed Great Forge...
+        ch23_0109  allefaero  "I won't,"
+        ch23_0110  narrator   he called after her.
+
+    Only Breezy is named in that paragraph, so the beat claims the quote for
+    her -- but the tag says *he*, and Allefaero is who called after her as she
+    walked away. The sentence naming him sits in a neighbouring paragraph the
+    beat layer never sees, and the pronoun is the only thing left pointing at
+    the truth.
+    """
     lines = chapter.lines
-    anchored: set[str] = set()
+    evidence: dict[str, tuple[str | None, Gender | None]] = {}
     for index, line in enumerate(lines):
         if not line.speaker or line.speaker == "narrator":
             continue
@@ -738,11 +843,11 @@ def _speech_tag_anchored(chapter: ScriptChapter, registry: CharacterRegistry) ->
             tag = str(lines[neighbour].text or "").strip()
             if neighbour == index + 1 and not _reads_as_attached_tag(tag):
                 continue
-            named, _gender = tag_speaker_evidence(tag, registry)
-            if named:
-                anchored.add(line.line_id)
+            named, gender = tag_speaker_evidence(tag, registry)
+            if named or gender:
+                evidence[line.line_id] = (named, gender)
                 break
-    return anchored
+    return evidence
 
 
 #: Substring identifying a review reason this pass wrote, so a later run under
@@ -798,13 +903,23 @@ def apply_refutation_repairs(
         beats = action_beat_attributions(chapter, chapter_texts.get(chapter.chapter_number, ""), registry)
         if not beats:
             continue
-        anchored = _speech_tag_anchored(chapter, registry)
+        tag_evidence = _speech_tag_evidence_by_line(chapter, registry)
         for line in chapter.lines:
             who = beats.get(line.line_id)
             if not who or who == line.speaker:
                 continue
-            if line.line_id in anchored:
-                # A speech tag outranks a beat, per the 2026-09-06 record.
+            named, tag_gender = tag_evidence.get(line.line_id, (None, None))
+            if named:
+                # A speech tag naming someone outranks a beat (2026-09-06).
+                continue
+            candidate = registry.characters.get(who)
+            if (
+                tag_gender is not None
+                and candidate is not None
+                and candidate.gender in (Gender.MALE, Gender.FEMALE)
+                and candidate.gender != tag_gender
+            ):
+                # The tag cannot say who spoke, but it rules this beat out.
                 continue
             counts["beat_attributed"] += 1
             records.append(

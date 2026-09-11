@@ -22,10 +22,13 @@ The beat closes the *first* quote; the second is a new paragraph and a
 different speaker. Reading a beat as attributing whatever follows it gets that
 exactly backwards.
 
-Measured over both scripted books: 2,977 quotes covered, **97.4%** agreeing
-with the stored speaker, and most of the 77 disagreements are the script being
+Measured over both scripted books: 2,678 quotes covered, **98.2%** agreeing
+with the stored speaker, and most of the 49 disagreements are the script being
 wrong -- "Dahlia countered." stored as effron, "Catti-brie reminded her da."
 stored as bruenor.
+
+Each guard below was earned by a real line that broke an earlier draft, and
+each one is cheap to lose by accident, so they are pinned here.
 """
 
 from __future__ import annotations
@@ -130,6 +133,53 @@ class TestWhatCountsAsABeat:
     )
     def test_only_a_named_subject_counts(self, registry, text, expected) -> None:
         assert beat_subject(text, registry) == expected
+
+    def test_a_beat_naming_two_people_abstains(self, registry) -> None:
+        """ch08_0244. Breezy leads the sentence; Holiday says the line.
+
+            Breezy grinned and strode forward, but Holiday grabbed her by the
+            arm and held her back. "Fight's over, I say."
+        """
+        chapter, text = _chapter([
+            ("c1", "narrator",
+             "Dahlia grinned and strode forward, but Effron grabbed her by the arm and held her back.", True),
+            ("c2", "dahlia", '"Fight is over, I say."', False),
+        ])
+        assert action_beat_attributions(chapter, text, registry) == {}
+
+    def test_one_name_matched_by_two_cast_entries_is_still_one_person(self, registry) -> None:
+        """A misparsed entry must not make a clear beat look ambiguous.
+
+        `the-finest-edge-of-twilight` carries `effron_child` with the alias
+        "Effron" beside the real `effron`. Counting matching character ids
+        rather than spans made "Effron spun around and glared at her." look
+        like it named two people, and abstained on the prologue's one anchor.
+        """
+        registry.characters["effron_child"] = Character(
+            id="effron_child", name="Effron's Child", gender=Gender.MALE,
+            age_range="child", voice_description="v", aliases=["Effron"],
+        )
+        chapter, text = _chapter(PROLOGUE)
+        assert action_beat_attributions(chapter, text, registry)["ch01_0295"] == "effron"
+
+    def test_a_fragment_naming_a_rival_blocks_the_beat(self, registry) -> None:
+        """ch26_0321. A fragment cannot be a beat, but it can still name a rival.
+
+            Starling glanced over her shoulder. The captain met her eyes, then
+            turned and walked out. "That girl," Crow snapped, "will wish she'd
+            never taken this job."
+
+        Only Starling heads a complete sentence, so an earlier draft handed the
+        quote to her. "Crow snapped," ends in a comma -- no beat -- and
+        "snapped" is not in the speech-verb list either, so nothing downstream
+        caught it. Every mention in the paragraph has to agree.
+        """
+        chapter, text = _chapter([
+            ("d1", "narrator", "Dahlia glanced over her shoulder.", True),
+            ("d2", "dahlia", '"That girl,"', False),
+            ("d3", "narrator", "Effron snapped,", False),
+        ])
+        assert action_beat_attributions(chapter, text, registry) == {}
 
     def test_a_fragment_running_into_the_quote_is_not_a_beat(self, registry) -> None:
         """ch01_0130: the quote is the narration's grammatical object.
