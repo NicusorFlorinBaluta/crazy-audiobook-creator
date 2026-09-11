@@ -1408,6 +1408,79 @@ The three rejected routes are pinned in
 continuation rule in particular is not reinvented by someone noticing that
 continuation evidence is only ever used to suppress.
 
+## The prologue exchange, and the limit of confidence-triggered escalation
+
+`the-finest-edge-of-twilight` shipped four consecutive prologue lines inverted.
+The source settles them:
+
+```
+"Go to your rest, Dahlia." Effron turned for the door.
+"I know where to find you."          <- dahlia   (stored effron)
+"Please don't."                      <- effron   (stored dahlia)
+"Discreetly."                        <- dahlia   (stored effron)
+Effron spun around and glared at her. "Never. Should you come to my
+    residence, well?"                <- effron   (stored dahlia)
+"Then you come to me," Dahlia begged.
+```
+
+`ch01_0295` is now fixed by the action-beat layer, which reads the paragraph it
+shares with *"Effron spun around and glared at her."* The other three carry no
+beat, no speech tag and no refutation. Everything below was tried on them.
+
+### Nothing available fixes the other three
+
+| approach | result |
+| --- | --- |
+| deterministic layers (beats, tags, refutations) | 1 of 4 |
+| per-line adjudication, narrow window | 2 of 4 |
+| per-line adjudication, wide window | **1 of 4** |
+| whole-run prompt with both anchors stated as fact | 2 of 4, unanimous 3/3 |
+
+Wide context makes it **worse**. It took `ch01_0292` from 0.85 to 0.98 on the
+wrong answer and flipped `ch01_0293` from right to wrong at 0.96. That is the
+2026-09-10 A/B finding arriving somewhere unwelcome: context buys confidence,
+not correctness, and here it buys confidence in the error.
+
+The whole-run prompt is the constrained-choice trick applied to a run rather
+than a line -- both ends known, two speakers, four slots. It is the one shape
+that has worked on this class before, and it is unanimous across three runs at
+0.95. It gets `ch01_0291` right where single-line adjudication was wrong at
+0.99, then collapses `0291` and `0292` both onto Dahlia: it reads *"Please
+don't."* as Dahlia pleading, when it is Effron objecting to being found. That
+inference is what the passage turns on, and the model does not make it.
+
+### Why no routing rule can rescue this
+
+Every escalation path in the system triggers on **low confidence** -- the
+wide-context cascade, the Gemini tier, the review queue. These lines come back
+at 0.95-0.99, 3-of-3 stable, in every configuration tried. There is no signal
+that anything is wrong, so there is nothing to route on.
+
+A shape-based trigger is available -- a run of short unattributed quotes
+between two anchors is easy to detect -- but the measurements above say the
+destinations do not fix it, so the trigger would only cost calls.
+
+### What is shipped, and what is not
+
+Shipped: the action-beat layer, which fixes the line that has real evidence,
+and does so across the library -- 26 corrections on
+`the-finest-edge-of-twilight`, 11 on `isles-of-the-emberdark`, 98.3% agreement
+over 2,584 covered quotes.
+
+Not shipped, measured and rejected: anchored alternation (32% agreement, 42%
+once beats supplied better anchors), and any confidence-triggered escalation of
+this class.
+
+Left open: the Gemini tier has not been tried on these three. It was unstable
+on the neighbouring `ch11_0148` -- `dahlia` at 1.00, then `effron` at 0.74,
+minutes apart -- so the expectation is low, and it costs external quota rather
+than local GPU, which is why it was not spent without asking.
+
+The honest position is that a short unattributed exchange, carrying no beat and
+no tag, whose direction turns on pragmatic inference, is outside what this
+pipeline can settle. It is narrower than it was this morning, and it is not
+closed.
+
 ## Related
 
 - [README.md](README.md) — status convention and index
