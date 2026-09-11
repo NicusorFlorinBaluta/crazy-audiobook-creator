@@ -1171,9 +1171,11 @@ several people, only its subject speaks* — which `audit_book_attribution`'s
 well as a following one. `ch55_0026` is the same shape plus a duplicate
 descriptor cast entry, `guard` and `guard_woman` for one person.
 
-Recorded rather than fixed. The descriptor rule above had to be narrowed twice
-in one sitting; changing a second detector in the same pass, without measuring
-it across books, is how block adjudication happened.
+Recorded rather than fixed at the time — the descriptor rule above had to be
+narrowed twice in one sitting, and changing a second detector in the same pass
+without measuring it is how block adjudication happened. It was measured
+immediately after; see *Should the subject rule be applied* below. `ch40_0090`
+is fixed, `ch55_0026` is cast duplication rather than a parser fault.
 
 The nine `absent_character_in_chapter` findings are the same underlying class —
 `deep_voice`, `police_officer`, `nol` — and the cast that produces them
@@ -1182,6 +1184,120 @@ The nine `absent_character_in_chapter` findings are the same underlying class �
 worth work. Fourteen of the seventeen issues this follow-up started with traced
 to descriptor cast entries overlapping each other and colliding with generic
 tags.
+
+### Should the subject rule be applied to `named_tag`? Measured, and yes
+
+The previous section left this recorded rather than fixed, on the grounds that
+changing a second detector unmeasured is how block adjudication happened. So it
+was measured.
+
+#### It is not a reporting nuisance — it is armed
+
+`repair_deterministic_named_attribution` does not merely list a `named_tag`
+finding. It renames the line at confidence 1.0 with `attribution_review_required
+= False`. Run against the library as it stood:
+
+```
+isles-of-the-emberdark        would rename 2:  ch40_0090 dajer -> dusk
+                                               ch55_0026 guard_woman -> guard
+the-finest-edge-of-twilight   would rename 0
+```
+
+`ch40_0090` is Dajer's line. The tag is *"He squatted near Dusk and muttered,"* —
+Dusk is who he squatted **near**. The next script-director run over that book
+would have written `dusk` over it, silently and unreviewably. This was not a
+latent risk; it was waiting for the next run.
+
+#### What the parser was missing
+
+`_dialogue_tag_evidence` has a subject rule already. Its **post-verbal** branch
+rejects a candidate when a preposition, participle or clause boundary sits
+between the verb and the name. Its **pre-verbal** branch checks only the tokens
+*between* the name and the verb, and never what precedes the name. So a name
+governed by a preposition — an object, never a subject — was read as the speaker.
+
+#### Two candidate rules, measured over 3,274 readings
+
+Every `named_tag` reading in both scripted books, in both directions:
+
+```
+                                          readings   removed   FPs killed   correct lost
+baseline                                     3,274         —            —              —
+A: preposition governs the name              3,267         7            3              0
+B: clause boundary before the verb           3,242        32            9             23
+```
+
+**Rule B was rejected.** "and" between a name and a speech verb is nearly always
+verb coordination sharing one subject — *"Allefaero shrugged and asked,"*,
+*"Breezy nodded and continued,"*, *"Effron swallowed hard and whispered,"*,
+*"Breezy laughed and agreed."* Twenty-three correct readings destroyed to catch
+nine. That is the same shape as the co-occurrence veto removed earlier in this
+review: a plausible rule that fires hardest on what it must not touch.
+
+**Rule A was applied**, with one guard. Its first draft destroyed a correct
+reading of its own:
+
+```
+"Second of Saplings said, the outburst unsettling his grey and brown Aviar."
+```
+
+The alias `Saplings` matches at the last token, so `of` sits immediately before
+it — but that `of` is part of `general_second_of_saplings` and governs nothing.
+The rule now declines to fire when the preceding token extends a longer label of
+the same character. With that guard it changes 7 readings across 4 tags, every
+one a prepositional object:
+
+```
+"He squatted near Dusk and muttered,"                        near  -> not dusk
+"He looked to Jarlaxle as he continued,"                     to    -> not jarlaxle
+"...than the lighthearted manner of Savahn, and said,"       of    -> not savahn
+"...She looked from Bruenor to her parents..."               to    -> not penelope
+```
+
+Nothing correct is lost. Suppressing the name does not suppress what the tag
+does establish — *"He squatted near Dusk and muttered,"* still yields a male
+pronoun subject.
+
+#### It found a real error while removing a false one
+
+On the audit the rule is `-1` false positive and `+1` true positive:
+
+```
+- isles-of-the-emberdark   ch40_0090  dajer  <- "named" dusk        false positive
++ the-finest-edge          ch24_0096  jarlaxle <- named athrogate   real error
+```
+
+The Edge of Twilight passage:
+
+> ch24_0094 **athrogate** — *"Really, me King, might we'd've expected less mischief from this one?"*
+> ch24_0095 narrator — *"said Athrogate, and he bounded over between Breezy and her parents and **burst into rhyme**."*
+> ch24_0096 **jarlaxle** ← stored — *"Well, hey-ho, but their girl's a **spitfire**! A clever young lass and a bit of a **liar**."*
+> ch24_0097 narrator — *"He looked to Jarlaxle as he continued,"*
+> ch24_0098 **jarlaxle** ← stored — *"With proper taste and a feathery **flair**, that's sure to land her in a mad dragon's **lair**!"*
+
+Athrogate bursts into rhyme, and both stored-as-Jarlaxle lines are the rhyming
+couplets. Jarlaxle is who he *looked at*. Only `ch24_0096` is reachable by the
+detector — `ch24_0098` needs the reading that *"as he continued"* keeps the
+speaker — so `ch24_0096` was repaired by the pipeline's own deterministic pass
+and `ch24_0098` by hand, with the reasoning stored on the line. No audio existed
+for chapter 24, so neither costs a re-master.
+
+#### Result
+
+```
+                              audit issues   named_tag
+isles-of-the-emberdark          13 -> 12       2 -> 1
+the-finest-edge-of-twilight       1 ->  1       0 -> 0
+```
+
+The one surviving `named_tag`, `ch55_0026 guard_woman -> guard`, is not a parser
+fault: *"a guard snapped,"* names a guard correctly, and the cast simply holds
+two entries for one person. That belongs to the descriptor-hygiene work below,
+not here.
+
+Thirteen tests, including the four verb-coordination tags that rule B would have
+broken — the rejected rule is pinned so it cannot be reintroduced by someone
+reading only the pre-verbal branch and noticing the asymmetry.
 
 ## Related
 

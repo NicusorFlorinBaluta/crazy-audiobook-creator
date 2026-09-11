@@ -3745,7 +3745,31 @@ class ScriptGenerator:
                         # Case 1: Pre-verbal subject (Candidate before SpeechVerb)
                         if 0 <= verb_index - name_end <= 3:
                             intervening = tag_tokens[name_end:verb_index]
-                            if not any(t in _PREPOSITIONS_OBJECTS for t in intervening):
+                            # A name governed by a preposition is that
+                            # preposition's object, never the sentence's
+                            # subject: "He squatted near Dusk and muttered,"
+                            # is Dajer speaking, and "...than the lighthearted
+                            # manner of Savahn" is Perrywinkle Shin. The
+                            # post-verbal branch below has always rejected an
+                            # intervening preposition; this branch checked only
+                            # what sits *between* the name and the verb, and
+                            # never what precedes the name.
+                            #
+                            # Unless the preposition belongs to the name -- the
+                            # alias "Saplings" matches inside "Second of
+                            # Saplings said", where `of` is part of
+                            # `general_second_of_saplings` and governs nothing.
+                            governed = (
+                                start > 0
+                                and tag_tokens[start - 1] in _PREPOSITIONS_OBJECTS
+                                and not any(
+                                    _word_tokens(other)[-len(name_tokens) - 1 :]
+                                    == (tag_tokens[start - 1], *name_tokens)
+                                    for other in names
+                                    if len(_word_tokens(other)) > len(name_tokens)
+                                )
+                            )
+                            if not governed and not any(t in _PREPOSITIONS_OBJECTS for t in intervening):
                                 proximity = verb_index - name_end
                                 pre_verbal_matches.append((proximity, len(name), character_id))
                         # Case 2: Post-verbal inverted subject (SpeechVerb before Candidate)
