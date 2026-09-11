@@ -1981,7 +1981,12 @@ class Pipeline:
                     # `dialogue_count` decides which side of a cast merge
                     # survives. Leaving it stale would be a quiet second bug.
                     ScriptGenerator.sync_dialogue_counts(chapter_scripts, registry)
-            except Exception as exc:
+            except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+                # Narrow deliberately. An attribution improvement must not fail
+                # the scripting stage, but `except Exception` would also swallow
+                # a NameError in this block -- which is exactly how
+                # `_pregenerate_pronunciation_previews` ran for two days without
+                # ever executing (see the 2026-09-10 record).
                 logger.warning("[Refutation] Deterministic refutation pass failed: %s", exc)
 
         post_repair_audit = audit_book_attribution(
