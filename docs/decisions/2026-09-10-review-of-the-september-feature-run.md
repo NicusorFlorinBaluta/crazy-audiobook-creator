@@ -1435,6 +1435,7 @@ beat, no speech tag and no refutation. Everything below was tried on them.
 | per-line adjudication, narrow window | 2 of 4 |
 | per-line adjudication, wide window | **1 of 4** |
 | whole-run prompt with both anchors stated as fact | 2 of 4, unanimous 3/3 |
+| Gemini, through the real escalation ladder | **1 of 4** (0 of the 3 it was asked) |
 
 Wide context makes it **worse**. It took `ch01_0292` from 0.85 to 0.98 on the
 wrong answer and flipped `ch01_0293` from right to wrong at 0.96. That is the
@@ -1448,6 +1449,29 @@ that has worked on this class before, and it is unanimous across three runs at
 0.99, then collapses `0291` and `0292` both onto Dahlia: it reads *"Please
 don't."* as Dahlia pleading, when it is Effron objecting to being found. That
 inference is what the passage turns on, and the model does not make it.
+
+### Gemini does not merely fail here -- it launders the error
+
+Run twice through `resolve_attributions`, so the real ladder and the real quota
+accounting. `gemini_api_triage` answered all three, identically both times, and
+restated the stored wrong speaker each time at 0.90-0.95:
+
+```
+{'attempted': 3, 'resolved': 3, 'manual_review': 0}
+  ch01_0291  truth dahlia -> effron  0.95
+  ch01_0292  truth effron -> dahlia  0.90
+  ch01_0293  truth dahlia -> effron  0.90
+```
+
+Note `resolved: 3, manual_review: 0`. Escalating this class to Gemini does not
+leave the lines flagged and unfixed -- it **clears the review flag** and books
+them as settled at high confidence. A wrong answer still in the queue can be
+caught later; one marked resolved cannot. For this shape Gemini is worse than
+no escalation, not merely unhelpful.
+
+It is also stable here, which is its own small surprise: the instability seen on
+the neighbouring `ch11_0148` -- `dahlia` at 1.00 then `effron` at 0.74 -- did not
+reappear. Confidently and reproducibly wrong.
 
 ### Why no routing rule can rescue this
 
@@ -1471,10 +1495,8 @@ Not shipped, measured and rejected: anchored alternation (32% agreement, 42%
 once beats supplied better anchors), and any confidence-triggered escalation of
 this class.
 
-Left open: the Gemini tier has not been tried on these three. It was unstable
-on the neighbouring `ch11_0148` -- `dahlia` at 1.00, then `effron` at 0.74,
-minutes apart -- so the expectation is low, and it costs external quota rather
-than local GPU, which is why it was not spent without asking.
+Closed: the Gemini tier was tried on these three and got none of them, twice,
+while clearing their review flags. There is no tier left to escalate to.
 
 The honest position is that a short unattributed exchange, carrying no beat and
 no tag, whose direction turns on pragmatic inference, is outside what this
