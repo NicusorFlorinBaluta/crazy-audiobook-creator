@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from brain.director.attribution_detector import _is_dialogue_line
 from brain.director.script_generator import (
     _HE_SPEECH_TAG,
     _SHE_SPEECH_TAG,
@@ -441,6 +442,135 @@ def resolve_refuted_by_unique_candidate(
     return proposals
 
 
+#: A name followed by a possessive is not the sentence's subject: "Effron's hand
+#: trembled" is about the hand.
+_BEAT_POSSESSIVE = re.compile(r"^['\u2019]s\b")
+
+
+def _source_paragraphs(lines: list[ScriptLine], chapter_text: str) -> list[list[int]]:
+    """Line indices grouped by source paragraph.
+
+    The paragraph is the unit of attribution in prose, and a blank line in the
+    source is what separates one speaker's turn from the next. Both halves of
+    that matter -- see `beat_subject`.
+    """
+    groups: list[list[int]] = []
+    current: list[int] = []
+    for index, line in enumerate(lines):
+        if current:
+            previous = lines[current[-1]]
+            gap = chapter_text[(previous.source_end or 0) : (line.source_start or 0)]
+            if "\n" in gap:
+                groups.append(current)
+                current = []
+        current.append(index)
+    if current:
+        groups.append(current)
+    return groups
+
+
+def _is_complete_sentence(text: str) -> bool:
+    """Does this narration stand as a sentence, or lead into an embedded quote?
+
+    An action beat is a whole sentence. A fragment that runs into the quotation
+    is not a beat at all -- the quote is its grammatical object:
+
+        Dahlia dropped silently to the back of the coach, then climbed across
+        the roof as the coach gained speed despite the driver's cries of
+        "Whoa!"
+
+    Read as a beat, that paragraph attributes "Whoa!" to Dahlia. It belongs to
+    the driver, and the narration says so. Requiring terminal punctuation is
+    what separates the two.
+    """
+    stripped = str(text or "").strip().rstrip("\"'“”‘’)]")
+    return bool(stripped) and stripped[-1] in ".!?…"
+
+
+def beat_subject(text: str, registry: CharacterRegistry) -> str | None:
+    """The character an action beat names as its subject, if exactly one.
+
+    Only a name in subject position counts -- the beat has to *open* with it.
+    "Effron spun around and glared at her." names Effron; "She looked from
+    Bruenor to her parents." names nobody, because the subject is a pronoun and
+    Bruenor is an object.
+    """
+    stripped = str(text or "").strip()
+    if not stripped or not stripped[:1].isupper():
+        return None
+    best: tuple[int, str] | None = None
+    for character_id, character in registry.characters.items():
+        if character_id == "narrator":
+            continue
+        for label in {str(character.name or ""), *(str(alias) for alias in (character.aliases or []))}:
+            label = label.strip()
+            if len(label) < 3 or not label[:1].isupper():
+                continue
+            if not stripped.lower().startswith(label.lower()):
+                continue
+            rest = stripped[len(label) :]
+            if _BEAT_POSSESSIVE.match(rest) or (rest and rest[0].isalnum()):
+                continue
+            if best is None or len(label) > best[0]:
+                best = (len(label), character_id)
+    return best[1] if best else None
+
+
+def action_beat_attributions(
+    chapter: ScriptChapter,
+    chapter_text: str,
+    registry: CharacterRegistry,
+) -> dict[str, str]:
+    """`line_id -> speaker` for quotes an action beat attributes.
+
+    Prose attributes dialogue two ways and the pipeline only ever read one of
+    them. A speech tag -- "said Effron" -- is handled everywhere. An **action
+    beat** sharing the quote's paragraph is not, and it is just as decisive:
+
+        Effron spun around and glared at her. "Never. Should you come to my
+        residence, well?" He looked down at the dust.
+
+    No speech verb anywhere, and the paragraph is unambiguously Effron's. The
+    prologue of `the-finest-edge-of-twilight` shipped four consecutive lines
+    inverted for want of this, with the stored speakers confidently wrong at
+    0.95-0.98 and no deterministic layer able to say otherwise.
+
+    The paragraph break is as load-bearing as the beat. In the same passage:
+
+        "Go to your rest, Dahlia." Effron turned for the door.
+
+        "I know where to find you."
+
+    The beat closes the *first* quote; the second is a new paragraph and a
+    different speaker. Reading the beat as attributing whatever follows it,
+    rather than whatever shares its paragraph, gets that exactly backwards.
+
+    Measured over both scripted books: 2,060 paragraphs carry a single named
+    beat subject, covering 3,298 quotes, and the beat agrees with the stored
+    speaker on **97.4%** of them. Inspecting the 87 disagreements, most are the
+    script being wrong -- "Dahlia countered." stored as effron, "Catti-brie
+    reminded her da." stored as bruenor.
+    """
+    lines = chapter.lines
+    if not chapter_text or any(line.source_start is None for line in lines):
+        return {}
+    out: dict[str, str] = {}
+    for group in _source_paragraphs(lines, chapter_text):
+        claimed = {
+            beat_subject(lines[i].text, registry)
+            for i in group
+            if lines[i].speaker == "narrator" and _is_complete_sentence(lines[i].text)
+        } - {None}
+        if len(claimed) != 1:
+            continue
+        who = claimed.pop()
+        for i in group:
+            line = lines[i]
+            if line.speaker and line.speaker != "narrator" and _is_dialogue_line(line):
+                out[line.line_id] = who
+    return out
+
+
 def tag_speaker_evidence(tag: str, registry: CharacterRegistry) -> tuple[str | None, Gender | None]:
     """What an attached speech tag establishes: a name, a gender, or neither.
 
@@ -595,6 +725,26 @@ def constrained_choice_proposals(
     return proposals
 
 
+def _speech_tag_anchored(chapter: ScriptChapter, registry: CharacterRegistry) -> set[str]:
+    """Lines a speech tag already attributes. A tag outranks an action beat."""
+    lines = chapter.lines
+    anchored: set[str] = set()
+    for index, line in enumerate(lines):
+        if not line.speaker or line.speaker == "narrator":
+            continue
+        for neighbour in (index + 1, index - 1):
+            if not (0 <= neighbour < len(lines)) or lines[neighbour].speaker != "narrator":
+                continue
+            tag = str(lines[neighbour].text or "").strip()
+            if neighbour == index + 1 and not _reads_as_attached_tag(tag):
+                continue
+            named, _gender = tag_speaker_evidence(tag, registry)
+            if named:
+                anchored.add(line.line_id)
+                break
+    return anchored
+
+
 #: Substring identifying a review reason this pass wrote, so a later run under
 #: a corrected rule can retract its own flag without touching anyone else's.
 DESCRIPTOR_REVIEW_MARKER = "describes the speaker in terms that fit"
@@ -606,6 +756,7 @@ def apply_refutation_repairs(
     *,
     ollama: Any | None = None,
     apply: bool = True,
+    chapter_texts: dict[int, str] | None = None,
 ) -> dict[str, Any]:
     """Reconcile stored speakers with the author's own text, in memory.
 
@@ -628,11 +779,52 @@ def apply_refutation_repairs(
     attribution means reading the passage, and the operator has not read the
     book. Every line settled here is a spoiler not shown.
 
+    `chapter_texts` maps chapter number to source text. Supply it and layer 0
+    runs as well -- action-beat attribution, which needs paragraph boundaries
+    and so needs the source. Omit it and that layer is skipped; everything else
+    is unchanged.
+
     Mutates `chapters` in place when `apply`; the caller owns saving them and
     resyncing `dialogue_count`. Returns counts plus a record per change.
     """
-    counts = {"renamed": 0, "flagged": 0, "unflagged": 0, "auto_resolved": 0}
+    counts = {"renamed": 0, "flagged": 0, "unflagged": 0, "auto_resolved": 0, "beat_attributed": 0}
     records: list[dict[str, Any]] = []
+
+    # Layer 0: the author naming the speaker through an action beat rather than
+    # a speech tag. Runs first because it is the same kind of evidence as a
+    # naming tag -- the author saying who is talking -- and because a rename
+    # here gives the later layers a correct neighbour to reason from.
+    for chapter in chapters if chapter_texts else []:
+        beats = action_beat_attributions(chapter, chapter_texts.get(chapter.chapter_number, ""), registry)
+        if not beats:
+            continue
+        anchored = _speech_tag_anchored(chapter, registry)
+        for line in chapter.lines:
+            who = beats.get(line.line_id)
+            if not who or who == line.speaker:
+                continue
+            if line.line_id in anchored:
+                # A speech tag outranks a beat, per the 2026-09-06 record.
+                continue
+            counts["beat_attributed"] += 1
+            records.append(
+                {
+                    "line_id": line.line_id,
+                    "action": "beat_attributed",
+                    "from": line.speaker,
+                    "to": who,
+                    "reason": f"an action beat in the same paragraph names {who!r} as the speaker",
+                }
+            )
+            if apply:
+                line.speaker = who
+                line.speaker_confidence = 0.95
+                line.speaker_evidence = (
+                    f"Action beat in the same source paragraph names '{who}' as its subject."
+                )[:4000]
+                line.attribution_resolver = "deterministic_action_beat"
+                line.attribution_review_required = False
+                line.attribution_review_reason = ""
 
     for chapter in chapters:
         lines = chapter.lines

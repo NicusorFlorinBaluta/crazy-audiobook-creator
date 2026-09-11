@@ -1965,11 +1965,15 @@ class Pipeline:
                     chapter_scripts,
                     registry,
                     ollama=self.ollama if constrained_choice else None,
+                    # Source text, so the action-beat layer can see paragraphs.
+                    chapter_texts={chapter.number: chapter.text for chapter in book.chapters},
                 )
                 counts = refutation["counts"]
                 if any(counts.values()):
                     logger.info(
-                        "[Refutation] renamed %d, auto-resolved %d, flagged %d, retracted %d stale flag(s)",
+                        "[Refutation] beat-attributed %d, renamed %d, auto-resolved %d, "
+                        "flagged %d, retracted %d stale flag(s)",
+                        counts["beat_attributed"],
                         counts["renamed"],
                         counts["auto_resolved"],
                         counts["flagged"],

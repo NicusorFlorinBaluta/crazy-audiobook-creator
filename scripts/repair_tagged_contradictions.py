@@ -41,7 +41,7 @@ import yaml
 from brain.director.attribution_audit import apply_refutation_repairs, refresh_attribution_audit
 from brain.director.script_generator import ScriptGenerator
 from shared.artifacts import atomic_write_text
-from shared.models import CharacterRegistry, ScriptChapter
+from shared.models import CharacterRegistry, ExtractedBook, ScriptChapter
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("TagRepair")
@@ -92,11 +92,19 @@ def repair(project_dir: Path, *, apply: bool, use_llm: bool = False) -> dict[str
 
     before = {line.line_id: (line.speaker, line.attribution_review_required) for c in chapters for line in c.lines}
 
+    # Source text, so the action-beat layer can see paragraph boundaries.
+    book_path = project_dir / "book.json"
+    chapter_texts = None
+    if book_path.exists():
+        book = ExtractedBook.model_validate_json(book_path.read_text(encoding="utf-8"))
+        chapter_texts = {chapter.number: chapter.text for chapter in book.chapters}
+
     result = apply_refutation_repairs(
         chapters,
         registry,
         ollama=_ollama_client() if use_llm else None,
         apply=apply,
+        chapter_texts=chapter_texts,
     )
     counts: dict[str, int] = dict(result["counts"])
     records: list[dict[str, Any]] = result["records"]
@@ -110,6 +118,8 @@ def repair(project_dir: Path, *, apply: bool, use_llm: bool = False) -> dict[str
                 "    %s  %s -> %s   (%s: %s)",
                 record["line_id"], record["from"], record["to"], record["source"], record["reason"][:90],
             )
+        elif action == "beat_attributed":
+            logger.info("    %s  %s -> %s   (%s)", record["line_id"], record["from"], record["to"], record["reason"])
         elif action == "unflagged":
             logger.info("    %s  %s stays, stale review flag retracted   %r", record["line_id"], record["speaker"], record["tag"])
         else:
@@ -180,9 +190,9 @@ def main() -> int:
     logger.info("%s %s", "Applying to" if args.apply else "Dry run over", project_dir)
     counts = repair(project_dir, apply=args.apply, use_llm=args.llm)
     logger.info(
-        "renamed=%d auto_resolved=%d flagged=%d unflagged=%d chapters_written=%d",
-        counts["renamed"], counts["auto_resolved"], counts["flagged"], counts["unflagged"],
-        counts["chapters_written"],
+        "beat_attributed=%d renamed=%d auto_resolved=%d flagged=%d unflagged=%d chapters_written=%d",
+        counts["beat_attributed"], counts["renamed"], counts["auto_resolved"], counts["flagged"],
+        counts["unflagged"], counts["chapters_written"],
     )
     if not args.apply:
         logger.info("Dry run -- nothing written. Re-run with --apply.")
