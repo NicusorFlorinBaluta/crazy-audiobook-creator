@@ -1282,6 +1282,10 @@ speaker — so `ch24_0096` was repaired by the pipeline's own deterministic pass
 and `ch24_0098` by hand, with the reasoning stored on the line. No audio existed
 for chapter 24, so neither costs a re-master.
 
+Whether that hand step could have been avoided is answered below, in *Could
+`ch24_0098` have been fixed automatically*. It could — and finding out turned up
+a live bug in a different code path.
+
 #### Result
 
 ```
@@ -1298,6 +1302,111 @@ not here.
 Thirteen tests, including the four verb-coordination tags that rule B would have
 broken — the rejected rule is pinned so it cannot be reintroduced by someone
 reading only the pre-verbal branch and noticing the asymmetry.
+
+### Could `ch24_0098` have been fixed automatically? Yes — but not by any of the obvious routes
+
+`ch24_0098` was repaired by hand above, with the note that the reading it needs
+— *"as he continued"* keeps the speaker — is not automated. Three candidate
+routes were tested.
+
+#### The model already knows the answer
+
+```
+A: as shipped (ch24_0096 and ch24_0098 both jarlaxle)
+  detector flags ch24_0096? False   ch24_0098? False
+  ch24_0098 narrow: athrogate 0.95, athrogate 0.95, athrogate 0.95   3/3 correct
+  ch24_0098 wide  : athrogate 0.95, athrogate 0.95, jarlaxle  0.95   2/3 correct
+```
+
+So **wider context does not help** — it is slightly *worse* here — and **Gemini
+was never a question**: no tier is reached, because the line is never flagged.
+The resolver was right all along and was not asked.
+
+Why it is not asked is the interesting part. Pattern 2,
+`narrator_separated_collapse`, requires the pair to lack continuation evidence,
+and *"He looked to Jarlaxle as he continued,"* **is** continuation evidence.
+`_has_continuation_tag` exists to suppress exactly this flag. Correct for
+spotting a collapse, and exactly wrong here: the pair really is one speaker
+twice, and both halves were wrong together.
+
+#### Rejected: continuation propagation
+
+The tempting deterministic rule — *across a continuation tag the two quotes
+share a speaker* — was measured over both books:
+
+```
+continuation pairs                              84
+  backward-pointing ("he added.")               61     excluded
+  forward-pointing ("...as he continued,")      23
+    tag names someone (already handled)          6
+    speakers agree                              16
+    speakers DISAGREE -> candidate finding        1
+```
+
+Direction matters and halves the population twice over: *"he added."* attaches
+to the quote **above** it and says nothing about the one below. Only a tag
+handing off with a comma introduces the next quote.
+
+The single surviving finding is a false positive:
+
+```
+ch09_0291  narrator          "...When Gregory's face registered "     <- cut mid-sentence
+ch09_0293  gregory_antoine   "what did you just say?"
+ch09_0294  narrator          "expression that Jarlaxle knew all too well, he added,"
+ch09_0295  jarlaxle          "I don't know if your Way of Shadow is the same, but—"
+```
+
+`ch09_0291` and `ch09_0294` are **one sentence split around an interjection**.
+The subject of "added" is Jarlaxle, and the stored speaker is right. One
+finding, zero correct — and because the rule would *rewrite* rather than flag,
+shipping it would trade a loud correct answer for a quiet wrong one, which is
+the block-adjudication failure mode. Rejected.
+
+#### Rejected: re-ask every neighbour of a deterministic attribution
+
+51 lines across both books (1.2% of Emberdark's dialogue, 0.2% of Edge of
+Twilight's), 285s of local calls. Result: **49 confirmed, 2 changed, neither
+change an improvement.** It flags ordinary alternation — two people taking
+turns is the default, not a defect.
+
+#### What those 2 changes exposed: a live bug
+
+```
+ch28_0089  woman_of_family -> minor_female  (confidence 1.0, deterministic_tag)
+ch38_0118  dajer           -> minor_male    (confidence 1.0, deterministic_tag)
+```
+
+Both are the descriptor false positive removed from the refutation pass earlier
+today, arriving from a different code path. `_adjudicate_turn_tier1`'s tag
+overrule — *"the author named the speaker… no confidence score outranks it"* —
+had no check that the tag reached its answer through an actual **name**.
+`_dialogue_tag_evidence` resolves *"the man said"* to `minor_male`, and the
+overrule then renames a real character to a placeholder at confidence 1.0 with
+review disabled.
+
+Exposure on lines the detector already flags is one line today (`ch38_0057`),
+but of every attached naming tag in the library that would overrule — 1 of 230 —
+**all were descriptors and none was a real name.** The guard therefore costs
+nothing measurable and removes the whole class. `tag_names_a_proper_noun` moved
+into `tiered_adjudicator` (the import runs that way already) and now gates the
+overrule. Both lines above re-adjudicate to `confirm`.
+
+#### Applied: re-ask the neighbours of a line a repair actually renamed
+
+Staleness is created by the rename, so the rename is what should trigger the
+second look. `neighbours_of_reattributed` takes the ids
+`repair_deterministic_named_attribution` changed and raises any adjacent
+dialogue line that still disagrees.
+
+On the `ch24` passage that is exactly `ch24_0098`, and the model settles it 3 of
+3. On a book with no renames it costs nothing; these two books produce one or
+two renames apiece, so it is two to four extra calls rather than the static
+rule's 51.
+
+The three rejected routes are pinned in
+`tests/test_stale_neighbour_detection.py`, with the measurements, so the
+continuation rule in particular is not reinvented by someone noticing that
+continuation evidence is only ever used to suppress.
 
 ## Related
 

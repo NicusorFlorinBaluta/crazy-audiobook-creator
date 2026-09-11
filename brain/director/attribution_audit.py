@@ -15,7 +15,12 @@ from brain.director.script_generator import (
     _SUBJECT_PRONOUNS,
     ScriptGenerator,
 )
-from brain.validators.tiered_adjudicator import _reads_as_attached_tag
+from brain.validators.tiered_adjudicator import (
+    _reads_as_attached_tag,
+)
+from brain.validators.tiered_adjudicator import (
+    _tag_names_a_proper_noun as tag_names_a_proper_noun,
+)
 from shared.artifacts import atomic_write_json
 from shared.constants import Gender
 from shared.models import CharacterRegistry, ExtractedBook, ScriptChapter, ScriptLine
@@ -451,27 +456,6 @@ def tag_speaker_evidence(tag: str, registry: CharacterRegistry) -> tuple[str | N
     ):
         gender = None
     return named, gender
-
-
-def tag_names_a_proper_noun(tag: str, resolved: str, registry: CharacterRegistry) -> bool:
-    """Did the tag reach `resolved` through an actual name, or a descriptor?
-
-    "Gregory replied with a blank stare." names Gregory. "the man said to Dusk."
-    reaches `minor_male` through a generic descriptor -- decisive about who did
-    *not* speak, silent about who did. Only the first may rename a line.
-    """
-    character = registry.characters.get(resolved)
-    if character is None:
-        return False
-    for candidate in [character.name or "", *(character.aliases or [])]:
-        token = candidate.strip()
-        if not token or not token[:1].isupper():
-            continue
-        # Articles and lower-case descriptors never qualify, so a capitalised
-        # first character is the test, applied to the form found in the tag.
-        if re.search(rf"(?<!\w){re.escape(token)}(?!\w)", tag):
-            return True
-    return False
 
 
 def _descriptor_tag_contradicts(

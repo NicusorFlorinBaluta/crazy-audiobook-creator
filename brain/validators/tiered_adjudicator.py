@@ -265,6 +265,27 @@ def _label_support(
     return "  [unverified]"
 
 
+def _tag_names_a_proper_noun(tag: str, resolved: str, registry: CharacterRegistry) -> bool:
+    """Did the tag reach `resolved` through an actual name, or a descriptor?
+
+    "Gregory replied with a blank stare." names Gregory. "the man said to Dusk."
+    reaches `minor_male` through a generic descriptor -- decisive about who did
+    *not* speak, silent about who did. Only the first may rename a line.
+    """
+    character = registry.characters.get(resolved)
+    if character is None:
+        return False
+    for candidate in [character.name or "", *(character.aliases or [])]:
+        token = candidate.strip()
+        if not token or not token[:1].isupper():
+            continue
+        # Articles and lower-case descriptors never qualify, so a capitalised
+        # first character is the test, applied to the form found in the tag.
+        if re.search(rf"(?<!\w){re.escape(token)}(?!\w)", tag):
+            return True
+    return False
+
+
 def _attached_tag_evidence(
     turn: SuspiciousTurn,
     registry: CharacterRegistry,
@@ -770,7 +791,22 @@ class TieredAttributionAdjudicator:
             "attached_tag": tag_status,
         }
 
-        if alias_passed and resolved_speaker and tag_named and tag_named != resolved_speaker:
+        if (
+            alias_passed
+            and resolved_speaker
+            and tag_named
+            and tag_named != resolved_speaker
+            # ...but only when the tag reached that id through an actual name.
+            # "the man said" resolves to `minor_male` through a generic
+            # description, which is decisive about who did *not* speak and
+            # silent about who did. Overruling on it renames a character to a
+            # placeholder at confidence 1.0 with review disabled -- a downgrade
+            # dressed as the author's own word. Measured over both books: of
+            # every attached naming tag that would overrule (1 of 230), all of
+            # them were descriptors and none was a real name, so this guard
+            # costs nothing and prevents `ch38_0057` becoming `minor_male`.
+            and _tag_names_a_proper_noun(tag_text, tag_named, self.registry)
+        ):
             # The author named the speaker. That is not evidence to weigh, it is
             # the answer, and no confidence score outranks it.
             guardrail_status["attached_tag"] = {

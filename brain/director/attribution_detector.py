@@ -137,6 +137,73 @@ def rebuild_turn_with_context(
     )
 
 
+def neighbours_of_reattributed(
+    chapters: list[ScriptChapter],
+    reattributed_line_ids: set[str],
+    *,
+    already_flagged: set[str] | None = None,
+    window_radius: int = 5,
+    scene_radius: int = 8,
+) -> list[SuspiciousTurn]:
+    """Dialogue lines whose neighbour was just renamed, and which now disagree with it.
+
+    A deterministic repair changes one line and leaves everything around it as
+    it was. When the two were one person speaking twice, the second half is now
+    stale and nothing looks at it again:
+
+        ch24_0095  narrator   "said Athrogate, ... and burst into rhyme."
+        ch24_0096  jarlaxle   -> repaired to athrogate by the named tag
+        ch24_0097  narrator   "He looked to Jarlaxle as he continued,"
+        ch24_0098  jarlaxle   <- the second half of the same couplet, untouched
+
+    The detector cannot catch that on its own. Pattern 2 needs the pair to lack
+    continuation evidence, and *"as he continued"* is continuation evidence --
+    so the pair was deliberately not flagged, which is right for spotting a
+    collapse and exactly wrong here.
+
+    Asking is enough: the local model answers `ch24_0098` correctly 3 times of 3
+    at 0.95 on the narrow window. It was simply never asked.
+
+    Deliberately keyed on lines a repair *changed* rather than on every line
+    carrying a deterministic resolver. The static version flags ordinary
+    alternation -- 51 lines across both books, of which 49 re-confirmed and
+    zero were improved. Staleness is created by the rename, so the rename is
+    what should trigger the second look; on a book with no renames this costs
+    nothing at all.
+    """
+    if not reattributed_line_ids:
+        return []
+    seen = set(already_flagged or set())
+    out: list[SuspiciousTurn] = []
+    for chapter in chapters:
+        lines = chapter.lines
+        spoken = [i for i, line in enumerate(lines) if _is_dialogue_line(line) and line.speaker != "narrator"]
+        for position, index in enumerate(spoken):
+            if lines[index].line_id not in reattributed_line_ids:
+                continue
+            for neighbour in (position - 1, position + 1):
+                if not 0 <= neighbour < len(spoken):
+                    continue
+                target = lines[spoken[neighbour]]
+                if target.speaker == lines[index].speaker or target.line_id in seen:
+                    continue
+                seen.add(target.line_id)
+                out.append(
+                    build_turn_window(
+                        chapter,
+                        spoken[neighbour],
+                        reason=(
+                            f"Neighbouring line {lines[index].line_id} was re-attributed to "
+                            f"'{lines[index].speaker}'; this line still disagrees with it"
+                        ),
+                        pattern="neighbour_reattributed",
+                        window_radius=window_radius,
+                        scene_radius=scene_radius,
+                    )
+                )
+    return out
+
+
 def detect_suspicious_turns(
     chapters: list[ScriptChapter],
     *,

@@ -1786,7 +1786,10 @@ class Pipeline:
         tiered_cfg = ext_cfg.get("tiered_attribution", {})
         if tiered_cfg.get("enabled", True):
             try:
-                from brain.director.attribution_detector import detect_suspicious_turns
+                from brain.director.attribution_detector import (
+                    detect_suspicious_turns,
+                    neighbours_of_reattributed,
+                )
                 from brain.validators.tiered_adjudicator import (
                     WIDE_RETRY_SCENE_RADIUS,
                     WIDE_RETRY_WINDOW_RADIUS,
@@ -1808,6 +1811,22 @@ class Pipeline:
                     min_confidence=min_conf,
                     max_short_response_chars=max_short,
                 )
+                # A deterministic rename leaves its neighbours stale, and the
+                # detector cannot see that: the pair it would have flagged is
+                # suppressed by the very continuation evidence that makes them
+                # one speaker. See `neighbours_of_reattributed`.
+                stale_neighbours = neighbours_of_reattributed(
+                    chapter_scripts,
+                    {str(entry["line_id"]) for entry in deterministic_before["repaired"]},
+                    already_flagged={turn.line_id for turn in suspicious},
+                )
+                if stale_neighbours:
+                    logger.info(
+                        "[TieredAttribution] Re-examining %d line(s) left stale by a deterministic rename: %s",
+                        len(stale_neighbours),
+                        [turn.line_id for turn in stale_neighbours],
+                    )
+                    suspicious = suspicious + stale_neighbours
                 if suspicious:
                     logger.info(
                         "[TieredAttribution] Detected %d suspicious dialogue turn(s) across %d chapter(s)",
