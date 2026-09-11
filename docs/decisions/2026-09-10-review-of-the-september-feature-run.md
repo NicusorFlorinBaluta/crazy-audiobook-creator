@@ -1473,6 +1473,67 @@ It is also stable here, which is its own small surprise: the instability seen on
 the neighbouring `ch11_0148` -- `dahlia` at 1.00 then `effron` at 0.74 -- did not
 reappear. Confidently and reproducibly wrong.
 
+### How the answer was reached by hand, and why that does not become a rule
+
+Worth writing down, because "a person could tell" is the obvious objection to
+all of the above. The chain was:
+
+1. `"Then you come to me," Dahlia begged.` -- speech tag. **Implemented.**
+2. `Effron spun around and glared at her. "Never..."` -- action beat.
+   **Implemented today.**
+3. `...glared at *her*` -- he is reacting to something *she* said, so the line
+   above is hers. **Not implemented, and measured below.**
+4. Two slots left between a known Effron and a known Dahlia -- alternation.
+   **Measured at 42%, rejected.**
+5. Does the exchange read as a conversation? She can find him, he says don't,
+   she offers discretion, he refuses, she asks him to come instead.
+
+Step 3 looked like the missing deterministic signal, so it was measured. A beat
+whose subject reacts *at her* or *to him*, where the pronoun is a bare object
+and its gender differs from the subject's, constrains the previous speaker's
+gender and rules out the subject:
+
+```
+covered 14   agrees 8   disagrees 6   -> 57.1%
+```
+
+Half the disagreements are the rule, not the script:
+
+```
+"Effron spun around and glared at her."   rule right -- this is ch01_0293
+"Effron came back at her."                rule probably right
+"Breezy stared at him..."                 rule wrong: she spoke, then looked
+"Starling looked to him."                 rule wrong: same
+"Dajer looked to her."                    rule wrong: same
+```
+
+*"spun around and glared at her"* is a reaction to her speaking. *"looked to
+him"* is the speaker turning after her own line. Identical grammar, opposite
+implication, and the difference lives in the verb. Splitting them on a
+hand-built verb list would be fitting to three true positives. Not built.
+
+Step 4 was re-measured by run length, in case short runs were the reliable
+subset:
+
+```
+ 2 slots  47.5%      6 slots  30.8%      10+ slots  0%
+ 4 slots  48.1%      8 slots  16.7%
+```
+
+A coin flip even at two slots. Consecutive same-speaker turns are ordinary
+dialogue, so alternation has no length at which it is safe.
+
+What actually did the work was step 5, and step 5 is the one thing neither
+model performs. Both produce readings that are internally incoherent -- Gemini
+and the local model each have Dahlia saying *"I know where to find you."* and
+then *"Please don't."*, which is her asking herself not to come. Neither notices.
+A rule cannot check discourse coherence, and the models do not.
+
+One caveat on all of this: the four "correct" attributions here are a reading,
+not a certainty. It is a well-anchored reading -- two ends fixed by the author's
+own text, and the only assignment under which the exchange makes sense -- but it
+is a reading, and it is what every measurement above is scored against.
+
 ### Why no routing rule can rescue this
 
 Every escalation path in the system triggers on **low confidence** -- the
