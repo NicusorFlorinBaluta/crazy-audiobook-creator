@@ -40,6 +40,8 @@ class PronunciationAndHotSwapTests(unittest.IsolatedAsyncioTestCase):
 
     def test_pronunciation_replacement_rules(self) -> None:
         """Verify word-boundary aware case-insensitive pronunciation replacement with fluid syllable spacing."""
+        # Hyphens in a stored mapping are joined out on the way through: the
+        # engine speaks a hyphen as a break, so "Koh-ker-lee" is three words.
         p_dict = {
             "homeisle": "home-aisle",
             "homeisler": "home-aisler",
@@ -48,20 +50,19 @@ class PronunciationAndHotSwapTests(unittest.IsolatedAsyncioTestCase):
             "kokerlii": "Koh-ker-lee",
         }
 
-        # Exact match (hyphens preserved, not forced to spaces)
         self.assertEqual(
             apply_pronunciations("The homeisle was quiet.", p_dict),
-            "The home-aisle was quiet.",
+            "The homeaisle was quiet.",
         )
         # Plural and agent noun matches
         self.assertEqual(
             apply_pronunciations("Two Homeislers met on the homeisles.", p_dict),
-            "Two home-aislers met on the home-aisles.",
+            "Two homeaislers met on the homeaisles.",
         )
         # Capitalized proper noun
         self.assertEqual(
             apply_pronunciations("Kokerlii flew overhead.", p_dict),
-            "Koh-ker-lee flew overhead.",
+            "Kohkerlee flew overhead.",
         )
         # Substring inside another word must NOT be erroneously replaced
         self.assertEqual(
@@ -75,11 +76,11 @@ class PronunciationAndHotSwapTests(unittest.IsolatedAsyncioTestCase):
 
         homeisle_rec = generate_phonetic_recommendations("Homeisle")
         self.assertEqual(homeisle_rec["default"], "Homeaisle")
-        self.assertEqual(homeisle_rec["alternate"], "Home-aisle")
+        self.assertEqual(homeisle_rec["alternate"], "Homeaisle")
 
         kokerlii_rec = generate_phonetic_recommendations("Kokerlii")
         self.assertEqual(kokerlii_rec["default"], "Cokerlee")
-        self.assertEqual(kokerlii_rec["alternate"], "Koh-ker-lee")
+        self.assertEqual(kokerlii_rec["alternate"], "Kohkerlee")
 
         pache_rec = generate_phonetic_recommendations("Pache")
         self.assertEqual(pache_rec["default"], "Pahchee")
@@ -95,15 +96,14 @@ class PronunciationAndHotSwapTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(uncle_jax_rec["default"], "Uncle Yax")
         self.assertIn(" ", uncle_jax_rec["default"])
 
-        # Hyphenated terms: hyphens MUST be preserved, never concatenated
+        # Hyphenated terms: the hyphen is spoken as a break, so it is joined
+        # out. "Catti-brie" left hyphenated is read aloud as "Caddy Breeze".
         tentowns_rec = generate_phonetic_recommendations("Ten-Towns")
-        self.assertEqual(tentowns_rec["default"], "Ten-Towns")
-        self.assertIn("-", tentowns_rec["default"])
-        self.assertNotIn("Tentowns", tentowns_rec["default"])
+        self.assertEqual(tentowns_rec["default"], "TenTowns")
+        self.assertNotIn("-", tentowns_rec["default"])
 
         caer_rec = generate_phonetic_recommendations("Caer-Konig")
-        self.assertEqual(caer_rec["default"], "Caer-Konig")
-        self.assertIn("-", caer_rec["default"])
+        self.assertNotIn("-", caer_rec["default"])
 
     def test_english_dictionary_filtering(self) -> None:
         """Verify standard English words are excluded from unresolved candidate suggestions."""
@@ -224,8 +224,8 @@ class PronunciationAndHotSwapTests(unittest.IsolatedAsyncioTestCase):
 
                 self.assertEqual(res["status"], "success")
                 self.assertTrue(res["has_tts"])
-                self.assertEqual(res["spoken_text"], "home-aisle")
-                self.assertEqual(res["text_spoken"], "The word is home-aisle.")
+                self.assertEqual(res["spoken_text"], "homeaisle")
+                self.assertEqual(res["text_spoken"], "The word is homeaisle.")
                 self.assertIn("api/projects/test/pronunciations/preview/", res["audio_url"])
 
                 # Now test fetching the preview audio
@@ -257,7 +257,7 @@ class PronunciationAndHotSwapTests(unittest.IsolatedAsyncioTestCase):
 
                 self.assertEqual(res["status"], "fallback_webspeech")
                 self.assertFalse(res["has_tts"])
-                self.assertEqual(res["spoken_text"], "home-aisle")
+                self.assertEqual(res["spoken_text"], "homeaisle")
 
     async def test_batch_pronunciation_update(self) -> None:
         """Verify batch approval of multiple pronunciation recommendations in a single atomic request."""
@@ -371,7 +371,7 @@ class PronunciationAndHotSwapTests(unittest.IsolatedAsyncioTestCase):
 
             # 2. Update pronunciation for homeisle -> home-aisle (hyphen preserved for fluid TTS)
             line1_spoken = apply_pronunciations(line1_orig, {"homeisle": "home-aisle"})
-            self.assertEqual(line1_spoken, "The home-aisle was peaceful.")
+            self.assertEqual(line1_spoken, "The homeaisle was peaceful.")
             ctx_line1_v2 = {"synthesis_text": line1_spoken, "model": "qwen3"}
 
             # Line 1 context has changed: MUST require regeneration
@@ -535,7 +535,9 @@ class PronunciationAndHotSwapTests(unittest.IsolatedAsyncioTestCase):
                 term_names = [c["term"] for c in inv["candidates"]]
                 self.assertIn("newterm", term_names, "Newly added term MUST be in refreshed inventory")
                 dict_content = json.loads((project_dir / "pronunciation_dict.json").read_text(encoding="utf-8"))
-                self.assertEqual(dict_content.get("newterm"), "new-term")
+                # Saved through normalize_phonetic_text, so the hyphen the operator typed
+                # is joined out before it can reach the engine as a break.
+                self.assertEqual(dict_content.get("newterm"), "newterm")
 
     def test_voice_library_resolve_voice_reference_narrator_variants(self) -> None:
         """Verify VoiceLibraryManager resolves narrator_female and narrator_male when narrator.wav is absent."""

@@ -293,15 +293,29 @@ def load_pronunciation_dictionary(
 
 
 def normalize_phonetic_text(text: str) -> str:
-    """Normalize phonetic respelling text for TTS while preserving hyphens and compounds.
+    """Normalize a phonetic respelling into something the TTS reads as one word.
 
-    Does NOT replace hyphens with spaces to prevent neural TTS from inserting
-    word-boundary pauses.
+    **The engine acts on hyphens and spaces.** Both produce an audible break, so
+    neither may be used to mark a syllable boundary -- `Gut-bus-ters` is spoken
+    as three words, not as "Gutbusters". This used to preserve hyphens on the
+    theory that only spaces caused pauses; that is backwards, and it is why
+    every stored `alternate` was unusable.
+
+    Hyphens are therefore **joined out**, not turned into spaces. Spaces that
+    are already in the term are left alone: a two-word name is two words, and
+    that break is the author's, not the respeller's.
+
+    This is the single choke point -- `apply_pronunciations`, the dashboard
+    routes and the pipeline all pass through it -- so the 184 hyphenated
+    recommendations already on disk are corrected on read rather than needing a
+    migration.
     """
     if not text:
         return text
-    # Strip enclosing quotes while keeping internal hyphens and apostrophes
+    # Strip enclosing quotes while keeping internal apostrophes.
     cleaned = text.strip().strip("\"'“”‘’")
+    # Join across hyphens and any stray spacing they leave behind.
+    cleaned = re.sub(r"\s*[-‐‑‒–—]\s*", "", cleaned)
     return re.sub(r"\s+", " ", cleaned).strip()
 
 
@@ -409,7 +423,23 @@ def _split_into_phonetic_chunks(word: str) -> list[str]:
 
 
 def generate_phonetic_recommendations(term: str, context: str = "") -> dict[str, str]:
-    """Generate 1 default and 1 alternate TTS-friendly phonetic respelling."""
+    """Generate 1 default and 1 alternate TTS-friendly phonetic respelling.
+
+    Both values are normalised on the way out, so no branch can hand back a
+    hyphen. Several of them would otherwise: `_KNOWN_TERM_OVERRIDES` holds
+    hand-written forms like "Koh-ker-lee", and the `rec_alt = raw` fallbacks
+    echo the source term, which for "Catti-brie" or "Aegis-fang" carries a
+    hyphen of its own.
+    """
+    recommendation = _phonetic_recommendations(term, context)
+    return {
+        "default": normalize_phonetic_text(recommendation.get("default", "")),
+        "alternate": normalize_phonetic_text(recommendation.get("alternate", "")),
+    }
+
+
+def _phonetic_recommendations(term: str, context: str = "") -> dict[str, str]:
+    """Unnormalised generation; call `generate_phonetic_recommendations` instead."""
     raw = term.strip()
     if not raw:
         return {"default": "", "alternate": ""}
@@ -421,20 +451,22 @@ def generate_phonetic_recommendations(term: str, context: str = "") -> dict[str,
     # Multi-word terms (whitespace separated): process each word independently to preserve word separation
     if re.search(r"\s+", raw):
         words = raw.split()
-        sub_recs = [generate_phonetic_recommendations(w, context) for w in words]
+        sub_recs = [_phonetic_recommendations(w, context) for w in words]
         rec_def = " ".join(r["default"] for r in sub_recs)
         rec_alt = " ".join(r["alternate"] for r in sub_recs)
         if rec_def.lower() == rec_alt.lower() or not rec_alt:
             rec_alt = raw
         return {"default": rec_def, "alternate": rec_alt}
 
-    # Hyphenated terms: process parts independently to preserve hyphen boundaries
+    # Hyphenated terms: the hyphen is a break the engine speaks, so the parts are
+    # respelled independently and then *joined*. "Catti-brie" is one name and
+    # must arrive as one token, or it is read as "Caddy Breeze".
     if "-" in raw:
         parts = [p for p in raw.split("-") if p]
         if len(parts) > 1:
-            sub_recs = [generate_phonetic_recommendations(p, context) for p in parts]
-            rec_def = "-".join(r["default"] for r in sub_recs)
-            rec_alt = "-".join(r["alternate"] for r in sub_recs)
+            sub_recs = [_phonetic_recommendations(p, context) for p in parts]
+            rec_def = "".join(r["default"] for r in sub_recs)
+            rec_alt = "".join(r["alternate"] for r in sub_recs)
             if rec_def.lower() == rec_alt.lower() or not rec_alt:
                 rec_alt = raw
             return {"default": rec_def, "alternate": rec_alt}
@@ -459,19 +491,19 @@ def generate_phonetic_recommendations(term: str, context: str = "") -> dict[str,
                 alt_parts.append("Lite")
             else:
                 alt_parts.append(p)
-        rec_alt = "-".join(comp) if alt_parts == comp else "".join(alt_parts)
+        rec_alt = "".join(alt_parts)
         if rec_alt.lower() == rec_def.lower():
-            rec_alt = "-".join(comp)
+            rec_alt = "".join(comp)
         return {"default": rec_def, "alternate": rec_alt}
 
     clean_def = raw
     clean_alt = raw
     if re.search(r"lii$", clean_def, re.I):
         clean_def = re.sub(r"lii$", "lee", clean_def, flags=re.I)
-        clean_alt = re.sub(r"lii$", "-lee", clean_alt, flags=re.I)
+        clean_alt = re.sub(r"lii$", "lee", clean_alt, flags=re.I)
     elif re.search(r"ii$", clean_def, re.I):
         clean_def = re.sub(r"ii$", "ee", clean_def, flags=re.I)
-        clean_alt = re.sub(r"ii$", "-ee", clean_alt, flags=re.I)
+        clean_alt = re.sub(r"ii$", "ee", clean_alt, flags=re.I)
 
     if re.match(r"^Sz", clean_def, re.I):
         clean_def = re.sub(r"^Sz", "S", clean_def, flags=re.I)
@@ -502,15 +534,17 @@ def generate_phonetic_recommendations(term: str, context: str = "") -> dict[str,
                 parts.append("nah")
             else:
                 parts.append(s.capitalize() if not parts else s.lower())
-        if not alt and parts:
+        # Both forms concatenate. The alternate differs by its vowel and
+        # consonant choices, never by inserting a break the engine speaks.
+        if parts:
             return parts[0].capitalize() + "".join(p.lower() for p in parts[1:])
-        return "-".join(parts)
+        return ""
 
     rec_def = format_sylls(sylls_def, alt=False)
     rec_alt = format_sylls(sylls_alt, alt=True)
 
     if rec_def.lower() == rec_alt.lower() or not rec_alt:
-        rec_alt = "-".join(sylls_def) if len(sylls_def) > 1 else raw
+        rec_alt = raw
 
     return {"default": rec_def, "alternate": rec_alt}
 
@@ -580,14 +614,39 @@ def _get_configured_ollama() -> tuple[str, str]:
 
 
 _PRONUNCIATION_PROMPT_HEADER = (
-    "You are an expert fantasy and fiction pronunciation director for audiobooks.\n"
-    "For each candidate proper noun or out-of-vocabulary term and its book context, provide the exact spoken phonetic respelling for a Neural TTS engine.\n"
+    "You are a pronunciation director for an audiobook narrated by a neural TTS engine.\n"
+    "For each term below, write how it should be SPELLED so the engine SAYS it correctly.\n"
+    "You are not writing a pronunciation guide for a human. You are writing replacement\n"
+    "text that will be substituted into the manuscript before synthesis.\n"
+    "\n"
+    "THE ONE HARD RULE: never write a hyphen, and never add a space.\n"
+    "The engine speaks both of them as a break. 'Gut-bus-ters' is read aloud as three\n"
+    "separate words. 'Cat tee bree' is read as three separate words. A respelling that\n"
+    "marks syllables with hyphens or spaces is worse than no respelling at all.\n"
+    "\n"
     "Rules:\n"
-    "1. For single-word terms, write phonetic respellings as fluid single words or natural English syllables without spaces between syllables (e.g. 'Kaludin', 'Zeth', 'Taravanjian', 'Homeaisle', 'Shalan'). Do NOT put spaces between syllables of a single word.\n"
-    "2. For multi-word terms or names (e.g. 'Braelin Janquay', 'Uncle Jax', 'Ghaliver Longstocking'), ALWAYS preserve the spaces between separate words. Never concatenate separate words or names into a single word (e.g. write 'Braelin Yanquay', NEVER 'BraelinJanquay').\n"
-    "3. For hyphenated terms (e.g. 'Ten-Towns', 'Caer-Konig'), preserve the hyphen or use spaces between distinct words; do NOT concatenate them into a single squashed word.\n"
-    "4. Provide 1 default respelling and 1 alternate valid respelling.\n"
-    '5. Output STRICT JSON with key \'recommendations\': [{"term": "...", "default": "...", "alternate": "..."}]\n\n'
+    "1. Respell using ordinary English letter patterns that a reader would sound out the\n"
+    "   right way, joined into ONE word: 'Kattybree', 'Jarlaxul', 'Kimmureeel', 'Eejisfang'.\n"
+    "2. Keep exactly the spaces the term already has, and no others. A one-word term (even\n"
+    "   a hyphenated one like 'Catti-brie') must come back as ONE word with no hyphen.\n"
+    "   A two-word name like 'Braelin Janquay' must come back as TWO words\n"
+    "   ('Braelin Yanquay'), never squashed into one.\n"
+    "3. Change the spelling only where it changes the sound. If the term already reads\n"
+    "   correctly, return it unchanged rather than inventing a variant.\n"
+    "4. Use the context to disambiguate, and keep the capitalisation of a proper noun.\n"
+    "5. 'alternate' must be a genuinely DIFFERENT plausible pronunciation, not the same\n"
+    "   respelling with breaks added. If there is no real second reading, repeat the default.\n"
+    '6. Output STRICT JSON with key \'recommendations\': '
+    '[{"term": "...", "default": "...", "alternate": "..."}]\n'
+    "\n"
+    "Worked examples:\n"
+    '  "Catti-brie"  -> default "Kattybree"    (one word; the hyphen would be spoken)\n'
+    '  "Jarlaxle"    -> default "Jarlaxul"     (read as "Jarl Axel" without help)\n'
+    '  "Kimmuriel"   -> default "Kimmureeel"   (read as "Kim Oriel" without help)\n'
+    '  "Do\'Urden"    -> default "Doeurden"     (apostrophe dropped, one word)\n'
+    '  "Aegis-fang"  -> default "Eejisfang"    (one word)\n'
+    '  "Uncle Jax"   -> default "Uncle Yax"    (two words in, two words out)\n'
+    "\n"
     "CANDIDATES:\n"
 )
 
@@ -601,17 +660,24 @@ def _pronunciation_prompt(items: list[tuple[str, str]]) -> str:
 
 
 def _clean_rec(term: str, rec: str) -> str:
+    """Normalise one model answer, and refuse it if it changes the word count.
+
+    `normalize_phonetic_text` has already joined out any hyphens, so the only
+    thing left to police is spacing: the respelling must have exactly as many
+    words as the term. Squashing "Uncle Jax" into "UncleYax" loses a break the
+    author wrote, and splitting "Catti-brie" into "Catty Bree" invents one the
+    engine will speak.
+
+    There used to be a hyphen guard here that did the opposite -- when the model
+    correctly returned an unhyphenated respelling for a hyphenated term, it
+    threw the answer away and substituted a hyphenated fallback.
+    """
     cleaned = normalize_phonetic_text(rec)
     if not cleaned:
         return ""
-    # Guard against LLM concatenating words when term had spaces
-    if " " in term and " " not in cleaned:
-        fb = generate_phonetic_recommendations(term)
-        return fb.get("default", cleaned)
-    # Guard against LLM concatenating words when term had hyphens
-    if "-" in term and "-" not in cleaned and " " not in cleaned:
-        fb = generate_phonetic_recommendations(term)
-        return fb.get("default", cleaned)
+    if len(cleaned.split()) != len(re.split(r"\s+", term.strip())):
+        fallback = generate_phonetic_recommendations(term).get("default", "")
+        return normalize_phonetic_text(fallback)
     return cleaned
 
 

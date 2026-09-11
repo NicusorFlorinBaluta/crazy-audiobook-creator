@@ -572,7 +572,7 @@ class IncrementalDeliveryApiTests(unittest.IsolatedAsyncioTestCase):
             self.project_id,
             PronunciationRequest(
                 term="Pronunciation: Kholin",
-                spoken_text="Pronunciation: Ko-lin",
+                spoken_text="Pronunciation: Kolin",
             ),
         )
         self.assertEqual(res["status"], "success")
@@ -582,7 +582,7 @@ class IncrementalDeliveryApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(dict_file.exists())
         saved_dict = json.loads(dict_file.read_text(encoding="utf-8"))
         self.assertIn("Kholin", saved_dict)
-        self.assertEqual(saved_dict["Kholin"], "Ko-lin")
+        self.assertEqual(saved_dict["Kholin"], "Kolin")
 
 
 if __name__ == "__main__":
