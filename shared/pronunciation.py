@@ -103,6 +103,56 @@ _COMMON_SENTENCE_WORDS = {
 }
 _CANDIDATE_PATTERN = re.compile(r"\b[A-Z][A-Za-z'’-]{2,}\b")
 
+#: Contraction tails. A capitalised "You're" at the head of a quotation looks
+#: exactly like an unfamiliar proper noun to the candidate pattern, and the
+#: dictionary check misses it because "you're" is not a dictionary entry. It
+#: reached the Emberdark lexicon as a term needing a respelling, the LLM
+#: obligingly proposed "Youre", and that would have been substituted into 79
+#: lines across 24 chapters. Stripping the tail leaves "you", which the
+#: dictionary does know.
+_CONTRACTION_TAIL = re.compile(r"(?:'|’)(?:s|re|ve|ll|d|t|m)$", re.IGNORECASE)
+
+
+def _pronunciation_base_form(term: str) -> str:
+    """Strip a contraction tail so the dictionary check can see the real word."""
+    return _CONTRACTION_TAIL.sub("", term).strip()
+
+
+def _is_pronunciation_noise(term: str, english_words: set[str]) -> bool:
+    """Reject candidates that cannot be a pronunciation problem.
+
+    Three shapes, all found in live lexicons on 2026-09-12:
+
+    * a contraction -- "You're", above;
+    * a fragment left by the extractor, such as "MW-", which has no
+      pronunciation to get right;
+    * a descriptor built entirely from ordinary English words. Emberdark casts
+      a character named "White-Haired Being", and a cast alias is exempt from
+      the dictionary check by design, so the whole phrase became a candidate.
+      An English phrase is not a pronunciation risk whoever is named by it.
+    """
+    stripped = term.strip()
+    if not stripped:
+        return True
+    if stripped.endswith("-") or stripped.startswith("-"):
+        return True
+    letters = re.sub(r"[^A-Za-z]", "", stripped)
+    if len(letters) < 3:
+        return True
+    if not english_words:
+        return False
+    # Only a genuine multi-word phrase is judged this way. A hyphenated
+    # compound is one written word, and splitting it finds English pieces
+    # inside real names: "Catti-brie" yields "brie", "Ten-Towns" yields both
+    # halves. Both are names the engine has opinions about; neither is noise.
+    if not re.search(r"\s", stripped):
+        return False
+    parts = [part for part in re.split(r"[\s\-‐‑‒–—]+", stripped) if part]
+    if len(parts) < 2:
+        return False
+    return all(_pronunciation_base_form(part).casefold() in english_words for part in parts)
+
+
 _ENGLISH_WORDS_CACHE: set[str] | None = None
 
 
@@ -907,8 +957,11 @@ def build_pronunciation_inventory(
     for key in all_keys:
         verified = key in mapping_by_folded
         occurrence_count = counts.get(key, 0)
+        # Noise the cast-alias exemption below would otherwise wave through.
+        if not verified and _is_pronunciation_noise(display.get(key, key), english_words):
+            continue
         # Skip standard English dictionary words unless explicitly verified or in character cast
-        if not verified and key not in character_aliases and key in english_words:
+        if not verified and key not in character_aliases and _pronunciation_base_form(key) in english_words:
             continue
         if not verified and occurrence_count < 2 and key not in character_aliases:
             continue

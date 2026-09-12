@@ -27,6 +27,7 @@ document is a bug.
 | [dashboard-guide.md](dashboard-guide.md) | Operating the dashboard, organised by decision rather than by stage. |
 | [prompts.md](prompts.md) | Prompt contracts and the source-fidelity rules the LLM may not break. |
 | [quality-assurance.md](quality-assurance.md) | Every quality gate, what it measures, and what it does on failure. |
+| [pronunciation-evidence.md](pronunciation-evidence.md) | How a respelling is proved necessary before it is allowed to change audio. |
 | [scripting-quality-performance-policy.md](scripting-quality-performance-policy.md) | The order in which scripting trade-offs are decided. |
 | [setup-windows.md](setup-windows.md) | Supported single-workstation install. |
 | [socket-resilience-and-supervision.md](socket-resilience-and-supervision.md) | Three-layer resilience for staying online across network faults. |
