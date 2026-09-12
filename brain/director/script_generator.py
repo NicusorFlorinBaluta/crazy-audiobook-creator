@@ -260,6 +260,12 @@ _SHE_SPEECH_TAG = re.compile(
     r"|(?:\b" + _SPEECH_VERB_PATTERN + r")\s+(?:\w+\s+){0,2}\bshe\b"
 )
 _SPEECH_VERB_SET = frozenset(_SPEECH_VERBS)
+#: An indefinite article in front of a name means the narration is not
+#: identifying an individual. It matters because some cast entries are named
+#: after their role -- "Guard", "Captain", "Senator" -- so "a guard said"
+#: otherwise reads as the author naming that character.
+_INDEFINITE_ARTICLES = frozenset({"a", "an"})
+
 _PREPOSITIONS_OBJECTS = frozenset(
     {
         "to",
@@ -3740,6 +3746,18 @@ class ScriptGenerator:
                     # "Effron's head snapped around" -- a possessive modifies
                     # the real subject, it is not the subject.
                     if name_end < len(tag_tokens) and tag_tokens[name_end] == "s":
+                        continue
+                    # "a guard snapped," is not the author naming anyone: an
+                    # indefinite article is precisely a refusal to identify an
+                    # individual. It reads as a name only because a cast entry
+                    # happens to be *called* "Guard", and it then contradicted
+                    # `ch55_0026`, where the next sentence -- "locking gazes
+                    # with the woman" -- says which guard it was.
+                    #
+                    # Measured over both books: 167 named-tag readings, 3 behind
+                    # an article, and the other two already agree with the line
+                    # they sit beside. No correct reading is lost.
+                    if start > 0 and tag_tokens[start - 1] in _INDEFINITE_ARTICLES:
                         continue
                     for verb_index in speech_positions:
                         # Case 1: Pre-verbal subject (Candidate before SpeechVerb)

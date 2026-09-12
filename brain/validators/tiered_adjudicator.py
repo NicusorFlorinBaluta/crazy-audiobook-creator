@@ -169,6 +169,11 @@ _EVIDENCE_LABEL = {
 #: Roughly four times the detector's default. Prefill is cheap relative to
 #: decode, so the extra context is not what makes a retried line slower -- the
 #: second call is. See `_retry_with_wide_context` for the measured cost.
+#: Confidence an audit-flagged line must clear before a resolution is written
+#: rather than proposed. Higher than the ordinary auto-accept: see the
+#: comment at its use site for the measurement behind it.
+AUDIT_ISSUE_AUTO_ACCEPT = 0.98
+
 WIDE_RETRY_WINDOW_RADIUS = 20
 WIDE_RETRY_SCENE_RADIUS = 30
 
@@ -839,7 +844,24 @@ class TieredAttributionAdjudicator:
                 guardrail_results=guardrail_status,
             )
 
-        all_passed = alias_passed and gender_passed and confidence >= self.local_auto_accept
+        # A line the audit has proved wrong is a hard case by construction, and
+        # the cost of getting it wrong is asymmetric: the stored speaker is
+        # absent from the chapter, so the audit re-flags it every run, but a
+        # *wrong replacement who is present* stops being flagged at all. The
+        # bridge would then have converted a loud failure into a silent one.
+        #
+        # Measured on the ten Emberdark lines, 2026-09-12. Correct at 1.00,
+        # 0.98, 1.00; wrong at 0.95 and 0.95 (`ch28_0117` -> `starling`, who is
+        # the person being thanked, and `ch49_0039` -> `insect_god`, which also
+        # split a two-line utterance). Five points is a thin calibration and the
+        # threshold should move if a larger sample disagrees -- but the
+        # direction is not in doubt, and below it the answer becomes a proposal
+        # for review instead of an edit.
+        auto_accept_floor = self.local_auto_accept
+        if turn.detection_pattern == "audit_blocking_issue":
+            auto_accept_floor = max(auto_accept_floor, AUDIT_ISSUE_AUTO_ACCEPT)
+
+        all_passed = alias_passed and gender_passed and confidence >= auto_accept_floor
 
         if all_passed and resolved_speaker:
             return AdjudicationResult(
@@ -859,8 +881,8 @@ class TieredAttributionAdjudicator:
             escalate_reasons.append(alias_detail)
         if not gender_passed:
             escalate_reasons.append(gender_detail)
-        if confidence < self.local_auto_accept:
-            escalate_reasons.append(f"Confidence {confidence:.2f} < threshold {self.local_auto_accept:.2f}")
+        if confidence < auto_accept_floor:
+            escalate_reasons.append(f"Confidence {confidence:.2f} < threshold {auto_accept_floor:.2f}")
         full_reason = "; ".join(escalate_reasons) or reason
 
         escalation = AdjudicationResult(

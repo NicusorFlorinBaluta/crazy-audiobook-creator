@@ -216,3 +216,47 @@ class TestTheAbsentSpeakerIsTakenOffTheBallot:
         turn = build_turn_window(prologue, 2, reason="low confidence", pattern="low_confidence")
         assert turn.excluded_speakers == []
         assert turn.extra_candidates == []
+
+
+class TestAnAuditFlaggedLineClearsAHigherBar:
+    """The bridge must not turn a loud failure into a silent one.
+
+    The stored speaker on these lines is absent from the chapter, so the audit
+    re-flags it on every run and the line stays blocking. Replace it with the
+    *wrong* speaker who happens to be present and the audit goes quiet -- the
+    line is still wrong, and nothing will ever say so again.
+
+    Measured over the ten Emberdark lines on 2026-09-12. The three the model
+    got right came back at 1.00, 0.98 and 1.00; the two it got wrong came back
+    at 0.95 -- `ch28_0117` -> `starling`, who is the person being thanked, and
+    `ch49_0039` -> `insect_god`, which also split a two-line utterance across
+    two speakers. Below the bar the answer is recorded as a proposal instead of
+    written as an edit.
+    """
+
+    def test_the_floor_is_above_the_ordinary_auto_accept(self) -> None:
+        from brain.validators.tiered_adjudicator import AUDIT_ISSUE_AUTO_ACCEPT
+
+        assert AUDIT_ISSUE_AUTO_ACCEPT > 0.95, "0.95 is where both wrong answers landed"
+
+    def test_the_correct_answers_clear_it_and_the_wrong_ones_do_not(self) -> None:
+        from brain.validators.tiered_adjudicator import AUDIT_ISSUE_AUTO_ACCEPT
+
+        correct = {"ch21_0173": 1.00, "ch23_0093": 0.98, "ch23_0095": 1.00}
+        wrong = {"ch28_0117": 0.95, "ch49_0039": 0.95}
+        for line_id, confidence in correct.items():
+            assert confidence >= AUDIT_ISSUE_AUTO_ACCEPT, line_id
+        for line_id, confidence in wrong.items():
+            assert confidence < AUDIT_ISSUE_AUTO_ACCEPT, line_id
+
+    def test_only_audit_turns_are_held_to_it(self) -> None:
+        """Detector findings keep the threshold they were measured against."""
+        from brain.director.attribution_detector import build_turn_window
+
+        chapter = ScriptChapter(
+            chapter_number=1,
+            chapter_title="One",
+            lines=[_line("ch01_0001", "dusk", '"Quote."', 0.96)],
+        )
+        turn = build_turn_window(chapter, 0, reason="low confidence", pattern="low_confidence")
+        assert turn.detection_pattern != "audit_blocking_issue"

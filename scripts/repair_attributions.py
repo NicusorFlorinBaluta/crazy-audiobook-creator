@@ -76,6 +76,18 @@ def main():
     )
     parser.add_argument("--apply", action="store_true", help="Write changes to disk")
     parser.add_argument(
+        "--only-audit-issues",
+        action="store_true",
+        help=(
+            "Adjudicate only the lines the attribution audit blocks on, ignoring detector "
+            "findings. Use when repairing a book whose audio is already published: the "
+            "detector's own findings are real but not release-blocking, and some are "
+            "genuinely ambiguous -- ch21_0049 resolved to 'winds' on one run and "
+            "'minor_male' on the next, both at 0.95. Writing an arbitrary choice into a "
+            "published chapter costs a re-master for no gain."
+        ),
+    )
+    parser.add_argument(
         "--no-wide-context",
         action="store_true",
         help="Escalate straight to Tier 2 instead of retrying sub-threshold lines with a wider window",
@@ -139,7 +151,7 @@ def main():
     logger.info("Loaded %d chapter script(s) for audit/repair", len(chapter_scripts))
 
     # Detect suspicious turns
-    suspicious = detect_suspicious_turns(chapter_scripts)
+    suspicious = [] if args.only_audit_issues else detect_suspicious_turns(chapter_scripts)
     audit_issues = _audit_issues(project_path)
     audit_turns = turns_from_audit_issues(
         chapter_scripts,
@@ -208,7 +220,7 @@ def main():
     for ch in chapter_scripts:
         ch_num = ch.chapter_number
         sf = file_map.get(ch_num)
-        ch_suspicious = detect_suspicious_turns([ch])
+        ch_suspicious = [] if args.only_audit_issues else detect_suspicious_turns([ch])
         ch_suspicious = ch_suspicious + turns_from_audit_issues(
             [ch],
             audit_issues,

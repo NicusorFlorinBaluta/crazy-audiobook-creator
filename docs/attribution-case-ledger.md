@@ -47,6 +47,8 @@ for writing them down.
 | `ch26_0321` | *"Crow snapped,"* is a fragment, so not a beat — but still names a rival | every name in the paragraph must agree | — | `tests/test_action_beat_attribution.py` | `deterministic_action_beat` |
 | `ch24_0098` | second half of a couplet, left stale when the first was repaired | a rename re-opens its disagreeing neighbours | — | `tests/test_stale_neighbour_detection.py` | — |
 | `ch23_0093` | `deep_voice` at confidence 1.00, where the tag says *"a commanding female voice"* | an audit-blocking finding is escalated to the cascade | 10 lines on Emberdark, all ≥0.95, invisible to every detector pattern | `tests/test_audit_issues_reach_the_cascade.py` | — |
+| `ch55_0026` | *"a guard snapped,"* read as naming the character called `Guard` | an indefinite article does not name an individual | 167 named-tag readings, 3 behind an article, 2 already agreeing | `tests/test_indefinite_article_is_not_a_name.py` | `deterministic_named_tag` |
+| `ch28_0117` | the cascade answered `starling`, who is the person being thanked | an audit-flagged line needs 0.98, not 0.95, before it is written | correct at 1.00/0.98/1.00, wrong at 0.95/0.95 | `tests/test_audit_issues_reach_the_cascade.py` | — |
 | `ch08_0315` | `drominadian` — a speaker in no cast entry, `voice_id: None` | a repair may not assign an unregistered speaker | 2 lines shipped without a voice | `tests/test_unknown_speaker_guard.py` | — |
 | — | a character enters under a generic label and names themselves later | a unique explicit self-identity resolves the surrounding generic cluster | one reveal per cluster, or it abstains | `tests/test_attribution_audit.py` | `deterministic_identity_reveal` |
 | — | `Gut-bus-ters` spoken as three words | no hyphen or added space in a respelling | 108 stored values corrected on read | `tests/test_pronunciation_no_spoken_breaks.py` | — |
@@ -79,7 +81,7 @@ after rejection.
 | `ch01_0291`, `ch01_0292`, `ch01_0293` | no beat, no tag, no refutation; every tier is confidently wrong | see the 2026-09-10 record, *the prologue exchange* |
 | `ch08_0142`, `ch08_0144` | corrected by hand after the audit flagged them; the fix is in the script but not the delivered audio | one split utterance, tag says *"she"*, stored as the male `armored_alien` |
 | `ch28_0027` | audit false positive; the rule that would suppress it costs a genuine catch in `sample_book-14` | recorded as an `acceptable` review disposition |
-| Emberdark descriptor cast (9 `absent_character_in_chapter`) | the rule that produced them was fixed in September, but nothing re-ran it over the finished script | the current `_dialogue_tag_evidence` returns nothing for all four tags; the stored attributions are stale output of the old rule |
+| Emberdark `ch49_0037`/`0039` and `ch50_0000`/`0002` | the same utterance appears at the end of one chapter and the start of the next; the speaker is unnamed there and revealed afterwards | resolved to `minor_female` from ch50_0003 (*"one of his guards"*) and ch50_0006 (*"A woman with long black hair"*); they had been the **male** `deep_voice` |
 
 ## Related
 
