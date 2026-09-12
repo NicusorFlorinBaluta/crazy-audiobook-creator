@@ -7,7 +7,7 @@ staccato misattribution, narrator-separated attribution collapse, or low confide
 from __future__ import annotations
 
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from shared.models import ScriptChapter, ScriptLine
@@ -58,6 +58,15 @@ class SuspiciousTurn:
     detection_pattern: str
     surrounding_lines: list[dict[str, Any]]
     scene_text: str
+    #: Speakers the adjudicator may not choose for this line. Set only where
+    #: something has *proved* the speaker wrong -- an `absent_character_in_chapter`
+    #: finding is the audit stating that character is nowhere in the chapter's
+    #: source, so offering it as a candidate can only reproduce the error.
+    excluded_speakers: list[str] = field(default_factory=list)
+    #: Extra candidates for the same case. The candidate list is otherwise
+    #: built from the speakers of neighbouring lines, and when the neighbours
+    #: are all narration the right answer is simply not on it.
+    extra_candidates: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -135,6 +144,128 @@ def rebuild_turn_with_context(
         window_radius=window_radius,
         scene_radius=scene_radius,
     )
+
+
+#: Audit findings that name a specific line whose speaker is wrong, and which
+#: the escalation cascade can therefore be asked about. Findings about cast
+#: hygiene or counts are excluded -- there is no single line to re-attribute.
+AUDITABLE_ISSUE_KINDS = frozenset(
+    {
+        "absent_character_in_chapter",
+        "unknown_speaker",
+        "named_tag",
+        "narrator_spoken_dialogue",
+        "collective_tag_named_speaker",
+    }
+)
+
+
+def _names_in_scene(scene_text: str, registry: Any) -> list[str]:
+    """Registered characters the scene text actually names."""
+    if registry is None or not scene_text:
+        return []
+    lowered = scene_text.casefold()
+    found: list[str] = []
+    for character_id, character in getattr(registry, "characters", {}).items():
+        if character_id == "narrator":
+            continue
+        for label in (character.name or "", *(character.aliases or [])):
+            token = str(label).strip().casefold()
+            if len(token) < 3:
+                continue
+            if re.search(rf"(?<!\w){re.escape(token)}(?!\w)", lowered):
+                found.append(character_id)
+                break
+    return found
+
+
+def turns_from_audit_issues(
+    chapters: list[ScriptChapter],
+    issues: list[dict[str, Any]],
+    *,
+    registry: Any = None,
+    already_flagged: set[str] | None = None,
+    window_radius: int = 5,
+    scene_radius: int = 8,
+) -> list[SuspiciousTurn]:
+    """Suspicious turns for lines the audit blocked on, so the cascade sees them.
+
+    The audit and the detector look for different things and, until now,
+    neither told the other. The detector fires on collapse, low confidence, and
+    staccato turns; the audit checks the finished script against the cast and
+    the source. A line can therefore be a release-blocking audit failure and
+    completely invisible to the auto-fix.
+
+    Ten lines of `isles-of-the-emberdark` sat in exactly that gap on
+    2026-09-12, and they were all *confidently* wrong, which is what kept them
+    there:
+
+        ch21_0173  deep_voice   1.00   '"What?"'          he asked, his voice hoarse.
+        ch23_0093  deep_voice   1.00   '"Hey,"'           a commanding female voice said
+        ch28_0117  nol          0.98   '"Thank you so much."'
+        ch42_0091  police_officer 0.95 '"You shouldn\'t get too close,"'  one of the guards warned
+
+    None is a collapse, none is a repeated speaker, and at 0.95-1.00 none is
+    low-confidence -- the one detector pattern that might have caught them. The
+    audit named every one of them and nothing acted on it.
+
+    Confidence is deliberately not consulted here. A line the audit can prove
+    wrong is wrong however sure the model was, and the certainty is part of the
+    defect rather than a reason to trust it.
+    """
+    if not issues:
+        return []
+    seen = set(already_flagged or set())
+    by_line: dict[str, dict[str, Any]] = {}
+    for issue in issues:
+        kind = str(issue.get("kind") or "")
+        line_id = str(issue.get("line_id") or "")
+        if not line_id or kind not in AUDITABLE_ISSUE_KINDS or line_id in seen:
+            continue
+        by_line.setdefault(line_id, issue)
+
+    out: list[SuspiciousTurn] = []
+    for chapter in chapters:
+        for index, line in enumerate(chapter.lines):
+            issue = by_line.get(line.line_id)
+            if issue is None:
+                continue
+            seen.add(line.line_id)
+            message = str(issue.get("message") or "").strip()
+            expected = str(issue.get("expected_speaker") or "").strip()
+            reason = f"Attribution audit ({issue.get('kind')}): {message}"
+            if expected:
+                reason += f" The attached tag points to '{expected}'."
+            turn = build_turn_window(
+                chapter,
+                index,
+                reason=reason,
+                pattern="audit_blocking_issue",
+                window_radius=window_radius,
+                scene_radius=scene_radius,
+            )
+
+            # `absent_character_in_chapter` is the audit proving this speaker
+            # is nowhere in the chapter's source. Leaving it on the candidate
+            # list lets the model re-pick it, and it does: on `ch21_0173` it
+            # reasoned its way to the right *person* -- "attributes the
+            # dialogue to the male character (Dusk/Deep Voice)" -- and then
+            # returned `deep_voice` at confidence 1.00, because that was the
+            # id in front of it and `dusk` was not.
+            #
+            # `dusk` was not on the list because the list is built from the
+            # speakers of neighbouring lines, and every neighbour here is
+            # narration. So the exclusion is only half the fix: the scene names
+            # the people in it, and those are the candidates.
+            if issue.get("kind") == "absent_character_in_chapter":
+                turn.excluded_speakers = [line.speaker]
+                turn.extra_candidates = [
+                    character_id
+                    for character_id in _names_in_scene(turn.scene_text, registry)
+                    if character_id != line.speaker
+                ]
+            out.append(turn)
+    return out
 
 
 def neighbours_of_reattributed(

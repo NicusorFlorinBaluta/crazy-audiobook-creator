@@ -1862,6 +1862,7 @@ class Pipeline:
                 from brain.director.attribution_detector import (
                     detect_suspicious_turns,
                     neighbours_of_reattributed,
+                    turns_from_audit_issues,
                 )
                 from brain.validators.tiered_adjudicator import (
                     WIDE_RETRY_SCENE_RADIUS,
@@ -1901,6 +1902,35 @@ class Pipeline:
                         [turn.line_id for turn in stale_neighbours],
                     )
                     suspicious = suspicious + stale_neighbours
+
+                # The audit checks the script against the cast and the source,
+                # which is a different question from the detector's. A line can
+                # be a release-blocking audit failure and invisible here --
+                # every one of the ten on Emberdark was confidently wrong, so
+                # `low_confidence`, the only pattern that might have caught
+                # them, never fired. The audit runs after this block to gate
+                # the release; running it once more first is deterministic and
+                # cheap beside adjudication, and it is what lets the cascade
+                # see those lines at all.
+                pre_audit = audit_book_attribution(
+                    book,
+                    registry,
+                    chapter_scripts,
+                    confidence_threshold=self.script_generator.speaker_confidence_threshold,
+                )
+                audit_turns = turns_from_audit_issues(
+                    chapter_scripts,
+                    pre_audit.get("issues", []),
+                    registry=registry,
+                    already_flagged={turn.line_id for turn in suspicious},
+                )
+                if audit_turns:
+                    logger.info(
+                        "[TieredAttribution] Escalating %d line(s) the attribution audit blocks on: %s",
+                        len(audit_turns),
+                        [turn.line_id for turn in audit_turns],
+                    )
+                    suspicious = suspicious + audit_turns
                 if suspicious:
                     logger.info(
                         "[TieredAttribution] Detected %d suspicious dialogue turn(s) across %d chapter(s)",

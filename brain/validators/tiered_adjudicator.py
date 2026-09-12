@@ -662,6 +662,18 @@ class TieredAttributionAdjudicator:
         active_ids.add(turn.current_speaker)
         active_ids.discard("narrator")
 
+        # A turn may arrive with the candidate list already constrained. Only
+        # the audit does this, and only where it has proved the stored speaker
+        # is absent from the chapter, so the exclusion is evidence rather than
+        # a heuristic. Both lists are empty for every detector-found turn.
+        for excluded in getattr(turn, "excluded_speakers", ()) or ():
+            active_ids.discard(excluded)
+        active_ids.update(
+            candidate
+            for candidate in (getattr(turn, "extra_candidates", ()) or ())
+            if candidate in self.registry.characters
+        )
+
         scene_characters: list[dict[str, Any]] = []
         for cid in sorted(active_ids):
             char = self.registry.characters.get(cid)

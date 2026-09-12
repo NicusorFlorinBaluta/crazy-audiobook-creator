@@ -60,6 +60,12 @@ scratch-runner concurrency.
      with the line that forced it and the test that pins it in
      [attribution-case-ledger.md](attribution-case-ledger.md), which is also
      where a new rule has to be recorded before it can ship.
+     The detector that feeds the escalation cascade fires on collapse, low
+     confidence and staccato turns. Those patterns cannot see a line that is
+     *confidently* wrong, so findings from `attribution_audit` — the pass that
+     checks the finished script against the cast and the source — are escalated
+     too, via `turns_from_audit_issues`. Before that bridge existed a line
+     could block the release gate and never once be re-examined.
      Unsupported IDs and
      low-confidence results trigger focused retries. Unresolved dialogue is retained as a low-confidence review item rather than a
      release-grade guess. Scripting completes and persists `attribution_audit.json`, but

@@ -21,7 +21,7 @@ from typing import Any
 import yaml
 
 from brain.director.attribution_audit import refresh_attribution_audit
-from brain.director.attribution_detector import detect_suspicious_turns
+from brain.director.attribution_detector import detect_suspicious_turns, turns_from_audit_issues
 from brain.director.ollama_client import OllamaClient
 from brain.validators.gemini_validation import GeminiValidationService
 from brain.validators.tiered_adjudicator import (
@@ -45,6 +45,24 @@ def load_config() -> dict:
         cfg_path = Path(__file__).resolve().parent.parent / "brain" / "config.yaml"
     with open(cfg_path, encoding="utf-8") as f:
         return yaml.safe_load(f)
+
+
+def _audit_issues(project_path: Path) -> list[dict]:
+    """Blocking findings from the last audit, so the cascade can see them.
+
+    The detector and the audit ask different questions, and a line can fail
+    the audit while looking unremarkable to the detector -- confidently wrong
+    is the usual shape. Reading the persisted report keeps this script's
+    behaviour the same as the pipeline's without re-running an audit here.
+    """
+    report_path = project_path / "attribution_audit.json"
+    if not report_path.is_file():
+        return []
+    try:
+        return json.loads(report_path.read_text(encoding="utf-8")).get("issues", [])
+    except (OSError, ValueError) as exc:
+        logger.warning("Could not read %s: %s", report_path, exc)
+        return []
 
 
 def main():
@@ -122,6 +140,20 @@ def main():
 
     # Detect suspicious turns
     suspicious = detect_suspicious_turns(chapter_scripts)
+    audit_issues = _audit_issues(project_path)
+    audit_turns = turns_from_audit_issues(
+        chapter_scripts,
+        audit_issues,
+        registry=registry,
+        already_flagged={turn.line_id for turn in suspicious},
+    )
+    if audit_turns:
+        logger.info(
+            "Adding %d line(s) the attribution audit blocks on: %s",
+            len(audit_turns),
+            [turn.line_id for turn in audit_turns],
+        )
+        suspicious = suspicious + audit_turns
     logger.info("Detected %d suspicious turn(s) across selected chapters", len(suspicious))
 
     if not suspicious:
@@ -177,6 +209,12 @@ def main():
         ch_num = ch.chapter_number
         sf = file_map.get(ch_num)
         ch_suspicious = detect_suspicious_turns([ch])
+        ch_suspicious = ch_suspicious + turns_from_audit_issues(
+            [ch],
+            audit_issues,
+            registry=registry,
+            already_flagged={turn.line_id for turn in ch_suspicious},
+        )
 
         if not ch_suspicious:
             logger.info("Chapter %d: Clean (0 suspicious turns)", ch_num)
