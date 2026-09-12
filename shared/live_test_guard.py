@@ -11,8 +11,7 @@ def require_model_opt_in(argv: Sequence[str]) -> list[str]:
     values = list(argv)
     if "--allow-models" not in values:
         raise SystemExit(
-            "Refusing to load models without --allow-models. Run this only "
-            "during an approved live-test window."
+            "Refusing to load models without --allow-models. Run this only during an approved live-test window."
         )
     values.remove("--allow-models")
     return values

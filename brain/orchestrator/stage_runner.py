@@ -14,7 +14,7 @@ class PipelineResumePlan:
     reason: str
 
     @classmethod
-    def from_state(cls, state: dict[str, Any]) -> "PipelineResumePlan":
+    def from_state(cls, state: dict[str, Any]) -> PipelineResumePlan:
         reset_target = state.get("reset_target_stage")
         if reset_target:
             return cls(PipelineStage(reset_target), "explicit stage reset")

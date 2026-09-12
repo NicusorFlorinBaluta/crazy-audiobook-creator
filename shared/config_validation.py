@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from ipaddress import ip_network
 from typing import Any
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
@@ -40,11 +41,26 @@ def validate_brain_config(config: dict[str, Any]) -> dict[str, Any]:
             if field in ollama and not str(ollama[field]).strip():
                 errors.append(f"ollama.{field} cannot be empty")
         fallbacks = ollama.get("fallback_models", [])
-        if (
-            not isinstance(fallbacks, list)
-            or any(not isinstance(item, str) or not item.strip() for item in fallbacks)
-        ):
+        if not isinstance(fallbacks, list) or any(not isinstance(item, str) or not item.strip() for item in fallbacks):
             errors.append("ollama.fallback_models must be a list of non-empty model tags")
+        _number(errors, ollama, "max_output_tokens", minimum=1, maximum=65536)
+        _number(errors, ollama, "max_generation_seconds", minimum=1, maximum=7200)
+        _number(errors, ollama, "repetition_window_chars", minimum=0, maximum=8192)
+        _number(errors, ollama, "repetition_count", minimum=2, maximum=20)
+        _number(errors, ollama, "num_parallel", minimum=1, maximum=16)
+        backend = str(ollama.get("gpu_backend", "vulkan")).strip().lower()
+        if backend not in {"vulkan", "rocm"}:
+            errors.append("ollama.gpu_backend must be 'vulkan' or 'rocm'")
+        kv_cache_type = str(ollama.get("kv_cache_type", "") or "").strip()
+        if kv_cache_type and kv_cache_type not in {"f16", "q8_0", "q4_0"}:
+            errors.append("ollama.kv_cache_type must be empty, f16, q8_0, or q4_0")
+        if kv_cache_type in {"q8_0", "q4_0"} and not ollama.get("flash_attention", True):
+            errors.append("ollama.kv_cache_type quantization requires ollama.flash_attention: true")
+        think = ollama.get("think")
+        if think is not None and not (
+            isinstance(think, bool) or (isinstance(think, str) and think in {"low", "medium", "high", "max"})
+        ):
+            errors.append("ollama.think must be boolean or one of low, medium, high, max")
     voice = config.get("voice_server", {})
     host = str(voice.get("host", "http://127.0.0.1:8100"))
     parsed = urlsplit(host)
@@ -54,17 +70,25 @@ def validate_brain_config(config: dict[str, Any]) -> dict[str, Any]:
     _number(errors, voice, "timeout", minimum=1)
     _number(errors, voice, "retries", minimum=0, maximum=20)
     script = config.get("script", {})
+    if not isinstance(script, dict):
+        errors.append("script must be an object")
+        script = {}
+    elif "joint_analysis" in script and not isinstance(script["joint_analysis"], bool):
+        errors.append("script.joint_analysis must be boolean")
+    if "adaptive_split_enabled" in script and not isinstance(script["adaptive_split_enabled"], bool):
+        errors.append("script.adaptive_split_enabled must be boolean")
+    if "dialogue_focused_schema" in script and not isinstance(script["dialogue_focused_schema"], bool):
+        errors.append("script.dialogue_focused_schema must be boolean")
     _number(errors, script, "chunk_size_words", minimum=50)
     _number(errors, script, "max_fragments_per_chunk", minimum=1)
+    _number(errors, script, "adaptive_split_max_depth", minimum=0, maximum=6)
+    _number(errors, script, "adaptive_split_min_fragments", minimum=2)
     _number(errors, script, "speaker_confidence_threshold", minimum=0, maximum=1)
     metadata = config.get("metadata", {})
     if not isinstance(metadata, dict):
         errors.append("metadata must be an object")
     else:
-        if (
-            "auto_fetch_external" in metadata
-            and not isinstance(metadata["auto_fetch_external"], bool)
-        ):
+        if "auto_fetch_external" in metadata and not isinstance(metadata["auto_fetch_external"], bool):
             errors.append("metadata.auto_fetch_external must be boolean")
         _number(errors, metadata, "cache_hours", minimum=0, maximum=720)
     external = config.get("external_validation", {})
@@ -78,6 +102,19 @@ def validate_brain_config(config: dict[str, Any]) -> dict[str, Any]:
         _number(errors, external, "manual_review_confidence", minimum=0, maximum=1)
         _number(errors, external, "attribution_batch_size", minimum=1, maximum=100)
         _number(errors, external, "max_audio_regenerations", minimum=0, maximum=5)
+        cast = external.get("cast_adjudication", {})
+        if not isinstance(cast, dict):
+            errors.append("external_validation.cast_adjudication must be an object")
+        else:
+            for field in ("enabled", "require_approval"):
+                if field in cast and not isinstance(cast[field], bool):
+                    errors.append(f"external_validation.cast_adjudication.{field} must be boolean")
+            # A merge gives two characters one voice for a whole book. Refuse a
+            # bar low enough to make that a coin flip.
+            _number(errors, cast, "min_confidence", minimum=0.5, maximum=1)
+            for field in ("roster_model", "adjudication_model"):
+                if field in cast and not str(cast[field]).strip():
+                    errors.append(f"external_validation.cast_adjudication.{field} cannot be empty")
         circuit = external.get("circuit_breaker", {})
         if not isinstance(circuit, dict):
             errors.append("external_validation.circuit_breaker must be an object")
@@ -98,8 +135,7 @@ def validate_brain_config(config: dict[str, Any]) -> dict[str, Any]:
                     errors.append(f"external_validation.api.{field} cannot be empty")
             budgets = api.get("daily_request_budgets", {})
             if not isinstance(budgets, dict) or any(
-                not isinstance(value, int) or isinstance(value, bool) or value < 0
-                for value in budgets.values()
+                not isinstance(value, int) or isinstance(value, bool) or value < 0 for value in budgets.values()
             ):
                 errors.append("external_validation.api.daily_request_budgets must contain non-negative integers")
         if not isinstance(browser, dict):
@@ -120,8 +156,13 @@ def validate_brain_config(config: dict[str, Any]) -> dict[str, Any]:
     except Exception:
         errors.append(f"schedule.timezone is unknown: {timezone_name}")
     valid_days = {
-        "Monday", "Tuesday", "Wednesday", "Thursday",
-        "Friday", "Saturday", "Sunday",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+        "Sunday",
     }
     windows = schedule.get("windows", [])
     if not isinstance(windows, list):
@@ -137,18 +178,39 @@ def validate_brain_config(config: dict[str, Any]) -> dict[str, Any]:
                 except ValueError:
                     errors.append(f"schedule window {index} {field} must use HH:MM")
             days = window.get("days", [])
-            if (
-                not isinstance(days, list)
-                or not days
-                or any(day not in valid_days for day in days)
-            ):
+            if not isinstance(days, list) or not days or any(day not in valid_days for day in days):
                 errors.append(f"schedule window {index} has invalid days")
             if window.get("start") == window.get("end"):
-                errors.append(
-                    f"schedule window {index} start and end must differ"
-                )
+                errors.append(f"schedule window {index} start and end must differ")
     if schedule.get("enabled") and not windows:
         errors.append("enabled schedule requires at least one window")
+
+    dashboard = config.get("dashboard", {})
+    if not isinstance(dashboard, dict):
+        errors.append("dashboard must be an object")
+    else:
+        # A malformed CIDR must fail at startup. Silently discarding it would
+        # widen unauthenticated LAN access instead of narrowing it, which is
+        # the opposite of what the operator intended by setting the key.
+        if "trusted_lan_cidrs" in dashboard:
+            cidrs = dashboard.get("trusted_lan_cidrs")
+            if isinstance(cidrs, str):
+                cidrs = [cidrs]
+            if cidrs is None or not isinstance(cidrs, (list, tuple)):
+                errors.append("dashboard.trusted_lan_cidrs must be a list of CIDR strings")
+            else:
+                for entry in cidrs:
+                    try:
+                        ip_network(str(entry).strip(), strict=False)
+                    except ValueError:
+                        errors.append(f"dashboard.trusted_lan_cidrs contains an invalid network: {entry!r}")
+        origins = dashboard.get("cors_origins")
+        if origins is not None and not isinstance(origins, (list, tuple)):
+            errors.append("dashboard.cors_origins must be a list")
+        _number(errors, dashboard, "port", minimum=1, maximum=65535)
+        _number(errors, dashboard, "max_upload_size_mb", minimum=1)
+        _number(errors, dashboard, "max_epub_expanded_mb", minimum=1)
+
     if errors:
         raise ValueError("Invalid brain configuration: " + "; ".join(errors))
     return config
@@ -173,12 +235,20 @@ def validate_voice_config(config: dict[str, Any]) -> dict[str, Any]:
                 errors.append(f"tts.post_processing.{field} must be boolean")
     if tts.get("attn_implementation", "sdpa") not in {"sdpa", "eager"}:
         errors.append("tts.attn_implementation must be sdpa or eager")
-    if validation.get("whisper_backend", "auto") not in {
-        "auto", "faster_whisper", "openai_whisper"
-    }:
+    if validation.get("whisper_backend", "auto") not in {"auto", "faster_whisper", "openai_whisper"}:
         errors.append("validation.whisper_backend is invalid")
     _number(errors, validation, "wer_threshold", minimum=0, maximum=1)
     _number(errors, validation, "speaker_similarity_threshold", minimum=-1, maximum=1)
+    _number(
+        errors,
+        validation,
+        "voice_profile_similarity_warning",
+        minimum=-1,
+        maximum=1,
+    )
+    # Upper bound matches the designer's own clamp. Each round re-boots the
+    # VoiceDesign subprocess, so a typo here costs real wall time.
+    _number(errors, validation, "voice_distinctness_rounds", minimum=0, maximum=5)
     _number(errors, validation, "max_retries", minimum=0, maximum=20)
     mastering = config.get("mastering", {})
     _number(errors, mastering, "crossfade_ms", minimum=0, maximum=500)

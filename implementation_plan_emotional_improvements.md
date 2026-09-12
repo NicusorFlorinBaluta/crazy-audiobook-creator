@@ -1,5 +1,7 @@
 # Implementation Plan — Advanced Scripting, Speaker Attribution & Emotional Inflections
 
+**Status:** Historical planning record — not a specification. Kept for context; some sections describe modules and deployments that were never built or have since been replaced. Current behavior is defined by [README.md](README.md), [docs/](docs/README.md), the models, and the executable tests.
+
 > **Historical proposal — superseded and partly based on a faulty premise.**
 > Vathi is a speaking human character; entity type must never determine whether
 > a speaker is retained. Current rules keep every entity that actually speaks,

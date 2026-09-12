@@ -27,9 +27,11 @@ from shared.models import (
     GenerateLineResponse,
     MasterChapterRequest,
     MasterChapterResponse,
-    ValidateRequest,
     QualityResult,
+    ValidateRequest,
     VoiceHealthResponse,
+    VoiceWarmupRequest,
+    VoiceWarmupResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -91,8 +93,8 @@ class VoiceClient:
                 if health.status == "ok":
                     logger.info("Voice server is ready: %s", health.model_loaded)
                     return True
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Voice server not ready yet; retrying: %s", exc)
 
             elapsed = int(time.time() - start)
             logger.info(
@@ -110,36 +112,101 @@ class VoiceClient:
     # Voice bootstrapping
     # ------------------------------------------------------------------
 
-    def bootstrap_voices(self, request: BootstrapVoicesRequest) -> BootstrapVoicesResponse:
-        """Generate voice reference clips for all characters."""
+    def bootstrap_voices(
+        self,
+        request: BootstrapVoicesRequest,
+        progress_callback=None,
+    ) -> BootstrapVoicesResponse:
+        """Generate voice references, optionally consuming NDJSON progress."""
         logger.info(
             "Bootstrapping %d voices for project '%s'",
             len(request.characters),
             request.project_id,
         )
-        data = self._post(
-            "/voices/bootstrap",
-            request.model_dump(),
-            timeout=1200,
-        )
-        return BootstrapVoicesResponse(**data)
+        if progress_callback is None:
+            data = self._post(
+                "/voices/bootstrap",
+                request.model_dump(),
+                timeout=1200,
+            )
+            return BootstrapVoicesResponse(**data)
+
+        import json
+
+        url = f"{self.host}/voices/bootstrap/stream"
+        last_error: Exception | None = None
+        for attempt in range(1, self.retries + 1):
+            try:
+                timeout = httpx.Timeout(
+                    connect=10.0,
+                    read=120.0,
+                    write=60.0,
+                    pool=10.0,
+                )
+                with httpx.Client(
+                    timeout=timeout,
+                    headers=self._client.headers,
+                    follow_redirects=True,
+                ) as client:
+                    with client.stream(
+                        "POST",
+                        url,
+                        json=request.model_dump(by_alias=True),
+                    ) as response:
+                        response.raise_for_status()
+                        for line in response.iter_lines():
+                            if not line or not line.strip():
+                                continue
+                            event = json.loads(line)
+                            if event.get("type") == "progress":
+                                progress_callback(event.get("data", {}))
+                            elif event.get("type") == "result":
+                                return BootstrapVoicesResponse(**event.get("data", {}))
+                            elif event.get("type") == "error":
+                                raise RuntimeError(
+                                    f"Voice Server bootstrap error: {event.get('error')} - {event.get('detail')}"
+                                )
+                raise RuntimeError("Voice bootstrap stream ended without a result")
+            except (httpx.TimeoutException, httpx.RequestError, httpx.HTTPStatusError) as exc:
+                last_error = exc
+                logger.warning(
+                    "POST /voices/bootstrap/stream failed (attempt %d/%d): %s",
+                    attempt,
+                    self.retries,
+                    exc,
+                )
+                if attempt < self.retries:
+                    time.sleep(self.retry_delay)
+        raise last_error or RuntimeError("Failed to bootstrap voices after retries")
 
     # ------------------------------------------------------------------
-    # TTS generation
+    # TTS generation & Warmup
     # ------------------------------------------------------------------
 
-    def generate_line(self, request: GenerateLineRequest) -> GenerateLineResponse:
+    def warmup_voice(
+        self,
+        project_id: str | None = None,
+        voice_id: str | None = None,
+        timeout: int = 120,
+    ) -> VoiceWarmupResponse:
+        """Warm up the TTS engine and prime prompt cache for preview or synthesis."""
+        req = VoiceWarmupRequest(project_id=project_id, voice_id=voice_id)
+        data = self._post("/voices/warmup", req.model_dump(), timeout=timeout)
+        return VoiceWarmupResponse(**data)
+
+    def generate_line(
+        self,
+        request: GenerateLineRequest,
+        timeout: int | None = None,
+    ) -> GenerateLineResponse:
         """Generate audio for a single script line."""
-        data = self._post("/generate/line", request.model_dump())
+        data = self._post("/generate/line", request.model_dump(), timeout=timeout)
         return GenerateLineResponse(**data)
 
-    def generate_chapter(
-        self, 
-        request: GenerateChapterRequest,
-        progress_callback=None
-    ) -> GenerateChapterResponse:
+    def generate_chapter(self, request: GenerateChapterRequest, progress_callback=None) -> GenerateChapterResponse:
         """Generate audio for an entire chapter via an NDJSON event stream."""
         import json
+
         logger.info(
             "Generating chapter %d (%d lines) for project '%s'",
             request.chapter_number,
@@ -147,7 +214,7 @@ class VoiceClient:
             request.project_id,
         )
         url = f"{self.host}/generate/chapter"
-        
+
         last_error = None
         for attempt in range(1, self.retries + 1):
             try:
@@ -161,7 +228,7 @@ class VoiceClient:
                                 data = json.loads(line)
                             except json.JSONDecodeError:
                                 continue
-                            
+
                             if data.get("type") == "progress":
                                 msg = data.get("data", {})
                                 line_id = msg.get("line_id", "unknown")
@@ -169,13 +236,27 @@ class VoiceClient:
                                 cache_note = " (cache hit)" if msg.get("cache_hit") else ""
                                 logger.info("%s segment %s%s", phase.title(), line_id, cache_note)
                                 if progress_callback:
+                                    # Stamp which stream attempt produced this
+                                    # event. A retry below restarts the chapter
+                                    # from zero, so a consumer keeping rate
+                                    # state (the pipeline's ETA estimator) must
+                                    # be able to tell a restart from forward
+                                    # progress. Without it, the pre-failure
+                                    # samples stay in the average and the ETA
+                                    # is wrong for the rest of the chapter.
+                                    #
+                                    # Distinct from `msg["attempt"]`, which is
+                                    # the Voice service's per-line retry count.
+                                    msg["stream_attempt"] = attempt
                                     progress_callback(msg)
                             elif data.get("type") == "result":
                                 return GenerateChapterResponse(**data.get("data", {}))
                             elif data.get("type") == "error":
-                                raise RuntimeError(f"Voice Server generation error: {data.get('error')} - {data.get('detail')}")
+                                raise RuntimeError(
+                                    f"Voice Server generation error: {data.get('error')} - {data.get('detail')}"
+                                )
                 raise RuntimeError("Stream ended without returning a result.")
-            except (httpx.TimeoutException, httpx.RequestError) as e:
+            except (httpx.TimeoutException, httpx.RequestError, httpx.HTTPStatusError) as e:
                 last_error = e
                 logger.warning(
                     "POST /generate/chapter stream failed (attempt %d/%d): %s",
@@ -221,10 +302,11 @@ class VoiceClient:
     def export_m4b(self, request: ExportM4BRequest) -> ExportM4BResponse:
         """Export all chapters as a single M4B audiobook."""
         logger.info("Exporting M4B for project '%s'", request.project_id)
+        timeout = max(3600, len(request.chapters) * 120)
         data = self._post(
             "/export/m4b",
             request.model_dump(),
-            timeout=600,
+            timeout=timeout,
         )
         return ExportM4BResponse(**data)
 
@@ -266,7 +348,9 @@ class VoiceClient:
         last_error: Exception | None = None
         req_size = len(str(json_data)) if json_data else 0
 
-        logger.info("[VoiceClient] Requesting %s %s (timeout=%ss, payload=%d bytes)", method, path, effective_timeout, req_size)
+        logger.info(
+            "[VoiceClient] Requesting %s %s (timeout=%ss, payload=%d bytes)", method, path, effective_timeout, req_size
+        )
 
         for attempt in range(1, self.retries + 1):
             t0 = time.time()
@@ -335,9 +419,7 @@ class VoiceClient:
             if attempt < self.retries:
                 time.sleep(self.retry_delay)
 
-        raise VoiceClientError(
-            f"{method} {path} failed after {self.retries} attempts: {last_error}"
-        ) from last_error
+        raise VoiceClientError(f"{method} {path} failed after {self.retries} attempts: {last_error}") from last_error
 
     def close(self) -> None:
         """Close the HTTP client."""

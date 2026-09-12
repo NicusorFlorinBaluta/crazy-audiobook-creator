@@ -96,7 +96,28 @@ do {
 } while ((Get-Date) -lt $taskDeadline)
 
 if ($scheduledTask.State -eq "Running") {
-    throw "Scheduled task '$TaskName' did not stop within the shutdown timeout."
+    # Task Scheduler can retain a stale Running state after the launcher or
+    # Python child has exited.  At this point the dashboard port is confirmed
+    # free, so ending this exact registered task cannot interrupt a live API.
+    Write-Warning (
+        "Scheduled task '$TaskName' is stale after the dashboard port closed; " +
+        "ending that task instance before restart."
+    )
+    schtasks.exe /End /TN $TaskName | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not end stale scheduled task '$TaskName'."
+    }
+    $taskEndDeadline = (Get-Date).AddSeconds(10)
+    do {
+        Start-Sleep -Milliseconds 500
+        $scheduledTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+    } while (
+        $scheduledTask.State -eq "Running" -and
+        (Get-Date) -lt $taskEndDeadline
+    )
+    if ($scheduledTask.State -eq "Running") {
+        throw "Scheduled task '$TaskName' remained Running after an explicit end."
+    }
 }
 
 schtasks.exe /Run /TN $TaskName | Out-Host

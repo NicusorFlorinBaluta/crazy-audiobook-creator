@@ -1,5 +1,7 @@
 # Production-readiness changes — 2026-08-02
 
+**Status:** Historical record — A dated record of what was done and why. Evidence, not a specification -- do not implement from it.
+
 This note records the decisions implemented after reviewing the failed
 `sample_book-v32b-prod-e2e` run and the evidence from the replacement
 `sample_book-1` production baseline completed on 2026-08-03. The original

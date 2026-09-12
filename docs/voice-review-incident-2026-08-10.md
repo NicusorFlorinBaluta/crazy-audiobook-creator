@@ -1,5 +1,7 @@
 # Voice Review Attribution and UI Incident — 2026-08-10
 
+**Status:** Historical record — A dated record of what was done and why. Evidence, not a specification -- do not implement from it.
+
 ## Impact
 
 The `sample_book-14` release run reached voice review with contaminated

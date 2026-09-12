@@ -4,23 +4,27 @@ from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 import shutil
 import subprocess
 import sys
-
+from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _project_python() -> Path | None:
-    """Return the recorded project interpreter without importing project dependencies."""
+    """Return the dashboard interpreter where browser escalation actually runs."""
+    dashboard_python = REPO_ROOT / "venv" / "Scripts" / "python.exe"
+    if dashboard_python.is_file():
+        return dashboard_python
+
+    # Older installations may not have the lightweight dashboard venv. The
+    # recorded runtime is a safe fallback, but is normally the separate voice
+    # environment and therefore must not take precedence over ``venv``.
     runtime_path = REPO_ROOT / "runtime-environment.json"
     if runtime_path.is_file():
         try:
-            executable = json.loads(runtime_path.read_text(encoding="utf-8")).get(
-                "python", {}
-            ).get("executable")
+            executable = json.loads(runtime_path.read_text(encoding="utf-8")).get("python", {}).get("executable")
             if executable and Path(executable).is_file():
                 return Path(executable)
         except (OSError, json.JSONDecodeError, AttributeError):
@@ -94,15 +98,11 @@ def main() -> int:
         raise SystemExit(f"Brain configuration not found: {config_path}")
     config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     browser = config.get("external_validation", {}).get("browser", {})
-    profile = _resolve_repo_path(
-        browser.get("profile_dir", "brain/projects/.gemini-browser-profile")
-    )
+    profile = _resolve_repo_path(browser.get("profile_dir", "brain/projects/.gemini-browser-profile"))
     profile.mkdir(parents=True, exist_ok=True)
     chrome = _find_chrome(args.chrome or str(browser.get("chrome_executable", "")))
     if chrome is None:
-        raise SystemExit(
-            "Google Chrome was not found. Pass its location with --chrome C:\\path\\to\\chrome.exe"
-        )
+        raise SystemExit("Google Chrome was not found. Pass its location with --chrome C:\\path\\to\\chrome.exe")
 
     print("A normal, non-automated Chrome window will open with a dedicated Gemini profile.")
     print("Sign in and select the premium Pro model, then close that Chrome window.")
@@ -118,9 +118,7 @@ def main() -> int:
         ],
         cwd=REPO_ROOT,
     )
-    input(
-        "After sign-in, Pro selection, and closing the dedicated Chrome window, press Enter here: "
-    )
+    input("After sign-in, Pro selection, and closing the dedicated Chrome window, press Enter here: ")
     if process.poll() is None:
         process.terminate()
         try:

@@ -1,5 +1,7 @@
 # Fix the Root Cause: Pass 1 Character Analysis Missing Speakers
 
+**Status:** Historical planning record — not a specification. Kept for context; some sections describe modules and deployments that were never built or have since been replaced. Current behavior is defined by [README.md](README.md), [docs/](docs/README.md), the models, and the executable tests.
+
 ## Problem Diagnosis
 
 The `child_female` crash isn't a Pass 2 parsing issue — it's a **Pass 1 coverage gap**. Here's what's actually happening:

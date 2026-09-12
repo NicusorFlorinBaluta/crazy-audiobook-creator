@@ -1,0 +1,53 @@
+# Local guardrails, matching the CI `lint` job.
+#
+# Install once:
+#   python -m pip install pre-commit
+#   pre-commit install
+#
+# The ruff hooks are the important ones: `F811` (duplicate definition) and
+# `F821` (undefined name) are the rules that catch the defect class which
+# previously survived several manual audits of this repository.
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.6
+    hooks:
+      - id: ruff
+        args: [--fix]
+      # Enabled 2026-09-04, after the one-off reformatting commit.
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+        # brain/config.yaml and voice/config.yaml are plain YAML; the workflow
+        # files use GitHub's `on:`/`if:` keys which check-yaml handles fine.
+      - id: check-json
+      - id: check-merge-conflict
+      - id: mixed-line-ending
+        args: [--fix=no]
+      - id: check-added-large-files
+        args: [--maxkb=512]
+      - id: check-ast
+      - id: check-illegal-windows-names
+
+  # Added 2026-09-12. The ledger's rows claim a named test pins a named case,
+  # and the guard also fails when a rule writes an `attribution_resolver` no row
+  # explains -- so a new attribution rule cannot be committed undocumented.
+  # Only runs when attribution code or the ledger itself is touched.
+  - repo: local
+    hooks:
+      - id: attribution-case-ledger
+        name: attribution case ledger matches the code
+        entry: python -m pytest tests/test_case_ledger.py -q
+        language: system
+        pass_filenames: false
+        files: >-
+          (?x)^(
+            docs/attribution-case-ledger\.md
+            |brain/(director|validators)/.*\.py
+            |tests/test_case_ledger\.py
+            |\.github/workflows/ci\.yml
+          )$

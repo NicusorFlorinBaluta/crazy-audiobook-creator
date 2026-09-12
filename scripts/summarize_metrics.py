@@ -17,9 +17,7 @@ def main() -> int:
     parser.add_argument("project_dir", type=Path)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
-    summary = summarize_metrics(
-        read_metrics(args.project_dir / "performance_metrics.jsonl")
-    )
+    summary = summarize_metrics(read_metrics(args.project_dir / "performance_metrics.jsonl"))
     text = json.dumps(summary, indent=2, ensure_ascii=False, sort_keys=True) + "\n"
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)

@@ -10,6 +10,7 @@ voice_library/
 *.mp3
 *.aac
 *.flac
+*.apk
 
 # Python
 __pycache__/
@@ -22,6 +23,9 @@ env/
 *.egg-info/
 dist/
 build/
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
 
 # IDE
 .vscode/
@@ -32,12 +36,14 @@ build/
 # OS
 .DS_Store
 Thumbs.db
+
 # Node / Dependencies
 node_modules/
 desktop/node_modules/
 
 # Config with secrets
 config.local.yaml
+.env
 
 # Database
 *.db
@@ -60,11 +66,22 @@ models/
 *.bin
 *.safetensors
 *.gguf
-.env
-scratch/check_pipeline_state.py
-.gitignore
-scratch/test_voice_upload.py
-scratch/run_e2e_test.py
-.gitignore
 
+# Local scratch / throwaway scripts.
+# Anything here is disposable by definition: do not reference it from brain/,
+# voice/ or shared/, and do not cite it as release evidence. Promote a script
+# that has become load-bearing into tools/ or scripts/ instead.
 scratch/
+
+# Raw assistant/IDE transcripts may contain source-book excerpts, local paths,
+# operational logs, and credentials. Preserve decisions in docs/decisions/.
+#
+# `Testing The Audiobook Pipeline 2.md` was committed and lived here until
+# 2026-09-04 because the original `/*chat*.md` pattern did not match its name.
+# The patterns below are deliberately broader than "chat".
+/*chat*.md
+/*Chat*.md
+/*transcript*.md
+/*Transcript*.md
+/Testing*.md
+cahtgpt_chat.md

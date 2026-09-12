@@ -1,5 +1,7 @@
 # Audio echo incident — 2026-08-10
 
+**Status:** Historical record — A dated record of what was done and why. Evidence, not a specification -- do not implement from it.
+
 ## Summary
 
 Listening to the `sample_book-13` export from the 2026-08-09 full-book run

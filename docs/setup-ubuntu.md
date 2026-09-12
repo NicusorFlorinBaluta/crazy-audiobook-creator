@@ -1,5 +1,7 @@
 # Ubuntu Setup (Legacy)
 
+**Status:** Legacy — Describes a design that is no longer supported. Kept for context only.
+
 The current supported architecture is a single Windows workstation. The Voice API, Qwen3-TTS VoiceDesign/Base, Whisper, mastering, and export now run locally and default to loopback.
 
 The former Ubuntu/NVIDIA deployment guide was removed because it described:

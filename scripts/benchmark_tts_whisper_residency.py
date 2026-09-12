@@ -22,10 +22,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from shared.live_test_guard import add_model_opt_in
 from voice.tts_server.qwen3_engine import Qwen3TTSEngine
 from voice.tts_server.voice_library import VoiceLibraryManager
 from voice.validator.whisper_validator import WhisperValidator
-from shared.live_test_guard import add_model_opt_in
 
 
 def _gpu_snapshot(label: str) -> dict[str, float | str]:
@@ -67,9 +67,7 @@ def _timed_generation(
     return {
         "wall_seconds": wall_seconds,
         "audio_seconds": audio_seconds,
-        "realtime_factor": (
-            wall_seconds / audio_seconds if audio_seconds > 0 else float("inf")
-        ),
+        "realtime_factor": (wall_seconds / audio_seconds if audio_seconds > 0 else float("inf")),
     }
 
 
@@ -88,14 +86,10 @@ def main() -> int:
     config = yaml.safe_load(Path("voice/config.yaml").read_text("utf-8")) or {}
     tts_cfg = config.get("tts", {})
     val_cfg = config.get("validation", {})
-    library = VoiceLibraryManager(
-        config.get("storage", {}).get("voice_library_dir", "voice_library")
-    )
+    library = VoiceLibraryManager(config.get("storage", {}).get("voice_library_dir", "voice_library"))
     voice = library.get_voice_info(args.project, args.voice)
     if not voice:
-        raise SystemExit(
-            f"Voice '{args.voice}' not found in project '{args.project}'"
-        )
+        raise SystemExit(f"Voice '{args.voice}' not found in project '{args.project}'")
     reference = Path(voice["file"]).resolve()
     reference_text = voice.get("ref_text", "")
     text = (
@@ -135,6 +129,7 @@ def main() -> int:
         "whisper_vad_filter": bool(val_cfg.get("whisper_vad_filter", False)),
         "snapshots": [_gpu_snapshot("initial")],
     }
+
     def save_report() -> None:
         if args.output_json:
             args.output_json.parent.mkdir(parents=True, exist_ok=True)
@@ -167,12 +162,8 @@ def main() -> int:
         ]
         report["snapshots"].append(_gpu_snapshot("tts_warm"))
         report["tts_only_runs"] = tts_only
-        report["tts_only_median_seconds"] = statistics.median(
-            item["wall_seconds"] for item in tts_only
-        )
-        report["tts_only_median_realtime_factor"] = statistics.median(
-            item["realtime_factor"] for item in tts_only
-        )
+        report["tts_only_median_seconds"] = statistics.median(item["wall_seconds"] for item in tts_only)
+        report["tts_only_median_realtime_factor"] = statistics.median(item["realtime_factor"] for item in tts_only)
         report["checkpoint"] = "tts_only_complete"
         save_report()
 
@@ -189,9 +180,7 @@ def main() -> int:
             for index in range(max(1, args.repeats))
         ]
         transcription_started = time.perf_counter()
-        transcript = whisper.transcribe(
-            str(output_dir / "co-resident-0.wav")
-        )
+        transcript = whisper.transcribe(str(output_dir / "co-resident-0.wav"))
         transcription_seconds = time.perf_counter() - transcription_started
         final_snapshot = _gpu_snapshot("after_co_resident_work")
         report["snapshots"].append(final_snapshot)
@@ -199,23 +188,11 @@ def main() -> int:
         report["checkpoint"] = "co_resident_complete"
         save_report()
 
-        tts_only_median = statistics.median(
-            item["wall_seconds"] for item in tts_only
-        )
-        co_resident_median = statistics.median(
-            item["wall_seconds"] for item in co_resident
-        )
-        tts_only_rtf = statistics.median(
-            item["realtime_factor"] for item in tts_only
-        )
-        co_resident_rtf = statistics.median(
-            item["realtime_factor"] for item in co_resident
-        )
-        slowdown = (
-            (co_resident_rtf / tts_only_rtf) - 1.0
-            if tts_only_rtf > 0
-            else 1.0
-        )
+        tts_only_median = statistics.median(item["wall_seconds"] for item in tts_only)
+        co_resident_median = statistics.median(item["wall_seconds"] for item in co_resident)
+        tts_only_rtf = statistics.median(item["realtime_factor"] for item in tts_only)
+        co_resident_rtf = statistics.median(item["realtime_factor"] for item in co_resident)
+        slowdown = (co_resident_rtf / tts_only_rtf) - 1.0 if tts_only_rtf > 0 else 1.0
         free_gib = float(final_snapshot.get("free_gib", 0.0))
         report.update(
             {
@@ -232,9 +209,7 @@ def main() -> int:
                 # Conservative gate: leave enough room for long utterances,
                 # allocator fragmentation, and OS/display GPU use.
                 "recommend_keep_resident": (
-                    free_gib >= 4.0
-                    and slowdown <= 0.15
-                    and whisper.calculate_wer(text, transcript) <= 0.20
+                    free_gib >= 4.0 and slowdown <= 0.15 and whisper.calculate_wer(text, transcript) <= 0.20
                 ),
                 "decision_rule": (
                     "At least 4 GiB free after work and no more than 15% "
