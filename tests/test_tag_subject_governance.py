@@ -73,6 +73,7 @@ class TestAPrepositionalObjectIsNotTheSpeaker:
     @pytest.mark.parametrize(
         "tag",
         [
+            # ch40_0090: Dajer speaks; Dusk is who he squatted near.
             "He squatted near Dusk and muttered,",
             "He looked to Dusk as he continued,",
             "He turned toward Dusk and said,",

@@ -46,6 +46,7 @@ cleaned up, so some paths inside them no longer resolve.
 | --- | --- |
 | [voice-review-incident-2026-08-10.md](voice-review-incident-2026-08-10.md) | Voice review failure and its resolution. |
 | [tiered-attribution-and-audio-regeneration-2026-09-03.md](tiered-attribution-and-audio-regeneration-2026-09-03.md) | Conversational attribution collapse and the auto-fix engine. |
+| [attribution-case-ledger.md](attribution-case-ledger.md) | Every attribution rule in force, the line that forced it, what it measured, and the test that pins it -- plus the rules measured and rejected, and the cases knowingly left wrong. |
 | [attribution-repair-2026-09-06.md](attribution-repair-2026-09-06.md) | Three attribution runs on a 32-chapter book, a misparsed cast entry, and the stale-process lesson. |
 | [speaker-attribution-incident-2026-08-11.md](speaker-attribution-incident-2026-08-11.md) | Misattributed quotations in the shipped release, and the selective repair. |
 | [speaker-attribution-improvements-2026-08-18.md](speaker-attribution-improvements-2026-08-18.md) | Attribution failure modes across a 63-chapter book, and the fixes. |

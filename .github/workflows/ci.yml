@@ -59,7 +59,14 @@ jobs:
           python -m pip install -r brain/requirements.txt
           python -m pip install -r requirements-ci.txt
       - name: Python unit tests
-        run: python -m unittest discover -s tests -v
+        # pytest, not `unittest discover`. pytest collects unittest.TestCase
+        # classes as well, so this is a superset -- but the reverse is not
+        # true, and 17 test files using fixtures or bare test functions were
+        # collected by nothing: 238 tests, including every guard written for
+        # the attribution work, silently absent from CI. requirements-ci.txt
+        # has installed pytest for exactly this reason the whole time, and
+        # says so; only the invocation was never changed.
+        run: python -m pytest tests -q
       - name: Python compilation
         # Includes the repository root: a stray non-UTF-8 file there used to be
         # invisible to every check.

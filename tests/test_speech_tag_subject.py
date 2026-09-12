@@ -236,6 +236,31 @@ def test_a_named_tag_overrules_the_model(registry) -> None:
     assert result.confidence == 1.0
 
 
+def test_a_descriptor_may_not_overrule_the_model(registry) -> None:
+    """Only a tag that reached its answer through a *name* is the author speaking.
+
+    "the man said" resolves to `minor_male` through a generic description, and
+    the overrule used to take that as the author naming the speaker: a real
+    character renamed to a placeholder at confidence 1.0 with review disabled,
+    a downgrade dressed as a correction. Measured over both books, of every
+    attached naming tag that would overrule -- 1 of 230 -- all were descriptors
+    and none was a real name, so the guard costs nothing.
+    """
+    registry.characters["minor_male"] = Character(
+        id="minor_male",
+        name="Unnamed Man",
+        gender=Gender.MALE,
+        age_range="adult",
+        voice_description="v",
+        aliases=[],
+    )
+    result = _adjudicator(registry, "jarlaxle")._adjudicate_turn_tier1(
+        _turn(LINE, "jarlaxle", "the man said, turning away."), None
+    )
+    assert result.resolved_speaker == "jarlaxle", "a description must not rename anyone"
+    assert result.resolver_tier != "deterministic_tag"
+
+
 def test_a_tag_that_agrees_leaves_the_model_alone(registry) -> None:
     result = _adjudicator(registry, "dahlia")._adjudicate_turn_tier1(
         _turn(LINE, "dahlia", "she replied, turning away."), None
