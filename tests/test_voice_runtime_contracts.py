@@ -211,7 +211,9 @@ class VoiceModelResidencyTests(unittest.TestCase):
                 designer.bootstrap_voices(req, progress_callback=progress_events.append)
 
             # Check that designing_references emitted character name and id
-            design_events = [e for e in progress_events if e.get("phase") == "designing_references" and e.get("completed", 0) > 0]
+            design_events = [
+                e for e in progress_events if e.get("phase") == "designing_references" and e.get("completed", 0) > 0
+            ]
             self.assertTrue(len(design_events) > 0)
             self.assertEqual(design_events[0].get("character_name"), "Catti-brie")
             self.assertEqual(design_events[0].get("character_id"), "catti_brie")
@@ -574,9 +576,11 @@ class PipelineVoiceBootstrapProgressTests(unittest.TestCase):
             )
             (pdir / "script" / "ch01.json").write_text(chap.model_dump_json(), encoding="utf-8")
 
-            with patch("brain.orchestrator.pipeline.JobQueue") as mock_jq_cls, \
-                 patch("brain.orchestrator.pipeline.VoiceClient") as mock_vc_cls, \
-                 patch("brain.orchestrator.pipeline.OllamaClient"):
+            with (
+                patch("brain.orchestrator.pipeline.JobQueue") as mock_jq_cls,
+                patch("brain.orchestrator.pipeline.VoiceClient") as mock_vc_cls,
+                patch("brain.orchestrator.pipeline.OllamaClient"),
+            ):
                 mock_jq = Mock()
                 mock_jq.get_job.return_value = {
                     "voice_review_policy": "required_once",
@@ -587,14 +591,16 @@ class PipelineVoiceBootstrapProgressTests(unittest.TestCase):
 
                 def fake_bootstrap(request, progress_callback=None):
                     if progress_callback:
-                        progress_callback({
-                            "phase": "designing_references",
-                            "completed": 1,
-                            "total": 1,
-                            "message": "Prepared 1 of 1 voice candidates (Hero)",
-                            "character_name": "Hero",
-                            "character_id": "hero",
-                        })
+                        progress_callback(
+                            {
+                                "phase": "designing_references",
+                                "completed": 1,
+                                "total": 1,
+                                "message": "Prepared 1 of 1 voice candidates (Hero)",
+                                "character_name": "Hero",
+                                "character_id": "hero",
+                            }
+                        )
                     return BootstrapVoicesResponse(
                         status="success",
                         project_id="test_proj",

@@ -974,6 +974,7 @@ class AudioValidationFastExitAndFallbackTests(unittest.TestCase):
                 line_text="Hello world",
                 result=q_result,
             )
+
     def test_validate_audio_benign_soft_warnings_auto_accepted_without_api_calls(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1171,4 +1172,3 @@ class AudioValidationFastExitAndFallbackTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

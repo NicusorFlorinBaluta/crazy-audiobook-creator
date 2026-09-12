@@ -109,9 +109,7 @@ class UndefinedNamesTests(unittest.TestCase):
         self.assertEqual(
             findings,
             [],
-            "undefined names (each is a NameError waiting for its branch to run):"
-            + '\n  '
-            + '\n  '.join(findings),
+            "undefined names (each is a NameError waiting for its branch to run):" + "\n  " + "\n  ".join(findings),
         )
 
 

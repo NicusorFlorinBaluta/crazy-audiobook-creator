@@ -147,8 +147,16 @@ class PronunciationAndHotSwapTests(unittest.IsolatedAsyncioTestCase):
                             {"line_id": "ch01_0002", "speaker": "dusk", "text": "Farewell, Homeisle."},
                             {"line_id": "ch01_0003", "speaker": "narrator", "text": "And Homeisle faded from sight."},
                             # Dictionary words should be filtered out
-                            {"line_id": "ch01_0004", "speaker": "narrator", "text": "The Tower was tall. The Tower loomed."},
-                            {"line_id": "ch01_0005", "speaker": "narrator", "text": "The Less they knew, the Less they cared."},
+                            {
+                                "line_id": "ch01_0004",
+                                "speaker": "narrator",
+                                "text": "The Tower was tall. The Tower loomed.",
+                            },
+                            {
+                                "line_id": "ch01_0005",
+                                "speaker": "narrator",
+                                "text": "The Less they knew, the Less they cared.",
+                            },
                         ],
                     }
                 ],
@@ -193,9 +201,7 @@ class PronunciationAndHotSwapTests(unittest.IsolatedAsyncioTestCase):
                 def health_check_once(self, timeout_seconds: float = 0.8) -> MagicMock:
                     return MagicMock(status="ok")
 
-                def generate_line(
-                    self, req: GenerateLineRequest, timeout: int | None = None
-                ) -> GenerateLineResponse:
+                def generate_line(self, req: GenerateLineRequest, timeout: int | None = None) -> GenerateLineResponse:
                     out_path = workspace_dir / "segments" / f"{req.line.line_id}.wav"
                     _make_dummy_wav(out_path, duration_s=0.3)
                     return GenerateLineResponse(
@@ -626,8 +632,16 @@ class PronunciationAndHotSwapTests(unittest.IsolatedAsyncioTestCase):
                         "chapter_title": "One",
                         "lines": [
                             {"line_id": "ch01_0001", "speaker": "narrator", "text": "Uncle Jax walked in."},
-                            {"line_id": "ch01_0002", "speaker": "dusk", "text": "Hello, Jax. Where is Braelin Janquay?"},
-                            {"line_id": "ch01_0003", "speaker": "narrator", "text": "Braelin Janquay was in Ten-Towns."},
+                            {
+                                "line_id": "ch01_0002",
+                                "speaker": "dusk",
+                                "text": "Hello, Jax. Where is Braelin Janquay?",
+                            },
+                            {
+                                "line_id": "ch01_0003",
+                                "speaker": "narrator",
+                                "text": "Braelin Janquay was in Ten-Towns.",
+                            },
                             {"line_id": "ch01_0004", "speaker": "narrator", "text": "Jax smiled. Uncle Jax was wise."},
                         ],
                     }
@@ -688,9 +702,10 @@ class PronunciationAndHotSwapTests(unittest.IsolatedAsyncioTestCase):
             (proj_dir / "pronunciation_recommendations.json").write_text(json.dumps(recs), encoding="utf-8")
             (proj_dir / "pronunciation_dict.json").write_text(json.dumps(proj), encoding="utf-8")
 
-            with patch.object(dashboard_runtime, "require_job"), \
-                 patch.object(dashboard_runtime, "project_dir", return_value=proj_dir):
-
+            with (
+                patch.object(dashboard_runtime, "require_job"),
+                patch.object(dashboard_runtime, "project_dir", return_value=proj_dir),
+            ):
                 # 1. Scope: verified / custom only
                 res_ver = await pronunciation_routes.export_pronunciations("test_proj", scope="verified")
                 data_ver = json.loads(res_ver.body.decode("utf-8"))
@@ -731,8 +746,10 @@ class PronunciationAndHotSwapTests(unittest.IsolatedAsyncioTestCase):
             dict_path = proj_dir / "pronunciation_dict.json"
             dict_path.write_text(json.dumps({"Jax": "OldSpoken", "other": "val"}), encoding="utf-8")
 
-            with patch.object(dashboard_runtime, "require_job"), \
-                 patch.object(dashboard_runtime, "project_dir", return_value=proj_dir):
+            with (
+                patch.object(dashboard_runtime, "require_job"),
+                patch.object(dashboard_runtime, "project_dir", return_value=proj_dir),
+            ):
                 req = pronunciation_routes.PronunciationBatchRequest(entries={"jax": "NewSpoken"})
                 res = await pronunciation_routes.batch_update_pronunciations("test_proj", req)
                 self.assertEqual(res["status"], "success")
@@ -755,4 +772,3 @@ class PronunciationAndHotSwapTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

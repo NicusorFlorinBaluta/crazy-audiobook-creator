@@ -46,18 +46,18 @@ class TestPossessiveContradictionCheck:
         return ScriptChapter(
             chapter_number=number,
             chapter_title=f"Chapter {number}",
-            lines=[
-                ScriptLine(line_id=lid, speaker=speaker, text=text)
-                for lid, speaker, text in rows
-            ],
+            lines=[ScriptLine(line_id=lid, speaker=speaker, text=text) for lid, speaker, text in rows],
         )
 
     def test_the_ch11_tower_contradiction_is_caught(self) -> None:
-        chapter = self._chapter(11, [
-            ("ch11_0147", "effron", '"And I have even done you small favors, as you mention."'),
-            ("ch11_0148", "effron", '"You have never invited me to be a guest in your tower."'),
-            ("ch11_0149", "effron", '"You will never be invited into my tower, mother,"'),
-        ])
+        chapter = self._chapter(
+            11,
+            [
+                ("ch11_0147", "effron", '"And I have even done you small favors, as you mention."'),
+                ("ch11_0148", "effron", '"You have never invited me to be a guest in your tower."'),
+                ("ch11_0149", "effron", '"You will never be invited into my tower, mother,"'),
+            ],
+        )
         found = detect_possessive_contradictions([chapter])
         assert len(found) == 1
         assert found[0]["speaker"] == "effron"
@@ -66,27 +66,36 @@ class TestPossessiveContradictionCheck:
         assert found[0]["disclaimed_line_id"] == "ch11_0148"
 
     def test_a_contrast_inside_one_line_is_not_a_contradiction(self) -> None:
-        """"Your tower is grander than my tower" is one speaker, two towers."""
-        chapter = self._chapter(1, [
-            ("ch01_0001", "effron", '"Your tower is grander than my tower, mother."'),
-            ("ch01_0002", "effron", '"That has always been true."'),
-        ])
+        """ "Your tower is grander than my tower" is one speaker, two towers."""
+        chapter = self._chapter(
+            1,
+            [
+                ("ch01_0001", "effron", '"Your tower is grander than my tower, mother."'),
+                ("ch01_0002", "effron", '"That has always been true."'),
+            ],
+        )
         assert detect_possessive_contradictions([chapter]) == []
 
     def test_two_speakers_may_disagree_about_ownership(self) -> None:
         """The check is about ONE speaker contradicting themselves."""
-        chapter = self._chapter(1, [
-            ("ch01_0001", "dahlia", '"You have never invited me into your tower."'),
-            ("ch01_0002", "effron", '"You will never be invited into my tower."'),
-        ])
+        chapter = self._chapter(
+            1,
+            [
+                ("ch01_0001", "dahlia", '"You have never invited me into your tower."'),
+                ("ch01_0002", "effron", '"You will never be invited into my tower."'),
+            ],
+        )
         assert detect_possessive_contradictions([chapter]) == []
 
     def test_a_narrator_line_does_not_break_the_run(self) -> None:
         """Speech tags sit between turns; the run is the speaker's, not the text's."""
-        chapter = self._chapter(11, [
-            ("ch11_0148", "effron", '"...a guest in your tower."'),
-            ("ch11_0149", "effron", '"You will never enter my tower."'),
-        ])
+        chapter = self._chapter(
+            11,
+            [
+                ("ch11_0148", "effron", '"...a guest in your tower."'),
+                ("ch11_0149", "effron", '"You will never enter my tower."'),
+            ],
+        )
         assert len(detect_possessive_contradictions([chapter])) == 1
 
     def test_it_is_reported_and_never_blocking(self) -> None:
@@ -99,10 +108,13 @@ class TestPossessiveContradictionCheck:
         abstract nouns would be fitting to noise, so none is applied and the
         result informs rather than gates.
         """
-        chapter = self._chapter(25, [
-            ("ch25_0101", "dusk", '"Setting off without knowing your way home is stupid."'),
-            ("ch25_0103", "dusk", '"No, I don\'t know how we\'ll find our way back,"'),
-        ])
+        chapter = self._chapter(
+            25,
+            [
+                ("ch25_0101", "dusk", '"Setting off without knowing your way home is stupid."'),
+                ("ch25_0103", "dusk", "\"No, I don't know how we'll find our way back,\""),
+            ],
+        )
         found = detect_possessive_contradictions([chapter])
         assert len(found) == 1, "the known false positive is documented, not suppressed"
         assert found[0]["noun"] == "way"
@@ -176,8 +188,12 @@ class TestUniqueCandidateResolver:
         return CharacterRegistry(
             characters={
                 cid: Character(
-                    id=cid, name=cid.title(), gender=Gender(g),
-                    age_range="adult", voice_description="x", aliases=[],
+                    id=cid,
+                    name=cid.title(),
+                    gender=Gender(g),
+                    age_range="adult",
+                    voice_description="x",
+                    aliases=[],
                 )
                 for cid, g in genders.items()
             }
@@ -186,18 +202,21 @@ class TestUniqueCandidateResolver:
     @staticmethod
     def _chapter(rows):
         return ScriptChapter(
-            chapter_number=11, chapter_title="Eleven",
+            chapter_number=11,
+            chapter_title="Eleven",
             lines=[ScriptLine(line_id=i, speaker=s, text=t) for i, s, t in rows],
         )
 
     def test_the_ch11_cascade_resolves_to_dahlia(self) -> None:
         """The case block adjudication was built for and never fixed."""
-        chapter = self._chapter([
-            ("ch11_0145", "dahlia", '"Of course!"'),
-            ("ch11_0147", "effron", '"And I have done you small favors."'),
-            ("ch11_0148", "effron", '"You have never invited me to be a guest in your tower."'),
-            ("ch11_0149", "effron", '"You will never be invited into my tower, mother,"'),
-        ])
+        chapter = self._chapter(
+            [
+                ("ch11_0145", "dahlia", '"Of course!"'),
+                ("ch11_0147", "effron", '"And I have done you small favors."'),
+                ("ch11_0148", "effron", '"You have never invited me to be a guest in your tower."'),
+                ("ch11_0149", "effron", '"You will never be invited into my tower, mother,"'),
+            ]
+        )
         registry = self._registry(effron="male", dahlia="female")
         proposals = resolve_refuted_by_unique_candidate([chapter], registry)
         assert len(proposals) == 1
@@ -208,7 +227,8 @@ class TestUniqueCandidateResolver:
 
     def test_a_gendering_tag_resolves_when_one_candidate_fits(self) -> None:
         chapter = ScriptChapter(
-            chapter_number=62, chapter_title="Sixty-Two",
+            chapter_number=62,
+            chapter_title="Sixty-Two",
             lines=[
                 ScriptLine(line_id="a", speaker="dusk", text='"Look there."'),
                 ScriptLine(line_id="b", speaker="vathi", text='"Are you done?"'),
@@ -222,7 +242,8 @@ class TestUniqueCandidateResolver:
     def test_two_candidates_are_left_alone(self) -> None:
         """It cannot guess between them, so it does not."""
         chapter = ScriptChapter(
-            chapter_number=47, chapter_title="Forty-Seven",
+            chapter_number=47,
+            chapter_title="Forty-Seven",
             lines=[
                 ScriptLine(line_id="a", speaker="starling", text='"One."'),
                 ScriptLine(line_id="b", speaker="chrysalis", text='"Two."'),
@@ -236,7 +257,8 @@ class TestUniqueCandidateResolver:
     def test_no_candidate_means_no_change(self) -> None:
         """The known false positive: "your way home" against "our way back"."""
         chapter = ScriptChapter(
-            chapter_number=25, chapter_title="Twenty-Five",
+            chapter_number=25,
+            chapter_title="Twenty-Five",
             lines=[
                 ScriptLine(line_id="a", speaker="dusk", text='"Knowing your way home matters."'),
                 ScriptLine(line_id="b", speaker="dusk", text='"I do not know how we will find our way back."'),

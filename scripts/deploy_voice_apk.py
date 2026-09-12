@@ -63,9 +63,7 @@ def copy_locally() -> int:
     """Copy build APK to local project roots."""
     print("=== [2/4] Publishing to Local Project Roots ===")
     if not APK_BUILD_PATH.is_file():
-        raise FileNotFoundError(
-            f"Build APK not found at {APK_BUILD_PATH}. Did you run with --build?"
-        )
+        raise FileNotFoundError(f"Build APK not found at {APK_BUILD_PATH}. Did you run with --build?")
 
     apk_size = APK_BUILD_PATH.stat().st_size
     print(f"Source APK: {APK_BUILD_PATH} ({apk_size:,} bytes)")

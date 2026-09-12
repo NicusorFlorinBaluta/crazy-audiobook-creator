@@ -413,9 +413,7 @@ def resolve_refuted_by_unique_candidate(
         lines = chapter.lines
         for index, source, refuted, required_gender in _refutations(chapter, registry):
             low, high = max(0, index - window), min(len(lines), index + window + 1)
-            present = [
-                line.speaker for line in lines[low:high] if line.speaker and line.speaker != "narrator"
-            ]
+            present = [line.speaker for line in lines[low:high] if line.speaker and line.speaker != "narrator"]
             candidates = []
             for speaker_id in dict.fromkeys(present):
                 if speaker_id == refuted:
@@ -629,9 +627,7 @@ def action_beat_attributions(
     out: dict[str, str] = {}
     for group in _source_paragraphs(lines, chapter_text):
         narration = [lines[i] for i in group if lines[i].speaker == "narrator"]
-        claimed = {
-            beat_subject(line.text, registry) for line in narration if _is_complete_sentence(line.text)
-        } - {None}
+        claimed = {beat_subject(line.text, registry) for line in narration if _is_complete_sentence(line.text)} - {None}
         if len(claimed) != 1:
             continue
         who = claimed.pop()
@@ -787,7 +783,9 @@ def constrained_choice_proposals(
         if not (len(chosen) == 1 and next(iter(chosen)) in case["candidates"]):
             logger.info(
                 "[Refutation] %s: no stable answer across %d runs %s",
-                case["line_id"], runs, [a for a, _ in answers],
+                case["line_id"],
+                runs,
+                [a for a, _ in answers],
             )
             continue
         confidence = sum(c for _, c in answers) / max(1, len(answers))
@@ -924,9 +922,9 @@ def apply_action_beat_attributions(
             if apply:
                 line.speaker = who
                 line.speaker_confidence = 0.95
-                line.speaker_evidence = (
-                    f"Action beat in the same source paragraph names '{who}' as its subject."
-                )[:4000]
+                line.speaker_evidence = (f"Action beat in the same source paragraph names '{who}' as its subject.")[
+                    :4000
+                ]
                 line.attribution_resolver = "deterministic_action_beat"
                 line.attribution_review_required = False
                 line.attribution_review_reason = ""
@@ -1048,8 +1046,10 @@ def apply_refutation_repairs(
                 if apply and not line.attribution_review_required:
                     line.attribution_review_required = True
                     line.attribution_review_reason = reason
-            elif descriptor_match and line.attribution_review_required and DESCRIPTOR_REVIEW_MARKER in (
-                line.attribution_review_reason or ""
+            elif (
+                descriptor_match
+                and line.attribution_review_required
+                and DESCRIPTOR_REVIEW_MARKER in (line.attribution_review_reason or "")
             ):
                 # A run under the older rule flagged this; the descriptor does
                 # not contradict the stored speaker, so clear it rather than
@@ -1577,9 +1577,7 @@ def refresh_attribution_audit(project_dir: Path, *, confidence_threshold: float 
         for path in sorted((project_dir / "script").glob("chapter_*.json"))
         if not path.name.endswith(".meta.json")
     ]
-    return write_attribution_audit(
-        project_dir, book, registry, scripts, confidence_threshold=confidence_threshold
-    )
+    return write_attribution_audit(project_dir, book, registry, scripts, confidence_threshold=confidence_threshold)
 
 
 def queue_attribution_audit_issues(

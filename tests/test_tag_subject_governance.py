@@ -99,7 +99,7 @@ class TestAPrepositionalObjectIsNotTheSpeaker:
 
 class TestTheNameKeepsItsOwnPreposition:
     def test_an_alias_inside_a_longer_name_is_not_governed(self, registry) -> None:
-        """"Second of Saplings said" -- `of` belongs to the name, governs nothing.
+        """ "Second of Saplings said" -- `of` belongs to the name, governs nothing.
 
         The alias "Saplings" matches at the last token, so the naive rule sees a
         preposition immediately before it and throws away a correct reading.

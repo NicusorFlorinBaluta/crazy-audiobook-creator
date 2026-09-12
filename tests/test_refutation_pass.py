@@ -69,12 +69,15 @@ class TestGenericTagsAgainstDescriptors:
 
     def test_the_woman_does_not_contradict_the_woman_of_the_family(self, registry) -> None:
         """ch28_0089. The narration two lines up is "The woman of the family caught her"."""
-        chapter = _chapter(28, [
-            ("ch28_0086", "narrator", "She collapsed toward the rooftop. The woman of the family caught her."),
-            ("ch28_0089", "woman_of_family", '"Your—Your Majesty?"'),
-            ("ch28_0090", "narrator", "the woman said in Yolish, one of the more common languages."),
-            ("ch28_0091", "woman_of_family", '"Are you all right?"'),
-        ])
+        chapter = _chapter(
+            28,
+            [
+                ("ch28_0086", "narrator", "She collapsed toward the rooftop. The woman of the family caught her."),
+                ("ch28_0089", "woman_of_family", '"Your—Your Majesty?"'),
+                ("ch28_0090", "narrator", "the woman said in Yolish, one of the more common languages."),
+                ("ch28_0091", "woman_of_family", '"Are you all right?"'),
+            ],
+        )
         result = apply_refutation_repairs([chapter], registry)
 
         assert result["counts"]["flagged"] == 0, "a hypernym is not a contradiction"
@@ -83,11 +86,14 @@ class TestGenericTagsAgainstDescriptors:
 
     def test_the_man_does_not_contradict_one_of_the_ones_above(self, registry) -> None:
         """ch38_0057. The line before reads "The man seemed to think he knew everything"."""
-        chapter = _chapter(38, [
-            ("ch38_0055", "narrator", "Dusk didn't reply. The man seemed to think he knew everything."),
-            ("ch38_0057", "one_of_the_ones_above_male", '"Come now,"'),
-            ("ch38_0058", "narrator", "the man said, moving as if to put his arm around Dusk's shoulders."),
-        ])
+        chapter = _chapter(
+            38,
+            [
+                ("ch38_0055", "narrator", "Dusk didn't reply. The man seemed to think he knew everything."),
+                ("ch38_0057", "one_of_the_ones_above_male", '"Come now,"'),
+                ("ch38_0058", "narrator", "the man said, moving as if to put his arm around Dusk's shoulders."),
+            ],
+        )
         result = apply_refutation_repairs([chapter], registry)
 
         assert result["counts"]["flagged"] == 0
@@ -100,29 +106,38 @@ class TestGenericTagsAgainstDescriptors:
         introduced. The older rule read that as the narration declining to use
         a name it had, and flagged a correct attribution.
         """
-        chapter = _chapter(38, [
-            ("ch38_0118", "dusk", '"My name is Sixth of the Dusk,"'),
-            ("ch38_0119", "narrator", "the man said, turning away."),
-        ])
+        chapter = _chapter(
+            38,
+            [
+                ("ch38_0118", "dusk", '"My name is Sixth of the Dusk,"'),
+                ("ch38_0119", "narrator", "the man said, turning away."),
+            ],
+        )
         result = apply_refutation_repairs([chapter], registry)
 
         assert result["counts"]["flagged"] == 0
 
     def test_a_descriptor_of_the_other_gender_contradicts(self, registry) -> None:
         """Gender is the whole of what a generic description establishes."""
-        chapter = _chapter(28, [
-            ("ch28_0089", "minor_male", '"Your Majesty?"'),
-            ("ch28_0090", "narrator", "the woman said in Yolish."),
-        ])
+        chapter = _chapter(
+            28,
+            [
+                ("ch28_0089", "minor_male", '"Your Majesty?"'),
+                ("ch28_0090", "narrator", "the woman said in Yolish."),
+            ],
+        )
         result = apply_refutation_repairs([chapter], registry)
 
         assert result["counts"]["flagged"] == 1
 
     def test_a_generic_tag_contradicts_a_named_character_of_the_other_gender(self, registry) -> None:
-        chapter = _chapter(38, [
-            ("ch38_0057", "starling", '"Come now,"'),
-            ("ch38_0058", "narrator", "the man said, turning away."),
-        ])
+        chapter = _chapter(
+            38,
+            [
+                ("ch38_0057", "starling", '"Come now,"'),
+                ("ch38_0058", "narrator", "the man said, turning away."),
+            ],
+        )
         result = apply_refutation_repairs([chapter], registry)
 
         assert result["counts"]["flagged"] == 1
@@ -135,14 +150,16 @@ class TestGenericTagsAgainstDescriptors:
         operator a read of the passage -- which is the spoiler this whole layer
         exists to avoid.
         """
-        chapter = _chapter(28, [
-            ("ch28_0089", "woman_of_family", '"Your Majesty?"'),
-            ("ch28_0090", "narrator", "the woman said in Yolish."),
-        ])
+        chapter = _chapter(
+            28,
+            [
+                ("ch28_0089", "woman_of_family", '"Your Majesty?"'),
+                ("ch28_0090", "narrator", "the woman said in Yolish."),
+            ],
+        )
         chapter.lines[0].attribution_review_required = True
         chapter.lines[0].attribution_review_reason = (
-            "The attached speech tag describes the speaker in terms that fit 'minor_female', "
-            "not 'woman_of_family'."
+            "The attached speech tag describes the speaker in terms that fit 'minor_female', not 'woman_of_family'."
         )
 
         result = apply_refutation_repairs([chapter], registry)
@@ -153,10 +170,13 @@ class TestGenericTagsAgainstDescriptors:
 
     def test_someone_elses_review_flag_is_left_alone(self, registry) -> None:
         """Only flags this pass wrote may be retracted by this pass."""
-        chapter = _chapter(28, [
-            ("ch28_0089", "woman_of_family", '"Your Majesty?"'),
-            ("ch28_0090", "narrator", "the woman said in Yolish."),
-        ])
+        chapter = _chapter(
+            28,
+            [
+                ("ch28_0089", "woman_of_family", '"Your Majesty?"'),
+                ("ch28_0090", "narrator", "the woman said in Yolish."),
+            ],
+        )
         chapter.lines[0].attribution_review_required = True
         chapter.lines[0].attribution_review_reason = "Whisper transcription disagreed with the script."
 
@@ -168,10 +188,13 @@ class TestGenericTagsAgainstDescriptors:
 
 class TestTheNamingTagStillWins:
     def test_a_tag_that_names_someone_renames_the_line(self, registry) -> None:
-        chapter = _chapter(11, [
-            ("ch11_0001", "starling", '"You will never be invited into my tower,"'),
-            ("ch11_0002", "narrator", "said Vathi, turning away."),
-        ])
+        chapter = _chapter(
+            11,
+            [
+                ("ch11_0001", "starling", '"You will never be invited into my tower,"'),
+                ("ch11_0002", "narrator", "said Vathi, turning away."),
+            ],
+        )
         result = apply_refutation_repairs([chapter], registry)
 
         assert result["counts"]["renamed"] == 1
@@ -186,10 +209,13 @@ class TestTheNamingTagStillWins:
 
 class TestDryRunChangesNothing:
     def test_apply_false_reports_without_writing(self, registry) -> None:
-        chapter = _chapter(11, [
-            ("ch11_0001", "starling", '"Quote,"'),
-            ("ch11_0002", "narrator", "said Vathi, turning away."),
-        ])
+        chapter = _chapter(
+            11,
+            [
+                ("ch11_0001", "starling", '"Quote,"'),
+                ("ch11_0002", "narrator", "said Vathi, turning away."),
+            ],
+        )
         result = apply_refutation_repairs([chapter], registry, apply=False)
 
         assert result["counts"]["renamed"] == 1

@@ -1185,9 +1185,7 @@ class ValidationLoop:
             passed_hard_gates=not hard_audio_failure and not length_sensitive_wer_failure,
         )
         if stt_unavailable:
-            res.warnings.append(
-                "Speech-to-text was unavailable, so this segment's wording was never verified."
-            )
+            res.warnings.append("Speech-to-text was unavailable, so this segment's wording was never verified.")
 
         # Phase 5.1/5.2 Report-only drift and join checks
         if reference_pitch_median > 0 and analysis.get("pitch_median", 0.0) > 0:

@@ -195,9 +195,7 @@ def test_a_model_failure_on_the_retry_is_not_fatal(registry, chapter) -> None:
 
 def test_the_cascade_can_be_switched_off(registry, chapter) -> None:
     ollama = _WidthSensitiveOllama(narrow=("effron", 0.80), wide=("dahlia", 0.98))
-    result = _adjudicator(registry, ollama, wide_context_retry=False)._adjudicate_turn_tier1(
-        _turn(chapter), chapter
-    )
+    result = _adjudicator(registry, ollama, wide_context_retry=False)._adjudicate_turn_tier1(_turn(chapter), chapter)
 
     assert result.resolver_tier == "gemini_api"
     assert len(ollama.prompts) == 1

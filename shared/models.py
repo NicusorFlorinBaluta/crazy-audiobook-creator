@@ -889,4 +889,3 @@ class VoiceWarmupResponse(BaseModel):
     voice_id: str | None = None
     prompt_primed: bool = False
     vram: dict[str, float] = Field(default_factory=dict)
-

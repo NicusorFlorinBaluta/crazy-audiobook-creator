@@ -39,8 +39,7 @@ def _chapter(rows: list[tuple[str, str, str]]) -> ScriptChapter:
         chapter_title="Chapter 24",
         scenes=[],
         lines=[
-            ScriptLine(line_id=lid, speaker=speaker, text=text, speaker_confidence=0.95)
-            for lid, speaker, text in rows
+            ScriptLine(line_id=lid, speaker=speaker, text=text, speaker_confidence=0.95) for lid, speaker, text in rows
         ],
     )
 
@@ -48,14 +47,28 @@ def _chapter(rows: list[tuple[str, str, str]]) -> ScriptChapter:
 @pytest.fixture
 def couplet() -> ScriptChapter:
     """The real passage, with ch24_0096 already repaired to athrogate."""
-    return _chapter([
-        ("ch24_0094", "athrogate", '"Really, me King, might we\'d\'ve expected less mischief from this one?"'),
-        ("ch24_0095", "narrator", "said Athrogate, and he bounded over between Breezy and her parents and burst into rhyme."),
-        ("ch24_0096", "athrogate", '"Well, hey-ho, but their girl\'s a spitfire! A clever young lass and a bit of a liar."'),
-        ("ch24_0097", "narrator", "He looked to Jarlaxle as he continued,"),
-        ("ch24_0098", "jarlaxle", '"With proper taste and a feathery flair, that\'s sure to land her in a mad dragon\'s lair!"'),
-        ("ch24_0099", "pwent", '"Might that that\'ll get them two ma and da out and fightin\', eh me King?"'),
-    ])
+    return _chapter(
+        [
+            ("ch24_0094", "athrogate", "\"Really, me King, might we'd've expected less mischief from this one?\""),
+            (
+                "ch24_0095",
+                "narrator",
+                "said Athrogate, and he bounded over between Breezy and her parents and burst into rhyme.",
+            ),
+            (
+                "ch24_0096",
+                "athrogate",
+                '"Well, hey-ho, but their girl\'s a spitfire! A clever young lass and a bit of a liar."',
+            ),
+            ("ch24_0097", "narrator", "He looked to Jarlaxle as he continued,"),
+            (
+                "ch24_0098",
+                "jarlaxle",
+                "\"With proper taste and a feathery flair, that's sure to land her in a mad dragon's lair!\"",
+            ),
+            ("ch24_0099", "pwent", "\"Might that that'll get them two ma and da out and fightin', eh me King?\""),
+        ]
+    )
 
 
 def test_the_detector_alone_does_not_see_it(couplet) -> None:

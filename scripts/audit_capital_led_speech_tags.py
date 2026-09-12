@@ -7,6 +7,7 @@ If it overwhelmingly names the preceding speaker, it can be read as a trailing
 tag. If it often names the following speaker, it is a leading tag and using it
 would corrupt attribution.
 """
+
 import argparse
 import re
 from collections import Counter
@@ -20,11 +21,15 @@ _parser.add_argument("--project", default="the-finest-edge-of-twilight-book")
 root = Path("brain/projects") / _parser.parse_args().project
 registry = CharacterRegistry.model_validate_json((root / "characters.json").read_text(encoding="utf-8"))
 
-SPEECH = r"(?:said|says|asked|asks|replied|replies|answered|stated|added|adds|muttered|growled|" \
-         r"whispered|shouted|called|snarled|breathed|offered|insisted|countered|agreed|admitted|" \
-         r"observed|remarked|continued|went on|interrupted|corrected|protested|explained)"
-REACTION = r"(?:laughed|smiled|nodded|shrugged|frowned|grinned|sighed|blinked|stared|turned|" \
-           r"looked|glanced|winced|scowled|chuckled)"
+SPEECH = (
+    r"(?:said|says|asked|asks|replied|replies|answered|stated|added|adds|muttered|growled|"
+    r"whispered|shouted|called|snarled|breathed|offered|insisted|countered|agreed|admitted|"
+    r"observed|remarked|continued|went on|interrupted|corrected|protested|explained)"
+)
+REACTION = (
+    r"(?:laughed|smiled|nodded|shrugged|frowned|grinned|sighed|blinked|stared|turned|"
+    r"looked|glanced|winced|scowled|chuckled)"
+)
 
 tally = Counter()
 examples = {"trailing": [], "leading": [], "neither": []}
@@ -71,7 +76,7 @@ for kind in ("speech", "reaction"):
     print(f"\ncapital-led, {kind}-verb tags: {total}")
     for k in ("trailing", "leading", "both-same", "neither", "unparsed"):
         if rows.get(k):
-            print(f"    {k:11}: {rows[k]:4}  ({rows[k]/total*100:.0f}%)")
+            print(f"    {k:11}: {rows[k]:4}  ({rows[k] / total * 100:.0f}%)")
 print("\nLEADING examples (these would be mis-read as trailing tags):")
 for e in examples["leading"]:
     print(f"   {e[0]} {e[1]!r} names {e[2]}, but previous speaker was {e[3]}")

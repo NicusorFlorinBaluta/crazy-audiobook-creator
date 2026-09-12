@@ -48,16 +48,22 @@ from shared.models import Character, CharacterRegistry, ScriptChapter, ScriptLin
 def registry() -> CharacterRegistry:
     def char(cid: str, name: str, gender: Gender, aliases: list[str] | None = None) -> Character:
         return Character(
-            id=cid, name=name, gender=gender, age_range="adult",
-            voice_description=f"{name} voice", aliases=aliases or [],
+            id=cid,
+            name=name,
+            gender=gender,
+            age_range="adult",
+            voice_description=f"{name} voice",
+            aliases=aliases or [],
         )
 
-    return CharacterRegistry(characters={
-        "narrator": char("narrator", "Narrator", Gender.OTHER),
-        "effron": char("effron", "Effron", Gender.MALE),
-        "dahlia": char("dahlia", "Dahlia", Gender.FEMALE),
-        "driver_portly": char("driver_portly", "Portly Driver", Gender.MALE),
-    })
+    return CharacterRegistry(
+        characters={
+            "narrator": char("narrator", "Narrator", Gender.OTHER),
+            "effron": char("effron", "Effron", Gender.MALE),
+            "dahlia": char("dahlia", "Dahlia", Gender.FEMALE),
+            "driver_portly": char("driver_portly", "Portly Driver", Gender.MALE),
+        }
+    )
 
 
 def _chapter(rows):
@@ -71,11 +77,16 @@ def _chapter(rows):
             sep = "\n\n" if new_para else " "
             parts.append(sep)
             cursor += len(sep)
-        lines.append(ScriptLine(
-            line_id=lid, speaker=speaker, text=text,
-            source_start=cursor, source_end=cursor + len(text),
-            dialogue_kind=None if speaker == "narrator" else "spoken",
-        ))
+        lines.append(
+            ScriptLine(
+                line_id=lid,
+                speaker=speaker,
+                text=text,
+                source_start=cursor,
+                source_end=cursor + len(text),
+                dialogue_kind=None if speaker == "narrator" else "spoken",
+            )
+        )
         parts.append(text)
         cursor += len(text)
     return ScriptChapter(chapter_number=1, chapter_title="Prologue", scenes=[], lines=lines), "".join(parts)
@@ -101,7 +112,7 @@ class TestTheParagraphIsTheUnit:
         assert action_beat_attributions(chapter, text, registry)["ch01_0289"] == "effron"
 
     def test_a_paragraph_break_severs_the_beat(self, registry) -> None:
-        """"I know where to find you." is a new paragraph -- and is Dahlia's."""
+        """ "I know where to find you." is a new paragraph -- and is Dahlia's."""
         chapter, text = _chapter(PROLOGUE)
         assert "ch01_0291" not in action_beat_attributions(chapter, text, registry)
 
@@ -111,11 +122,13 @@ class TestTheParagraphIsTheUnit:
         assert action_beat_attributions(chapter, text, registry) == {}
 
     def test_a_paragraph_naming_two_characters_claims_nothing(self, registry) -> None:
-        chapter, text = _chapter([
-            ("a1", "narrator", "Effron turned away.", True),
-            ("a2", "narrator", "Dahlia watched him go.", False),
-            ("a3", "effron", '"Enough."', False),
-        ])
+        chapter, text = _chapter(
+            [
+                ("a1", "narrator", "Effron turned away.", True),
+                ("a2", "narrator", "Dahlia watched him go.", False),
+                ("a3", "effron", '"Enough."', False),
+            ]
+        )
         assert action_beat_attributions(chapter, text, registry) == {}
 
 
@@ -137,14 +150,20 @@ class TestWhatCountsAsABeat:
     def test_a_beat_naming_two_people_abstains(self, registry) -> None:
         """ch08_0244. Breezy leads the sentence; Holiday says the line.
 
-            Breezy grinned and strode forward, but Holiday grabbed her by the
-            arm and held her back. "Fight's over, I say."
+        Breezy grinned and strode forward, but Holiday grabbed her by the
+        arm and held her back. "Fight's over, I say."
         """
-        chapter, text = _chapter([
-            ("c1", "narrator",
-             "Dahlia grinned and strode forward, but Effron grabbed her by the arm and held her back.", True),
-            ("c2", "dahlia", '"Fight is over, I say."', False),
-        ])
+        chapter, text = _chapter(
+            [
+                (
+                    "c1",
+                    "narrator",
+                    "Dahlia grinned and strode forward, but Effron grabbed her by the arm and held her back.",
+                    True,
+                ),
+                ("c2", "dahlia", '"Fight is over, I say."', False),
+            ]
+        )
         assert action_beat_attributions(chapter, text, registry) == {}
 
     def test_one_name_matched_by_two_cast_entries_is_still_one_person(self, registry) -> None:
@@ -156,8 +175,12 @@ class TestWhatCountsAsABeat:
         like it named two people, and abstained on the prologue's one anchor.
         """
         registry.characters["effron_child"] = Character(
-            id="effron_child", name="Effron's Child", gender=Gender.MALE,
-            age_range="child", voice_description="v", aliases=["Effron"],
+            id="effron_child",
+            name="Effron's Child",
+            gender=Gender.MALE,
+            age_range="child",
+            voice_description="v",
+            aliases=["Effron"],
         )
         chapter, text = _chapter(PROLOGUE)
         assert action_beat_attributions(chapter, text, registry)["ch01_0295"] == "effron"
@@ -174,11 +197,13 @@ class TestWhatCountsAsABeat:
         "snapped" is not in the speech-verb list either, so nothing downstream
         caught it. Every mention in the paragraph has to agree.
         """
-        chapter, text = _chapter([
-            ("d1", "narrator", "Dahlia glanced over her shoulder.", True),
-            ("d2", "dahlia", '"That girl,"', False),
-            ("d3", "narrator", "Effron snapped,", False),
-        ])
+        chapter, text = _chapter(
+            [
+                ("d1", "narrator", "Dahlia glanced over her shoulder.", True),
+                ("d2", "dahlia", '"That girl,"', False),
+                ("d3", "narrator", "Effron snapped,", False),
+            ]
+        )
         assert action_beat_attributions(chapter, text, registry) == {}
 
     def test_a_fragment_running_into_the_quote_is_not_a_beat(self, registry) -> None:
@@ -187,12 +212,18 @@ class TestWhatCountsAsABeat:
         "...as the coach gained speed despite the driver's cries of "Whoa!""
         reads as a beat by Dahlia and attributes the driver's shout to her.
         """
-        chapter, text = _chapter([
-            ("ch01_0129", "narrator",
-             "Dahlia dropped silently to the back of the coach, then climbed across the roof "
-             "as the coach gained speed despite the driver's cries of", True),
-            ("ch01_0130", "driver_portly", '"Whoa!"', False),
-        ])
+        chapter, text = _chapter(
+            [
+                (
+                    "ch01_0129",
+                    "narrator",
+                    "Dahlia dropped silently to the back of the coach, then climbed across the roof "
+                    "as the coach gained speed despite the driver's cries of",
+                    True,
+                ),
+                ("ch01_0130", "driver_portly", '"Whoa!"', False),
+            ]
+        )
         assert action_beat_attributions(chapter, text, registry) == {}
 
 
@@ -200,7 +231,9 @@ class TestItRunsInThePass:
     def test_the_prologue_line_is_corrected(self, registry) -> None:
         chapter, text = _chapter(PROLOGUE)
         result = apply_refutation_repairs(
-            [chapter], registry, chapter_texts={1: text},
+            [chapter],
+            registry,
+            chapter_texts={1: text},
         )
         assert result["counts"]["beat_attributed"] == 1
         by = {line.line_id: line for line in chapter.lines}
@@ -210,11 +243,13 @@ class TestItRunsInThePass:
 
     def test_a_speech_tag_outranks_a_beat(self, registry) -> None:
         """The 2026-09-06 principle. A tag is the author saying it outright."""
-        chapter, text = _chapter([
-            ("b1", "narrator", "Effron spun around and glared at her.", True),
-            ("b2", "dahlia", '"Never."', False),
-            ("b3", "narrator", "said Dahlia.", False),
-        ])
+        chapter, text = _chapter(
+            [
+                ("b1", "narrator", "Effron spun around and glared at her.", True),
+                ("b2", "dahlia", '"Never."', False),
+                ("b3", "narrator", "said Dahlia.", False),
+            ]
+        )
         result = apply_refutation_repairs([chapter], registry, chapter_texts={1: text})
         assert result["counts"]["beat_attributed"] == 0
         assert chapter.lines[1].speaker == "dahlia"

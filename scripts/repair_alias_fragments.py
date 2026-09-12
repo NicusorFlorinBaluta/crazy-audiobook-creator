@@ -105,9 +105,7 @@ def repair(project_dir: Path, *, apply: bool) -> int:
 
     # The prune never empties an entry, but this is the invariant that matters
     # most, so assert it against the file rather than trusting the function.
-    emptied = [
-        cid for cid, entry in characters.items() if before[cid] and not (entry.get("aliases") or [])
-    ]
+    emptied = [cid for cid, entry in characters.items() if before[cid] and not (entry.get("aliases") or [])]
     if emptied:
         logger.error("%s: REFUSING -- these entries would lose every alias: %s", project_dir.name, emptied)
         return 0
@@ -160,7 +158,9 @@ def main() -> int:
             continue
         total += repair(target, apply=args.apply)
 
-    logger.info("%s: %d alias(es) across %d project(s)", "removed" if args.apply else "would remove", total, len(targets))
+    logger.info(
+        "%s: %d alias(es) across %d project(s)", "removed" if args.apply else "would remove", total, len(targets)
+    )
     return 0
 
 

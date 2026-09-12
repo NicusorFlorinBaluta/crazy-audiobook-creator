@@ -116,16 +116,28 @@ def repair(project_dir: Path, *, apply: bool, use_llm: bool = False) -> dict[str
         elif action == "auto_resolved":
             logger.info(
                 "    %s  %s -> %s   (%s: %s)",
-                record["line_id"], record["from"], record["to"], record["source"], record["reason"][:90],
+                record["line_id"],
+                record["from"],
+                record["to"],
+                record["source"],
+                record["reason"][:90],
             )
         elif action == "beat_attributed":
             logger.info("    %s  %s -> %s   (%s)", record["line_id"], record["from"], record["to"], record["reason"])
         elif action == "unflagged":
-            logger.info("    %s  %s stays, stale review flag retracted   %r", record["line_id"], record["speaker"], record["tag"])
+            logger.info(
+                "    %s  %s stays, stale review flag retracted   %r",
+                record["line_id"],
+                record["speaker"],
+                record["tag"],
+            )
         else:
             logger.info(
                 "    %s  %s stays, flagged for review (%s)   %r",
-                record["line_id"], record["speaker"], record["tag_says"], record["tag"],
+                record["line_id"],
+                record["speaker"],
+                record["tag_says"],
+                record["tag"],
             )
 
     counts["chapters_written"] = 0
@@ -191,8 +203,12 @@ def main() -> int:
     counts = repair(project_dir, apply=args.apply, use_llm=args.llm)
     logger.info(
         "beat_attributed=%d renamed=%d auto_resolved=%d flagged=%d unflagged=%d chapters_written=%d",
-        counts["beat_attributed"], counts["renamed"], counts["auto_resolved"], counts["flagged"],
-        counts["unflagged"], counts["chapters_written"],
+        counts["beat_attributed"],
+        counts["renamed"],
+        counts["auto_resolved"],
+        counts["flagged"],
+        counts["unflagged"],
+        counts["chapters_written"],
     )
     if not args.apply:
         logger.info("Dry run -- nothing written. Re-run with --apply.")

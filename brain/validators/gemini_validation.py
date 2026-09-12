@@ -135,9 +135,7 @@ class QuotaExhaustedError(ExternalValidationError):
 
     def __init__(self, message: str, retry_at_epoch: float | None = None):
         super().__init__(message)
-        self.retry_at_epoch = (
-            float(retry_at_epoch) if retry_at_epoch is not None else next_daily_quota_reset_epoch()
-        )
+        self.retry_at_epoch = float(retry_at_epoch) if retry_at_epoch is not None else next_daily_quota_reset_epoch()
 
 
 _VALIDATION_RECOVERABLE_ERRORS = (
@@ -644,9 +642,7 @@ class GeminiApiClient:
                         # Per-day quota: no amount of waiting inside this call
                         # recovers it. Fail fast so the circuit stays shut until
                         # the quota actually returns at Pacific midnight.
-                        raise QuotaExhaustedError(
-                            f"Gemini API daily quota exhausted (429): {resp_text[:300].strip()}"
-                        )
+                        raise QuotaExhaustedError(f"Gemini API daily quota exhausted (429): {resp_text[:300].strip()}")
                     if attempt + 1 >= max_attempts:
                         raise ExternalValidationError(
                             f"Gemini API rate limited (429), retries exhausted: {resp_text[:300].strip()}"
@@ -887,9 +883,7 @@ DETERMINISTIC_REVIEW_PREFIX = "[deterministic] "
 
 
 def _is_deterministic_contradiction(line: Any) -> bool:
-    return str(getattr(line, "attribution_review_reason", "") or "").startswith(
-        DETERMINISTIC_REVIEW_PREFIX
-    )
+    return str(getattr(line, "attribution_review_reason", "") or "").startswith(DETERMINISTIC_REVIEW_PREFIX)
 
 
 class GeminiValidationService:

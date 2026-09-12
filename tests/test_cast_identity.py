@@ -907,12 +907,14 @@ class CheckpointLifetimeTests(unittest.TestCase):
         }
         # Four sentences, each naming both in apposition -- the shape prose uses
         # to introduce an appellative beside the name it stands in for.
-        book = chr(10).join([
-            "Avelyere lifted her hand, and the veteran wizard's spell took shape.",
-            "Catti-brie had studied under Avelyere once, the veteran wizard's methods exacting.",
-            'It was Avelyere who answered, the veteran wizard speaking softly.',
-            'Avelyere frowned; the veteran wizard was rarely wrong.',
-        ])
+        book = chr(10).join(
+            [
+                "Avelyere lifted her hand, and the veteran wizard's spell took shape.",
+                "Catti-brie had studied under Avelyere once, the veteran wizard's methods exacting.",
+                "It was Avelyere who answered, the veteran wizard speaking softly.",
+                "Avelyere frowned; the veteran wizard was rarely wrong.",
+            ]
+        )
         self.assertEqual(conjunction_count(book, ["Avelyere"], ["veteran wizard"]), 0)
         self.assertIsNone(merge_veto("avelyere", "veteran_wizard", cast, book))
 

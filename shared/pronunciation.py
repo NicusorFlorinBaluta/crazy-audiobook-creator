@@ -281,11 +281,7 @@ def load_pronunciation_dictionary(
             if replacement and replacement.casefold() != word.casefold()
         }
     else:
-        active_mappings = {
-            word: replacement
-            for word, replacement, _ in mappings.values()
-            if replacement
-        }
+        active_mappings = {word: replacement for word, replacement, _ in mappings.values() if replacement}
     return (
         active_mappings,
         {word: source for word, _, source in mappings.values()},
@@ -636,7 +632,7 @@ _PRONUNCIATION_PROMPT_HEADER = (
     "4. Use the context to disambiguate, and keep the capitalisation of a proper noun.\n"
     "5. 'alternate' must be a genuinely DIFFERENT plausible pronunciation, not the same\n"
     "   respelling with breaks added. If there is no real second reading, repeat the default.\n"
-    '6. Output STRICT JSON with key \'recommendations\': '
+    "6. Output STRICT JSON with key 'recommendations': "
     '[{"term": "...", "default": "...", "alternate": "..."}]\n'
     "\n"
     "Worked examples:\n"
@@ -952,8 +948,8 @@ def build_pronunciation_inventory(
                 rec_default = cached_recs[key].get("default", "")
                 rec_alternate = cached_recs[key].get("alternate", "")
                 # Auto-repair cached squashed recommendations (e.g. BraelinJanquay -> Braelin Yanquay)
-                is_squashed_space = (" " in display_term and " " not in rec_default)
-                is_squashed_hyphen = ("-" in display_term and "-" not in rec_default and " " not in rec_default)
+                is_squashed_space = " " in display_term and " " not in rec_default
+                is_squashed_hyphen = "-" in display_term and "-" not in rec_default and " " not in rec_default
                 if is_squashed_space or is_squashed_hyphen:
                     rec_default = ""
                     rec_alternate = ""

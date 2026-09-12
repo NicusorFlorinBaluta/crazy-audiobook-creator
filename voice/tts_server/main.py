@@ -596,9 +596,7 @@ def warmup_voice(request: VoiceWarmupRequest) -> VoiceWarmupResponse:
     with gpu_job():
         engine._ensure_loaded()
         if request.project_id:
-            ref_path, resolved_id, ref_text = library.resolve_voice_reference(
-                request.project_id, request.voice_id
-            )
+            ref_path, resolved_id, ref_text = library.resolve_voice_reference(request.project_id, request.voice_id)
             if ref_path and ref_path.exists():
                 try:
                     engine._get_voice_clone_prompt(
@@ -644,9 +642,7 @@ def generate_line(request: GenerateLineRequest) -> GenerateLineResponse:
     )
 
     voice_id = request.line.voice_id or request.line.speaker
-    voice_ref, resolved_id, ref_text = library.resolve_voice_reference(
-        request.project_id, voice_id
-    )
+    voice_ref, resolved_id, ref_text = library.resolve_voice_reference(request.project_id, voice_id)
     if not voice_ref or not voice_ref.exists():
         raise HTTPException(
             status_code=404,

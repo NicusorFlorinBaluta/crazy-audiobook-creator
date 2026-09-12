@@ -388,7 +388,7 @@ class TestAttachedTagGate:
         assert not _reads_as_attached_tag(tag)
 
     def test_a_refusal_to_speak_is_not_a_tag(self) -> None:
-        """"Dahlia said no more" matches "<Name> said" and is the opposite."""
+        """ "Dahlia said no more" matches "<Name> said" and is the opposite."""
         assert not _reads_as_attached_tag("Dahlia said no more and let him go.")
 
     def test_continuing_to_walk_is_not_continuing_to_speak(self) -> None:
@@ -422,12 +422,20 @@ class TestDescriptorIsNotAName:
         return CharacterRegistry(
             characters={
                 "gregory_antoine": Character(
-                    id="gregory_antoine", name="Gregory Antoine", gender=Gender.MALE,
-                    age_range="adult", voice_description="dry", aliases=["Gregory", "Gregory Antoine"],
+                    id="gregory_antoine",
+                    name="Gregory Antoine",
+                    gender=Gender.MALE,
+                    age_range="adult",
+                    voice_description="dry",
+                    aliases=["Gregory", "Gregory Antoine"],
                 ),
                 "minor_male": Character(
-                    id="minor_male", name="Minor Male", gender=Gender.MALE,
-                    age_range="adult", voice_description="plain", aliases=[],
+                    id="minor_male",
+                    name="Minor Male",
+                    gender=Gender.MALE,
+                    age_range="adult",
+                    voice_description="plain",
+                    aliases=[],
                 ),
             }
         )

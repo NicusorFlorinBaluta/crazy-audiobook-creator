@@ -808,8 +808,10 @@ class ExportMetadataTests(unittest.TestCase):
 
     def test_export_embeds_cover_art_with_valid_input_ordering(self) -> None:
         exporter = M4BExporter()
-        with patch("voice.mastering.m4b_exporter.subprocess.run") as run, \
-             patch("voice.mastering.m4b_exporter.Path.exists", return_value=True):
+        with (
+            patch("voice.mastering.m4b_exporter.subprocess.run") as run,
+            patch("voice.mastering.m4b_exporter.Path.exists", return_value=True),
+        ):
             run.return_value.returncode = 0
             run.return_value.stderr = ""
             exporter._run_ffmpeg(
@@ -828,7 +830,9 @@ class ExportMetadataTests(unittest.TestCase):
         cover_idx = command.index("cover.jpg")
         self.assertEqual(command[cover_idx - 1], "-i")
         map_metadata_idx = command.index("-map_metadata")
-        self.assertLess(cover_idx, map_metadata_idx, "All inputs (-i) must appear before output options (-map_metadata)")
+        self.assertLess(
+            cover_idx, map_metadata_idx, "All inputs (-i) must appear before output options (-map_metadata)"
+        )
         self.assertIn("-map", command)
         self.assertIn("2:v", command)
         self.assertIn("attached_pic", command)

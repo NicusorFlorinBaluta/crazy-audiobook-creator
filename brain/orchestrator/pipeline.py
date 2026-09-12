@@ -2409,7 +2409,9 @@ class Pipeline:
                 try:
                     cast_data = json.loads(cast_path.read_text(encoding="utf-8"))
                     voices = cast_data.get("voices", {})
-                    voice_id = next((vid for vid in voices if "narrator" in vid.lower()), next(iter(voices.keys()), "narrator"))
+                    voice_id = next(
+                        (vid for vid in voices if "narrator" in vid.lower()), next(iter(voices.keys()), "narrator")
+                    )
                 except Exception:
                     voice_id = "narrator"
 
@@ -2428,7 +2430,12 @@ class Pipeline:
                 term = str(cand.get("term", "")).strip()
                 if not term:
                     continue
-                spoken = cand.get("effective_spoken") or cand.get("spoken_text") or cand.get("recommendation_default") or term
+                spoken = (
+                    cand.get("effective_spoken")
+                    or cand.get("spoken_text")
+                    or cand.get("recommendation_default")
+                    or term
+                )
                 clean_spoken = normalize_phonetic_text(str(spoken))
 
                 ctx_list = cand.get("contexts") or []
@@ -2479,7 +2486,6 @@ class Pipeline:
             logger.info("Completed pronunciation preview pre-generation.")
         except Exception as exc:
             logger.warning("Pronunciation preview pre-generation encountered an issue: %s", exc)
-
 
     def _run_incremental_delivery(self, project_id: str, project_dir: Path, current_stage: PipelineStage) -> None:
         """Run incremental batching, generating, mastering, and publishing."""
@@ -3627,6 +3633,7 @@ class Pipeline:
             )
         except Exception as exc:
             logger.warning("External audio QA could not load voice references: %s", exc)
+
         def _risk_priority(q: Any) -> tuple[int, float, float]:
             """Worst first, so quota is spent on the riskiest segments.
 

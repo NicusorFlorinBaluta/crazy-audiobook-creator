@@ -129,9 +129,7 @@ class VoiceLibraryManager:
             return info.get("ref_text", "")
         return ""
 
-    def resolve_voice_reference(
-        self, project_id: str, character_id: str | None = None
-    ) -> tuple[Path | None, str, str]:
+    def resolve_voice_reference(self, project_id: str, character_id: str | None = None) -> tuple[Path | None, str, str]:
         """Resolve an existing voice reference clip, character ID, and ref_text.
 
         If character_id exists, returns its path, id, and ref_text.

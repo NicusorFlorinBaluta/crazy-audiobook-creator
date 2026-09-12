@@ -457,9 +457,7 @@ async def export_pronunciations(project_id: str, scope: str = "all"):
     }
     return JSONResponse(
         content=payload,
-        headers={
-            "Content-Disposition": f'attachment; filename="{project_id}_lexicon_{scope_lower}.json"'
-        },
+        headers={"Content-Disposition": f'attachment; filename="{project_id}_lexicon_{scope_lower}.json"'},
     )
 
 
@@ -615,4 +613,3 @@ async def get_pronunciation_preview_audio(project_id: str, preview_id: str):
             "Content-Disposition": f'inline; filename="preview_{safe_id}.wav"',
         },
     )
-

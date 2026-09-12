@@ -57,8 +57,7 @@ class ReviewGate:
         return tuple(
             item
             for item in self.items
-            if item.category in _CHANGES_OUTPUT_CATEGORIES
-            and item.disposition not in RESOLVED_ATTRIBUTION_DISPOSITIONS
+            if item.category in _CHANGES_OUTPUT_CATEGORIES and item.disposition not in RESOLVED_ATTRIBUTION_DISPOSITIONS
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -66,8 +65,9 @@ class ReviewGate:
         for item in self.items:
             counts[item.category] = counts.get(item.category, 0) + 1
         return {
-            "items": [{**item.to_dict(), "changes_output": item.category in _CHANGES_OUTPUT_CATEGORIES}
-                      for item in self.items],
+            "items": [
+                {**item.to_dict(), "changes_output": item.category in _CHANGES_OUTPUT_CATEGORIES} for item in self.items
+            ],
             "total_count": len(self.items),
             "blocking_count": len(self.blocking_items),
             "actionable_count": len(self.actionable_items),

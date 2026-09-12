@@ -146,9 +146,7 @@ _TAG_NEGATION = re.compile(
 )
 
 # "<Name> <optional adverb> <speech verb>" at the very start of the sentence.
-_CAPITAL_LED_TAG = re.compile(
-    rf"^[A-Z][\w'’-]*(?:\s+[A-Z][\w'’-]*)?\s+(?:\w+ly\s+)?(?:{_SPEECH_TAG_VERBS})\b"
-)
+_CAPITAL_LED_TAG = re.compile(rf"^[A-Z][\w'’-]*(?:\s+[A-Z][\w'’-]*)?\s+(?:\w+ly\s+)?(?:{_SPEECH_TAG_VERBS})\b")
 
 #: Tiers that mean "the local model settled this line". Every consumer that
 #: asks "was this resolved locally?" must accept all of them, so the set lives
@@ -997,20 +995,12 @@ class TieredAttributionAdjudicator:
 
                 cur_speaker = (
                     cur_res.resolved_speaker
-                    if (
-                        cur_res
-                        and cur_res.resolver_tier in _LOCAL_RESOLVER_TIERS
-                        and cur_res.resolved_speaker
-                    )
+                    if (cur_res and cur_res.resolver_tier in _LOCAL_RESOLVER_TIERS and cur_res.resolved_speaker)
                     else cur.speaker
                 )
                 nxt_speaker = (
                     nxt_res.resolved_speaker
-                    if (
-                        nxt_res
-                        and nxt_res.resolver_tier in _LOCAL_RESOLVER_TIERS
-                        and nxt_res.resolved_speaker
-                    )
+                    if (nxt_res and nxt_res.resolver_tier in _LOCAL_RESOLVER_TIERS and nxt_res.resolved_speaker)
                     else nxt.speaker
                 )
 
