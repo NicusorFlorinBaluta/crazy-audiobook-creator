@@ -32,3 +32,22 @@ repos:
         args: [--maxkb=512]
       - id: check-ast
       - id: check-illegal-windows-names
+
+  # Added 2026-09-12. The ledger's rows claim a named test pins a named case,
+  # and the guard also fails when a rule writes an `attribution_resolver` no row
+  # explains -- so a new attribution rule cannot be committed undocumented.
+  # Only runs when attribution code or the ledger itself is touched.
+  - repo: local
+    hooks:
+      - id: attribution-case-ledger
+        name: attribution case ledger matches the code
+        entry: python -m pytest tests/test_case_ledger.py -q
+        language: system
+        pass_filenames: false
+        files: >-
+          (?x)^(
+            docs/attribution-case-ledger\.md
+            |brain/(director|validators)/.*\.py
+            |tests/test_case_ledger\.py
+            |\.github/workflows/ci\.yml
+          )$

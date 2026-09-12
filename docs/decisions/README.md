@@ -42,6 +42,20 @@ Newest first.
 | 2026-08-23 | [Separate character pass and early attribution gate](separate-character-pass-and-attribution-gate-2026-08-23.md) | Current |
 | 2026-08 | [Quality and resilience decisions](2026-08-quality-resilience-review.md) | Partially superseded by the 2026-08-23 record (scripting/character analysis sections only) |
 
+## Attribution rules are logged separately
+
+A decision record explains *why* a class of behaviour changed. It is the wrong
+grain for the individual attribution rules, which arrive one real
+misattribution at a time and now number in the twenties. Those live in
+[../attribution-case-ledger.md](../attribution-case-ledger.md), one row per
+rule: the line that forced it, what it measured, the test that pins it, and the
+`attribution_resolver` it writes.
+
+Writing the record is not optional and not on the honour system —
+`tests/test_case_ledger.py` fails when a rule writes a provenance no row
+explains. Add the row in the same commit as the rule. Write a decision record
+too when the *policy* changed, not merely when a new case was covered.
+
 ## Standing priority order
 
 Unchanged since the August 2026 record, and still the tie-breaker for every
@@ -56,5 +70,6 @@ decision above:
 ## Related
 
 - [../architecture.md](../architecture.md) — current implementation
+- [../attribution-case-ledger.md](../attribution-case-ledger.md) — every attribution rule, its case, and its test
 - [../plans/](../plans/) — audit and validation plans
 - [../benchmarks/](../benchmarks/) — measured results behind promotion decisions

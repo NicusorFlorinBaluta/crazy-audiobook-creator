@@ -21,6 +21,7 @@ soundfile>=0.12.0
 numpy>=1.26.0
 scipy>=1.14.0
 
-# Test runner. The suite is unittest-based, but a few modules use pytest
-# fixtures and are collected only under pytest.
+# Test runner. The suite mixes unittest.TestCase classes with fixture-based
+# modules; pytest collects both, `unittest discover` collects only the former
+# and silently skipped 238 tests until 2026-09-12.
 pytest>=8.0

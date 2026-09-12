@@ -55,6 +55,11 @@ scratch-runner concurrency.
      a winner but vetoes a contradicting speaker into review. Only a pronoun that
      is the subject of the speech verb counts. See
      [decisions/2026-09-06-speech-tags-outrank-adjudication.md](decisions/2026-09-06-speech-tags-outrank-adjudication.md).
+     Every deterministic rule layered on top of this — action beats, the
+     possessive and addressee refutations, tag-subject governance — is listed
+     with the line that forced it and the test that pins it in
+     [attribution-case-ledger.md](attribution-case-ledger.md), which is also
+     where a new rule has to be recorded before it can ship.
      Unsupported IDs and
      low-confidence results trigger focused retries. Unresolved dialogue is retained as a low-confidence review item rather than a
      release-grade guess. Scripting completes and persists `attribution_audit.json`, but

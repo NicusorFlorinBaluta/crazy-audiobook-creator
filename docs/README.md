@@ -20,6 +20,7 @@ document is a bug.
 | Document | Covers |
 | --- | --- |
 | [api-reference.md](api-reference.md) | Endpoint reference for the Dashboard/Brain and Voice services. |
+| [attribution-case-ledger.md](attribution-case-ledger.md) | Every attribution rule in force, the line that forced it, what it measured, and the test that pins it -- plus the rules measured and rejected, and the cases knowingly left wrong. **A new attribution rule needs a row here.** |
 | [architecture.md](architecture.md) | How the shipped pipeline works. The authoritative description. |
 | [configuration.md](configuration.md) | Every key in `brain/config.yaml` and `voice/config.yaml`. |
 | [crazy-voice-companion.md](crazy-voice-companion.md) | The CrazyVoice Android companion app (separate repository). |
@@ -46,7 +47,6 @@ cleaned up, so some paths inside them no longer resolve.
 | --- | --- |
 | [voice-review-incident-2026-08-10.md](voice-review-incident-2026-08-10.md) | Voice review failure and its resolution. |
 | [tiered-attribution-and-audio-regeneration-2026-09-03.md](tiered-attribution-and-audio-regeneration-2026-09-03.md) | Conversational attribution collapse and the auto-fix engine. |
-| [attribution-case-ledger.md](attribution-case-ledger.md) | Every attribution rule in force, the line that forced it, what it measured, and the test that pins it -- plus the rules measured and rejected, and the cases knowingly left wrong. |
 | [attribution-repair-2026-09-06.md](attribution-repair-2026-09-06.md) | Three attribution runs on a 32-chapter book, a misparsed cast entry, and the stale-process lesson. |
 | [speaker-attribution-incident-2026-08-11.md](speaker-attribution-incident-2026-08-11.md) | Misattributed quotations in the shipped release, and the selective repair. |
 | [speaker-attribution-improvements-2026-08-18.md](speaker-attribution-improvements-2026-08-18.md) | Attribution failure modes across a 63-chapter book, and the fixes. |
@@ -91,6 +91,35 @@ plus two write-ups:
 | --- | --- |
 | [unattended-full-app-audit-2026-08-23.md](plans/unattended-full-app-audit-2026-08-23.md) | Unattended full-application audit plan. |
 | [targeted-block-adjudication-2026-09-06.md](plans/targeted-block-adjudication-2026-09-06.md) | Joint speaker assignment for dialogue blocks no speech tag can settle. |
+
+## Adding an attribution rule
+
+Attribution rules accumulate faster than anything else in this pipeline, and a
+rule with no recorded case behind it is a guess that later reads as settled
+policy. Three rejected rules were re-proposed within a day of their rejection,
+twice by me, before the ledger existed.
+
+So a new rule owes four things, and two of them are enforced:
+
+1. **A real case.** A `line_id` from a book in `brain/projects` that the rule
+   fixes. Not a constructed example.
+2. **A measurement across both books.** What the rule changed, and what it cost.
+   About ten proposed rules have been rejected at this step; the number matters
+   more than the direction.
+3. **A test** naming that case id, so the row's claim of coverage is checkable.
+   *Enforced:* `tests/test_case_ledger.py` fails if the file stops existing or
+   stops mentioning the case.
+4. **A row in [attribution-case-ledger.md](attribution-case-ledger.md)**,
+   including the `attribution_resolver` the rule writes. *Enforced:* the same
+   test fails when the code writes a provenance no row explains — and a rule
+   has to write one, or a finished script could not say which layer settled the
+   line.
+
+A rule that measured badly still gets a row, in the rejected table. That is the
+half of the ledger that stops the same idea being re-proposed.
+
+The guard runs in CI, and locally through `.pre-commit-config.yaml` whenever
+`brain/director/**`, `brain/validators/**`, or the ledger is touched.
 
 ## Not documentation
 

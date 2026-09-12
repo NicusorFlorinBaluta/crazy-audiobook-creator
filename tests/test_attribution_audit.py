@@ -84,6 +84,37 @@ class AttributionAuditTests(unittest.TestCase):
         script = ScriptChapter(chapter_number=1, chapter_title="One", lines=lines)
         return book, [script]
 
+    def test_blocks_a_speaker_absent_from_the_chapter(self) -> None:
+        """The out-of-chapter hallucination from the 2026-08-18 record.
+
+        Pass 2 attributed chapters 4 and 7 of `isles-of-the-emberdark` to
+        characters who were not in the scene, because the prompt offered it the
+        whole 40-plus-character book registry rather than the chapter's own
+        cast. `_get_chapter_scoped_speakers` narrowed the prompt and this audit
+        kind catches what still slips through -- it is what still reports nine
+        real errors on that book, `deep_voice` speaking in four chapters that
+        never mention a deep voice.
+        """
+        # The chapter must name *somebody*, or the scoped-speaker lookup falls
+        # back to the whole registry and nothing is out of chapter by
+        # definition. Here it names Dusk, and the quote is given to Vathi.
+        book, scripts = self._artifacts('Dusk waited. "Wait," she said.', "vathi")
+        report = audit_book_attribution(book, self.registry, scripts)
+        self.assertFalse(report["passed"])
+        self.assertIn(
+            "absent_character_in_chapter",
+            {issue["kind"] for issue in report["issues"]},
+        )
+
+    def test_allows_a_speaker_the_chapter_names(self) -> None:
+        """The guard must not fire on a character the chapter actually mentions."""
+        book, scripts = self._artifacts('Vathi frowned. "Wait," she said.', "vathi")
+        report = audit_book_attribution(book, self.registry, scripts)
+        self.assertNotIn(
+            "absent_character_in_chapter",
+            {issue["kind"] for issue in report["issues"]},
+        )
+
     def test_blocks_narrator_owned_spoken_quote(self) -> None:
         book, scripts = self._artifacts('"Wait," she said.', "narrator")
         report = audit_book_attribution(book, self.registry, scripts)

@@ -99,3 +99,60 @@ class TestCiRunsTheWholeSuite:
         ]
         offenders = [c for c in commands if "unittest discover" in c]
         assert not offenders, f"unittest discovery silently skips fixture-based files: {offenders}"
+
+
+class TestANewRuleCannotShipUnlogged:
+    """A rule that writes a new provenance must earn a ledger row.
+
+    The ledger is only worth reading if it is complete, and "remember to
+    update the doc" is not a mechanism. Every rule added this month introduced
+    a new `attribution_resolver` value -- `deterministic_action_beat`,
+    `local_qwen_wide`, `constrained_choice`, `deterministic_unique_candidate`
+    -- so that value is the signal, and it is one the author cannot avoid
+    emitting: without it a line's provenance would not say which layer settled
+    it.
+
+    Values that mean "no rule was involved" are exempt below. Adding to that
+    list is itself a visible decision in the diff.
+    """
+
+    #: Provenances that are not a rule: the script generator's own output, a
+    #: human edit, an escalation tier named after its provider, and the legacy
+    #: value still read from scripts written before block adjudication was
+    #: removed on 2026-09-10.
+    NOT_A_RULE = {
+        "local",
+        "human",
+        "local_qwen_micro",
+        "local_qwen_block",
+        "gemini_api",
+        "gemini_api_triage",
+        "gemini_api_adjudication",
+        "gemini_web",
+        "source_parser",
+        "identity_consolidation",
+    }
+
+    RESOLVER = re.compile(r'attribution_resolver(?:"\])?\s*=\s*"([a-z_]+)"')
+
+    def _written_resolvers(self) -> set[str]:
+        found: set[str] = set()
+        for root in (Path("brain"), Path("scripts")):
+            for path in root.rglob("*.py"):
+                found |= set(self.RESOLVER.findall(path.read_text(encoding="utf-8", errors="ignore")))
+        return found - self.NOT_A_RULE
+
+    def test_the_scan_finds_the_known_rules(self) -> None:
+        """A regex that matches nothing would pass the next test vacuously."""
+        found = self._written_resolvers()
+        assert "deterministic_action_beat" in found, f"scan looks broken; found {sorted(found)}"
+        assert len(found) >= 3
+
+    def test_every_rule_provenance_appears_in_the_ledger(self) -> None:
+        body = LEDGER.read_text(encoding="utf-8")
+        missing = sorted(r for r in self._written_resolvers() if r not in body)
+        assert not missing, (
+            f"these resolvers write a provenance no ledger row explains: {missing}. "
+            f"Add a row to {LEDGER} with the case that forced the rule and the test that pins it, "
+            f"or add the value to NOT_A_RULE if it is not a rule."
+        )
