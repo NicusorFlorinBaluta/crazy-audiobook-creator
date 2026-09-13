@@ -1,5 +1,7 @@
 # Post-E2E improvement plan — 2026-08-09
 
+**Status:** Historical record — A dated record of what was done and why. Evidence, not a specification -- do not implement from it.
+
 ## Purpose
 
 This plan reconciles the pre-E2E review recommendations with the evidence from

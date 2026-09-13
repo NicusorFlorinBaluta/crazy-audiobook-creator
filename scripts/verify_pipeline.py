@@ -12,14 +12,13 @@ import hashlib
 import json
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from shared.runtime_preflight import collect_runtime_report
-
 
 MODEL_TIERS = {"gpu-smoke", "chapter", "full"}
 
@@ -93,13 +92,12 @@ def main() -> int:
     root = Path(__file__).resolve().parents[1]
     if args.tier in MODEL_TIERS and not args.allow_models:
         parser.error(
-            f"tier {args.tier!r} may load models; pass --allow-models only "
-            "during an approved live-test window"
+            f"tier {args.tier!r} may load models; pass --allow-models only during an approved live-test window"
         )
 
     report: dict[str, Any] = {
         "schema_version": 1,
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
         "tier": args.tier,
         "source_control": _source_control_state(root),
         "runtime": collect_runtime_report(),
@@ -127,9 +125,7 @@ def main() -> int:
         )
         for relative in node_files:
             report["checks"].append(_run(["node", "--check", relative], root))
-        report["checks"].append(
-            _run([sys.executable, "scripts/check_markdown_links.py"], root)
-        )
+        report["checks"].append(_run([sys.executable, "scripts/check_markdown_links.py"], root))
     elif args.tier == "artifact":
         if not args.project_dir:
             parser.error("--project-dir is required for artifact verification")
@@ -144,9 +140,7 @@ def main() -> int:
                 }
             )
         if not candidates:
-            report["checks"].append(
-                {"returncode": 1, "error": "No M4B artifact found"}
-            )
+            report["checks"].append({"returncode": 1, "error": "No M4B artifact found"})
     else:
         report["checks"].append(
             {
@@ -158,9 +152,7 @@ def main() -> int:
             }
         )
 
-    report["ok"] = all(
-        check.get("returncode", 1) == 0 for check in report["checks"]
-    )
+    report["ok"] = all(check.get("returncode", 1) == 0 for check in report["checks"])
     output = args.output or root / "verification-manifest.json"
     output.write_text(
         json.dumps(report, indent=2, ensure_ascii=False, sort_keys=True) + "\n",

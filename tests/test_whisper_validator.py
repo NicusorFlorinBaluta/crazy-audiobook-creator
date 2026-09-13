@@ -75,9 +75,7 @@ class WhisperValidatorTextTests(unittest.TestCase):
         )
 
     def test_empty_text_is_not_an_equivalent_spoken_line(self) -> None:
-        self.assertFalse(
-            WhisperValidator.is_orthographic_segmentation_match("", "")
-        )
+        self.assertFalse(WhisperValidator.is_orthographic_segmentation_match("", ""))
 
 
 if __name__ == "__main__":

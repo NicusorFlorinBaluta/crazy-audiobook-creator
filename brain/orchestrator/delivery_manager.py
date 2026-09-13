@@ -9,13 +9,15 @@ import os
 import re
 import shutil
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterator, Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from shared.artifacts import atomic_write_text
 from shared.single_instance import SingleInstanceLock
 
 logger = logging.getLogger(__name__)
@@ -113,12 +115,11 @@ class DeliveryManager:
     def _read_index(path: Path) -> DeliveryIndex:
         raw = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(raw, dict):
-            raise ValueError("Delivery index root must be an object")
+            raise TypeError("Delivery index root must be an object")
         version = int(raw.get("schema_version", 1) or 1)
         if version > DELIVERY_INDEX_SCHEMA_VERSION:
             raise DeliveryIndexVersionError(
-                f"Delivery index schema {version} is newer than supported "
-                f"schema {DELIVERY_INDEX_SCHEMA_VERSION}"
+                f"Delivery index schema {version} is newer than supported schema {DELIVERY_INDEX_SCHEMA_VERSION}"
             )
         if version < 1:
             raise ValueError(f"Invalid delivery index schema version: {version}")
@@ -131,9 +132,7 @@ class DeliveryManager:
                 version = 2
                 raw["schema_version"] = version
                 continue
-            raise DeliveryIndexVersionError(
-                f"No delivery index migration is available from schema {version}"
-            )
+            raise DeliveryIndexVersionError(f"No delivery index migration is available from schema {version}")
         return DeliveryIndex.model_validate(raw)
 
     def load_index(self) -> DeliveryIndex:
@@ -145,9 +144,9 @@ class DeliveryManager:
         except DeliveryIndexVersionError:
             raise
         except Exception as exc:
-            logger.error("Failed to load delivery index %s: %s", self.index_path, exc)
+            logger.exception("Failed to load delivery index %s: %s", self.index_path, exc)
             corrupt_path = self.index_path.with_name(
-                f"index.json.corrupt-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+                f"index.json.corrupt-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}"
             )
             try:
                 shutil.copy2(self.index_path, corrupt_path)
@@ -160,27 +159,18 @@ class DeliveryManager:
                     return recovered
                 except Exception:
                     logger.exception("Previous delivery index is also invalid")
-            raise DeliveryIndexCorruptError(
-                f"Delivery index is corrupt; preserved copy: {corrupt_path.name}"
-            ) from exc
+            raise DeliveryIndexCorruptError(f"Delivery index is corrupt; preserved copy: {corrupt_path.name}") from exc
 
     def save_index(self, index: DeliveryIndex) -> None:
         """Flush and atomically replace the index while retaining one backup."""
         self.init_storage()
         index.schema_version = DELIVERY_INDEX_SCHEMA_VERSION
-        temp_path = self.index_path.with_name("index.json.tmp")
-        try:
-            with open(temp_path, "w", encoding="utf-8") as handle:
-                handle.write(index.model_dump_json(indent=2))
-                handle.flush()
-                os.fsync(handle.fileno())
-            if self.index_path.is_file():
-                previous_temp = self.previous_index_path.with_suffix(".previous.tmp")
-                shutil.copy2(self.index_path, previous_temp)
-                os.replace(previous_temp, self.previous_index_path)
-            os.replace(temp_path, self.index_path)
-        finally:
-            temp_path.unlink(missing_ok=True)
+        if self.index_path.is_file():
+            try:
+                shutil.copy2(self.index_path, self.previous_index_path)
+            except OSError:
+                pass
+        atomic_write_text(self.index_path, index.model_dump_json(indent=2))
 
     @contextmanager
     def packaging_lock(
@@ -190,16 +180,12 @@ class DeliveryManager:
         timeout_seconds: float = 300.0,
     ) -> Iterator[None]:
         """Serialize publication, export, metadata remux, reset, and cleanup."""
-        lock_key = hashlib.sha256(
-            str(self.project_dir.resolve()).casefold().encode("utf-8")
-        ).hexdigest()[:20]
+        lock_key = hashlib.sha256(str(self.project_dir.resolve()).casefold().encode("utf-8")).hexdigest()[:20]
         lock = SingleInstanceLock(f"crazy-audiobook-package-{lock_key}.lock")
         deadline = time.monotonic() + max(0.0, timeout_seconds)
         while not lock.acquire():
             if not wait or time.monotonic() >= deadline:
-                raise DeliveryPackagingBusyError(
-                    "Another packaging, metadata, reset, or cleanup operation is active"
-                )
+                raise DeliveryPackagingBusyError("Another packaging, metadata, reset, or cleanup operation is active")
             time.sleep(0.1)
         try:
             yield
@@ -258,13 +244,6 @@ class DeliveryManager:
             script_dependency_fingerprint=script_dependency_fingerprint,
         )
         index = self.load_index()
-        if index.deliveries and (
-            index.batch_size != batch_size
-            or (index.chapter_numbers and index.chapter_numbers != chapter_numbers)
-        ):
-            raise DeliveryPlanLockedError(
-                "Delivery chapter boundaries are locked after the first publication"
-            )
         changed = (
             index.plan_fingerprint != plan_fingerprint
             or index.batch_size != batch_size
@@ -275,12 +254,12 @@ class DeliveryManager:
             index.batch_size = batch_size
             index.chapter_numbers = list(chapter_numbers)
             index.export_revision = DELIVERY_EXPORT_REVISION
-            # A dependency change keeps files recoverable but makes every old
-            # revision ineligible for automatic reuse until republished.
+            # A dependency or batch size change keeps files recoverable but marks old
+            # revisions as stale until republished.
             for part in index.deliveries:
                 if part.plan_fingerprint != plan_fingerprint:
                     part.status = "stale"
-                    part.stale_reason = "Script or export dependencies changed"
+                    part.stale_reason = "Script, batch size, or export dependencies changed"
             self.save_index(index)
         return index, batches
 
@@ -291,9 +270,7 @@ class DeliveryManager:
         include_stale: bool = False,
     ) -> DeliveryPart | None:
         for part in self.load_index().deliveries:
-            if part.delivery_id == delivery_id and (
-                include_stale or part.status == "published"
-            ):
+            if part.delivery_id == delivery_id and (include_stale or part.status == "published"):
                 return part
         return None
 
@@ -331,15 +308,9 @@ class DeliveryManager:
             return False
         if plan_fingerprint and part.plan_fingerprint != plan_fingerprint:
             return False
-        if (
-            master_manifest_hashes is not None
-            and part.master_manifest_hashes != master_manifest_hashes
-        ):
+        if master_manifest_hashes is not None and part.master_manifest_hashes != master_manifest_hashes:
             return False
-        if (
-            metadata_fingerprint is not None
-            and part.metadata_fingerprint != metadata_fingerprint
-        ):
+        if metadata_fingerprint is not None and part.metadata_fingerprint != metadata_fingerprint:
             return False
         try:
             artifact_path = self.resolve_artifact(part.artifact)
@@ -355,10 +326,7 @@ class DeliveryManager:
         if part is None:
             raise DeliveryError("Delivery part is missing or stale")
         artifact_path = self.resolve_artifact(part.artifact)
-        if (
-            artifact_path.stat().st_size != part.bytes
-            or self._hash_file(artifact_path) != part.sha256
-        ):
+        if artifact_path.stat().st_size != part.bytes or self._hash_file(artifact_path) != part.sha256:
             raise DeliveryError("Delivery artifact failed integrity validation")
         return part, artifact_path
 
@@ -390,9 +358,7 @@ class DeliveryManager:
         index = self.load_index()
         if plan_fingerprint:
             if not index.plan_fingerprint or plan_fingerprint != index.plan_fingerprint:
-                raise DeliveryPlanLockedError(
-                    "Publication fingerprint does not match the active delivery plan"
-                )
+                raise DeliveryPlanLockedError("Publication fingerprint does not match the active delivery plan")
             expected_batch = next(
                 (
                     planned
@@ -405,9 +371,7 @@ class DeliveryManager:
                 None,
             )
             if expected_batch is None or expected_batch != batch:
-                raise DeliveryPlanLockedError(
-                    "Publication chapters do not match the locked delivery plan"
-                )
+                raise DeliveryPlanLockedError("Publication chapters do not match the locked delivery plan")
             expected_manifest_keys = {str(number) for number in batch.chapter_numbers}
             if set(master_manifest_hashes) != expected_manifest_keys:
                 raise ValueError("Delivery mastering dependencies are incomplete")
@@ -426,10 +390,7 @@ class DeliveryManager:
             else str(batch.chapter_numbers[0])
         )
         while True:
-            filename = (
-                f"{safe_title} - Part {batch.ordinal:02d} - "
-                f"Chapters {chapter_label}-r{revision}.m4b"
-            )
+            filename = f"{safe_title} - Part {batch.ordinal:02d} - Chapters {chapter_label}-r{revision}.m4b"
             final_path = self.resolve_artifact(filename, require_file=False)
             if not final_path.exists():
                 break
@@ -450,7 +411,7 @@ class DeliveryManager:
             chapter_numbers=list(batch.chapter_numbers),
             artifact=filename,
             status="published",
-            published_at=datetime.now(timezone.utc).isoformat(),
+            published_at=datetime.now(UTC).isoformat(),
             sha256=sha256,
             bytes=file_bytes,
             duration_seconds=max(0.0, float(duration_seconds)),
@@ -460,9 +421,7 @@ class DeliveryManager:
             quality=quality or {},
             superseded_artifacts=superseded,
         )
-        index.deliveries = [
-            part for part in index.deliveries if part.delivery_id != batch.delivery_id
-        ]
+        index.deliveries = [part for part in index.deliveries if part.delivery_id != batch.delivery_id]
         index.deliveries.append(new_part)
         index.deliveries.sort(key=lambda part: part.ordinal)
         if not index.deliveries[:-1] and not index.chapter_numbers:
@@ -521,10 +480,7 @@ class DeliveryManager:
             return []
         project_root = self.project_dir.resolve()
         archives = sorted(
-            (
-                path for path in history_root.iterdir()
-                if path.is_dir() and not path.is_symlink()
-            ),
+            (path for path in history_root.iterdir() if path.is_dir() and not path.is_symlink()),
             key=lambda path: path.name,
             reverse=True,
         )

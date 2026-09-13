@@ -1,5 +1,7 @@
 # Speaker attribution incident and selective repair (2026-08-11)
 
+**Status:** Historical record — A dated record of what was done and why. Evidence, not a specification -- do not implement from it.
+
 ## Impact
 
 The completed `sample_book-14` release contained multiple spoken quotations

@@ -67,8 +67,23 @@ validation:
   emotion_wer_allowance: 0.0        # Keep transcript accuracy strict unless benchmark evidence justifies a relaxation
   max_retries: 3
   speaker_similarity_threshold: 0.55
+  # Speaker-embedding cosine similarity at or above which two cast voices are
+  # judged too close to tell apart. Lower is stricter.
   voice_profile_similarity_warning: 0.985
   voice_profile_acoustic_regenerations: 1
+  # Extra design/compare rounds spent separating voices that collide at the
+  # threshold above. Each round re-boots the VoiceDesign subprocess and
+  # redesigns only the colliding voices with a brief naming who they collided
+  # with, then re-measures.
+  #
+  # Before this existed, comparison ran after VoiceDesign had been unloaded, so
+  # a collision could only ever be reported. A 52-character cast left 22
+  # flagged pairs for manual resolution, one of them a character measured at
+  # 0.992 against the narrator.
+  #
+  # Set to 0 to restore that report-only behaviour. Whatever still collides
+  # when the rounds run out is surfaced for manual redesign either way.
+  voice_distinctness_rounds: 2
 
   # Audio checks
   artifact_noise_threshold: -50      # dB
@@ -97,6 +112,14 @@ mastering:
   peak_ceiling_mode: "soft_limiter"  # Listening-approved; preserves most samples while controlling true peaks
   crossfade_ms: 30
   fade_curve: "cosine"               # "linear" | "cosine" | "exponential"
+
+  # Chapter-edge silence, owned here because the assembler owns chapter edges.
+  # `AudioAssembler` has taken these as constructor arguments since it was
+  # written; nothing passed them, so its defaults were the only values that had
+  # ever applied. brain/config.yaml carried matching `chapter_*_pause_ms` keys
+  # that read like the controls and were read by nothing.
+  chapter_start_silence_ms: 1000     # standard audiobook lead-in
+  chapter_end_silence_ms: 2000
 
   # Noise gate
   noise_gate_enabled: false          # Generated audio normally needs no gate

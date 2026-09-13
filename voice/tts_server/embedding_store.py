@@ -15,7 +15,7 @@ import json
 import logging
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -118,22 +118,11 @@ class EmbeddingStore:
                     PRIMARY KEY (project_id, line_id)
                 )
             """)
-            columns = {
-                row[1]
-                for row in conn.execute(
-                    "PRAGMA table_info(generation_fingerprints)"
-                ).fetchall()
-            }
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(generation_fingerprints)").fetchall()}
             if "fingerprint_hash" not in columns:
-                conn.execute(
-                    "ALTER TABLE generation_fingerprints "
-                    "ADD COLUMN fingerprint_hash TEXT DEFAULT ''"
-                )
+                conn.execute("ALTER TABLE generation_fingerprints ADD COLUMN fingerprint_hash TEXT DEFAULT ''")
             if "output_hash" not in columns:
-                conn.execute(
-                    "ALTER TABLE generation_fingerprints "
-                    "ADD COLUMN output_hash TEXT DEFAULT ''"
-                )
+                conn.execute("ALTER TABLE generation_fingerprints ADD COLUMN output_hash TEXT DEFAULT ''")
             conn.commit()
 
     @staticmethod
@@ -208,7 +197,7 @@ class EmbeddingStore:
         torch.save(embedding, buffer)
         blob = buffer.getvalue()
         shape_str = str(list(embedding.shape))
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
 
         with self._connect() as conn:
             conn.execute(
@@ -274,7 +263,7 @@ class EmbeddingStore:
             return
 
         fx_hash = self.hash_text(json.dumps(fx_settings_dict, sort_keys=True))
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
 
         with self._connect() as conn:
             conn.execute(
@@ -333,7 +322,7 @@ class EmbeddingStore:
         ref_text_hash = self.hash_text(ref_text or "")
         buffer = io.BytesIO()
         torch.save(items, buffer)
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         with self._connect() as conn:
             conn.execute(
                 """
@@ -421,10 +410,7 @@ class EmbeddingStore:
         when its generation fingerprint and content hash still match; it is
         never treated as accepted until validation has its own matching record.
         """
-        if output_path and (
-            not Path(output_path).exists()
-            or Path(output_path).stat().st_size < 1000
-        ):
+        if output_path and (not Path(output_path).exists() or Path(output_path).stat().st_size < 1000):
             return True
         expected_fingerprint = self._generation_fingerprint(
             text=text,
@@ -444,12 +430,7 @@ class EmbeddingStore:
                 """,
                 (project_id, line_id),
             ).fetchone()
-        return not (
-            row
-            and row[0] == expected_fingerprint
-            and row[1]
-            and row[1] == current_output_hash
-        )
+        return not (row and row[0] == expected_fingerprint and row[1] and row[1] == current_output_hash)
 
     def save_synthesis_fingerprint(
         self,
@@ -510,7 +491,7 @@ class EmbeddingStore:
             generation_context=generation_context,
         )
         output_hash = self.hash_file(output_path)
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
 
         with self._connect() as conn:
             conn.execute(
@@ -601,7 +582,7 @@ class EmbeddingStore:
             expected_text=expected_text,
             validation_context=validation_context,
         )
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         with self._connect() as conn:
             conn.execute(
                 """
@@ -651,6 +632,7 @@ class EmbeddingStore:
         generation_context: dict[str, Any] | None,
     ) -> str:
         from voice.tts_server.qwen3_engine import MOOD_TIER_VERSION
+
         payload = {
             "text": text,
             "speaker": speaker,
@@ -660,6 +642,4 @@ class EmbeddingStore:
             "context": generation_context or {},
             "mood_tier_version": MOOD_TIER_VERSION,
         }
-        return self.hash_text(
-            json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        )
+        return self.hash_text(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")))

@@ -144,8 +144,19 @@ def _cover_dimensions(content: bytes, mime_type: str) -> tuple[int, int]:
             raise ValueError("cover payload is not a valid JPEG")
         offset = 2
         sof_markers = {
-            0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7,
-            0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF,
+            0xC0,
+            0xC1,
+            0xC2,
+            0xC3,
+            0xC5,
+            0xC6,
+            0xC7,
+            0xC9,
+            0xCA,
+            0xCB,
+            0xCD,
+            0xCE,
+            0xCF,
         }
         while offset + 8 < len(content):
             if content[offset] != 0xFF:
@@ -157,12 +168,12 @@ def _cover_dimensions(content: bytes, mime_type: str) -> tuple[int, int]:
                 continue
             if offset + 4 > len(content):
                 break
-            segment_length = int.from_bytes(content[offset + 2:offset + 4], "big")
+            segment_length = int.from_bytes(content[offset + 2 : offset + 4], "big")
             if segment_length < 2 or offset + 2 + segment_length > len(content):
                 break
             if marker in sof_markers and segment_length >= 7:
-                height = int.from_bytes(content[offset + 5:offset + 7], "big")
-                width = int.from_bytes(content[offset + 7:offset + 9], "big")
+                height = int.from_bytes(content[offset + 5 : offset + 7], "big")
+                width = int.from_bytes(content[offset + 7 : offset + 9], "big")
                 return width, height
             offset += 2 + segment_length
         raise ValueError("JPEG cover has no readable dimensions")
@@ -222,10 +233,7 @@ def _request_search(client: httpx.Client, params: dict[str, str | int]) -> httpx
             return response
         except (httpx.TransportError, httpx.HTTPStatusError) as exc:
             last_error = exc
-            if (
-                isinstance(exc, httpx.HTTPStatusError)
-                and exc.response.status_code == 429
-            ):
+            if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 429:
                 break
             if attempt < 2:
                 time.sleep(0.25 * (attempt + 1))
@@ -330,7 +338,7 @@ def _attach_cover(
             result.cover_width,
             result.cover_height,
         ) = _download_cover(client, image_url)
-    except Exception as exc:
+    except (ValueError, TypeError, AttributeError) as exc:
         result.warnings.append(f"Cover was rejected: {exc}")
         logger.warning("Rejected Google Books cover: %s", exc)
 
@@ -341,11 +349,7 @@ def _provider_error_message(exc: Exception) -> str:
         status_code = exc.response.status_code
         if status_code == 429:
             retry_after = str(exc.response.headers.get("retry-after") or "").strip()
-            suffix = (
-                f" Try again after {retry_after} seconds."
-                if retry_after.isdigit()
-                else " Try again later."
-            )
+            suffix = f" Try again after {retry_after} seconds." if retry_after.isdigit() else " Try again later."
             return "Google Books rate limit reached." + suffix
         if status_code >= 500:
             return "Google Books is temporarily unavailable. Try again later."
@@ -380,10 +384,7 @@ class MetadataFetcher:
 
         params = _search_params(query_title, query_author, language)
         if "key" not in params and transport is None:
-            logger.warning(
-                "GOOGLE_BOOKS_API_KEY is not configured; lookup may use a "
-                "shared anonymous quota"
-            )
+            logger.warning("GOOGLE_BOOKS_API_KEY is not configured; lookup may use a shared anonymous quota")
         normalized_language = str(language or "").strip().lower()
         if re.fullmatch(r"[a-z]{2}", normalized_language):
             params["langRestrict"] = normalized_language
@@ -410,9 +411,7 @@ class MetadataFetcher:
                     info = item.get("volumeInfo") or {}
                     if not isinstance(info, dict):
                         continue
-                    ranked.append(
-                        (_candidate_score(query_title, query_author, info), item)
-                    )
+                    ranked.append((_candidate_score(query_title, query_author, info), item))
                 ranked.sort(key=lambda pair: pair[0], reverse=True)
                 if not ranked or ranked[0][0] < _MATCH_THRESHOLD:
                     confidence = ranked[0][0] if ranked else 0.0
@@ -433,7 +432,7 @@ class MetadataFetcher:
                 )
                 _attach_cover(result, item, client)
                 return result
-        except Exception as exc:
+        except (httpx.HTTPError, OSError, ValueError, KeyError, TypeError) as exc:
             safe_error = _provider_error_message(exc)
             # Never log the raw HTTP exception: its URL may contain the API key.
             logger.warning("Google Books metadata lookup failed: %s", safe_error)
@@ -482,9 +481,7 @@ class MetadataFetcher:
                     info = item.get("volumeInfo") or {}
                     if not isinstance(info, dict) or not item.get("id"):
                         continue
-                    ranked.append(
-                        (_candidate_score(query_title, query_author, info), item)
-                    )
+                    ranked.append((_candidate_score(query_title, query_author, info), item))
                 ranked.sort(key=lambda pair: pair[0], reverse=True)
                 results = [
                     _metadata_from_item(
@@ -508,7 +505,7 @@ class MetadataFetcher:
                     query_author=query_author,
                     results=results,
                 )
-        except Exception as exc:
+        except (httpx.HTTPError, OSError, ValueError, KeyError, TypeError) as exc:
             safe_error = _provider_error_message(exc)
             logger.warning("Google Books manual search failed: %s", safe_error)
             return MetadataSearchResults(
@@ -561,7 +558,7 @@ class MetadataFetcher:
                 )
                 _attach_cover(result, item, client)
                 return result
-        except Exception as exc:
+        except (httpx.HTTPError, OSError, ValueError, KeyError, TypeError) as exc:
             safe_error = _provider_error_message(exc)
             logger.warning("Google Books selected-volume fetch failed: %s", safe_error)
             return FetchedMetadata(

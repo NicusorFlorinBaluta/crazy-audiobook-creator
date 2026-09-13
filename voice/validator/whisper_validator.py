@@ -10,11 +10,17 @@ import logging
 import re
 import unicodedata
 from difflib import SequenceMatcher
-from typing import Any
-
-import numpy as np
 
 logger = logging.getLogger(__name__)
+
+
+class TranscriptionUnavailableError(RuntimeError):
+    """Raised when the STT engine could not produce a transcript at all.
+
+    Distinct from an empty transcript, which is a legitimate result meaning the
+    audio contained no recognisable speech. Callers that score a transcript
+    must treat this as "not validated" rather than as a total mismatch.
+    """
 
 
 class WhisperValidator:
@@ -28,9 +34,7 @@ class WhisperValidator:
         vad_filter: bool = False,
     ):
         if backend not in {"auto", "faster_whisper", "openai_whisper"}:
-            raise ValueError(
-                "backend must be auto, faster_whisper, or openai_whisper"
-            )
+            raise ValueError("backend must be auto, faster_whisper, or openai_whisper")
         self.model_name = model_name
         self.device = device
         self.backend = backend
@@ -61,6 +65,7 @@ class WhisperValidator:
                 if device == "auto":
                     try:
                         import torch
+
                         device = "cuda" if torch.cuda.is_available() else "cpu"
                     except ImportError:
                         device = "cpu"
@@ -77,8 +82,8 @@ class WhisperValidator:
             except ImportError:
                 if self.backend == "faster_whisper":
                     raise
-                import whisper
                 import torch
+                import whisper
 
                 device = self.device
                 if device == "auto":
@@ -89,10 +94,12 @@ class WhisperValidator:
                 self._backend = "openai_whisper"
 
             self._is_loaded = True
-            logger.info("Whisper model loaded using %s (device=%s)", getattr(self, "_backend", "faster_whisper"), device)
+            logger.info(
+                "Whisper model loaded using %s (device=%s)", getattr(self, "_backend", "faster_whisper"), device
+            )
 
         except Exception as e:
-            logger.error("Failed to load Whisper: %s", e)
+            logger.exception("Failed to load Whisper: %s", e)
             raise
 
     def unload(self) -> None:
@@ -104,6 +111,7 @@ class WhisperValidator:
 
             try:
                 import torch
+
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
             except ImportError:
@@ -111,38 +119,75 @@ class WhisperValidator:
 
             logger.info("Whisper model unloaded")
 
+    @staticmethod
+    def normalize_language(language: str | None) -> str | None:
+        """Normalize language tags (e.g. 'en-US', 'en_US') to standard 2-letter codes for Whisper."""
+        if not language:
+            return None
+        clean = str(language).strip().lower()
+        if clean in ("", "auto", "none", "null", "undefined"):
+            return None
+        code = clean.split("-")[0].split("_")[0].strip()
+        return code or None
+
     def transcribe(self, audio_file: str, language: str | None = None) -> str:
-        """Transcribe an audio file to text.
+        """Transcribe an audio file, returning "" if the engine could not run.
+
+        Kept for callers that only want a best-effort transcript (benchmarks,
+        voice design, ad-hoc scripts). Anything that *scores* the result must
+        use :meth:`transcribe_strict` instead: an empty string here is
+        indistinguishable from silence, and scoring it yields WER 1.0 for audio
+        that was never actually examined. That is what produced 275 spurious
+        hard-gate failures on 2026-09-07.
+        """
+        try:
+            return self.transcribe_strict(audio_file, language=language)
+        except TranscriptionUnavailableError as exc:
+            logger.warning("[WhisperValidator] STT transcription failed for '%s': %s", audio_file, exc)
+            return ""
+
+    def transcribe_strict(self, audio_file: str, language: str | None = None) -> str:
+        """Transcribe an audio file to text, raising if the engine cannot run.
 
         Args:
             audio_file: Path to the .wav file.
+            language: Optional language code (e.g. 'en', 'es'). BCP-47 tags like 'en-US' are normalized.
 
         Returns:
-            Transcribed text.
+            Transcribed text. An empty string means the engine ran and heard
+            nothing, which is a real result; engine failure raises instead.
+
+        Raises:
+            TranscriptionUnavailableError: the STT engine could not produce a
+                transcript at all.
         """
         if not self._is_loaded:
             self.load()
 
-        try:
+        clean_lang = self.normalize_language(language)
+
+        def _do_transcribe(lang_arg: str | None) -> str:
             if getattr(self, "_backend", "faster_whisper") == "openai_whisper":
-                kwargs = {"language": language} if language else {}
+                kwargs = {"language": lang_arg} if lang_arg else {}
                 if not self.vad_filter:
                     result = self._model.transcribe(audio_file, **kwargs)
                     return result.get("text", "").strip()
 
                 import tempfile
+
                 import soundfile as sf
                 import torch
-                from silero_vad import load_silero_vad, get_speech_timestamps, collect_chunks
-                
+                from silero_vad import collect_chunks, get_speech_timestamps, load_silero_vad
+
                 vad_model = load_silero_vad()
                 audio_np, sr = sf.read(audio_file, dtype="float32")
                 if audio_np.ndim > 1:
                     audio_np = audio_np.mean(axis=1)
                 wav = torch.from_numpy(audio_np)  # VAD expects 1D
-                
+
                 if sr != 16000:
                     import math
+
                     from scipy.signal import resample_poly
 
                     divisor = math.gcd(sr, 16000)
@@ -153,7 +198,7 @@ class WhisperValidator:
                     ).astype("float32", copy=False)
                     wav = torch.from_numpy(audio_np)
                     sr = 16000
-                
+
                 speech_timestamps = get_speech_timestamps(wav, vad_model, return_seconds=False)
                 if not speech_timestamps:
                     # Silero can reject valid very short, high-pitched, or
@@ -162,31 +207,47 @@ class WhisperValidator:
                     # guaranteed transcription failure.
                     result = self._model.transcribe(audio_file, **kwargs)
                     return result.get("text", "").strip()
-                    
+
                 wav_speech = collect_chunks(speech_timestamps, wav)
-                
+
                 with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
                     tmp_path = f.name
-                
+
                 try:
                     sf.write(tmp_path, wav_speech.numpy(), 16000)
                     result = self._model.transcribe(tmp_path, **kwargs)
                     return result.get("text", "").strip()
                 finally:
                     import os
+
                     os.unlink(tmp_path)
             else:
                 segments, info = self._model.transcribe(
                     audio_file,
                     beam_size=5,
                     vad_filter=True,
-                    language=language,
+                    language=lang_arg,
                 )
                 text = " ".join(segment.text for segment in segments)
                 return text.strip()
+
+        try:
+            return _do_transcribe(clean_lang)
         except Exception as e:
-            logger.warning("[WhisperValidator] STT transcription failed for '%s': %s", audio_file, e)
-            return ""
+            if clean_lang and "language" in str(e).lower():
+                logger.warning(
+                    "[WhisperValidator] STT transcription failed with language '%s' (%s); retrying with auto-detection...",
+                    clean_lang,
+                    e,
+                )
+                try:
+                    return _do_transcribe(None)
+                except Exception as retry_err:
+                    logger.warning("[WhisperValidator] Fallback auto-detection transcription failed: %s", retry_err)
+                    raise TranscriptionUnavailableError(
+                        f"STT failed for {audio_file!r} with language {clean_lang!r} and on auto-detect retry: {retry_err}"
+                    ) from retry_err
+            raise TranscriptionUnavailableError(f"STT failed for {audio_file!r}: {e}") from e
 
     def calculate_wer(
         self,
@@ -218,11 +279,16 @@ class WhisperValidator:
             first_hyp = hyp_words[0].lower()
             first_ref = ref_words[0].lower()
             if first_hyp in {"you", "u", "user"} and first_ref not in {"you", "u", "user"}:
-                logger.warning("[WhisperValidator] Detected leading prompt token hallucination: %r vs ref %r", hyp_words[:3], ref_words[:3])
+                logger.warning(
+                    "[WhisperValidator] Detected leading prompt token hallucination: %r vs ref %r",
+                    hyp_words[:3],
+                    ref_words[:3],
+                )
                 return 0.50  # Instantly fail threshold for leading prompt hallucinations
 
         try:
             import jiwer
+
             wer = jiwer.wer(norm_ref, norm_hyp)
             return min(wer, 1.0)  # Cap at 1.0
         except ImportError:
@@ -238,8 +304,8 @@ class WhisperValidator:
                     cost = 0 if ref_words[i - 1] == hyp_words[j - 1] else 1
                     d[i][j] = min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + cost)
             return min(d[len(ref_words)][len(hyp_words)] / len(ref_words), 1.0)
-        except Exception as e:
-            logger.error("WER calculation failed: %s", e)
+        except (ValueError, TypeError, ZeroDivisionError, IndexError) as e:
+            logger.exception("WER calculation failed: %s", e)
             return 1.0  # Assume worst case
 
     def calculate_text_similarity(
@@ -281,10 +347,7 @@ class WhisperValidator:
 
         compact_reference = compact(reference)
         compact_hypothesis = compact(hypothesis)
-        return bool(
-            compact_reference
-            and compact_reference == compact_hypothesis
-        )
+        return bool(compact_reference and compact_reference == compact_hypothesis)
 
     @staticmethod
     def _expand_english_contractions(text: str) -> str:
@@ -330,10 +393,11 @@ class WhisperValidator:
         # Step 1: Use OpenAI Whisper's official English normalizer if available
         try:
             from whisper.normalizers import EnglishTextNormalizer
+
             if not hasattr(WhisperValidator, "_english_normalizer"):
                 WhisperValidator._english_normalizer = EnglishTextNormalizer()
             text = WhisperValidator._english_normalizer(text)
-        except Exception:
+        except ImportError:
             text = text.lower()
 
         # Step 2: Dynamically convert any remaining numbers/ordinals to words
@@ -341,16 +405,16 @@ class WhisperValidator:
             import num2words
 
             def replace_ordinal(match):
-                num_str, suffix = match.group(1), match.group(2)
+                num_str = match.group(1)
                 try:
                     return " " + num2words.num2words(int(num_str), to="ordinal") + " "
-                except Exception:
+                except (ValueError, TypeError, OverflowError):
                     return match.group(0)
 
             def replace_cardinal(match):
                 try:
                     return " " + num2words.num2words(int(match.group(0))) + " "
-                except Exception:
+                except (ValueError, TypeError, OverflowError):
                     return match.group(0)
 
             # Match ordinals first (e.g., 21st, 100th)

@@ -1,0 +1,302 @@
+{
+  "schema_version": 2,
+  "created_at": "2026-08-21T17:43:28.785765+00:00",
+  "project": "isles-of-the-emberdark-a-cosmere-novel-secret-projects-book-5",
+  "chapter": 7,
+  "source_control": {
+    "commit": "d7b6451133e177247c402552d3aca57622615604",
+    "branch": "dev",
+    "dirty": true,
+    "status": [
+      "M .gitignore",
+      " D \"3rd chat_history.md\"",
+      " D \"4th chat_history.md\"",
+      " M brain/config.yaml",
+      " M brain/dashboard/api/main.py",
+      " M brain/dashboard/api/mobile.py",
+      " M brain/dashboard/frontend/css/styles.css",
+      " M brain/dashboard/frontend/js/app.js",
+      " M brain/dashboard/frontend/js/script-viewer.js",
+      " M brain/director/attribution_audit.py",
+      " M brain/director/character_analyzer.py",
+      " M brain/director/script_generator.py",
+      " M brain/extractor/epub_parser.py",
+      " M brain/orchestrator/job_queue.py",
+      " M brain/orchestrator/pipeline.py",
+      " M brain/orchestrator/review_gate.py",
+      " M brain/validators/gemini_validation.py",
+      " D chat-history-2.md",
+      " D chat-history-3.md",
+      " D chat-history.md",
+      " D chat_agent_12_08.md",
+      " D chat_gpt_session_03_08.md",
+      " M docs/api-reference.md",
+      " M docs/architecture.md",
+      " M docs/configuration.md",
+      " M docs/crazy-voice-companion.md",
+      " M scripts/restart_dashboard.ps1",
+      " M shared/constants.py",
+      " M shared/models.py",
+      " M tests/test_artifacts_and_script.py",
+      " M tests/test_attribution_guardrails_enhanced.py",
+      " M tests/test_dashboard_frontend_ux.py",
+      " M tests/test_dashboard_lifecycle.py",
+      " M tests/test_epub_parser.py",
+      " M tests/test_gemini_validation.py",
+      " M tests/test_incremental_delivery_pipeline.py",
+      " M tests/test_mobile_api.py",
+      " M tests/test_review_workflow.py",
+      " M voice/mastering/m4b_exporter.py",
+      "?? brain/orchestrator/quality_trends.py",
+      "?? docs/decisions/",
+      "?? docs/quality-performance-hardening-2026-08-21.md",
+      "?? tests/test_cast_distinctness_gate.py",
+      "?? tests/test_process_resilience.py",
+      "?? tests/test_quality_trends.py"
+    ]
+  },
+  "python_version": "3.13.3",
+  "brain_config_sha256": "9b5dfac2e2e0a831f5fa423d7d2930019c7cfeda37575543b235c8cc2423432c",
+  "runtime": {
+    "model": "qwen2.5:32b",
+    "context_window": 16384,
+    "temperature": 0.2,
+    "speaker_confidence_threshold": 0.55
+  },
+  "book_sha256": "237e9a7240c6ec35f859bf0326b7107070af07c13d4b96ae48b66797763ed59d",
+  "registry_sha256": "63f9518b56b686b776c3d82188d72dc2d7f0de7b3dec7a070a5826239831b093",
+  "available_fragments": 248,
+  "configs": [
+    {
+      "label": "w300_f20",
+      "chunk_size_words": 300,
+      "max_fragments_per_chunk": 20
+    },
+    {
+      "label": "w320_f22",
+      "chunk_size_words": 320,
+      "max_fragments_per_chunk": 22
+    }
+  ],
+  "protocol": {
+    "order": "AB",
+    "repetitions_per_config_per_excerpt": 1,
+    "window_fragments": 20,
+    "warmup_fragments": 0,
+    "same_source_per_pair": true
+  },
+  "excerpts": [
+    {
+      "offset": 0,
+      "fragment_count": 20,
+      "source_words": 175,
+      "source_sha256": "2523d81bb4629f056aef415c3e787c5998e17620cc21f95833f6e24cfd610a49"
+    }
+  ],
+  "runs": [
+    {
+      "config": "w300_f20",
+      "chunk_count": 1,
+      "fragment_count": 20,
+      "source_words": 175,
+      "output_lines": 20,
+      "wall_seconds": 394.77510050003184,
+      "wall_seconds_per_source_word": 2.255857717143039,
+      "coverage_ok": true,
+      "ids_ok": true,
+      "unknown_speakers": [],
+      "full_attempts": 1,
+      "structural_retries": 0,
+      "focused_retries": 0,
+      "local_repairs": 0,
+      "fragment_fallbacks": 0,
+      "calls": [
+        {
+          "chapter_number": 7,
+          "chapter_title": "Five Years Ago",
+          "fragment_count": 20,
+          "source_words": 175,
+          "prompt_characters": 10869,
+          "wall_seconds": 394.771315,
+          "attempts": 1,
+          "full_attempts": 1,
+          "structural_failures": 0,
+          "structural_retries": 0,
+          "full_semantic_retries": 0,
+          "focused_retries": 0,
+          "strict_attribution_retries": 0,
+          "delivery_focused_retries": 0,
+          "delivery_focused_rounds": 0,
+          "delivery_issue_counts": {},
+          "local_repairs": 0,
+          "fragment_fallbacks": 0,
+          "attribution_issue_counts": {},
+          "requests": [
+            {
+              "request_kind": "full_chunk",
+              "attempt": 1,
+              "wall_seconds": 394.723534,
+              "success": true,
+              "ollama": {
+                "attempt": 1,
+                "prompt_characters": 10869,
+                "response_characters": 2102,
+                "stream_chunks": 696,
+                "elapsed_seconds": 394.723414,
+                "chunks_per_second": 1.76326,
+                "prompt_eval_count": 2812,
+                "eval_count": 696,
+                "prompt_eval_duration_ns": 30622396000,
+                "eval_duration_ns": 306815947000,
+                "load_duration_ns": 57269580800
+              },
+              "compact_metadata": {
+                "received_characters": 1385,
+                "canonical_characters": 4117,
+                "character_savings": 2732,
+                "character_savings_ratio": 0.66359
+              }
+            }
+          ],
+          "used_fallback": false,
+          "ollama": {
+            "attempt": 1,
+            "prompt_characters": 10869,
+            "response_characters": 2102,
+            "stream_chunks": 696,
+            "elapsed_seconds": 394.723414,
+            "chunks_per_second": 1.76326,
+            "prompt_eval_count": 2812,
+            "eval_count": 696,
+            "prompt_eval_duration_ns": 30622396000,
+            "eval_duration_ns": 306815947000,
+            "load_duration_ns": 57269580800
+          }
+        }
+      ],
+      "excerpt_offset": 0,
+      "source_sha256": "2523d81bb4629f056aef415c3e787c5998e17620cc21f95833f6e24cfd610a49",
+      "repetition": 1,
+      "slot": 1,
+      "mode_label": "A"
+    },
+    {
+      "config": "w320_f22",
+      "chunk_count": 1,
+      "fragment_count": 20,
+      "source_words": 175,
+      "output_lines": 20,
+      "wall_seconds": 277.4134316999698,
+      "wall_seconds_per_source_word": 1.5852196097141131,
+      "coverage_ok": true,
+      "ids_ok": true,
+      "unknown_speakers": [],
+      "full_attempts": 1,
+      "structural_retries": 0,
+      "focused_retries": 0,
+      "local_repairs": 0,
+      "fragment_fallbacks": 0,
+      "calls": [
+        {
+          "chapter_number": 7,
+          "chapter_title": "Five Years Ago",
+          "fragment_count": 20,
+          "source_words": 175,
+          "prompt_characters": 10869,
+          "wall_seconds": 277.411408,
+          "attempts": 1,
+          "full_attempts": 1,
+          "structural_failures": 0,
+          "structural_retries": 0,
+          "full_semantic_retries": 0,
+          "focused_retries": 0,
+          "strict_attribution_retries": 0,
+          "delivery_focused_retries": 0,
+          "delivery_focused_rounds": 0,
+          "delivery_issue_counts": {},
+          "local_repairs": 0,
+          "fragment_fallbacks": 0,
+          "attribution_issue_counts": {},
+          "requests": [
+            {
+              "request_kind": "full_chunk",
+              "attempt": 1,
+              "wall_seconds": 277.409506,
+              "success": true,
+              "ollama": {
+                "attempt": 1,
+                "prompt_characters": 10869,
+                "response_characters": 2056,
+                "stream_chunks": 690,
+                "elapsed_seconds": 277.409423,
+                "chunks_per_second": 2.487298,
+                "prompt_eval_count": 2812,
+                "eval_count": 690,
+                "prompt_eval_duration_ns": 401823000,
+                "eval_duration_ns": 276901351000,
+                "load_duration_ns": 96441500
+              },
+              "compact_metadata": {
+                "received_characters": 1362,
+                "canonical_characters": 4204,
+                "character_savings": 2842,
+                "character_savings_ratio": 0.676023
+              }
+            }
+          ],
+          "used_fallback": false,
+          "ollama": {
+            "attempt": 1,
+            "prompt_characters": 10869,
+            "response_characters": 2056,
+            "stream_chunks": 690,
+            "elapsed_seconds": 277.409423,
+            "chunks_per_second": 2.487298,
+            "prompt_eval_count": 2812,
+            "eval_count": 690,
+            "prompt_eval_duration_ns": 401823000,
+            "eval_duration_ns": 276901351000,
+            "load_duration_ns": 96441500
+          }
+        }
+      ],
+      "excerpt_offset": 0,
+      "source_sha256": "2523d81bb4629f056aef415c3e787c5998e17620cc21f95833f6e24cfd610a49",
+      "repetition": 1,
+      "slot": 2,
+      "mode_label": "B"
+    }
+  ],
+  "server_start_seconds": 4.678686600003857,
+  "summary": {
+    "w300_f20": {
+      "runs": 1,
+      "wall_seconds_per_source_word_p50": 2.255857717143039,
+      "wall_seconds_per_source_word_p95": 2.255857717143039,
+      "full_attempts": 1,
+      "structural_retries": 0,
+      "focused_retries": 0,
+      "local_repairs": 0,
+      "fragment_fallbacks": 0,
+      "all_invariants_passed": true
+    },
+    "w320_f22": {
+      "runs": 1,
+      "wall_seconds_per_source_word_p50": 1.5852196097141131,
+      "wall_seconds_per_source_word_p95": 1.5852196097141131,
+      "full_attempts": 1,
+      "structural_retries": 0,
+      "focused_retries": 0,
+      "local_repairs": 0,
+      "fragment_fallbacks": 0,
+      "all_invariants_passed": true
+    }
+  },
+  "decision": {
+    "normalized_wall_change_fraction": -0.2972874141540559,
+    "speed_gate_pass": true,
+    "automated_quality_gate_pass": true,
+    "requires_manual_attribution_review": true,
+    "promote": false
+  }
+}

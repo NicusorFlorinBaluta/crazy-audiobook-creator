@@ -4,18 +4,19 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import yaml
 
+from brain.orchestrator.pipeline import Pipeline
+from scripts.benchmark_script_chunks import _parse_configs
+from scripts.benchmark_support import balanced_order, summarize_tts_runs
+from scripts.benchmark_tts_fixture import _deep_update
 from shared.config_validation import validate_brain_config, validate_voice_config
+from shared.logging_utils import rotate_file
 from shared.performance import read_metrics, summarize_metrics
 from shared.progress import ProgressEstimator
 from shared.reference_selection import reference_line_score, select_reference_text
-from shared.logging_utils import rotate_file
-from scripts.benchmark_support import balanced_order, summarize_tts_runs
-from scripts.benchmark_tts_fixture import _deep_update
-from scripts.benchmark_script_chunks import _parse_configs
-
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -31,13 +32,73 @@ class ConfigurationValidationTests(unittest.TestCase):
 
     def test_unsafe_voice_backend_fails_before_model_loading(self) -> None:
         with self.assertRaisesRegex(ValueError, "whisper_backend"):
-            validate_voice_config(
-                {"validation": {"whisper_backend": "mystery_backend"}}
-            )
+            validate_voice_config({"validation": {"whisper_backend": "mystery_backend"}})
 
     def test_ollama_fallback_models_must_be_explicit_model_tags(self) -> None:
         with self.assertRaisesRegex(ValueError, "fallback_models"):
             validate_brain_config({"ollama": {"fallback_models": [""]}})
+
+    def test_ollama_generation_safeguards_are_bounded(self) -> None:
+        for key, value in (
+            ("max_output_tokens", 0),
+            ("max_generation_seconds", 0),
+            ("repetition_window_chars", -1),
+            ("repetition_count", 1),
+        ):
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, key):
+                validate_brain_config({"ollama": {key: value}})
+
+    def test_joint_analysis_flag_must_be_boolean(self) -> None:
+        with self.assertRaisesRegex(ValueError, "joint_analysis"):
+            validate_brain_config({"script": {"joint_analysis": "yes"}})
+
+    def test_adaptive_split_settings_are_bounded(self) -> None:
+        invalid = (
+            ({"adaptive_split_enabled": "yes"}, "adaptive_split_enabled"),
+            ({"dialogue_focused_schema": "yes"}, "dialogue_focused_schema"),
+            ({"adaptive_split_max_depth": 7}, "adaptive_split_max_depth"),
+            ({"adaptive_split_min_fragments": 1}, "adaptive_split_min_fragments"),
+        )
+        for script, field in invalid:
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, field):
+                validate_brain_config({"script": script})
+
+    def test_pipeline_wires_generation_limits_and_adaptive_split_config(self) -> None:
+        config = {
+            "ollama": {
+                "host": "http://127.0.0.1:11435",
+                "model": "test-model",
+                "max_output_tokens": 4321,
+                "max_generation_seconds": 321,
+                "repetition_window_chars": 222,
+                "repetition_count": 5,
+            },
+            "script": {
+                "adaptive_split_enabled": True,
+                "adaptive_split_max_depth": 3,
+                "adaptive_split_min_fragments": 10,
+                "dialogue_focused_schema": True,
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "config.yaml"
+            config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+            with patch("brain.orchestrator.pipeline.OllamaClient") as client_type:
+                pipeline = Pipeline(
+                    config_path=config_path,
+                    projects_dir=root / "projects",
+                )
+
+        client_kwargs = client_type.call_args.kwargs
+        self.assertEqual(client_kwargs["max_output_tokens"], 4321)
+        self.assertEqual(client_kwargs["max_generation_seconds"], 321)
+        self.assertEqual(client_kwargs["repetition_window_chars"], 222)
+        self.assertEqual(client_kwargs["repetition_count"], 5)
+        self.assertTrue(pipeline.script_generator.adaptive_split_enabled)
+        self.assertEqual(pipeline.script_generator.adaptive_split_max_depth, 3)
+        self.assertEqual(pipeline.script_generator.adaptive_split_min_fragments, 10)
+        self.assertTrue(pipeline.script_generator.dialogue_focused_schema)
 
     def test_invalid_enabled_schedule_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "requires at least one window"):
@@ -45,23 +106,25 @@ class ConfigurationValidationTests(unittest.TestCase):
 
     def test_schedule_window_requires_an_explicit_weekday(self) -> None:
         with self.assertRaisesRegex(ValueError, "days"):
-            validate_brain_config({
-                "schedule": {
-                    "enabled": True,
-                    "windows": [{"days": [], "start": "08:00", "end": "18:00"}],
+            validate_brain_config(
+                {
+                    "schedule": {
+                        "enabled": True,
+                        "windows": [{"days": [], "start": "08:00", "end": "18:00"}],
+                    }
                 }
-            })
+            )
 
     def test_schedule_window_must_have_nonzero_duration(self) -> None:
         with self.assertRaisesRegex(ValueError, "must differ"):
-            validate_brain_config({
-                "schedule": {
-                    "enabled": True,
-                    "windows": [{
-                        "days": ["Monday"], "start": "08:00", "end": "08:00"
-                    }],
+            validate_brain_config(
+                {
+                    "schedule": {
+                        "enabled": True,
+                        "windows": [{"days": ["Monday"], "start": "08:00", "end": "08:00"}],
+                    }
                 }
-            })
+            )
 
 
 class ProgressEstimatorTests(unittest.TestCase):
@@ -71,15 +134,17 @@ class ProgressEstimatorTests(unittest.TestCase):
         estimator.observe("tts", 1, 20)
         estimator.observe("tts", 1, 3)
 
-        eta, confidence = estimator.estimate(
-            "tts", completed_units=4, total_units=10
-        )
+        eta, confidence = estimator.estimate("tts", completed_units=4, total_units=10)
 
         self.assertEqual(eta, 18.0)
         self.assertEqual(confidence, "medium")
         snapshot = estimator.snapshot(
-            "tts", stage="generating", phase="synthesis", message="Working",
-            completed_units=4, total_units=10,
+            "tts",
+            stage="generating",
+            phase="synthesis",
+            message="Working",
+            completed_units=4,
+            total_units=10,
         )
         self.assertEqual(snapshot.percent, 40.0)
         self.assertEqual(snapshot.schema_version, 1)
@@ -88,14 +153,11 @@ class ProgressEstimatorTests(unittest.TestCase):
 class ReferenceSelectionTests(unittest.TestCase):
     def test_real_diverse_dialogue_beats_repetitive_emphasis(self) -> None:
         clear = (
-            "We should cross the old bridge before sunrise, then ask the "
-            "station master which road reaches the harbor."
+            "We should cross the old bridge before sunrise, then ask the station master which road reaches the harbor."
         )
         repetitive = "RUN RUN RUN! RUN! RUN!"
 
-        selection = select_reference_text(
-            [repetitive, clear], seed_text="Generic fallback sentence."
-        )
+        selection = select_reference_text([repetitive, clear], seed_text="Generic fallback sentence.")
 
         self.assertGreater(reference_line_score(clear), reference_line_score(repetitive))
         self.assertTrue(selection.text.startswith(clear))
@@ -103,7 +165,8 @@ class ReferenceSelectionTests(unittest.TestCase):
 
     def test_seed_is_only_appended_when_real_dialogue_is_insufficient(self) -> None:
         selection = select_reference_text(
-            ["Yes."], seed_text="This calm sentence supplies enough varied words for a stable voice reference.",
+            ["Yes."],
+            seed_text="This calm sentence supplies enough varied words for a stable voice reference.",
             minimum_words=8,
         )
         self.assertTrue(selection.used_seed_text)
@@ -113,12 +176,27 @@ class ReferenceSelectionTests(unittest.TestCase):
 class PerformanceSummaryTests(unittest.TestCase):
     def test_summary_uses_latest_successful_chapter_record(self) -> None:
         records = [
-            {"event": "chapter_generation", "chapter_number": 1,
-             "segments": 2, "synthesis_cache_misses": 2},
-            {"event": "chapter_generation", "chapter_number": 1,
-             "segments": 2, "synthesis_cache_hits": 2},
-            {"event": "chapter_generation", "chapter_number": 2,
-             "segments": 4, "failed_validation": 1},
+            {
+                "event": "script_generation",
+                "pass1_seconds": 12.0,
+                "pass2_seconds": 30.0,
+                "total_seconds": 42.0,
+                "chapters": 2,
+                "segments": 6,
+            },
+            {
+                "event": "script_generation",
+                "director_mode": "joint",
+                "pass1_seconds": 0.0,
+                "pass2_seconds": 25.0,
+                "reconciliation_seconds": 1.0,
+                "total_seconds": 26.0,
+                "chapters": 2,
+                "segments": 6,
+            },
+            {"event": "chapter_generation", "chapter_number": 1, "segments": 2, "synthesis_cache_misses": 2},
+            {"event": "chapter_generation", "chapter_number": 1, "segments": 2, "synthesis_cache_hits": 2},
+            {"event": "chapter_generation", "chapter_number": 2, "segments": 4, "failed_validation": 1},
             {"event": "chapter_mastering", "chapter_number": 1},
         ]
         summary = summarize_metrics(records)
@@ -126,6 +204,10 @@ class PerformanceSummaryTests(unittest.TestCase):
         self.assertEqual(summary["mastered_chapters"], 1)
         self.assertEqual(summary["generation_totals"]["synthesis_cache_hits"], 2.0)
         self.assertNotIn("synthesis_cache_misses", summary["generation_totals"])
+        self.assertEqual(
+            [run["director_mode"] for run in summary["script_director_runs"]],
+            ["two_pass", "joint"],
+        )
 
     def test_reader_ignores_a_truncated_jsonl_tail(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -184,9 +266,7 @@ class PerformanceSummaryTests(unittest.TestCase):
         self.assertEqual(summary["by_speaker_role"]["character"]["segments"], 1)
         self.assertEqual(summary["by_model_state"]["cold"]["segments"], 1)
         self.assertEqual(
-            summary["substage_totals_seconds"][
-                "tts_autoregressive_generation_seconds"
-            ],
+            summary["substage_totals_seconds"]["tts_autoregressive_generation_seconds"],
             5.0,
         )
 
@@ -252,3 +332,82 @@ class LogRotationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ScriptDirectorLlmSummaryTests(unittest.TestCase):
+    """The LLM half of the pipeline must be measurable, not just timed.
+
+    `OllamaClient` records prompt/eval token counts and durations, and
+    `ScriptGenerator` forwards them into `call_metrics`, but nothing summarized
+    them -- so prefill cost and prefix-cache health were invisible even though
+    scripting is roughly half of total book wall time.
+    """
+
+    # Values measured on 2026-08-23 (docs/benchmarks/candidate-qwen38-27b-8k-
+    # nonthinking-f40-ch07-offset0-2026-08-23.json).
+    MEASURED = {
+        "prompt_eval_count": 3635,
+        "eval_count": 1527,
+        "prompt_eval_duration_ns": 25_409_571_000,
+        "eval_duration_ns": 51_320_000_000,
+        "load_duration_ns": 45_240_959_300,
+    }
+
+    def _summary(self, calls):
+        return summarize_metrics([{"event": "script_generation", "calls": calls}])["script_director_llm"]
+
+    def test_no_llm_calls_is_reported_rather_than_crashing(self) -> None:
+        self.assertEqual(summarize_metrics([])["script_director_llm"], {"calls": 0})
+
+    def test_throughput_is_derived_from_recorded_durations(self) -> None:
+        summary = self._summary([{"chapter_number": 7, "ollama": self.MEASURED}])
+        # 3635 tokens / 25.41s and 1527 tokens / 51.32s
+        self.assertAlmostEqual(summary["prefill_tokens_per_second"], 143.06, places=1)
+        self.assertAlmostEqual(summary["decode_tokens_per_second"], 29.75, places=1)
+        self.assertAlmostEqual(summary["prefill_share_of_compute"], 0.3312, places=3)
+        self.assertEqual(summary["prompt_tokens"], 3635)
+        self.assertEqual(summary["generated_tokens"], 1527)
+
+    def test_repeated_full_prefix_evaluation_is_reported_as_no_reuse(self) -> None:
+        """The condition worth acting on: every chunk re-evaluates the prefix."""
+        summary = self._summary(
+            [
+                {"chapter_number": 7, "ollama": self.MEASURED},
+                {"chapter_number": 7, "ollama": {**self.MEASURED, "prompt_eval_count": 3590}},
+            ]
+        )
+        cache = summary["prefix_cache"]
+        self.assertGreater(cache["later_to_first_ratio"], 0.9)
+        self.assertFalse(cache["reuse_detected"])
+
+    def test_a_small_later_prompt_is_reported_as_reuse(self) -> None:
+        summary = self._summary(
+            [
+                {"chapter_number": 7, "ollama": self.MEASURED},
+                {"chapter_number": 7, "ollama": {**self.MEASURED, "prompt_eval_count": 1100}},
+            ]
+        )
+        cache = summary["prefix_cache"]
+        self.assertLess(cache["later_to_first_ratio"], 0.5)
+        self.assertTrue(cache["reuse_detected"])
+
+    def test_reuse_is_unknown_when_every_chapter_had_one_request(self) -> None:
+        summary = self._summary(
+            [
+                {"chapter_number": 7, "ollama": self.MEASURED},
+                {"chapter_number": 8, "ollama": self.MEASURED},
+            ]
+        )
+        cache = summary["prefix_cache"]
+        self.assertEqual(cache["chapters_observed"], 2)
+        self.assertIsNone(cache["reuse_detected"])
+
+    def test_calls_without_ollama_telemetry_are_ignored(self) -> None:
+        summary = self._summary(
+            [
+                {"chapter_number": 7, "ollama": self.MEASURED},
+                {"chapter_number": 7},
+                {"chapter_number": 7, "ollama": "not-a-dict"},
+            ]
+        )
+        self.assertEqual(summary["calls"], 1)
