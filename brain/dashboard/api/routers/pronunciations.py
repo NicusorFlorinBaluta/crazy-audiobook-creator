@@ -124,7 +124,7 @@ async def toggle_preview_mode(project_id: str, request: PreviewModeRequest):
                 runtime.pipeline.stop(project_id)
                 try:
                     await asyncio.to_thread(runtime.pipeline.voice_client.cancel_project, project_id)
-                except (VoiceClientError, RuntimeError, OSError) as exc:
+                except Exception as exc:
                     logger.debug("Voice cancel project during preview mode entry: %s", exc)
             paused_by_us = True
             await asyncio.sleep(0.5)
@@ -152,7 +152,7 @@ async def toggle_preview_mode(project_id: str, request: PreviewModeRequest):
                     try:
                         await asyncio.to_thread(runtime.pipeline.voice_client.health_check_once, 0.8)
                         is_healthy = True
-                    except (VoiceClientError, RuntimeError, OSError):
+                    except Exception:
                         is_healthy = False
                 if not is_healthy:
                     await asyncio.to_thread(runtime.pipeline._start_voice_server)
@@ -167,6 +167,23 @@ async def toggle_preview_mode(project_id: str, request: PreviewModeRequest):
             except Exception as exc:  # noqa: BLE001 - spawns the voice server; surface is open
                 logger.warning("Preview mode warmup error: %s", exc)
                 warmup_info = {"error": str(exc)}
+
+        warmup_error = warmup_info.get("error")
+        if warmup_error:
+            _active_preview_modes[project_id] = {
+                "active": False,
+                "paused_by_us": paused_by_us or job.get("paused_by_preview_mode", False),
+                "voice_id": voice_id,
+                "warmup": warmup_info,
+            }
+            return {
+                "status": "error",
+                "preview_mode": False,
+                "paused_pipeline": paused_by_us,
+                "voice_id": voice_id,
+                "warmup": warmup_info,
+                "detail": f"Failed to prime TTS voice engine: {warmup_error}",
+            }
 
         _active_preview_modes[project_id] = {
             "active": True,
@@ -259,7 +276,8 @@ async def update_pronunciation(project_id: str, request: PronunciationRequest):
             )
 
     if affected_chapters:
-        DeliveryManager(project_dir).mark_stale_for_chapters(
+        runtime.mark_chapters_stale(
+            project_id,
             affected_chapters,
             f"Pronunciation updated for '{term}'",
         )
@@ -350,7 +368,8 @@ async def batch_update_pronunciations(project_id: str, request: PronunciationBat
                 )
 
         if affected_chapters:
-            DeliveryManager(project_dir).mark_stale_for_chapters(
+            runtime.mark_chapters_stale(
+                project_id,
                 affected_chapters,
                 f"Batch pronunciation updated for {len(affected_terms)} terms",
             )
@@ -488,6 +507,9 @@ async def generate_preview_audio(
         text_to_speak = clean_spoken
 
     if not voice_id:
+        active_mode = _active_preview_modes.get(project_id, {})
+        voice_id = active_mode.get("voice_id")
+    if not voice_id:
         cast_path = project_dir / "voice_cast.json"
         if cast_path.is_file():
             try:
@@ -528,7 +550,7 @@ async def generate_preview_audio(
                 try:
                     await asyncio.to_thread(runtime.pipeline.voice_client.health_check_once, 0.8)
                     is_healthy = True
-                except (VoiceClientError, RuntimeError, OSError):
+                except Exception:
                     is_healthy = False
 
             if not is_healthy:
@@ -552,7 +574,7 @@ async def generate_preview_audio(
             if seg_path.is_file() and seg_path.stat().st_size > 44:
                 shutil.copyfile(seg_path, audio_path)
                 has_tts = True
-        except (VoiceClientError, RuntimeError, OSError, shutil.Error) as exc:
+        except Exception as exc:
             logger.warning("TTS native preview generation failed: %s", exc)
             tts_error = str(exc)
             has_tts = False

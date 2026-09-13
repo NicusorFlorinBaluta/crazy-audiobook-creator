@@ -2787,11 +2787,27 @@ class Pipeline:
                 for path in script_files
             ]
         )
+        manifests_dir = project_dir / "manifests"
+        invalidated_chapters = (
+            set(state.get("generated_chapters", [])) | set(state.get("mastered_chapters", []))
+        ) - set(generated_chapters)
+        raw_pending = set(state.get("voice_revision_pending_chapters", []))
+        valid_pending = {
+            c
+            for c in raw_pending
+            if c in set(state.get("generated_chapters", []))
+            or c in set(state.get("mastered_chapters", []))
+            or (manifests_dir / f"chapter_{c:03d}.segments.json").is_file()
+        }
+        voice_revision_pending = sorted(
+            (valid_pending | invalidated_chapters) - set(generated_chapters)
+        )
         self.job_queue.update_job(
             project_id,
             {
                 "generated_chapters": generated_chapters,
                 "mastered_chapters": mastered_chapters,
+                "voice_revision_pending_chapters": voice_revision_pending,
             },
         )
 
@@ -3230,6 +3246,10 @@ class Pipeline:
                 else None
             )
             ch_title = getattr(chapter_script, "title", None) or f"chapter {chapter_script.chapter_number}"
+            self.job_queue.update_job(
+                project_id,
+                {"current_master_chapter": chapter_script.chapter_number},
+            )
             self.job_queue.update_progress(
                 project_id,
                 self._progress_estimator.snapshot(
@@ -3305,6 +3325,7 @@ class Pipeline:
                     project_id,
                     {
                         "mastered_chapters": mastered_chapters,
+                        "current_master_chapter": None,
                     },
                 )
                 self._progress_estimator.observe(f"{project_id}:mastering", 1.0, mastering_seconds)
@@ -3330,6 +3351,8 @@ class Pipeline:
             except Exception as e:
                 logger.exception("Failed to master chapter %d: %s", chapter_script.chapter_number, e)
                 raise
+
+        self.job_queue.update_job(project_id, {"current_master_chapter": None})
 
     def _run_export(
         self,

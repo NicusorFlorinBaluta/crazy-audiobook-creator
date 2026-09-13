@@ -70,12 +70,15 @@ class VoiceClient:
 
     def health_check_once(self, timeout_seconds: float = 2.0) -> VoiceHealthResponse:
         """Perform a quiet single preflight check before launching a managed server."""
-        response = self._client.get(
-            f"{self.host}/health",
-            timeout=httpx.Timeout(timeout_seconds),
-        )
-        response.raise_for_status()
-        return VoiceHealthResponse(**response.json())
+        try:
+            response = self._client.get(
+                f"{self.host}/health",
+                timeout=httpx.Timeout(timeout_seconds),
+            )
+            response.raise_for_status()
+            return VoiceHealthResponse(**response.json())
+        except (httpx.HTTPError, OSError) as exc:
+            raise VoiceClientError(f"Voice server health check failed: {exc}") from exc
 
     def wait_for_server(self, max_wait_seconds: int = 120) -> bool:
         """Wait for the Voice server to become available.
@@ -288,10 +291,12 @@ class VoiceClient:
             request.chapter_number,
             request.project_id,
         )
+        timeout = max(1800, len(request.segments) * 15)
         data = self._post(
             "/master/chapter",
             request.model_dump(),
-            timeout=300,
+            timeout=timeout,
+            retries=1,
         )
         return MasterChapterResponse(**data)
 
@@ -331,9 +336,10 @@ class VoiceClient:
         path: str,
         json_data: dict | None = None,
         timeout: int | None = None,
+        retries: int | None = None,
     ) -> dict[str, Any]:
         """Make a POST request with retry logic."""
-        return self._request("POST", path, json_data=json_data, timeout=timeout)
+        return self._request("POST", path, json_data=json_data, timeout=timeout, retries=retries)
 
     def _request(
         self,
@@ -341,10 +347,12 @@ class VoiceClient:
         path: str,
         json_data: dict | None = None,
         timeout: int | None = None,
+        retries: int | None = None,
     ) -> dict[str, Any]:
         """Make an HTTP request with retry logic."""
         url = f"{self.host}{path}"
         effective_timeout = timeout or self.timeout
+        effective_retries = retries if retries is not None else self.retries
         last_error: Exception | None = None
         req_size = len(str(json_data)) if json_data else 0
 
@@ -352,7 +360,7 @@ class VoiceClient:
             "[VoiceClient] Requesting %s %s (timeout=%ss, payload=%d bytes)", method, path, effective_timeout, req_size
         )
 
-        for attempt in range(1, self.retries + 1):
+        for attempt in range(1, effective_retries + 1):
             t0 = time.time()
             try:
                 response = self._client.request(
@@ -373,7 +381,7 @@ class VoiceClient:
                     method,
                     path,
                     attempt,
-                    self.retries,
+                    effective_retries,
                     e,
                 )
             except httpx.HTTPStatusError as e:
@@ -388,7 +396,7 @@ class VoiceClient:
                     path,
                     e.response.status_code,
                     attempt,
-                    self.retries,
+                    effective_retries,
                     e,
                     error_details,
                 )
@@ -402,7 +410,7 @@ class VoiceClient:
                     "Cannot connect to Voice server at %s (attempt %d/%d): %s",
                     self.host,
                     attempt,
-                    self.retries,
+                    effective_retries,
                     e,
                 )
             except Exception as e:
@@ -412,14 +420,14 @@ class VoiceClient:
                     method,
                     path,
                     attempt,
-                    self.retries,
+                    effective_retries,
                     e,
                 )
 
-            if attempt < self.retries:
+            if attempt < effective_retries:
                 time.sleep(self.retry_delay)
 
-        raise VoiceClientError(f"{method} {path} failed after {self.retries} attempts: {last_error}") from last_error
+        raise VoiceClientError(f"{method} {path} failed after {effective_retries} attempts: {last_error}") from last_error
 
     def close(self) -> None:
         """Close the HTTP client."""

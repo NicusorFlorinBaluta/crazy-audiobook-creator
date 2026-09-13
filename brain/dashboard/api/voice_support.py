@@ -309,22 +309,10 @@ def _mark_voice_chapters_stale(
     project_id: str,
     affected_chapters: list[int],
 ) -> None:
-    if not runtime.job_queue or not affected_chapters:
-        return
-    state = runtime.job_queue.get_job(project_id)
-    affected = set(affected_chapters)
-    pending = set(state.get("voice_revision_pending_chapters", [])) | affected
-    DeliveryManager(runtime.project_dir(project_id)).mark_stale_for_chapters(
-        affected,
-        "Voice assignment changed",
-    )
-    runtime.job_queue.update_job(
+    runtime.mark_chapters_stale(
         project_id,
-        {
-            "generated_chapters": [number for number in state.get("generated_chapters", []) if number not in affected],
-            "mastered_chapters": [number for number in state.get("mastered_chapters", []) if number not in affected],
-            "voice_revision_pending_chapters": sorted(pending),
-        },
+        affected_chapters,
+        "Voice assignment changed",
     )
 
 

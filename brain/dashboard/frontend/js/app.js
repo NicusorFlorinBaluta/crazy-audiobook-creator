@@ -2161,6 +2161,13 @@ function renderChapterList(project) {
     document.getElementById('chapter-summary-badge').textContent =
         `${mastered.size} / ${total} mastered`;
 
+    const progress = project.progress;
+    const isRunning = project.running === true;
+    const currentActiveChapter = isRunning
+        ? (progress?.chapter || project.current_master_chapter || project.current_gen_chapter || project.current_script_chapter)
+        : null;
+    const revisionPending = new Set(project.voice_revision_pending_chapters || []);
+
     for (let chapter = 1; chapter <= total; chapter++) {
         const detail = detailsMap.get(chapter) || {};
         const title = detail.title || `Chapter ${chapter}`;
@@ -2175,8 +2182,50 @@ function renderChapterList(project) {
         const stage = resolvePipelineStage(project);
 
         const isSelectedInBatch = selection === null || selection.has(chapter);
+        const isActiveChapter = isRunning && currentActiveChapter === chapter;
 
-        if (mastered.has(chapter)) {
+        if (isActiveChapter && (stage.includes('master') || progress?.phase === 'chapter_mastering')) {
+            statusKey = 'active';
+            statusText = 'Mastering...';
+            statusBackground = 'rgba(168, 85, 247, 0.25)';
+            statusColor = '#c084fc';
+            percent = (progress && progress.chapter === chapter && Number.isFinite(progress.percent))
+                ? Math.round(progress.percent)
+                : (detail.progress_percent || 95);
+        } else if (isActiveChapter && (stage.includes('generat') || stage.includes('validat') || progress?.phase === 'synthesis' || progress?.phase === 'validation')) {
+            statusKey = 'active';
+            const curLines = (progress && progress.chapter === chapter && progress.line_position != null)
+                ? progress.line_position
+                : generatedLines;
+            const totLines = (progress && progress.chapter === chapter && progress.line_total != null)
+                ? progress.line_total
+                : totalLines;
+            const phase = progress?.phase || (stage.includes('validat') ? 'validation' : 'generating');
+            if (phase === 'synthesis') {
+                statusText = totLines > 0 ? `Synthesizing ${curLines}/${totLines}` : 'Synthesizing...';
+            } else if (phase === 'validation' || (totLines > 0 && curLines >= totLines)) {
+                statusText = totLines > 0 ? `Validating ${curLines}/${totLines}` : 'Validating...';
+            } else {
+                statusText = totLines > 0 ? `Generating ${curLines}/${totLines}` : 'Generating...';
+            }
+            statusBackground = 'rgba(59, 130, 246, 0.2)';
+            statusColor = '#60a5fa';
+            percent = (progress && progress.chapter === chapter && Number.isFinite(progress.percent))
+                ? Math.round(progress.percent)
+                : (totLines > 0 ? Math.round((curLines / totLines) * 100) : (detail.progress_percent || 0));
+        } else if (isActiveChapter && stage.includes('script')) {
+            statusKey = 'active';
+            statusText = 'Scripting...';
+            statusBackground = 'rgba(234, 179, 8, 0.2)';
+            statusColor = '#facc15';
+            percent = detail.progress_percent || 50;
+        } else if (revisionPending.has(chapter) && !mastered.has(chapter) && !generated.has(chapter)) {
+            statusKey = 'revision_pending';
+            statusText = 'Needs audio update';
+            statusBackground = 'rgba(245, 158, 11, 0.15)';
+            statusColor = '#fbbf24';
+            percent = 0;
+        } else if (mastered.has(chapter)) {
             statusKey = 'done';
             statusText = 'Mastered';
             statusBackground = 'rgba(168, 85, 247, 0.15)';
@@ -2189,14 +2238,6 @@ function renderChapterList(project) {
             statusBackground = 'rgba(168, 85, 247, 0.15)';
             statusColor = '#c084fc';
             percent = 100;
-        } else if (stage.includes('generat') && currentGen === chapter) {
-            statusKey = 'active';
-            statusText = totalLines > 0 && generatedLines >= totalLines
-                ? `Validating ${generatedLines}/${totalLines}`
-                : `Generating ${generatedLines}/${totalLines}`;
-            statusBackground = 'rgba(59, 130, 246, 0.2)';
-            statusColor = '#60a5fa';
-            if (totalLines > 0 && generatedLines >= totalLines) percent = 99;
         } else if (stage.includes('script') && project.work_progress?.phase !== 'character_analysis' && (currentScript === chapter || (!currentScript && chapter === scripted.size + 1 && chapter <= total))) {
             statusKey = 'active';
             statusText = 'Scripting...';
@@ -2745,8 +2786,39 @@ function renderChapterGridLegacy(project) {
         const stageLower = (project.stage || project.status || '').toLowerCase();
         const isGeneratingStage = stageLower.includes('gen');
         const isScriptingStage = stageLower.includes('script');
+        const isMasteringStage = stageLower.includes('master');
+        const progress = project.progress;
+        const isRunning = project.running === true;
+        const currentActive = isRunning
+            ? (progress?.chapter || project.current_master_chapter || project.current_gen_chapter || project.current_script_chapter)
+            : null;
+        const revisionPending = new Set(project.voice_revision_pending_chapters || []);
+        const isActive = isRunning && currentActive === i;
 
-        if (mastered.has(i)) {
+        if (isActive && isMasteringStage) {
+            statusText = '🟣 Mastering...';
+            statusBg = 'rgba(168, 85, 247, 0.2)';
+            statusColor = '#c084fc';
+            pct = 95;
+        } else if (isActive && isGeneratingStage) {
+            if (totalLines > 0 && genLines >= totalLines) {
+                statusText = `🔎 Validating (${genLines}/${totalLines})`;
+                pct = 99;
+            } else {
+                statusText = `🔵 Gen (${genLines}/${totalLines})`;
+            }
+            statusBg = 'rgba(59, 130, 246, 0.15)';
+            statusColor = '#60a5fa';
+        } else if (isActive && isScriptingStage) {
+            statusText = '🟡 Scripting...';
+            statusBg = 'rgba(234, 179, 8, 0.15)';
+            statusColor = '#facc15';
+        } else if (revisionPending.has(i) && !mastered.has(i) && !generated.has(i)) {
+            statusText = '⚠️ Needs update';
+            statusBg = 'rgba(245, 158, 11, 0.15)';
+            statusColor = '#fbbf24';
+            pct = 0;
+        } else if (mastered.has(i)) {
             statusText = '✅ Done';
             statusBg = 'rgba(16, 185, 129, 0.15)';
             statusColor = '#34d399';
@@ -2757,17 +2829,6 @@ function renderChapterGridLegacy(project) {
             statusBg = 'rgba(168, 85, 247, 0.15)';
             statusColor = '#c084fc';
             pct = 100;
-        } else if (isGeneratingStage && currentGen === i) {
-            if (totalLines > 0 && genLines >= totalLines) {
-                statusText = `🔎 Validating (${genLines}/${totalLines})`;
-                // WAVs exist, but the chapter is incomplete until validation
-                // accepts every required line.
-                pct = 99;
-            } else {
-                statusText = `🔵 Gen (${genLines}/${totalLines})`;
-            }
-            statusBg = 'rgba(59, 130, 246, 0.15)';
-            statusColor = '#60a5fa';
         } else if (scripted.has(i)) {
             statusText = `🟢 Scripted (${totalLines}l)`;
             statusBg = 'rgba(132, 204, 22, 0.15)';

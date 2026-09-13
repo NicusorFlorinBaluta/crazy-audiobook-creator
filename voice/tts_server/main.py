@@ -860,6 +860,18 @@ def validate_segment(request: ValidateRequest) -> dict:
     return result.model_dump()
 
 
+_chapter_mastering_locks: dict[tuple[str, int], threading.Lock] = {}
+_chapter_locks_guard = threading.Lock()
+
+
+def _get_chapter_mastering_lock(project_id: str, chapter_number: int) -> threading.Lock:
+    key = (project_id, chapter_number)
+    with _chapter_locks_guard:
+        if key not in _chapter_mastering_locks:
+            _chapter_mastering_locks[key] = threading.Lock()
+        return _chapter_mastering_locks[key]
+
+
 @app.post("/master/chapter")
 def master_chapter(request: MasterChapterRequest) -> MasterChapterResponse:
     """Master (assemble + normalize) a chapter's audio."""
@@ -877,61 +889,68 @@ def master_chapter(request: MasterChapterRequest) -> MasterChapterResponse:
                 detail=f"Missing segment: {segment.line_id}",
             )
 
-    announcement_audio = None
-    if request.announce_chapter:
-        narrator_ref = library.get_voice_path(
-            request.project_id,
-            request.narrator_voice_id,
-        )
-        if not narrator_ref.is_file():
-            raise HTTPException(
-                status_code=422,
-                detail=(f"Selected narrator voice is required for chapter announcements: {request.narrator_voice_id}"),
+    with _get_chapter_mastering_lock(request.project_id, request.chapter_number):
+        announcement_audio = None
+        if request.announce_chapter:
+            narrator_ref = library.get_voice_path(
+                request.project_id,
+                request.narrator_voice_id,
             )
-        announcement_text = request.chapter_title.strip() or (f"Chapter {request.chapter_number}")
-        with gpu_job():
-            announcement_audio = engine.generate_speech(
-                text=announcement_text,
-                voice_reference_path=narrator_ref,
-                ref_text=library.get_voice_ref_text(
-                    request.project_id,
-                    request.narrator_voice_id,
+            if not narrator_ref.is_file():
+                raise HTTPException(
+                    status_code=422,
+                    detail=(f"Selected narrator voice is required for chapter announcements: {request.narrator_voice_id}"),
                 )
-                or "",
-                emotion_instruction="clear chapter announcement",
-                speed=1.0,
+            announcement_text = request.chapter_title.strip() or (f"Chapter {request.chapter_number}")
+            with gpu_job():
+                announcement_audio = engine.generate_speech(
+                    text=announcement_text,
+                    voice_reference_path=narrator_ref,
+                    ref_text=library.get_voice_ref_text(
+                        request.project_id,
+                        request.narrator_voice_id,
+                    )
+                    or "",
+                    emotion_instruction="clear chapter announcement",
+                    speed=1.0,
+                )
+
+        with gpu_job():
+            assembled = assembler.assemble_chapter(
+                segments=request.segments,
+                workspace=workspace,
+                announcement_audio=announcement_audio,
             )
+            if len(assembled["audio"]) == 0:
+                raise HTTPException(status_code=422, detail="Assembled chapter is empty")
 
-    with gpu_job():
-        assembled = assembler.assemble_chapter(
-            segments=request.segments,
-            workspace=workspace,
-            announcement_audio=announcement_audio,
+            output_dir = _safe_workspace_project(request.project_id) / "chapters"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            output_path = output_dir / f"chapter_{request.chapter_number:03d}.wav"
+            temp_path = output_dir / f".tmp_chapter_{request.chapter_number:03d}_{os.getpid()}_{time.time_ns()}.wav"
+            try:
+                mastering_result = normalizer.normalize(
+                    audio=assembled["audio"],
+                    sample_rate=assembled["sample_rate"],
+                    output_path=str(temp_path),
+                )
+                os.replace(temp_path, output_path)
+            except Exception:
+                temp_path.unlink(missing_ok=True)
+                raise
+
+        return MasterChapterResponse(
+            status="success",
+            chapter_number=request.chapter_number,
+            output_file=str(output_path),
+            duration_seconds=mastering_result["duration_seconds"],
+            lufs=mastering_result["lufs"],
+            peak_dbfs=mastering_result["peak_dbfs"],
+            file_size_mb=output_path.stat().st_size / (1024 * 1024),
+            join_warnings=int(assembled.get("join_warnings", 0)),
+            join_diagnostics=assembled.get("join_diagnostics", []),
+            timeline=assembled.get("timeline", []),
         )
-        if len(assembled["audio"]) == 0:
-            raise HTTPException(status_code=422, detail="Assembled chapter is empty")
-
-        output_dir = _safe_workspace_project(request.project_id) / "chapters"
-        output_dir.mkdir(parents=True, exist_ok=True)
-        output_path = output_dir / f"chapter_{request.chapter_number:03d}.wav"
-        mastering_result = normalizer.normalize(
-            audio=assembled["audio"],
-            sample_rate=assembled["sample_rate"],
-            output_path=str(output_path),
-        )
-
-    return MasterChapterResponse(
-        status="success",
-        chapter_number=request.chapter_number,
-        output_file=str(output_path),
-        duration_seconds=mastering_result["duration_seconds"],
-        lufs=mastering_result["lufs"],
-        peak_dbfs=mastering_result["peak_dbfs"],
-        file_size_mb=output_path.stat().st_size / (1024 * 1024),
-        join_warnings=int(assembled.get("join_warnings", 0)),
-        join_diagnostics=assembled.get("join_diagnostics", []),
-        timeline=assembled.get("timeline", []),
-    )
 
 
 @app.post("/export/m4b")

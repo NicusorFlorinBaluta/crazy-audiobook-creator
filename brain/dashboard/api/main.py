@@ -2165,7 +2165,32 @@ async def get_pipeline_status(project_id: str):
         scripted_chapters = set(state.get("scripted_chapters", []))
         # Chapters queued for voice re-generation should not be shown as generated/mastered
         # even if their audio segment files / master manifests are still on disk (they are stale).
-        voice_revision_pending = set(state.get("voice_revision_pending_chapters", []))
+        # Purely un-generated chapters (scripted or pending) do not have stale audio and must not be marked pending revision.
+        raw_voice_pending = set(state.get("voice_revision_pending_chapters", []))
+        stored_generated = set(state.get("generated_chapters", []))
+        stored_mastered = set(state.get("mastered_chapters", []))
+
+        def _had_audio(c: int) -> bool:
+            if c in stored_generated or c in stored_mastered:
+                return True
+            if manifests_dir.is_dir():
+                if (manifests_dir / f"chapter_{c:03d}.segments.json").is_file():
+                    return True
+                if (manifests_dir / f"chapter_{c:03d}.master.json").is_file():
+                    return True
+            return False
+
+        voice_revision_pending = {c for c in raw_voice_pending if _had_audio(c)}
+        if voice_revision_pending != raw_voice_pending:
+            state["voice_revision_pending_chapters"] = sorted(voice_revision_pending)
+            if job_queue:
+                try:
+                    job_queue.update_job(
+                        project_id,
+                        {"voice_revision_pending_chapters": sorted(voice_revision_pending)},
+                    )
+                except Exception:
+                    pass
 
         mastered_chapters = set(state.get("mastered_chapters", [])) - voice_revision_pending
         # Re-add from disk only for chapters NOT pending voice revision
@@ -2190,12 +2215,27 @@ async def get_pipeline_status(project_id: str):
             if has_s and t_lines > 0 and count >= t_lines:
                 generated_chapters.add(c_num)
 
-        # If the pipeline is actively re-scripting a chapter, demote it from generated/mastered
-        # regardless of what files are on disk — the pipeline has declared it stale.
+        # If the pipeline is actively running, demote actively running chapters from generated/mastered
+        # regardless of what files are on disk.
+        is_running = bool(state.get("running"))
         active_script_ch = state.get("current_script_chapter")
         if active_script_ch and stage and "script" in stage:
             generated_chapters.discard(int(active_script_ch))
             mastered_chapters.discard(int(active_script_ch))
+
+        progress_obj = state.get("progress") or {}
+        active_gen_ch = state.get("current_gen_chapter") or (
+            progress_obj.get("chapter") if stage and any(s in stage for s in ("generat", "validat")) else None
+        )
+        if is_running and active_gen_ch:
+            generated_chapters.discard(int(active_gen_ch))
+            mastered_chapters.discard(int(active_gen_ch))
+
+        active_master_ch = state.get("current_master_chapter") or (
+            progress_obj.get("chapter") if stage and "master" in stage else None
+        )
+        if is_running and active_master_ch:
+            mastered_chapters.discard(int(active_master_ch))
 
         state["generated_chapters"] = sorted(generated_chapters)
         state["mastered_chapters"] = sorted(mastered_chapters)
@@ -2216,19 +2256,37 @@ async def get_pipeline_status(project_id: str):
             raw_title = (book_chapter_titles.get(ch_num) or script_title or "").strip()
             title = raw_title if raw_title else f"Chapter {ch_num}"
 
+            is_active_gen = is_running and (active_gen_ch == ch_num)
+            is_active_master = is_running and (active_master_ch == ch_num)
+            is_pending_revision = ch_num in voice_revision_pending
+
             gen_count = segment_counts[ch_num] if total_lines > 0 else 0
-            if ch_num in generated_chapters and total_lines > 0:
+            if is_active_gen:
+                gen_count = int(state.get("lines_generated") or progress_obj.get("line_position") or 0)
+            elif is_pending_revision and ch_num not in generated_chapters:
+                gen_count = 0
+            elif ch_num in generated_chapters and total_lines > 0:
                 gen_count = max(gen_count, total_lines)
+
             validated_count = (
                 total_lines
                 if ch_num in generated_chapters
-                else min(int(state.get("lines_validated") or 0), gen_count)
-                if ch_num == state.get("current_gen_chapter")
+                else min(int(state.get("lines_validated") or progress_obj.get("line_position") or 0), gen_count)
+                if is_active_gen
                 else min(gen_count, total_lines)
             )
 
             # Compute stage-aware progress percentage
-            if ch_num in mastered_chapters or ch_num in generated_chapters:
+            if is_active_gen:
+                if total_lines > 0:
+                    pct = int((gen_count / total_lines) * 100)
+                else:
+                    pct = int(progress_obj.get("percent") or 0)
+            elif is_active_master:
+                pct = int(progress_obj.get("percent") or 95)
+            elif is_pending_revision and ch_num not in generated_chapters and ch_num not in mastered_chapters:
+                pct = 0
+            elif ch_num in mastered_chapters or ch_num in generated_chapters:
                 pct = 100
             elif "script" in stage or stage in ["voice_review", "bootstrapping"]:
                 if has_script or ch_num in scripted_chapters:

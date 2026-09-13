@@ -26,12 +26,33 @@ either section when reviewing history or selecting the next chapter batch.
 Their native disclosure state survives background status polling. Chapter
 controls use the same clickable section-header pattern as the other panels.
 
+## Chapter management & status
+
+The chapter list reflects live execution state and artifact validity:
+
+- **Mastered**: Chapter audio and announcement have been mastered into a final
+  WAV. A download link (`↓`) is available for direct inspection.
+- **Generated**: Utterance synthesis and validation are complete; awaiting mastering.
+- **Scripted · X lines**: Chapter script has been extracted and validated. Audio
+  generation has not begun.
+- **Needs audio update**: Audio was previously generated or mastered, but a
+  subsequent pronunciation lexicon or voice cast edit invalidated the existing
+  audio. Only chapters with existing completed audio receive this status;
+  un-generated scripted chapters remain `Scripted`.
+- **Active execution**: During pipeline runs, the active chapter dynamically displays
+  live stage indicators (`Synthesizing 25/50`, `Validating...`, `Mastering...`) with
+  pulsing active styling and progress percentages instead of static completed badges.
+- **Batch selection & filtering**: Checkboxes allow targeting specific chapter
+  subsets. Status filtering includes an option for `Needs update` to quickly audit
+  invalidated chapters.
+
 **Automatic working hours** is global to the queue. Each window has explicit
 weekday, start, and end controls; overnight windows belong to their start day.
 Time fields retain enough width for native 12-hour AM/PM controls and stack on
 narrow mobile screens.
 
 ## Book details
+
 
 **Find book details** previews the best Google Books match without changing the
 project. If it is wrong or no confident automatic match exists, expand

@@ -1425,6 +1425,9 @@ window.ScriptViewer = (() => {
             return;
         }
 
+        const qualityTabPanel = els.qualityOverview.closest('#tab-quality');
+        const savedScrollTop = qualityTabPanel ? qualityTabPanel.scrollTop : 0;
+
         els.qualityOverview.innerHTML = '';
 
         if ((q.stale_records || 0) > 0) {
@@ -1434,108 +1437,262 @@ window.ScriptViewer = (() => {
             els.qualityOverview.appendChild(notice);
         }
 
+        // Top KPI Stats Grid
         if (hasQuality && (q.total_segments || 0) > 0) {
+            const statsGrid = document.createElement('div');
+            statsGrid.className = 'quality-stats-grid';
+
             // Segments Total
-            addQualityStat('Total Segments', q.total_segments || 0, 'neutral', 'All scripted utterances evaluated in the final run.');
+            addQualityStat('Total Segments', q.total_segments || 0, 'neutral', 'All scripted utterances evaluated in the final run.', statsGrid);
         
-        // Pass Rate
-        const acceptedSegments = (q.passed_segments || 0) + (q.accepted_with_warning_segments || 0);
-        const passRateValue = q.total_segments > 0 ? (acceptedSegments / q.total_segments) * 100 : 0;
-        const passRate = acceptedSegments === q.total_segments && q.total_segments > 0
-            ? '100%'
-            : `${Math.min(99.9, passRateValue).toFixed(1)}%`;
-        const passStatus = passRateValue > 95 ? 'good' : (passRateValue > 85 ? 'warn' : 'bad');
-        addQualityStat('Accepted Rate', passRate, passStatus, 'Segments accepted automatically plus segments accepted with a documented soft warning.');
+            // Pass Rate
+            const acceptedSegments = (q.passed_segments || 0) + (q.accepted_with_warning_segments || 0);
+            const passRateValue = q.total_segments > 0 ? (acceptedSegments / q.total_segments) * 100 : 0;
+            const passRate = acceptedSegments === q.total_segments && q.total_segments > 0
+                ? '100%'
+                : `${Math.min(99.9, passRateValue).toFixed(1)}%`;
+            const passStatus = passRateValue > 95 ? 'good' : (passRateValue > 85 ? 'warn' : 'bad');
+            addQualityStat('Accepted Rate', passRate, passStatus, 'Segments accepted automatically plus segments accepted with a documented soft warning.', statsGrid);
 
-        addQualityStat(
-            'Accepted Warnings',
-            q.accepted_with_warning_segments || 0,
-            (q.accepted_with_warning_segments || 0) > 0 ? 'warn' : 'good',
-            'Accepted audio that passed hard safety checks but retained a non-blocking diagnostic warning.'
-        );
-        
-        // Retries
-        addQualityStat('Retries Triggered', q.retries_triggered || 0, q.retries_triggered > 0 ? 'warn' : 'good', 'Additional TTS attempts requested after an earlier candidate failed validation.');
-        
-        // WER (Word Error Rate)
-        if (q.average_wer !== undefined) {
-            const wer = (q.average_wer * 100).toFixed(1);
-            const werStatus = q.average_wer < 0.02 ? 'good' : (q.average_wer < 0.05 ? 'warn' : 'bad');
-            addQualityStat('Avg WER', `${wer}%`, werStatus, 'Average word error rate measured by transcription validation; lower is better. Approved pronunciation mappings may allow an otherwise high line-level value.');
+            addQualityStat(
+                'Accepted Warnings',
+                q.accepted_with_warning_segments || 0,
+                (q.accepted_with_warning_segments || 0) > 0 ? 'warn' : 'good',
+                'Accepted audio that passed hard safety checks but retained a non-blocking diagnostic warning.',
+                statsGrid
+            );
+            
+            // Retries
+            addQualityStat('Retries Triggered', q.retries_triggered || 0, q.retries_triggered > 0 ? 'warn' : 'good', 'Additional TTS attempts requested after an earlier candidate failed validation.', statsGrid);
+            
+            // WER (Word Error Rate)
+            if (q.average_wer !== undefined) {
+                const wer = (q.average_wer * 100).toFixed(1);
+                const werStatus = q.average_wer < 0.02 ? 'good' : (q.average_wer < 0.05 ? 'warn' : 'bad');
+                addQualityStat('Avg WER', `${wer}%`, werStatus, 'Average word error rate measured by transcription validation; lower is better. Approved pronunciation mappings may allow an otherwise high line-level value.', statsGrid);
+            }
+            
+            // Silence Drops
+            addQualityStat('Silence Errors', q.failed_silence || 0, q.failed_silence > 0 ? 'bad' : 'good', 'Segments rejected for excessive or invalid silence.', statsGrid);
+            
+            // Clipping
+            addQualityStat('Clipping Errors', q.failed_clipping || 0, q.failed_clipping > 0 ? 'bad' : 'good', 'Segments rejected because the waveform clipped.', statsGrid);
+
+            els.qualityOverview.appendChild(statsGrid);
         }
-        
-        // Silence Drops
-        addQualityStat('Silence Errors', q.failed_silence || 0, q.failed_silence > 0 ? 'bad' : 'good', 'Segments rejected for excessive or invalid silence.');
-        
-        // Clipping
-        addQualityStat('Clipping Errors', q.failed_clipping || 0, q.failed_clipping > 0 ? 'bad' : 'good', 'Segments rejected because the waveform clipped.');
 
+        // Build sub-tabs definition
+        const tabs = [];
+
+        // 1. Pronunciation Lexicon
+        if (hasPronunciations) {
+            const cand = currentData.pronunciations?.candidates || [];
+            const verifiedCount = cand.filter(item => item.status === 'verified').length;
+            tabs.push({
+                id: 'lexicon',
+                label: '🗣️ Pronunciation Lexicon',
+                badge: `${verifiedCount} verified`,
+                badgeClass: verifiedCount > 0 ? 'badge-resolved' : '',
+                render: (container) => renderPronunciationInventory(container)
+            });
+        }
+
+        // 2. Audio Escalations / Decisions
+        if (hasSegmentReview) {
+            const segItems = currentData.qualityReview?.segment_reviews || [];
+            const unreviewedCount = segItems.filter(item => (item.disposition || 'unreviewed') === 'unreviewed').length;
+            tabs.push({
+                id: 'segments',
+                label: '🎙️ Audio Decisions',
+                badge: `${unreviewedCount} unreviewed`,
+                badgeClass: unreviewedCount > 0 ? 'badge-alert' : 'badge-resolved',
+                render: (container) => renderSegmentReview(container)
+            });
+        }
+
+        // 3. Chapter Joins
+        if (hasJoinReview) {
+            const joins = currentData.qualityReview?.join_warnings || [];
+            const counts = currentData.qualityReview?.review_counts || {};
+            const unreviewedJoins = counts.unreviewed ?? joins.filter(item => (item.disposition || 'unreviewed') === 'unreviewed').length;
+            tabs.push({
+                id: 'joins',
+                label: '🔗 Chapter Joins',
+                badge: `${unreviewedJoins} unreviewed`,
+                badgeClass: unreviewedJoins > 0 ? 'badge-alert' : 'badge-resolved',
+                render: (container) => renderJoinReview(container)
+            });
+        }
+
+        // 4. Retries & History
         const noteworthy = (q.final_attempts || []).filter(
             item => item.status !== 'pass' || item.attempt > 1 || item.manual_review_required
         );
-        if (noteworthy.length) {
-            const details = document.createElement('div');
-            details.className = 'quality-attempts';
-            details.innerHTML = `
-                <div class="quality-attempts-heading">
-                    <strong>Retries and unresolved checks</strong>
-                    <span>${noteworthy.length} line${noteworthy.length === 1 ? '' : 's'}</span>
-                </div>
-                <div class="quality-attempts-list">
-                    ${noteworthy.map(item => `
-                        <div class="quality-attempt-row">
-                            <button type="button" class="quality-line-link" data-chapter="${item.chapter_number}" data-line-id="${escapeHtml(item.line_id)}">Ch ${item.chapter_number} · ${escapeHtml(item.line_id)}</button>
-                            <strong class="quality-attempt-status quality-status-${escapeHtml(item.status)}">${escapeHtml(humanizeToken(item.status))}</strong>
-                            <span>Attempt ${item.attempt}</span>
-                            <span>WER ${((item.wer || 0) * 100).toFixed(1)}%</span>
-                            <span title="Final validator confidence">Confidence ${item.validation_confidence == null ? 'n/a' : `${Math.round(item.validation_confidence * 100)}%`}</span>
-                            ${item.external_validation_provider ? `<span title="${escapeHtml(item.external_validation_reason || '')}">${escapeHtml(humanizeToken(item.external_validation_provider))} · ${escapeHtml(humanizeToken(item.external_validation_decision || 'abstain'))}</span>` : ''}
-                            <span class="quality-reason">${escapeHtml(humanizeToken(item.acceptance_reason))}</span>
-                            <details><summary>Reveal transcript and decisions</summary><p>${escapeHtml(item.transcribed_text || 'Transcript unavailable')}</p>${(item.external_validation_history || []).map(step => `<small>${escapeHtml(step.provider || 'local')} · ${escapeHtml(step.decision || 'unknown')} · ${step.confidence == null ? 'n/a' : `${Math.round(step.confidence * 100)}%`} · ${escapeHtml(step.reason || '')}</small>`).join('<br>')}</details>
-                            <audio class="quality-attempt-audio" aria-label="Listen to ${escapeHtml(item.line_id)}, final attempt ${item.attempt}" controls preload="metadata" src="${escapeHtml(item.audio_url || '')}"></audio>
-                        </div>
-                    `).join('')}
-                </div>
-            `;
-            els.qualityOverview.appendChild(details);
-            details.querySelectorAll('.quality-line-link').forEach(button => {
-                button.addEventListener('click', () => jumpToScriptLine(
-                    button.dataset.chapter,
-                    button.dataset.lineId
-                ));
+        const attemptHistory = q.attempts || [];
+        if (noteworthy.length > 0 || attemptHistory.length > 0) {
+            tabs.push({
+                id: 'history',
+                label: '📊 Retries & Validation',
+                badge: `${noteworthy.length} flagged`,
+                badgeClass: noteworthy.length > 0 ? 'badge-alert' : 'badge-resolved',
+                render: (container) => renderQualityRetries(container, noteworthy, attemptHistory)
             });
         }
-        const attemptHistory = q.attempts || [];
+
+        // If activeQualityTab is not set or not in available tabs, fallback to first available
+        if (!tabs.some(t => t.id === window.activeQualityTab)) {
+            window.activeQualityTab = tabs[0]?.id || 'lexicon';
+        }
+
+        if (tabs.length > 0) {
+            const subTabBar = document.createElement('div');
+            subTabBar.className = 'quality-subtab-bar';
+            subTabBar.setAttribute('role', 'tablist');
+            subTabBar.setAttribute('aria-label', 'Quality views');
+
+            const panelsContainer = document.createElement('div');
+            panelsContainer.className = 'quality-tab-panels';
+
+            tabs.forEach(tab => {
+                const isTabActive = tab.id === window.activeQualityTab;
+
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = `quality-subtab-btn ${isTabActive ? 'active' : ''}`;
+                btn.setAttribute('role', 'tab');
+                btn.setAttribute('aria-selected', isTabActive ? 'true' : 'false');
+                btn.setAttribute('aria-controls', `quality-panel-${tab.id}`);
+                btn.id = `quality-tab-btn-${tab.id}`;
+                btn.innerHTML = `
+                    <span>${escapeHtml(tab.label)}</span>
+                    <span class="quality-tab-badge ${tab.badgeClass}">${escapeHtml(tab.badge)}</span>
+                `;
+
+                btn.addEventListener('click', () => {
+                    window.activeQualityTab = tab.id;
+                    subTabBar.querySelectorAll('.quality-subtab-btn').forEach(b => {
+                        b.classList.remove('active');
+                        b.setAttribute('aria-selected', 'false');
+                    });
+                    btn.classList.add('active');
+                    btn.setAttribute('aria-selected', 'true');
+
+                    panelsContainer.querySelectorAll('.quality-tab-panel').forEach(p => {
+                        p.classList.remove('active');
+                    });
+                    const targetPanel = panelsContainer.querySelector(`#quality-panel-${tab.id}`);
+                    if (targetPanel) {
+                        targetPanel.classList.add('active');
+                    }
+                });
+
+                subTabBar.appendChild(btn);
+
+                const panel = document.createElement('div');
+                panel.className = `quality-tab-panel ${isTabActive ? 'active' : ''}`;
+                panel.id = `quality-panel-${tab.id}`;
+                panel.setAttribute('role', 'tabpanel');
+                panel.setAttribute('aria-labelledby', `quality-tab-btn-${tab.id}`);
+
+                tab.render(panel);
+                panelsContainer.appendChild(panel);
+            });
+
+            els.qualityOverview.appendChild(subTabBar);
+            els.qualityOverview.appendChild(panelsContainer);
+        }
+
+        if (qualityTabPanel && savedScrollTop > 0) {
+            qualityTabPanel.scrollTop = savedScrollTop;
+        }
+    }
+
+    function renderQualityRetries(container = els.qualityOverview, noteworthy = [], attemptHistory = []) {
+        const section = document.createElement('section');
+        section.className = 'quality-retries-section';
+
         const retriedIds = new Set(
             attemptHistory.filter(item => item.attempt > 1).map(item => item.line_id)
         );
-        if (retriedIds.size) {
-            const history = document.createElement('details');
-            history.className = 'quality-attempt-history';
-            history.innerHTML = `
-                <summary>All attempts for ${retriedIds.size} retried line${retriedIds.size === 1 ? '' : 's'}</summary>
-                <div class="quality-attempts-list">
-                    ${attemptHistory.filter(item => retriedIds.has(item.line_id)).map(item => `
-                        <div class="quality-attempt-row ${item.selected ? 'selected' : ''}">
-                            <span>Ch ${item.chapter_number} · ${escapeHtml(item.line_id)}</span>
-                            <strong>${item.selected ? 'Selected artifact' : 'Rejected candidate'}</strong>
-                            <span>Attempt ${item.attempt}</span>
-                            <span>${escapeHtml(item.status)}</span>
-                            <span>WER ${((item.wer || 0) * 100).toFixed(1)}%</span>
-                        </div>
-                    `).join('')}
+
+        let html = `
+            <div class="quality-panel-card" id="retries-panel-card">
+                <div class="quality-panel-header">
+                    <div>
+                        <strong>Retries & Validation History</strong>
+                        <small>Detailed evaluation log for multi-attempt utterances and validator decisions.</small>
+                    </div>
+                    <span class="quality-summary-badge ${noteworthy.length === 0 ? 'resolved' : ''}">${noteworthy.length} flagged</span>
+                </div>
+                <div class="quality-section-body">
+        `;
+
+        if (noteworthy.length) {
+            html += `
+                <div class="quality-attempts">
+                    <div class="quality-attempts-heading">
+                        <strong>Retries and unresolved checks</strong>
+                        <span>${noteworthy.length} line${noteworthy.length === 1 ? '' : 's'}</span>
+                    </div>
+                    <div class="quality-attempts-list">
+                        ${noteworthy.map(item => `
+                            <div class="quality-attempt-row">
+                                <button type="button" class="quality-line-link" data-chapter="${item.chapter_number}" data-line-id="${escapeHtml(item.line_id)}">Ch ${item.chapter_number} · ${escapeHtml(item.line_id)}</button>
+                                <strong class="quality-attempt-status quality-status-${escapeHtml(item.status)}">${escapeHtml(humanizeToken(item.status))}</strong>
+                                <span>Attempt ${item.attempt}</span>
+                                <span>WER ${((item.wer || 0) * 100).toFixed(1)}%</span>
+                                <span title="Final validator confidence">Confidence ${item.validation_confidence == null ? 'n/a' : `${Math.round(item.validation_confidence * 100)}%`}</span>
+                                ${item.external_validation_provider ? `<span title="${escapeHtml(item.external_validation_reason || '')}">${escapeHtml(humanizeToken(item.external_validation_provider))} · ${escapeHtml(humanizeToken(item.external_validation_decision || 'abstain'))}</span>` : ''}
+                                <span class="quality-reason">${escapeHtml(humanizeToken(item.acceptance_reason))}</span>
+                                <details><summary>Reveal transcript and decisions</summary><p>${escapeHtml(item.transcribed_text || 'Transcript unavailable')}</p>${(item.external_validation_history || []).map(step => `<small>${escapeHtml(step.provider || 'local')} · ${escapeHtml(step.decision || 'unknown')} · ${step.confidence == null ? 'n/a' : `${Math.round(step.confidence * 100)}%`} · ${escapeHtml(step.reason || '')}</small>`).join('<br>')}</details>
+                                <audio class="quality-attempt-audio" aria-label="Listen to ${escapeHtml(item.line_id)}, final attempt ${item.attempt}" controls preload="metadata" src="${escapeHtml(item.audio_url || '')}"></audio>
+                            </div>
+                        `).join('')}
+                    </div>
                 </div>
             `;
-            els.qualityOverview.appendChild(history);
-        }
         }
 
-        renderSegmentReview();
-        renderJoinReview();
-        renderPronunciationInventory();
+        if (retriedIds.size) {
+            html += `
+                <details class="quality-attempt-history" ${noteworthy.length === 0 ? 'open' : ''} style="margin-top: 14px;">
+                    <summary>All attempts for ${retriedIds.size} retried line${retriedIds.size === 1 ? '' : 's'}</summary>
+                    <div class="quality-attempts-list">
+                        ${attemptHistory.filter(item => retriedIds.has(item.line_id)).map(item => `
+                            <div class="quality-attempt-row ${item.selected ? 'selected' : ''}">
+                                <span>Ch ${item.chapter_number} · ${escapeHtml(item.line_id)}</span>
+                                <strong>${item.selected ? 'Selected artifact' : 'Rejected candidate'}</strong>
+                                <span>Attempt ${item.attempt}</span>
+                                <span>${escapeHtml(item.status)}</span>
+                                <span>WER ${((item.wer || 0) * 100).toFixed(1)}%</span>
+                            </div>
+                        `).join('')}
+                    </div>
+                </details>
+            `;
+        }
+
+        if (!noteworthy.length && !retriedIds.size) {
+            html += `<div class="review-complete-message">No retries were needed during synthesis.</div>`;
+        }
+
+        html += `
+                </div>
+            </div>
+        `;
+
+        section.innerHTML = html;
+        section.querySelectorAll('.quality-line-link').forEach(button => {
+            button.addEventListener('click', () => jumpToScriptLine(
+                button.dataset.chapter,
+                button.dataset.lineId
+            ));
+        });
+
+        container.appendChild(section);
     }
 
-    function renderSegmentReview() {
+    function renderSegmentReview(container = els.qualityOverview) {
         const items = currentData.qualityReview?.segment_reviews || [];
         if (!items.length) return;
         const section = document.createElement('section');
@@ -1573,18 +1730,18 @@ window.ScriptViewer = (() => {
             </article>
         `).join('');
         section.innerHTML = `
-            <details class="quality-section-details segment-review-details" open id="segment-review-details">
-                <summary class="quality-section-summary" role="button">
+            <div class="quality-panel-card segment-review-details" id="segment-panel-card">
+                <div class="quality-panel-header">
                     <div>
                         <strong>Audio requiring your decision</strong>
                         <small>Only segments that exhausted automatic confidence checks appear here.</small>
                     </div>
                     <span class="quality-summary-badge ${unreviewed.length === 0 ? 'resolved' : ''}">${unreviewed.length} unreviewed</span>
-                </summary>
-                <div class="quality-section-body">
-                    <div class="join-review-list">${unreviewed.length ? cards(unreviewed) : '<div class="review-complete-message">All escalated audio has been reviewed.</div>'}${reviewed.length ? `<details class="reviewed-joins"><summary>Show reviewed (${reviewed.length})</summary>${cards(reviewed)}</details>` : ''}</div>
                 </div>
-            </details>
+                <div class="quality-section-body">
+                    <div class="join-review-list">${unreviewed.length ? cards(unreviewed) : '<div class="review-complete-message">All escalated audio has been reviewed.</div>'}${reviewed.length ? `<details class="reviewed-joins" ${unreviewed.length === 0 ? 'open' : ''}><summary>Show reviewed (${reviewed.length})</summary>${cards(reviewed)}</details>` : ''}</div>
+                </div>
+            </div>
         `;
         section.querySelectorAll('.segment-review-save').forEach(button => {
             button.addEventListener('click', async () => {
@@ -1615,10 +1772,10 @@ window.ScriptViewer = (() => {
                 }
             });
         });
-        els.qualityOverview.appendChild(section);
+        container.appendChild(section);
     }
 
-    function renderJoinReview() {
+    function renderJoinReview(container = els.qualityOverview) {
         const review = currentData.qualityReview;
         const joins = review?.join_warnings || [];
         if (!joins.length) return;
@@ -1628,14 +1785,17 @@ window.ScriptViewer = (() => {
         const unreviewed = joins.filter(item => (item.disposition || 'unreviewed') === 'unreviewed');
         const reviewed = joins.filter(item => (item.disposition || 'unreviewed') !== 'unreviewed');
 
-        const joinState = {
-            page: 1,
-            pageSize: 15,
-            disposition: 'unreviewed',
-            chapter: 'all',
-            speaker: 'all',
-            severity: 'all'
-        };
+        if (!window.joinFilterState) {
+            window.joinFilterState = {
+                page: 1,
+                pageSize: 15,
+                disposition: 'unreviewed',
+                chapter: 'all',
+                speaker: 'all',
+                severity: 'all'
+            };
+        }
+        const joinState = window.joinFilterState;
 
         const cardsHtml = items => items.map(item => `
             <article class="join-review-item" data-item-id="${escapeHtml(item.item_id)}"
@@ -1670,18 +1830,18 @@ window.ScriptViewer = (() => {
         `).join('');
 
         section.innerHTML = `
-            <details class="quality-section-details join-review-details" open id="join-review-details">
-                <summary class="quality-section-summary" role="button">
+            <div class="quality-panel-card join-review-details" id="join-panel-card">
+                <div class="quality-panel-header">
                     <div>
                         <strong>Chapter join review</strong>
                         <small>${joins.length} diagnostic warning${joins.length === 1 ? '' : 's'}, sorted by measured severity. A warning is not automatically an audible defect.</small>
                     </div>
                     <span class="quality-summary-badge ${unreviewed.length === 0 ? 'resolved' : ''}">${counts.unreviewed || 0} unreviewed</span>
-                </summary>
+                </div>
                 <div class="quality-section-body">
                     <div class="join-review-filter-bar">
                         <label><span>Disposition</span><select class="input-sm join-filter-disposition">
-                            <option value="all">All</option><option value="unreviewed" selected>Unreviewed</option><option value="acceptable">Acceptable</option><option value="needs_remaster">Needs remaster</option><option value="source_tts_issue">Source / TTS issue</option>
+                            <option value="all">All</option><option value="unreviewed">Unreviewed</option><option value="acceptable">Acceptable</option><option value="needs_remaster">Needs remaster</option><option value="source_tts_issue">Source / TTS issue</option>
                         </select></label>
                         <label><span>Chapter</span><select class="input-sm join-filter-chapter"><option value="all">All chapters</option>${[...new Set(joins.map(item => item.chapter_number))].sort((a, b) => a - b).map(chapter => `<option value="${chapter}">Chapter ${chapter}</option>`).join('')}</select></label>
                         <label><span>Speaker</span><select class="input-sm join-filter-speaker"><option value="all">All speakers</option>${[...new Set(joins.flatMap(item => [item.previous_line?.speaker, item.current_line?.speaker]).filter(Boolean))].sort().map(speaker => `<option value="${escapeHtml(speaker.toLowerCase())}">${escapeHtml(speakerDisplayName(speaker))}</option>`).join('')}</select></label>
@@ -1697,7 +1857,7 @@ window.ScriptViewer = (() => {
                             <button class="btn btn-ghost btn-sm" id="btn-join-next-page" disabled>Next ▶</button>
                             <label class="visually-hidden" for="select-join-page-size">Warnings per page</label>
                             <select id="select-join-page-size" class="input-sm">
-                                <option value="15" selected>15 per page</option>
+                                <option value="15">15 per page</option>
                                 <option value="30">30 per page</option>
                                 <option value="50">50 per page</option>
                                 <option value="all">Show all</option>
@@ -1705,8 +1865,19 @@ window.ScriptViewer = (() => {
                         </div>
                     </div>
                 </div>
-            </details>
+            </div>
         `;
+
+        const dispSelect = section.querySelector('.join-filter-disposition');
+        if (dispSelect) dispSelect.value = joinState.disposition;
+        const chapSelect = section.querySelector('.join-filter-chapter');
+        if (chapSelect) chapSelect.value = joinState.chapter;
+        const spkSelect = section.querySelector('.join-filter-speaker');
+        if (spkSelect) spkSelect.value = joinState.speaker;
+        const sevSelect = section.querySelector('.join-filter-severity');
+        if (sevSelect) sevSelect.value = joinState.severity;
+        const sizeSelect = section.querySelector('#select-join-page-size');
+        if (sizeSelect) sizeSelect.value = String(joinState.pageSize);
 
         function renderJoinPage() {
             const container = section.querySelector('#join-review-items-container');
@@ -1853,7 +2024,7 @@ window.ScriptViewer = (() => {
         });
 
         renderJoinPage();
-        els.qualityOverview.appendChild(section);
+        container.appendChild(section);
     }
 
     async function saveReviewDisposition(itemId, disposition, note, button) {
@@ -1886,7 +2057,7 @@ window.ScriptViewer = (() => {
         }
     }
 
-    function renderPronunciationInventory() {
+    function renderPronunciationInventory(container = els.qualityOverview) {
         const inventory = currentData.pronunciations;
         if (!inventory) return;
         const candidates = inventory.candidates || [];
@@ -1895,27 +2066,30 @@ window.ScriptViewer = (() => {
         const section = document.createElement('section');
         section.className = 'pronunciation-review';
 
-        const lexState = {
-            page: 1,
-            pageSize: 15,
-            filter: 'all',
-            search: '',
-            inSentence: true
-        };
+        if (!window.lexiconFilterState) {
+            window.lexiconFilterState = {
+                page: 1,
+                pageSize: 15,
+                filter: 'all',
+                search: '',
+                inSentence: true
+            };
+        }
+        const lexState = window.lexiconFilterState;
 
         const unresolvedWithRecs = unresolved.filter(item => item.recommendation_default);
 
         const pMode = window.previewModeState || { active: false, pausedPipeline: false, voiceId: null, isWarming: false };
 
         section.innerHTML = `
-            <details class="quality-section-details pronunciation-details" open id="pronunciation-details">
-                <summary class="quality-section-summary" role="button">
+            <div class="quality-panel-card pronunciation-details" id="pronunciation-panel-card">
+                <div class="quality-panel-header">
                     <div>
                         <strong>Book pronunciation lexicon</strong>
                         <small>${unresolved.length} term${unresolved.length === 1 ? '' : 's'} suggested from text · ${verified.length} custom verified mapping${verified.length === 1 ? '' : 's'}</small>
                     </div>
                     <span class="quality-summary-badge resolved">${verified.length} verified</span>
-                </summary>
+                </div>
                 <div class="quality-section-body">
                     <div class="pronunciation-preview-mode-bar ${pMode.active ? 'active' : ''}" id="preview-mode-bar">
                         <div class="preview-mode-info">
@@ -1956,13 +2130,13 @@ window.ScriptViewer = (() => {
 
                     <div class="pronunciation-toolbar">
                         <div class="pronunciation-search-bar" style="flex: 1; position: relative;">
-                            <input type="text" id="lexicon-search-input" placeholder="🔍 Search words, terms, or replacements in lexicon...">
-                            <button type="button" class="btn-clear-search" id="btn-clear-lexicon-search" title="Clear search" style="display: none;">&times;</button>
+                            <input type="text" id="lexicon-search-input" value="${escapeHtml(lexState.search || '')}" placeholder="🔍 Search words, terms, or replacements in lexicon...">
+                            <button type="button" class="btn-clear-search" id="btn-clear-lexicon-search" title="Clear search" style="${lexState.search ? 'display: flex;' : 'display: none;'}">&times;</button>
                         </div>
                         <div class="pronunciation-filter-tabs">
-                            <button type="button" class="btn btn-ghost btn-sm lex-tab active" data-filter="all">All (${candidates.length})</button>
-                            <button type="button" class="btn btn-ghost btn-sm lex-tab" data-filter="verified">Verified (${verified.length})</button>
-                            <button type="button" class="btn btn-ghost btn-sm lex-tab" data-filter="unresolved">Suggestions (${unresolved.length})</button>
+                            <button type="button" class="btn btn-ghost btn-sm lex-tab ${lexState.filter === 'all' ? 'active' : ''}" data-filter="all">All (${candidates.length})</button>
+                            <button type="button" class="btn btn-ghost btn-sm lex-tab ${lexState.filter === 'verified' ? 'active' : ''}" data-filter="verified">Verified (${verified.length})</button>
+                            <button type="button" class="btn btn-ghost btn-sm lex-tab ${lexState.filter === 'unresolved' ? 'active' : ''}" data-filter="unresolved">Suggestions (${unresolved.length})</button>
                         </div>
                         <div class="pronunciation-io-actions">
                             <div class="lexicon-export-dropdown" style="position: relative;">
@@ -2000,8 +2174,9 @@ window.ScriptViewer = (() => {
                             <span class="pagination-page-num" id="lexicon-pagination-page-num">Page 1 of 1</span>
                             <button class="btn btn-ghost btn-sm" id="btn-lexicon-next-page" disabled>Next ▶</button>
                             <label class="visually-hidden" for="select-lexicon-page-size">Terms per page</label>
+                            <select id="select-join-page-size" class="input-sm" style="display:none;"></select>
                             <select id="select-lexicon-page-size" class="input-sm">
-                                <option value="15" selected>15 per page</option>
+                                <option value="15">15 per page</option>
                                 <option value="30">30 per page</option>
                                 <option value="50">50 per page</option>
                                 <option value="all">Show all</option>
@@ -2009,8 +2184,11 @@ window.ScriptViewer = (() => {
                         </div>
                     </div>
                 </div>
-            </details>
+            </div>
         `;
+
+        const pageSizeSelect = section.querySelector('#select-lexicon-page-size');
+        if (pageSizeSelect && lexState.pageSize) pageSizeSelect.value = String(lexState.pageSize);
 
         function matchesTerm(item, q) {
             const term = (item.term || '').toLowerCase();
@@ -2351,7 +2529,9 @@ window.ScriptViewer = (() => {
                     })
                 });
                 const data = await res.json().catch(() => ({}));
-                if (!res.ok) throw new Error(data.detail || 'Could not toggle preview mode');
+                if (!res.ok || data.status === 'error' || (!data.preview_mode && !isCurrentlyActive)) {
+                    throw new Error(data.detail || data.message || 'Could not toggle preview mode');
+                }
 
                 window.previewModeState = {
                     active: Boolean(data.preview_mode),
@@ -2403,7 +2583,7 @@ window.ScriptViewer = (() => {
             }
         });
 
-        els.qualityOverview.appendChild(section);
+        container.appendChild(section);
     }
 
     function openLexiconImportModal(projectId, currentCandidates, currentVerified) {
@@ -2811,6 +2991,7 @@ window.ScriptViewer = (() => {
                 body: JSON.stringify({
                     term: cleanTerm,
                     spoken_text: spoken,
+                    voice_id: pMode.voiceId || null,
                     in_sentence: inSentence,
                     context_sentence: contextSentence
                 })
@@ -2831,7 +3012,7 @@ window.ScriptViewer = (() => {
                 button.innerHTML = '🔊 Playing...';
                 await audio.play();
             } else {
-                const msg = data.message || 'TTS generation unavailable.';
+                const msg = data.message || data.detail || (response.statusText ? `HTTP ${response.status}: ${response.statusText}` : 'TTS generation unavailable.');
                 playWebSpeechFallback(spoken, button, originalHtml, msg);
             }
         } catch (error) {
@@ -2934,7 +3115,7 @@ window.ScriptViewer = (() => {
         }
     }
 
-    function addQualityStat(label, value, statusClass, description = '') {
+    function addQualityStat(label, value, statusClass, description = '', target = els.qualityOverview) {
         const div = document.createElement('div');
         div.className = 'quality-stat';
         if (description) {
@@ -2954,7 +3135,7 @@ window.ScriptViewer = (() => {
             <div class="stat-label">${label}${description ? ' <span aria-hidden="true">ⓘ</span>' : ''}</div>
         `;
         
-        els.qualityOverview.appendChild(div);
+        (target || els.qualityOverview).appendChild(div);
     }
     
     // escapeHtml now lives in js/dom-utils.js, which loads before this file.

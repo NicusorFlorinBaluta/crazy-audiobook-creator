@@ -183,3 +183,62 @@ def schedule_resume_after_reviews(project_id: str) -> bool:
 
     asyncio.create_task(resume())
     return True
+
+
+def mark_chapters_stale(
+    project_id: str,
+    affected_chapters: list[int] | set[int],
+    reason: str,
+) -> None:
+    """Mark chapters stale in delivery parts and record them as pending audio revision."""
+    if not affected_chapters:
+        return
+    from brain.orchestrator.delivery_manager import DeliveryManager
+
+    affected = set(affected_chapters)
+    try:
+        p_dir = project_dir(project_id)
+        DeliveryManager(p_dir).mark_stale_for_chapters(affected, reason)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not mark delivery parts stale for %s: %s", project_id, exc)
+
+    if not job_queue:
+        return
+    try:
+        state = job_queue.get_job(project_id)
+    except KeyError:
+        return
+    current_generated = set(state.get("generated_chapters", []))
+    current_mastered = set(state.get("mastered_chapters", []))
+
+    # A chapter only needs an audio update if audio was actually completed/generated for it.
+    # Un-generated (purely scripted or pending) chapters do not have stale audio.
+    p_dir = project_dir(project_id)
+    manifests_dir = p_dir / "manifests"
+
+    def _chapter_had_audio(c_num: int) -> bool:
+        if c_num in current_generated or c_num in current_mastered:
+            return True
+        if manifests_dir.is_dir():
+            if (manifests_dir / f"chapter_{c_num:03d}.segments.json").is_file():
+                return True
+            if (manifests_dir / f"chapter_{c_num:03d}.master.json").is_file():
+                return True
+        return False
+
+    stale_audio_chapters = {c for c in affected if _chapter_had_audio(c)}
+    existing_pending = {
+        c for c in state.get("voice_revision_pending_chapters", [])
+        if _chapter_had_audio(c)
+    }
+    pending = sorted(existing_pending | stale_audio_chapters)
+
+    job_queue.update_job(
+        project_id,
+        {
+            "generated_chapters": [number for number in state.get("generated_chapters", []) if number not in stale_audio_chapters],
+            "mastered_chapters": [number for number in state.get("mastered_chapters", []) if number not in stale_audio_chapters],
+            "voice_revision_pending_chapters": pending,
+        },
+    )
+

@@ -769,6 +769,39 @@ class PronunciationAndHotSwapTests(unittest.IsolatedAsyncioTestCase):
         # Second call returns False since already exited
         self.assertFalse(dashboard_runtime.exit_preview_mode(pid))
 
+    def test_health_check_once_raises_voice_client_error_on_httpx_error(self) -> None:
+        """Verify health_check_once wraps httpx errors in VoiceClientError."""
+        from brain.orchestrator.voice_client import VoiceClient, VoiceClientError
+        import httpx
+
+        client = VoiceClient(host="http://127.0.0.1:8100")
+        with patch.object(client._client, "get", side_effect=httpx.ConnectTimeout("timed out")):
+            with self.assertRaises(VoiceClientError):
+                client.health_check_once(0.8)
+
+    async def test_toggle_preview_mode_returns_error_on_warmup_failure(self) -> None:
+        """Verify toggle_preview_mode does not claim ready if warmup fails."""
+        pid = "test_warmup_fail_proj"
+        fake_pipeline = MagicMock()
+        fake_pipeline.voice_client.health_check_once.side_effect = Exception("offline")
+        fake_pipeline._start_voice_server.side_effect = RuntimeError("failed to spawn")
+        fake_job_queue = MagicMock()
+        fake_job_queue.get_job.return_value = {"running": False}
+
+        with (
+            patch.object(dashboard_runtime, "require_job"),
+            patch.object(dashboard_runtime, "project_dir", return_value=Path("/tmp")),
+            patch.object(dashboard_runtime, "pipeline", fake_pipeline),
+            patch.object(dashboard_runtime, "job_queue", fake_job_queue),
+        ):
+            req = pronunciation_routes.PreviewModeRequest(enabled=True)
+            res = await pronunciation_routes.toggle_preview_mode(pid, req)
+            self.assertEqual(res["status"], "error")
+            self.assertFalse(res["preview_mode"])
+            self.assertIn("detail", res)
+            self.assertFalse(pronunciation_routes._active_preview_modes[pid]["active"])
+
 
 if __name__ == "__main__":
     unittest.main()
+
