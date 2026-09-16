@@ -24,6 +24,13 @@ misses justified a respelling that would have made both worse.
 **Compare the whole term.** `Braelin Janquay` came back as the single word
 "braylon". Matching only the first word scored that 94% correct while the
 engine was in fact dropping half the name.
+
+**A majority is not a verdict.** Added 2026-09-16, after a listener heard
+`Drizzt` said two ways. Sampling is per line, so a name the engine mostly gets
+right can still be wrong on a tenth of its lines, and those lines are fixed --
+the seed is derived from the line, so they never heal on a rerun. Measuring
+only the dominant rendering called that `spoken_correctly`; `SOUND_STABLE_THRESHOLD`
+and the `unstable` verdict are what make the minority visible.
 """
 
 from __future__ import annotations
@@ -54,6 +61,26 @@ AGREE_THRESHOLD = 0.70
 #: Calibrated 2026-09-12 against the two books: Regis 100%, Wulfgar 78%,
 #: Ten-Towns 64%, Drizzt 59% (all correct) against Sylfae 41% and Bruenor 26%.
 SPELLING_STABLE_THRESHOLD = 0.50
+
+#: Share taken by the dominant *sound group*.
+#:
+#: The majority being right is not the same as the name being right. `Drizzt`
+#: carried no respelling and was scored `spoken_correctly` on 2026-09-12
+#: because its commonest rendering ("drist") is correct and its commonest
+#: spelling cleared the bar. Twelve of its 157 lines say "driz-ZIT" -- an extra
+#: syllable, a different name to a listener, and audible to the first person
+#: who sat through the book. Seeds are per line, so those twelve never heal on
+#: a rerun.
+#:
+#: Below this share the term is `unstable`: the engine agrees with itself too
+#: rarely for one name to come through. It is a report, never a licence to
+#: respell -- only `mispronounced` applies one.
+#:
+#: Calibrated 2026-09-16 against this book's regenerated audio, where an entry
+#: that works leaves nothing behind: Luskan 1.00 (27 lines), Bruenor 1.00
+#: (186), Guenhwyvar 1.00 (11), Wulfgar 0.99, Regis 0.99 -- against Jarlaxle
+#: 0.94 ("jarl axel" on 21 of 399 lines) and Drizzt 0.90.
+SOUND_STABLE_THRESHOLD = 0.95
 
 #: Phonetic-key similarity at which two renderings count as the same sound.
 MATCH_RATIO = 0.86
@@ -119,6 +146,9 @@ class TermEvidence:
     agreeing: int = 0
     heard: Counter[str] = field(default_factory=Counter)
     sound_groups: Counter[str] = field(default_factory=Counter)
+    #: line id -> what Whisper heard there. Kept so an `unstable` verdict can
+    #: name the lines to listen to instead of only reporting a percentage.
+    renderings_by_line: dict[str, str] = field(default_factory=dict)
 
     @property
     def agree_rate(self) -> float:
@@ -156,17 +186,58 @@ class TermEvidence:
         return sound_similarity(self.term, self.dominant_rendering) >= MATCH_RATIO
 
     @property
-    def verdict(self) -> str:
-        """`spoken_correctly`, `mispronounced`, `undecided`, or `insufficient`.
+    def outliers(self) -> int:
+        """Lines whose rendering fell outside the dominant sound group."""
+        if not self.sound_groups:
+            return 0
+        return self.samples - self.sound_groups.most_common(1)[0][1]
 
-        Only `mispronounced` justifies applying a respelling. `undecided` means
-        the evidence is real but beyond what this comparison can settle, and is
-        a question for a listener rather than a licence to guess.
+    @property
+    def outlier_lines(self) -> list[tuple[str, str]]:
+        """`(line_id, heard)` for every line outside the dominant sound group."""
+        if not self.sound_groups:
+            return []
+        dominant = self.sound_groups.most_common(1)[0][0]
+        return sorted(
+            (line_id, heard) for line_id, heard in self.renderings_by_line.items() if phonetic_key(heard) != dominant
+        )
+
+    @property
+    def minority_renderings(self) -> list[tuple[str, int]]:
+        """What the engine said on the lines that broke away, commonest first.
+
+        The point of the report: `Drizzt` is not "90% correct" to a listener,
+        it is a name that says "driz-ZIT" twelve times. Naming the renderings
+        is what makes that actionable.
+        """
+        if not self.sound_groups:
+            return []
+        dominant = self.sound_groups.most_common(1)[0][0]
+        minority = Counter(
+            {rendering: count for rendering, count in self.heard.items() if phonetic_key(rendering) != dominant}
+        )
+        return minority.most_common(6)
+
+    @property
+    def verdict(self) -> str:
+        """`spoken_correctly`, `mispronounced`, `unstable`, `undecided`, or `insufficient`.
+
+        Only `mispronounced` justifies applying a respelling. `unstable` says
+        the dominant rendering is right but the engine does not hold it across
+        the book; `undecided` says the evidence is real but beyond what this
+        comparison can settle. Both are questions for a listener rather than a
+        licence to guess.
+
+        `unstable` is tested before spelling because it is the more actionable
+        of the two: it names specific lines that are wrong, where `undecided`
+        only reports that the method cannot tell.
         """
         if self.samples < MIN_SAMPLES:
             return "insufficient"
         if not self.dominant_matches:
             return "mispronounced"
+        if self.stability < SOUND_STABLE_THRESHOLD:
+            return "unstable"
         if self.spelling_stability < SPELLING_STABLE_THRESHOLD:
             return "undecided"
         return "spoken_correctly"
@@ -180,6 +251,8 @@ class TermEvidence:
             "spelling_stability": round(self.spelling_stability, 3),
             "dominant_rendering": self.dominant_rendering,
             "verdict": self.verdict,
+            "outliers": self.outliers,
+            "minority_renderings": self.minority_renderings,
             "heard_as": self.heard.most_common(6),
         }
 
@@ -200,9 +273,18 @@ def measure_terms(
         if not probe_words:
             continue
         probe = probe_words[0].casefold()
+        # A multi-word term is only evidenced by lines that contain the whole
+        # thing. Selecting on the first word alone counted 189 "Gregory" lines
+        # as evidence about "Gregory Antoine" and then called the name
+        # mispronounced because the transcripts say "Gregory" -- which is what
+        # the script says too. The engine was never asked for the surname.
+        phrase = " ".join(word.casefold() for word in probe_words) if len(probe_words) > 1 else ""
         evidence = TermEvidence(term=term)
         for line_id, source in line_texts.items():
-            if probe not in {word.casefold() for word in _words(source)}:
+            source_words = [word.casefold() for word in _words(source)]
+            if probe not in set(source_words):
+                continue
+            if phrase and phrase not in " ".join(source_words):
                 continue
             transcript = transcripts.get(line_id)
             if not transcript:
@@ -212,6 +294,7 @@ def measure_terms(
             if span:
                 evidence.heard[span.casefold()] += 1
                 evidence.sound_groups[phonetic_key(span)] += 1
+                evidence.renderings_by_line[line_id] = span.casefold()
             if score >= MATCH_RATIO:
                 evidence.agreeing += 1
         results[term] = evidence

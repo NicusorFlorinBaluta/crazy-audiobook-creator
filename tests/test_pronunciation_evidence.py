@@ -112,7 +112,13 @@ class TestVerdicts:
 
         Long lines whose best span landed elsewhere dragged the average under
         the threshold. Judging on the average would have justified "Tentowns",
-        which the engine would then read as "tent owns".
+        which the engine would then read as "tent owns" -- so the average must
+        not be what condemns a term.
+
+        It is `unstable` rather than `spoken_correctly` because two of these
+        six lines really do say something else; see `TestStability`. The point
+        this case defends is that neither reading is `mispronounced`, which is
+        the only verdict that would ship the respelling.
         """
         texts, transcripts = _corpus(
             "Ten-Towns",
@@ -121,7 +127,7 @@ class TestVerdicts:
         evidence = measure_terms(["Ten-Towns"], texts, transcripts)["Ten-Towns"]
         assert evidence.agree_rate < 0.70
         assert evidence.dominant_matches
-        assert evidence.verdict == "spoken_correctly"
+        assert evidence.verdict != "mispronounced"
 
     def test_too_little_evidence_never_justifies_a_respelling(self) -> None:
         """11 of the 28 proposals had under 3 generated lines to judge by."""
@@ -156,3 +162,91 @@ class TestEvidenceReporting:
         assert blank.agree_rate == 0.0
         assert blank.stability == 0.0
         assert blank.verdict == "insufficient"
+
+
+class TestStability:
+    """A name the engine mostly gets right can still be wrong on some lines.
+
+    Added 2026-09-16, after a listener reached chapter 27 of
+    `the-finest-edge-of-twilight-book` and reported that `Drizzt` was being
+    said two different ways. It was: 141 of 157 lines say "drist", and 12 say
+    "driz-ZIT". The measurement pass four days earlier had called it
+    `spoken_correctly`, because the dominant rendering is right and no rule
+    looked at the rest.
+    """
+
+    def test_drizzt_is_unstable_not_correct(self) -> None:
+        """The real distribution: the majority is right and a tenth is not."""
+        texts, transcripts = _corpus("Drizzt", ["drist"] * 18 + ["drizzt"] * 9 + ["drizzit", "drizit", "drizzet"])
+        evidence = measure_terms(["Drizzt"], texts, transcripts)["Drizzt"]
+        assert evidence.dominant_matches, "the commonest rendering is still correct"
+        assert evidence.spelling_stability >= 0.50, "and its commonest spelling still dominates"
+        assert evidence.verdict == "unstable", "but a tenth of the lines say a different name"
+
+    def test_an_entry_that_worked_leaves_nothing_behind(self) -> None:
+        """`Luskan` -> `Laskan`: 27 of 27 lines came back "laskin"."""
+        texts, transcripts = _corpus("Luskan", ["laskin"] * 27)
+        evidence = measure_terms(["Luskan"], texts, transcripts)["Luskan"]
+        assert evidence.outliers == 0
+        assert evidence.verdict == "spoken_correctly"
+
+    def test_the_minority_renderings_are_named_not_just_counted(self) -> None:
+        """A percentage is not actionable; "it says driz-ZIT here" is."""
+        texts, transcripts = _corpus("Drizzt", ["drist"] * 18 + ["drizzt"] * 9 + ["drizzit", "drizit", "drizzet"])
+        evidence = measure_terms(["Drizzt"], texts, transcripts)["Drizzt"]
+        minority = dict(evidence.minority_renderings)
+        assert set(minority) == {"drizzit", "drizit", "drizzet"}
+        assert "drist" not in minority and "drizzt" not in minority
+
+    def test_the_outlying_lines_are_identified(self) -> None:
+        """Seeds are per line, so the bad takes are a fixed, nameable set.
+
+        They never heal on a rerun, which is what makes listing them worth
+        more than a stability percentage.
+        """
+        texts, transcripts = _corpus("Drizzt", ["drist"] * 18 + ["drizzt"] * 9 + ["drizzit", "drizit", "drizzet"])
+        evidence = measure_terms(["Drizzt"], texts, transcripts)["Drizzt"]
+        assert [line_id for line_id, _ in evidence.outlier_lines] == ["ch01_0027", "ch01_0028", "ch01_0029"]
+        assert evidence.outliers == 3
+
+    def test_instability_never_ships_a_respelling(self) -> None:
+        """`unstable` is a report. Only `mispronounced` applies a respelling."""
+        texts, transcripts = _corpus("Jarlaxle", ["jarlaxle"] * 20 + ["jarl axel", "jar laxal"])
+        evidence = measure_terms(["Jarlaxle"], texts, transcripts)["Jarlaxle"]
+        assert evidence.verdict == "unstable"
+        assert evidence.verdict != "mispronounced"
+
+
+class TestWholePhraseEvidence:
+    """A multi-word term is only evidenced by lines that contain all of it."""
+
+    def test_lines_naming_only_the_forename_are_not_evidence(self) -> None:
+        """The book calls him "Gregory" on most of his lines.
+
+        Selecting evidence on the first word counted those as failures to say
+        "Gregory Antoine" and reported a name the engine was never asked for
+        as mispronounced.
+        """
+        texts = {
+            "ch01_0000": "Gregory Antoine bowed.",
+            "ch01_0001": "Gregory said nothing.",
+            "ch01_0002": "Gregory turned away.",
+        }
+        transcripts = {
+            "ch01_0000": "Gregory Antoine bowed.",
+            "ch01_0001": "Gregory said nothing.",
+            "ch01_0002": "Gregory turned away.",
+        }
+        evidence = measure_terms(["Gregory Antoine"], texts, transcripts)["Gregory Antoine"]
+        assert evidence.samples == 1, "only the line that actually says the full name"
+
+    def test_a_dropped_surname_is_still_caught(self) -> None:
+        """The `Braelin Janquay` case must keep working.
+
+        Its lines do say the whole name; the engine is what drops half of it.
+        """
+        texts = {f"ch01_{i:04d}": "Braelin Janquay waited." for i in range(4)}
+        transcripts = {f"ch01_{i:04d}": "braylon waited." for i in range(4)}
+        evidence = measure_terms(["Braelin Janquay"], texts, transcripts)["Braelin Janquay"]
+        assert evidence.samples == 4
+        assert evidence.verdict == "mispronounced"

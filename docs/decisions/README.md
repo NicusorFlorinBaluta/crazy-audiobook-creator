@@ -32,7 +32,8 @@ Newest first.
 
 | Date | Record | Status |
 | --- | --- | --- |
-| 2026-09-12 | [Respellings are measured against transcripts](2026-09-12-respellings-are-measured-against-transcripts.md) | Current |
+| 2026-09-16 | [A majority is not a verdict: pronunciations are measured for stability](2026-09-16-a-majority-is-not-a-verdict.md) | Current |
+| 2026-09-12 | [Respellings are measured against transcripts](2026-09-12-respellings-are-measured-against-transcripts.md) | Partially superseded by the 2026-09-16 record (the `Drizzt` verdict only) |
 | 2026-09-10 | [Review of the 2026-09-05..09 feature run](2026-09-10-review-of-the-september-feature-run.md) | Current |
 | 2026-09-07 | [Pronunciation lexicon ergonomics & Whisper STT language normalization](2026-09-07-pronunciation-lexicon-and-stt-validation.md) | Current |
 | 2026-09-06 | [The book's speech tag outranks the model](2026-09-06-speech-tags-outrank-adjudication.md) | Current |

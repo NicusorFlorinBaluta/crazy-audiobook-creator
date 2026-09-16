@@ -1,6 +1,9 @@
 # A respelling ships only where the engine is measurably heard to be wrong
 
-**Status:** Current
+**Status:** Partially superseded
+**Superseded by:** [A majority is not a verdict](2026-09-16-a-majority-is-not-a-verdict.md)
+(the `Drizzt` row below and the claim that measuring the modal rendering is
+sufficient; the evidence-before-shipping rule is unchanged and still current)
 
 The pronunciation lexicon is applied without a human gate. A recommendation's
 `default` is loaded by `load_pronunciation_dictionary(include_defaults=True)`,
@@ -43,8 +46,18 @@ report of what the engine actually said.
 | `Braelin Janquay` | braylon x27 | half the name is gone |
 | `Regis` | regis x56, nothing else | correct |
 | `Wulfgar` | wolfgar x65, wulfgar x17 | correct; Whisper spells it its own way |
-| `Drizzt` | drist x34, drizzt x18 | correct -- "drist" *is* the pronunciation |
+| `Drizzt` | drist x34, drizzt x18 | ~~correct -- "drist" *is* the pronunciation~~ **incomplete; see below** |
 | `Jarlaxle` | jarlaxle x107, jarl axel x2 | correct in 94% of lines |
+
+> **Correction, 2026-09-16.** The `Drizzt` reading was right about the
+> majority and wrong to stop there. The row above lists only the two commonest
+> renderings out of 58 lines; the tail held drizzit x2, drizzit x1 and drizzet
+> x1, an extra syllable and a different name. Across the finished book that is
+> 12 lines of 157, and a listener heard it. "Correct" was a statement about the
+> mode when the question was about the distribution. The
+> [2026-09-16 record](2026-09-16-a-majority-is-not-a-verdict.md) adds the
+> `unstable` verdict for exactly this shape. Nothing about the *refusals*
+> below changes: Drizzt still must not be respelled on this evidence.
 
 Measuring the 33 proposals against that evidence kept **6** and refused
 **27**. Eleven were for names the engine already said correctly. Applying them
@@ -87,6 +100,12 @@ verdict in either direction.
 Verdicts are `mispronounced`, `undecided`, `spoken_correctly`, or
 `insufficient` (under three transcribed lines). **Only `mispronounced` applies
 a respelling.**
+
+> **Added 2026-09-16.** A fifth verdict, `unstable`, sits between
+> `mispronounced` and `undecided`: the dominant rendering is right but the
+> engine does not hold it across the book. It carries the same prohibition --
+> only `mispronounced` applies a respelling. See
+> [A majority is not a verdict](2026-09-16-a-majority-is-not-a-verdict.md).
 
 ## Two live defects this exposed
 

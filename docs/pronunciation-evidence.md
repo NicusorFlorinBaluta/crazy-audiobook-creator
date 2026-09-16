@@ -16,8 +16,14 @@ So a term with a respelling nothing measured is a pending edit to the book.
 The rule is therefore: **a respelling ships only where the engine is measurably
 heard to say the name wrong.**
 
-The reasoning and the numbers behind that rule are in
-[decisions/2026-09-12-respellings-are-measured-against-transcripts.md](decisions/2026-09-12-respellings-are-measured-against-transcripts.md).
+And the corollary, which cost a listener 27 chapters to notice: **a name that
+is mostly right is not therefore right.** The engine samples per line, so an
+unfamiliar spelling is re-guessed on every line and can lose about one time in
+ten. That is the `unstable` verdict below.
+
+The reasoning and the numbers are in
+[decisions/2026-09-12-respellings-are-measured-against-transcripts.md](decisions/2026-09-12-respellings-are-measured-against-transcripts.md)
+and [decisions/2026-09-16-a-majority-is-not-a-verdict.md](decisions/2026-09-16-a-majority-is-not-a-verdict.md).
 
 ## The loop
 
@@ -25,15 +31,26 @@ The reasoning and the numbers behind that rule are in
    asks the local model for respellings. It is told to return a term unchanged
    unless the spelling changes the sound, and it mostly does: 33 of 269 terms
    came back changed across two books.
-2. **Measure.** `scripts/measure_pronunciations.py <project_id>` scores each
-   proposal against `quality_logs.details.transcribed_text` — the Whisper
-   transcript of every segment already generated. Nothing is written.
-3. **Apply.** The same command with `--apply` keeps only the respellings
-   measured as `mispronounced` and resets the rest to a no-op. Evidence for
-   every term, kept or refused, is written to
-   `pronunciation_measurement_audit.json`.
+2. **Measure.** `scripts/measure_pronunciations.py <project_id>` scores every
+   term the lexicon touches — active entries, keep-originals, and unrespelled
+   candidates alike — against `quality_logs.details.transcribed_text`, the
+   Whisper transcript of every segment already generated. Nothing is written.
+   Entries already shipped are included on purpose: `Catti-brie` carried a
+   respelling that never worked, and measuring only proposals meant nothing
+   looked at it again.
+3. **Trial.** For a term the measurement flags, `scripts/trial_respelling.py
+   <project_id> <term> <control> <candidate>...` generates each spelling over
+   real lines and transcribes the takes. **The control comes first**, and it
+   often wins: `Drizzt`'s twelve bad lines came back 11/12 correct with the
+   text unchanged, while both candidates scored worse. Needs the voice server
+   on 8100, which the dashboard does not start.
+4. **Apply.** `measure_pronunciations.py --apply` keeps only the respellings
+   measured as `mispronounced` and resets the rest to a no-op. It rewrites the
+   recommendation file only — verified entries in `pronunciation_dict.json`
+   are human decisions and are never touched. Evidence for every term, kept or
+   refused, is written to `pronunciation_measurement_audit.json`.
 
-Run step 2 before resuming generation. Step 3 is what makes the lexicon safe
+Run step 2 before resuming generation. Step 4 is what makes the lexicon safe
 to leave unattended.
 
 ## Verdicts
@@ -41,14 +58,31 @@ to leave unattended.
 | verdict | meaning | effect |
 | --- | --- | --- |
 | `mispronounced` | the commonest thing Whisper wrote does not sound like the term | the respelling is applied |
-| `spoken_correctly` | the commonest rendering sounds like the term, and one rendering dominates | reset to no-op |
+| `unstable` | the commonest rendering is right, but the engine does not hold it across the book | reported with the offending lines; nothing applied |
+| `spoken_correctly` | one rendering dominates and it sounds like the term | reset to no-op |
 | `undecided` | renderings agree on consonants but scatter across vowels | reset to no-op, flagged for a listener |
 | `insufficient` | fewer than three transcribed lines | reset to no-op |
+
+**Only `mispronounced` applies a respelling.** The other four are reports.
 
 `undecided` exists because the comparison is deliberately deaf to vowel
 quality — that is what lets Whisper's "wolfgar" match a correctly spoken
 `Wulfgar`. It cannot then distinguish "BROO-nor" from "BRIN-or", so for a term
 whose renderings differ only in vowels it says so instead of guessing.
+
+`unstable` exists because the majority is not the whole story. `Drizzt` was
+scored `spoken_correctly` while 12 of its 157 lines said "driz-ZIT". The audit
+records `outliers`, `minority_renderings` and `outlier_lines` for these, so the
+verdict arrives with the lines to listen to rather than a percentage.
+
+## When the evidence is older than the lexicon
+
+`measure_pronunciations.py` refuses to call an active entry a failure unless
+the book has been through the engine since the lexicon last changed, and says
+so instead. Emberdark is the case it protects: its respellings were written on
+2026-09-12 and its newest transcript is from 2026-09-03, so every entry there
+would otherwise read as applied-and-failed when none has ever been spoken.
+Regenerate before trusting a verdict on an active entry.
 
 ## Reading the evidence
 
@@ -86,7 +120,23 @@ convention. Emberdark carried `"Xisis": "xisis"` while the engine read that
 name as "Jesus", and the measurement could not correct it.
 
 When a measured `mispronounced` term shows no active substitution, check the
-project dictionary first.
+project dictionary first. `measure_pronunciations.py` now lists keep-originals
+as their own entry kind, so one masking a failure shows up in the report rather
+than having to be guessed at: `the-finest-edge-of-twilight-book` carries four,
+of which `Janquay`, `Artemis Entreri` and `Jarlaxle` are measured `unstable`.
+
+## What this cannot fix
+
+The lexicon substitutes a *spelling*. Nothing constrains which phonemes the
+engine picks for it — there is no IPA or SSML layer — so a respelling is a
+guess until `trial_respelling.py` generates it. `Catti-brie` is the standing
+proof: an entry applied on all 179 of its lines, still heard four different
+ways.
+
+Nor is there a per-line repair. When a term is `unstable` because of a per-draw
+failure, the fix is redrawing those takes, and the only regeneration
+granularity is the chapter — which redraws every line at the same failure rate.
+`outlier_lines` names the lines; acting on them is still manual.
 
 ## Related
 
