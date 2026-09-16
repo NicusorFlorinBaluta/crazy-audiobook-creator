@@ -20,6 +20,7 @@ them would drop that coverage to zero rather than improve it. Migrate a group
 to `tests/frontend/` when you touch it, and delete its counterpart here then.
 """
 
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -38,13 +39,32 @@ def test_voice_assignment_uses_actual_cast_assignment() -> None:
 
 
 def test_project_navigation_and_tabs_are_keyboard_semantic() -> None:
+    """Every tab is wired to a panel, and exactly one is the focus stop.
+
+    This counted tabs until 2026-09-16, when the flag-triage tab was added
+    correctly and the assertion failed anyway because the expected number was
+    written down rather than derived. A count never checked the thing that
+    makes a tablist keyboard-navigable: that `aria-controls` finds a real
+    panel, and that exactly one tab is reachable with Tab while the arrow keys
+    move between the rest.
+    """
     page = _read("index.html")
     app = _read("js/app.js")
 
     assert 'class="nav-brand" id="nav-home-btn" aria-label="Back to projects"' in page
     assert 'role="tablist"' in page
-    assert page.count('role="tab"') == 4
-    assert page.count('role="tabpanel"') == 4
+
+    tabs = re.findall(r"<button[^>]*role=\"tab\"[^>]*>", page)
+    panels = set(re.findall(r"id=\"([^\"]+)\"[^>]*role=\"tabpanel\"", page))
+    assert tabs, "no tabs found in index.html"
+    assert len(tabs) == len(panels), "every tab needs its own panel"
+
+    controlled = {re.search(r"aria-controls=\"([^\"]+)\"", tab).group(1) for tab in tabs if "aria-controls=" in tab}
+    assert controlled == panels, "every tab must point at a panel that exists"
+
+    assert sum('aria-selected="true"' in tab for tab in tabs) == 1
+    assert sum('tabindex="0"' in tab for tab in tabs) == 1, "only the selected tab is a Tab stop"
+
     assert "document.createElement('button')" in app
     assert "handleTabKeydown" in app
 

@@ -2211,7 +2211,11 @@ async def get_pipeline_status(project_id: str):
         def _has_valid_script(c_num: int) -> tuple[bool, int, str]:
             return script_summary.get(c_num, (False, 0, ""))
 
-        generated_chapters = set(state.get("generated_chapters", [])) - voice_revision_pending
+        # Kept apart from what the disk scan adds below: only the pipeline's
+        # dependency/hash reconciler writes this, so it survives the
+        # actively-running demotion that stale segment files must not.
+        durable_generated = set(state.get("generated_chapters", [])) - voice_revision_pending
+        generated_chapters = set(durable_generated)
         for c_num, count in segment_counts.items():
             if c_num in voice_revision_pending:
                 continue
@@ -2232,7 +2236,13 @@ async def get_pipeline_status(project_id: str):
             progress_obj.get("chapter") if stage and any(s in stage for s in ("generat", "validat")) else None
         )
         if is_running and active_gen_ch:
-            generated_chapters.discard(int(active_gen_ch))
+            # Segments on disk for the chapter being generated belong to the
+            # run being replaced, so they must not read as complete. A chapter
+            # the reconciler durably recorded is different: invalidation
+            # clears that record, so its surviving there means the audio was
+            # reconciled, not merely present.
+            if int(active_gen_ch) not in durable_generated:
+                generated_chapters.discard(int(active_gen_ch))
             mastered_chapters.discard(int(active_gen_ch))
 
         active_master_ch = state.get("current_master_chapter") or (
@@ -2260,13 +2270,24 @@ async def get_pipeline_status(project_id: str):
             raw_title = (book_chapter_titles.get(ch_num) or script_title or "").strip()
             title = raw_title if raw_title else f"Chapter {ch_num}"
 
-            is_active_gen = is_running and (active_gen_ch == ch_num)
+            # Once the reconciler has durably recorded a chapter, it is done
+            # even if the job still names it as the active one -- otherwise
+            # the bar reports the disk's partial count over the finished work.
+            is_active_gen = is_running and (active_gen_ch == ch_num) and ch_num not in durable_generated
             is_active_master = is_running and (active_master_ch == ch_num)
             is_pending_revision = ch_num in voice_revision_pending
 
             gen_count = segment_counts[ch_num] if total_lines > 0 else 0
             if is_active_gen:
-                gen_count = int(state.get("lines_generated") or progress_obj.get("line_position") or 0)
+                # Live state outranks the disk, because after an invalidation
+                # the segments still on disk belong to the run being replaced.
+                # But "not reported yet" is not "zero generated": a chapter
+                # picked up mid-run has segments and no line position, and
+                # reading that as 0% hid real progress behind a stalled bar.
+                reported = state.get("lines_generated")
+                if reported is None:
+                    reported = progress_obj.get("line_position")
+                gen_count = int(reported) if reported is not None else gen_count
             elif is_pending_revision and ch_num not in generated_chapters:
                 gen_count = 0
             elif ch_num in generated_chapters and total_lines > 0:
