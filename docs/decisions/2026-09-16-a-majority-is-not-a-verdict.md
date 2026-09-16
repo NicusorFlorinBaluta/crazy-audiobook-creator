@@ -134,21 +134,123 @@ candidates scored worse and each invented a rendering the book had never
 produced. A book-wide substitution across 157 lines in 25 chapters would have
 been shipped to fix twelve unlucky takes.
 
-**`Catti-brie`: nothing was good enough to ship.** Fourteen lines spread across
-the book:
+**`Catti-brie`: a fix exists and was declined.** Two rounds over fourteen lines:
 
 | variant | on target | dominant rendering |
 | --- | --- | --- |
 | `CattiBrie` (current) | 1/14 | caddy bree x4, cadibri x3, cadbury x3 |
-| `Kattybree` | 0/14 | cadbury x5, caddy bree x3 |
-| `Kattibree` | 4/14 | cadabri x8 |
+| `Kattybree` | 0/14 | cadbury x5 |
+| `Kattibree` | 2/14 | cadabri x9 |
+| `Cattibree` | 2/14 | cadabri x9 |
+| **`Katteebree`** | **9/14** | ketibri x4, katibri x3 |
 
-`Kattibree` is the best of the three and still wrong two times in three. It is
-recorded here because it is interesting in the wrong direction: it is the most
-*consistent* of the three -- one rendering on 8 of 14 lines against the
-current entry's four-way spread -- while being no more correct. Consistency and
-accuracy came apart, and no metric in this repository can choose between them.
-That one is a listening decision and is left open.
+The second round was chosen from the phonology rather than by trying more
+shapes. English flaps a /t/ between a stressed and an unstressed vowel, which
+is what turns "CAT-ti" into "caddy"; doubling the vowel moves the stress onto
+the second syllable and the flap stops. That is a 9x improvement and the
+mechanism is understood.
+
+**It was not applied.** `Katteebree` buys accuracy on the consonant by shifting
+the stress to "ka-TEE-bree", where the name is "KAT-ee-bree", and applying it
+regenerates 179 lines of a delivered book. Offered with this evidence on
+2026-09-16, the owner chose to leave the entry alone. Recorded so the trade is
+not rediscovered and re-argued: the option is real, the cost is a different
+wrongness, and the decision was to keep what ships.
+
+**`Do'Urden`: the punctuation hypothesis was refuted.** The normaliser joins
+hyphens out but leaves apostrophes untouched, so `doh'urden` reaches the engine
+with its apostrophe, and terms containing one fail at 50% against 13% for
+everything else. Removing it looked obvious:
+
+| variant | on target |
+| --- | --- |
+| `doh'urden` (current) | **6/14** |
+| `dohurden` | 0/14 -- dohertyn x12 |
+| `DohUrden` | 0/14 -- dohertyn x10 |
+
+Both punctuation-free forms collapse completely. The apostrophe is holding a
+syllable boundary nothing else supplies, and stripping it turns the name into
+"Doherty-n". The asymmetry in `normalize_phonetic_text` is therefore **correct
+as written**, and should not be "fixed" by symmetry with hyphens.
+
+## Closing the loop in the pipeline, not beside it
+
+Measuring and repairing by hand leaves the pipeline free to make the same
+mistake tomorrow. Three changes move it upstream.
+
+**The validator was excusing the failure.** `_glossary_adjusted_wer` discounts
+ASR spelling variants for glossary names, so Whisper writing "wolfgar" for
+`Wulfgar` costs nothing -- correct, and the reason it exists. But the test was
+a 0.45 character ratio or a three-letter prefix, which forgave nearly any
+rendering: **"drizzit" scored 0.92 and cost nothing**, so the retry that would
+have redrawn it never fired.
+
+No similarity threshold can separate these, because on the phonetic key the
+*wrong* rendering scores higher than a *right* one:
+
+| pair | key similarity | correct? |
+| --- | --- | --- |
+| `drizzt` / `drizzit` | **0.91** | no |
+| `guenhwyvar` / `guinevar` | 0.89 | yes |
+
+What separates them is beats. "drizzit" adds a syllable; "guinevar" simplifies
+a consonant cluster and keeps all three. `same_spoken_form` forgives a
+rendering when it is the same sound, or when Whisper split the name across
+words ("coker lee" for `Kokerlii`), and withdraws forgiveness when the syllable
+count moves. WER is still diluted by line length, so this fires where the name
+dominates the line and the per-line repair covers the rest.
+
+**The reference clip now demonstrates the hard names.** The engine conditions
+on the reference audio, so whatever it hears there shapes every later line in
+that voice. `select_reference_text` takes `priority_terms` -- the same glossary
+the ASR is given -- and prefers lines containing them. The bonus is small on
+purpose: a shouted `DRIZZT! DRIZZT!` fragment is still a bad reference. This is
+the conditioning-domain answer to "reuse a known-good pronunciation", and
+unlike splicing a cached word it costs nothing at generation time and leaves
+prosody alone. It affects future bootstraps only.
+
+**The instrument is pinned.** Whisper was called with defaults, including a
+`temperature` tuple that resamples at rising temperature when a segment trips
+its thresholds, and `condition_on_previous_text=True`. Transcribing one clean
+segment three times gave identical text, so this was a tail risk rather than an
+active defect -- but it is a tail risk on exactly the hard segments a verdict
+depends on. Now `temperature=0.0` and no carry-over. `beam_size=5` was measured
+(0.64s against 0.44s, identical text) and left out for want of evidence.
+
+**And a trap worth naming.** Whisper's `initial_prompt` would reliably improve
+transcription of rare names, and using it here would be self-defeating: this
+validator is an unbiased phonetic reporter, and priming it with the correct
+spelling makes it write "Drizzt" for audio that said "driz-ZIT" -- erasing the
+signal the whole method reads. A test asserts it is absent.
+
+## What the repair actually achieved
+
+`Drizzt` went from **141/157 correct to 154/157** -- 90% to 98% -- by redrawing
+sixteen takes and touching nothing else. Verified by transcribing the segments
+as they stand rather than by trusting either repair log, which is a distinction
+that mattered: the audit is a snapshot, so a second pass re-reads outliers an
+earlier pass had already fixed and reports "gave up" for lines that are fine.
+`repair_outlier_lines.py` now listens to each line before redrawing it, which
+makes a re-run idempotent and its report true.
+
+Three lines resisted three passes: `ch22_0353`, `ch24_0166`, `ch24_0169`. All
+three are short -- 0.9 to 2.4 seconds -- and on a line that brief the name is
+most of the content, with little surrounding context to condition it. They are
+left as they are.
+
+**A fourth defect, found by the repair failing.** Those three kept producing
+correct takes that were then refused, and the cause was not the audio.
+`validate_single` never received `validation_terms`, so on the `/validate` path
+the glossary discount was dead code and a short line carrying a fictional name
+was judged on raw WER -- one name out of three words is 0.33, past the 0.20
+threshold, failing the hard gate however well it was spoken. Their original
+records show all three passed first time round *only* via
+`approved_glossary_spelling_variant`, the very discount the endpoint was not
+applying. `ValidateRequest` now carries the glossary, which also un-penalises
+the dashboard's preview and review flows.
+
+That is the fourth defect of the same shape in this area: a place where a
+fictional name is judged by a rule written for ordinary prose.
 
 ## What this does not fix
 
@@ -162,14 +264,18 @@ The 48 `unstable` terms in the first book and 16 in Emberdark are reports, not
 a work queue. Which of them are worth a regeneration is a listening decision,
 and deliberately not taken here.
 
-**There is no per-line repair.** The `Drizzt` trial says the fix for a
-per-draw failure is redrawing those twelve takes, and the pipeline's only
-regeneration granularity is the chapter -- which would redraw every line in
-25 chapters at the same one-in-ten rate, introducing fresh failures while
-clearing the old ones. Validation cannot catch these either: "drizzit" for
-"Drizzt" is a small enough edit distance to pass WER. The missing piece is a
-repair keyed to `outlier_lines`, reusing the line-level regeneration
-validation already has and the `attempt` bump that gives it a fresh seed.
+**The repair is a script, not a stage.** `repair_outlier_lines.py` and
+`remaster_chapters.py` are run by hand after a measurement. The validator gate
+now prevents most of what they clean up, so the loop is closed for new
+generation; an existing book still needs someone to run them.
+
+**WER dilutes.** The gate fires on `"Drizzt nodded."` (one wrong word in two)
+and not inside a thirty-word line, where the same error is 0.03. A name-only
+gate independent of line length would catch both, and would cost every retry
+on a name the engine cannot say -- `Catti-brie` alone would be 179 lines times
+the retry limit. The workable form is to gate only on terms the audit measured
+`spoken_correctly` or `unstable`, where a retry has somewhere to land. Not
+built.
 
 ## Related
 

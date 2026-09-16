@@ -133,10 +133,34 @@ guess until `trial_respelling.py` generates it. `Catti-brie` is the standing
 proof: an entry applied on all 179 of its lines, still heard four different
 ways.
 
-Nor is there a per-line repair. When a term is `unstable` because of a per-draw
-failure, the fix is redrawing those takes, and the only regeneration
-granularity is the chapter — which redraws every line at the same failure rate.
-`outlier_lines` names the lines; acting on them is still manual.
+## Repairing the lines rather than the name
+
+When a term is `unstable` the failure is usually per-draw, and the fix is new
+takes for those lines — not a respelling. `scripts/repair_outlier_lines.py
+<project_id> [--term X] [--apply]` reads `outlier_lines`, redraws exactly those
+lines, and **keeps a take only when it is better**: the name lands in the right
+sound group and the take still passes the hard gates. A line that will not come
+good is left exactly as it was.
+
+It is deliberately not a chapter regeneration. Redrawing a whole chapter
+subjects every line to the same failure rate, clearing old errors while
+introducing new ones.
+
+A kept take moves three things together, or the next run undoes it:
+
+| store | what changes | why |
+| --- | --- | --- |
+| the segment wav | replaced | the repair itself |
+| `chapter_NNN.segments.json` | segment `output_hash`, manifest `manifest_hash` | the reconciler drops a chapter from `generated` when a stored hash stops matching the file |
+| `voice_cache.db` | `generation_fingerprints.output_hash` | the generation cache compares it to the file before reusing a line |
+
+`dependency_hash` excludes `output_hash`, so it does not move and the chapter
+is not re-derived. The chapter's **master goes stale on purpose** and must be
+re-mastered for the repair to reach the delivery — assembly, not synthesis.
+
+Terms verdicted `mispronounced` are excluded: when the dominant rendering is
+wrong, redrawing only reshuffles the failure, and the name needs a respelling
+or a listener.
 
 ## Related
 
