@@ -33,9 +33,39 @@ class WhisperValidatorTextTests(unittest.TestCase):
         result = validator.transcribe("short-line.wav", language="en")
 
         self.assertEqual(result, "Uncle!")
-        validator._model.transcribe.assert_called_once_with(
-            "short-line.wav",
-            language="en",
+        validator._model.transcribe.assert_called_once()
+        args, kwargs = validator._model.transcribe.call_args
+        self.assertEqual(args, ("short-line.wav",), "raw audio, not a VAD-trimmed temp file")
+        self.assertEqual(kwargs["language"], "en")
+
+    def test_openai_backend_transcribes_deterministically(self) -> None:
+        """The transcript is a measurement, so the instrument must not drift.
+
+        Whisper's default `temperature` resamples at rising temperature when a
+        segment trips its compression-ratio or logprob threshold, and
+        `condition_on_previous_text` lets one line prime the next. Neither is
+        wanted when the transcript is evidence about how a name was said.
+        """
+        validator = WhisperValidator(
+            model_name="tiny",
+            device="cpu",
+            backend="openai_whisper",
+            vad_filter=False,
+        )
+        validator._backend = "openai_whisper"
+        validator._is_loaded = True
+        validator._model = Mock()
+        validator._model.transcribe.return_value = {"text": "Drizzit is defending."}
+
+        validator.transcribe("line.wav", language="en")
+
+        _args, kwargs = validator._model.transcribe.call_args
+        self.assertEqual(kwargs["temperature"], 0.0)
+        self.assertFalse(kwargs["condition_on_previous_text"])
+        self.assertNotIn(
+            "initial_prompt",
+            kwargs,
+            "priming Whisper with the glossary would erase the mispronunciation this measures",
         )
 
     def test_contraction_and_expanded_form_have_zero_wer(self) -> None:

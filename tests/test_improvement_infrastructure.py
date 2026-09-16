@@ -163,6 +163,40 @@ class ReferenceSelectionTests(unittest.TestCase):
         self.assertTrue(selection.text.startswith(clear))
         self.assertFalse(selection.used_seed_text)
 
+    def test_a_hard_name_is_preferred_when_quality_is_comparable(self) -> None:
+        """The reference clip is what in-context learning conditions on.
+
+        A clip that already contains `Drizzt` biases every later line in that
+        voice toward saying it the same way -- the conditioning-domain version
+        of reusing a known-good pronunciation, with nothing spliced.
+        """
+        plain = "We should cross the old bridge before sunrise and ask which road reaches the harbor."
+        with_name = "We should cross the old bridge with Drizzt before sunrise and ask which road he means."
+
+        self.assertGreater(
+            reference_line_score(with_name, priority_terms=frozenset({"drizzt"})),
+            reference_line_score(plain, priority_terms=frozenset({"drizzt"})),
+        )
+        selection = select_reference_text([plain, with_name], priority_terms=["Drizzt"])
+        self.assertIn("Drizzt", selection.text)
+
+    def test_a_hard_name_does_not_rescue_an_unusable_line(self) -> None:
+        """Clarity still decides. A shouted fragment is a bad reference even
+        when it contains every name in the book."""
+        shouted = "DRIZZT! DRIZZT! DRIZZT!"
+        clear = (
+            "We should cross the old bridge before sunrise, then ask the station master which road reaches the harbor."
+        )
+
+        self.assertGreater(
+            reference_line_score(clear, priority_terms=frozenset({"drizzt"})),
+            reference_line_score(shouted, priority_terms=frozenset({"drizzt"})),
+        )
+
+    def test_priority_terms_are_optional_and_change_nothing_when_absent(self) -> None:
+        line = "We should cross the old bridge before sunrise and ask which road reaches the harbor."
+        self.assertEqual(reference_line_score(line), reference_line_score(line, priority_terms=frozenset()))
+
     def test_seed_is_only_appended_when_real_dialogue_is_insufficient(self) -> None:
         selection = select_reference_text(
             ["Yes."],

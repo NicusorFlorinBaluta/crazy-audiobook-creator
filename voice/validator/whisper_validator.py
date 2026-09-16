@@ -13,6 +13,40 @@ from difflib import SequenceMatcher
 
 logger = logging.getLogger(__name__)
 
+#: Transcription options for the OpenAI Whisper backend.
+#:
+#: This call used to pass only `language`, inheriting every default. Two of
+#: them matter here, because this transcript is not just a subtitle -- it is the
+#: measurement the pronunciation evidence is built from, and an instrument that
+#: moves cannot measure a thing that moves.
+#:
+#: * `temperature` defaults to `(0.0, 0.2, 0.4, 0.6, 0.8, 1.0)`: greedy first,
+#:   then **resampling at rising temperature** whenever a segment trips the
+#:   compression-ratio or log-probability threshold. Clean segments never
+#:   escalate -- transcribing one three times gave identical text -- so this is
+#:   a tail risk rather than an active defect, and exactly the segments that
+#:   escalate are the difficult ones a verdict most depends on.
+#: * `condition_on_previous_text` defaults to `True`, letting one segment's
+#:   text prime the next. Segments here are independent lines, often from
+#:   different speakers, so that carry-over is noise.
+#:
+#: `beam_size=5` was measured alongside these and deliberately left out: 0.64s
+#: against 0.44s per call on this GPU, for identical text on the sample tried.
+#: The cost is small next to synthesis, but nothing here demonstrated a
+#: benefit, and the faster-whisper branch's use of it is not evidence for this
+#: one. Revisit with a transcript set where greedy is measurably wrong.
+#:
+#: **Never add `initial_prompt` with the book's glossary.** It reliably
+#: improves transcription of rare names, and that would be the wrong
+#: improvement: this validator is used as an unbiased phonetic reporter. Prime
+#: it with the correct spelling and it writes "Drizzt" for audio that said
+#: "driz-ZIT", which is the signal `shared/pronunciation_evidence.py` exists to
+#: read.
+_OPENAI_TRANSCRIBE_OPTIONS = {
+    "temperature": 0.0,
+    "condition_on_previous_text": False,
+}
+
 
 class TranscriptionUnavailableError(RuntimeError):
     """Raised when the STT engine could not produce a transcript at all.
@@ -169,6 +203,7 @@ class WhisperValidator:
         def _do_transcribe(lang_arg: str | None) -> str:
             if getattr(self, "_backend", "faster_whisper") == "openai_whisper":
                 kwargs = {"language": lang_arg} if lang_arg else {}
+                kwargs.update(_OPENAI_TRANSCRIBE_OPTIONS)
                 if not self.vad_filter:
                     result = self._model.transcribe(audio_file, **kwargs)
                     return result.get("text", "").strip()

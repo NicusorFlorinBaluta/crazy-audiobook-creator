@@ -2209,6 +2209,15 @@ class Pipeline:
                 "reference_text_policy": "ranked-actual-dialogue-v2",
             },
         )
+        # The same glossary the ASR is told to expect. A name worth validating
+        # leniently is a name the engine finds hard, which makes it exactly the
+        # name worth demonstrating in the reference clip.
+        try:
+            reference_priority_terms = self._validation_terms(project_dir)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            logger.debug("Could not derive reference priority terms for %s: %s", project_id, exc)
+            reference_priority_terms = []
+
         # Extract actual script lines for each character
         character_script_lines: dict[str, list[str]] = {}
         speaker_script_lines: dict[str, list[str]] = {}
@@ -2234,6 +2243,11 @@ class Pipeline:
                 seed_text=base_char.test_sentence or "",
                 minimum_words=15,
                 maximum_words=38,
+                # The reference clip is what in-context learning conditions on,
+                # so a clip that already contains the book's hard names biases
+                # every later line in this voice toward saying them the same
+                # way. Free at generation time: it is decided once, here.
+                priority_terms=reference_priority_terms,
             )
             ts = reference_selection.text
 
@@ -2799,9 +2813,7 @@ class Pipeline:
             or c in set(state.get("mastered_chapters", []))
             or (manifests_dir / f"chapter_{c:03d}.segments.json").is_file()
         }
-        voice_revision_pending = sorted(
-            (valid_pending | invalidated_chapters) - set(generated_chapters)
-        )
+        voice_revision_pending = sorted((valid_pending | invalidated_chapters) - set(generated_chapters))
         self.job_queue.update_job(
             project_id,
             {

@@ -120,6 +120,44 @@ def sound_similarity(left: str, right: str) -> float:
     return SequenceMatcher(None, left_key, right_key).ratio()
 
 
+def syllable_count(text: str) -> int:
+    """Vowel groups in a word — a stand-in for how many beats it is spoken in."""
+    return len(re.findall(r"[aeiouy]+", text.casefold()))
+
+
+def same_spoken_form(expected: str, observed: str) -> bool:
+    """Is `observed` Whisper's spelling of `expected`, or a different word?
+
+    The validator needs this distinction and a similarity score cannot make it.
+    Whisper writes "wolfgar" for a correct `Wulfgar` and "drist" for a correct
+    `Drizzt`, so spelling alone rejects good audio; but the engine also says
+    "driz-ZIT", and on the phonetic key that scores **0.91** against the term
+    while the *correct* "guinevar" for `Guenhwyvar` scores **0.89**. Any single
+    threshold that accepts the second accepts the first.
+
+    What separates them is beats, not letters. "drizzit" adds a syllable to a
+    one-syllable name; "guinevar" simplifies a consonant cluster and keeps all
+    three. So a rendering passes when it is the same sound, when the name was
+    merely split across words, or when it keeps the syllable count and stays
+    close on the key.
+    """
+    if len(observed) < 3:
+        return False
+    expected_key, observed_key = phonetic_key(expected), phonetic_key(observed)
+    if not expected_key or not observed_key:
+        return False
+    if expected_key == observed_key:
+        return True
+    # Whisper writes a long name as two words -- "coker lee" for `Kokerlii`,
+    # "jarl axel" for `Jarlaxle`. The first word is a prefix of the whole
+    # sound, and the remainder arrives as its own token.
+    if expected_key.startswith(observed_key):
+        return True
+    if syllable_count(expected) != syllable_count(observed):
+        return False
+    return SequenceMatcher(None, expected_key, observed_key).ratio() >= MATCH_RATIO
+
+
 def _words(text: str) -> list[str]:
     return _WORD.findall(text or "")
 

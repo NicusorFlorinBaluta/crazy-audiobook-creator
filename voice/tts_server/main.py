@@ -856,6 +856,7 @@ def validate_segment(request: ValidateRequest) -> dict:
         result = validator.validate_single(
             audio_file=str(audio_path),
             expected_text=request.expected_text,
+            validation_terms=set(request.validation_terms),
         )
     return result.model_dump()
 
@@ -899,7 +900,9 @@ def master_chapter(request: MasterChapterRequest) -> MasterChapterResponse:
             if not narrator_ref.is_file():
                 raise HTTPException(
                     status_code=422,
-                    detail=(f"Selected narrator voice is required for chapter announcements: {request.narrator_voice_id}"),
+                    detail=(
+                        f"Selected narrator voice is required for chapter announcements: {request.narrator_voice_id}"
+                    ),
                 )
             announcement_text = request.chapter_title.strip() or (f"Chapter {request.chapter_number}")
             with gpu_job():

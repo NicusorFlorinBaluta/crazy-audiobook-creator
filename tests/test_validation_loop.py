@@ -608,6 +608,21 @@ class ValidationLoopTests(unittest.TestCase):
         self.assertEqual(result.status, ValidationStatus.FAIL)
 
     def test_multiple_phonetic_glossary_spellings_preserve_sentence(self) -> None:
+        """Whisper's spelling is forgiven; a changed pronunciation is not.
+
+        Both names here are real, and they are not the same case. `Eelakin`
+        transcribed "Ilekin" is one sound spelled two ways, so it costs
+        nothing. `Patji` transcribed "Pachi" is the engine saying a different
+        word -- measured `mispronounced` over 133 Emberdark lines, heard as
+        "patchy" x73 and "pachi" x19 -- and it keeps its WER cost so the retry
+        that redraws it can fire.
+
+        Until 2026-09-16 both were forgiven, because the test was a 0.45
+        character ratio. The sentence is still preserved, which is what this
+        case is for: one questionable name out of nine words does not condemn
+        the line.
+        """
+
         class FictionalNamesWhisper(FakeWhisper):
             def transcribe(self, audio_file: str) -> str:
                 return "Pachi King of the Pantheon, God of the Ilekin."
@@ -641,7 +656,9 @@ class ValidationLoopTests(unittest.TestCase):
             )
 
         self.assertEqual(result.status, ValidationStatus.PASS)
-        self.assertEqual(result.effective_text_error, 0.0)
+        # "Ilekin" is discounted, "Pachi" is not: one of the two words costs.
+        self.assertAlmostEqual(result.effective_text_error, 1 / 9)
+        self.assertLess(result.effective_text_error, result.wer, "the same-sound name was still discounted")
         self.assertEqual(
             result.acceptance_reason,
             "approved_glossary_spelling_variant",

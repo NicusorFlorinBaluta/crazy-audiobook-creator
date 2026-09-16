@@ -489,6 +489,15 @@ class ValidateRequest(BaseModel):
 
     audio_file: str
     expected_text: str
+    validation_terms: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Book glossary terms whose ASR spelling variants should not count as errors. "
+            "Without these a short line carrying a fictional name is judged on raw WER, "
+            "where one name is a third of the words, and fails a threshold the same line "
+            "passes inside a chapter run."
+        ),
+    )
 
 
 class QualityResult(BaseModel):

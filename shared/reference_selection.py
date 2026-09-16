@@ -20,13 +20,44 @@ def _clean(value: str) -> str:
     return re.sub(r"\s+", " ", value or "").strip()
 
 
-def reference_line_score(text: str, target_words: int = 22) -> float:
-    """Score clarity/diversity without using acoustic or model inference."""
+#: How much a reference line is favoured for each distinct hard name it
+#: contains, capped at `_PRIORITY_TERM_CAP` terms.
+#:
+#: The engine runs in-context learning from the reference clip, so whatever it
+#: hears there conditions every later line in that voice. A reference that
+#: already contains `Drizzt` said correctly biases the model toward saying it
+#: that way again -- the same idea as caching a correct pronunciation, but
+#: applied to conditioning rather than to audio, so nothing is spliced and
+#: prosody stays natural.
+#:
+#: Deliberately small. Clarity and diversity are what make a reference usable
+#: in the first place, and a line stuffed with names but poorly spoken makes a
+#: worse reference than a clean one. This tips the balance between otherwise
+#: comparable candidates; it does not override the other terms.
+PRIORITY_TERM_BONUS = 0.75
+_PRIORITY_TERM_CAP = 3
+
+
+def reference_line_score(
+    text: str,
+    target_words: int = 22,
+    priority_terms: frozenset[str] | None = None,
+) -> float:
+    """Score clarity/diversity without using acoustic or model inference.
+
+    `priority_terms` are the book's hard names, cased-folded. A line that
+    contains one is preferred, because it becomes part of what the engine is
+    conditioned on.
+    """
     clean = _clean(text)
     words = re.findall(r"[^\W_]+(?:['’-][^\W_]+)?", clean.lower())
     if not words:
         return -1_000.0
     count = len(words)
+    priority_bonus = 0.0
+    if priority_terms:
+        present = {word for word in words if word in priority_terms}
+        priority_bonus = PRIORITY_TERM_BONUS * min(len(present), _PRIORITY_TERM_CAP)
     unique_ratio = len(set(words)) / count
     most_common = max(words.count(word) for word in set(words)) / count
     length_score = 1.0 - min(1.0, abs(count - target_words) / target_words)
@@ -37,6 +68,7 @@ def reference_line_score(text: str, target_words: int = 22) -> float:
     return round(
         length_score * 2.0
         + unique_ratio * 2.0
+        + priority_bonus
         - repetition_penalty
         - punctuation_penalty
         - min(1.0, all_caps / 3.0)
@@ -51,8 +83,14 @@ def select_reference_text(
     seed_text: str = "",
     minimum_words: int = 15,
     maximum_words: int = 38,
+    priority_terms: Iterable[str] = (),
 ) -> ReferenceTextSelection:
-    """Choose diverse real dialogue, combining lines only when necessary."""
+    """Choose diverse real dialogue, combining lines only when necessary.
+
+    `priority_terms` nudges selection toward lines containing the book's hard
+    names, so the clip the engine is conditioned on demonstrates them.
+    """
+    priority = frozenset(term.casefold() for term in priority_terms if term)
     unique: dict[str, tuple[int, str]] = {}
     for index, raw in enumerate(lines):
         clean = _clean(raw)
@@ -61,7 +99,7 @@ def select_reference_text(
             unique[key] = (index, clean)
     ranked = sorted(
         unique.values(),
-        key=lambda item: (-reference_line_score(item[1]), item[0]),
+        key=lambda item: (-reference_line_score(item[1], priority_terms=priority), item[0]),
     )
     chosen: list[str] = []
     chosen_words: set[str] = set()
@@ -79,7 +117,7 @@ def select_reference_text(
         chosen.append(candidate)
         chosen_words.update(words)
         total_words += len(words)
-        total_score += reference_line_score(candidate)
+        total_score += reference_line_score(candidate, priority_terms=priority)
         if total_words >= minimum_words:
             break
 
@@ -92,7 +130,7 @@ def select_reference_text(
             if remaining > 0:
                 chosen.append(" ".join(seed.split()[:remaining]))
                 total_words += min(len(seed_words), remaining)
-                total_score += reference_line_score(seed)
+                total_score += reference_line_score(seed, priority_terms=priority)
                 used_seed = True
 
     text = _clean(" ".join(chosen))

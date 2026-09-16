@@ -10,7 +10,6 @@ import re
 import time
 import unicodedata
 from collections.abc import Callable
-from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +32,7 @@ from shared.models import (
     QualityResult,
     ScriptLine,
 )
+from shared.pronunciation_evidence import same_spoken_form
 from voice.tts_server.qwen3_engine import Qwen3TTSEngine, mood_tier_for
 from voice.tts_server.voice_library import VoiceLibraryManager
 from voice.validator.audio_analyzer import AudioAnalyzer
@@ -753,10 +753,29 @@ class ValidationLoop:
             risk_adjusted_line_ids=risk_adjusted_line_ids,
         )
 
-    def validate_single(self, audio_file: str, expected_text: str) -> QualityResult:
+    def validate_single(
+        self,
+        audio_file: str,
+        expected_text: str,
+        validation_terms: set[str] | None = None,
+    ) -> QualityResult:
+        """Validate one segment outside a chapter run.
+
+        `validation_terms` matters more here than in a chapter: a standalone
+        line is often short, and on a three-word line one fictional name is a
+        third of the WER. Without the glossary such a line fails a threshold
+        the identical audio passes inside `process_chapter`, which is how a
+        correctly spoken repair take kept being rejected.
+        """
         if not self.whisper.is_loaded:
             self.whisper.load()
-        return self._validate_segment(audio_file, expected_text, "manual", 1.0)
+        return self._validate_segment(
+            audio_file,
+            expected_text,
+            "manual",
+            1.0,
+            validation_terms=validation_terms or set(),
+        )
 
     def _resolve_reference(self, project_id: str, line: ScriptLine) -> tuple[Path, str]:
         voice_id = line.voice_id or line.speaker
@@ -1247,8 +1266,17 @@ class ValidationLoop:
         Fictional names are often transcribed with plausible alternate
         spellings. The alignment below gives zero substitution cost only when
         the expected token is present in the project glossary and the observed
-        token is a close character-level rendering. Insertions, deletions, and
+        token is the same name said the same way. Insertions, deletions, and
         changes to ordinary prose retain their full WER cost.
+
+        The equivalence test used to be a character ratio of 0.45 or a
+        three-letter prefix, which forgave almost any rendering of a name --
+        including wrong ones. "drizzit" for `Drizzt` scored 0.92 and passed, so
+        a mispronunciation the listener notices cost nothing here and the retry
+        that would have redrawn it never fired. `same_spoken_form` keeps the
+        forgiveness this was built for (wolfgar/wulfgar, drist/drizzt, names
+        Whisper splits in two) and withdraws it from renderings that add or
+        drop a syllable.
         """
         reference_words = normalized_reference.split()
         hypothesis_words = normalized_hypothesis.split()
@@ -1275,10 +1303,7 @@ class ValidationLoop:
                 observed = hypothesis_words[column - 1]
                 equivalent = expected == observed
                 if not equivalent and expected in glossary_words:
-                    sim_ratio = SequenceMatcher(None, expected, observed).ratio()
-                    equivalent = len(observed) >= 3 and (
-                        sim_ratio >= 0.45 or expected.startswith(observed[:3]) or observed.startswith(expected[:3])
-                    )
+                    equivalent = same_spoken_form(expected, observed)
                 substitution_cost = 0.0 if equivalent else 1.0
                 distance[row][column] = min(
                     distance[row - 1][column] + 1.0,

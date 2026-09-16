@@ -12,11 +12,14 @@ replaced working audio with a guess.
 
 from __future__ import annotations
 
+from difflib import SequenceMatcher
+
 from shared.pronunciation_evidence import (
     TermEvidence,
     best_matching_span,
     measure_terms,
     phonetic_key,
+    same_spoken_form,
     sound_similarity,
 )
 
@@ -250,3 +253,53 @@ class TestWholePhraseEvidence:
         evidence = measure_terms(["Braelin Janquay"], texts, transcripts)["Braelin Janquay"]
         assert evidence.samples == 4
         assert evidence.verdict == "mispronounced"
+
+
+class TestSameSpokenForm:
+    """The validator's question: Whisper's spelling, or a different word?
+
+    `_glossary_adjusted_wer` forgave a 0.45 character ratio or a three-letter
+    prefix, which waved through almost any rendering of a name. "drizzit" for
+    `Drizzt` scored 0.92 and cost nothing, so the mispronunciation a listener
+    noticed never triggered the retry that would have redrawn it.
+    """
+
+    def test_whispers_own_spelling_is_forgiven(self) -> None:
+        """What the forgiveness was built for, and must keep doing."""
+        assert same_spoken_form("wulfgar", "wolfgar")
+        assert same_spoken_form("drizzt", "drist")
+        assert same_spoken_form("luskan", "laskin")
+        assert same_spoken_form("sylfae", "sylphay")
+        assert same_spoken_form("entreri", "entrary")
+
+    def test_an_added_syllable_is_not_forgiven(self) -> None:
+        """The case this exists for: "driz-ZIT" is a different name."""
+        assert not same_spoken_form("drizzt", "drizzit")
+        assert not same_spoken_form("drizzt", "drizit")
+        assert not same_spoken_form("drizzt", "drizzet")
+
+    def test_a_similarity_threshold_could_not_have_done_this(self) -> None:
+        """Why syllables and not a score.
+
+        On the phonetic key the wrong rendering scores *higher* than the right
+        one, so no single cutoff separates them. Both pairs are real.
+        """
+        wrong = SequenceMatcher(None, phonetic_key("drizzt"), phonetic_key("drizzit")).ratio()
+        right = SequenceMatcher(None, phonetic_key("guenhwyvar"), phonetic_key("guinevar")).ratio()
+        assert wrong > right, "the mispronunciation is the closer of the two by score"
+        assert not same_spoken_form("drizzt", "drizzit")
+        assert same_spoken_form("guenhwyvar", "guinevar")
+
+    def test_a_name_split_across_words_is_still_forgiven(self) -> None:
+        """Whisper writes long names as two tokens; the first is not an error."""
+        assert same_spoken_form("kokerlii", "coker")
+        assert same_spoken_form("jarlaxle", "jarl")
+        assert same_spoken_form("dalereckoning", "dale")
+
+    def test_a_genuinely_different_word_is_not_forgiven(self) -> None:
+        assert not same_spoken_form("catti", "caddy")
+        assert not same_spoken_form("xisis", "jesus")
+
+    def test_a_fragment_too_short_to_judge_is_not_forgiven(self) -> None:
+        assert not same_spoken_form("drizzt", "dr")
+        assert not same_spoken_form("drizzt", "")
