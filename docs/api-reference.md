@@ -125,6 +125,13 @@ The Mobile Companion API powers the **CrazyVoice** Android app with compatibilit
 | `GET` | `/api/mobile/v1/books/{project_id}` | Full book detail with rich chapter manifests, narrator, series, and exact start/end millisecond offsets |
 | `POST` | `/api/mobile/v1/books/{project_id}/progress` | Persist mobile playback progress (chapter, timestamp, speed, completion) |
 | `GET` | `/api/mobile/v1/books/{project_id}/progress` | Retrieve latest saved playback position for seamless cross-device resume |
+| `GET` | `/api/mobile/v1/books/{project_id}/chapters/{chapter_number}/lyrics` | Synchronized karaoke script lines with timestamps and character badges |
+| `GET` | `/api/mobile/v1/books/{project_id}/chapters/{chapter_number}/reader` | Formatted chapter prose paragraphs with audio timing boundaries |
+| `GET` | `/api/mobile/v1/books/{project_id}/epub` | Download original EPUB source file for offline reading |
+| `POST` | `/api/mobile/v1/books/{project_id}/flags` | Create playback issue flag with 20s reaction delay candidate lines |
+| `GET` | `/api/mobile/v1/books/{project_id}/flags` | List playback issue flags (supports `?status=open\|investigating\|fixed\|vetoed\|dismissed`) |
+| `PATCH` | `/api/mobile/v1/books/{project_id}/flags/{flag_id}` | Update flag status, line retargeting, verdict, resolution, or reviewer veto |
+| `GET` | `/api/mobile/v1/app` | Download compiled companion Android APK (`Voice-CrazyAudiobook-debug.apk`) |
 
 Project IDs and all resolved files are constrained beneath the project/workspace roots.
 

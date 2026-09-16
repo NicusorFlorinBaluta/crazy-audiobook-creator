@@ -54,8 +54,24 @@
 - **Inline Artwork Delivery (`artworkData`)**: Attached directly via `MediaMetadata.Builder.setArtworkData()`, delivering crisp cover art across the MediaSession IPC binder directly to Android Auto cards without encountering cross-process `FileProvider` permission blocks.
 - **Extended Projection Permissions**: `ImageFileProvider` pre-authorizes all standard Android Auto and Automotive projection hosts (`com.google.android.projection.gearhead`, `com.google.android.gms`, `com.android.bluetooth`, `com.google.android.apps.automotive.templates.host`).
 - **Robust Path Mapping**: `cover_paths.xml` declares `path="."` and `path="crazy_covers"` for full FileProvider compatibility.
+- **Primary Forward Slot for Quick Flagging**: In `LibrarySessionCallback.kt` and `PlaybackModule.kt`, the custom 🚩 Flag button is assigned to `CommandButton.SLOT_FORWARD`, guaranteeing its presence on compact split-screen cards and head-unit widgets beside Play/Pause.
 
-### 8. 24/7 Two-Way Progress Synchronization
+### 8. In-Car & Mobile Playback Issue Flagging
+- **One-Tap In-Car Flagging**: While driving, tap the 🚩 Flag button directly on the Android Auto dashboard media card to instantly log audio defects, misattributions, or pronunciation errors.
+- **In-App Mobile Flagging**:
+  - **Top App Bar**: Dedicated 🚩 Flag action in the player top bar flags the currently playing chapter position.
+  - **Lyrics View Line Tap**: Tapping or long-pressing lines in the synchronized script viewer allows pinpointing the exact dialogue line.
+- **Reaction Delay Window Compensation**: The Creator backend automatically captures a 20-second window preceding the tap (`[position_ms - 20000, position_ms + 2000]`), extracting all candidate spoken lines and manuscript text so driver/listener reaction lag never obscures the faulty sentence.
+- **Interactive Dashboard Triage**:
+  - Review flags under the project's **🚩 Playback Flags** tab in the Creator web dashboard.
+  - View candidate lines with relative timings (`-9.6s`, `-7.3s`, `[AT TAP]`).
+  - Click **`🎯 Focus Line`** to pin the exact spoken line in the database with automatic context re-enrichment.
+  - Manage status lifecycle (`🟡 Open`, `🔵 Investigating`, `🟢 Fixed`, `🟣 Vetoed`, `⚪ Dismissed`) via inline dropdown or one-click quick action buttons.
+- **Automated AI Diagnosis & CLI Tooling**:
+  - CLI script `tools/investigate_playback_flags.py` supports `--auto-diagnose`, `--export-prompt`, and `--veto` commands.
+- **Instant Backend Sync**: Dispatches to `/api/mobile/v1/books/{id}/flags` on the NAS Streamer or Creator workstation for automated AI diagnosis and dashboard review.
+
+### 9. 24/7 Two-Way Progress Synchronization
 - Persists chapter number, millisecond offset, playback speed, and completion status to `/api/mobile/v1/books/{id}/progress` in real time.
 - Backed by `/mnt/nas/media/crazybooks/{projectId}/progress.json` on the NAS for continuous 24/7 availability across devices.
 - Works seamlessly across both streaming and offline playback modes.

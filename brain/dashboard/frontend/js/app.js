@@ -501,6 +501,9 @@ function activateDetailTab(targetId, remember = false) {
     if (targetId === 'tab-characters' && state.currentProjectId && window.ScriptViewer) {
         window.ScriptViewer.refreshVoices(state.currentProjectId);
     }
+    if (targetId === 'tab-flags' && state.currentProjectId && window.fetchAndRenderFlags) {
+        window.fetchAndRenderFlags();
+    }
 }
 
 function handleTabKeydown(event) {
@@ -589,6 +592,9 @@ async function showDetailView(projectId, isHashLoad = false) {
     );
 
     scheduleDetailPoll();
+    if (window.fetchAndRenderFlags) {
+        window.fetchAndRenderFlags().catch(() => {});
+    }
 
     // Connect log console in background (non-blocking)
     if (window.LogConsole) {
@@ -3586,4 +3592,291 @@ window.saveIncrementalSettings = async function() {
     }
     saveBtn.disabled = false;
     saveBtn.textContent = 'Save Settings';
+};
+
+// ============================================================================
+// Playback Flags (In-Car & Mobile Issue Tracking)
+// ============================================================================
+
+window.fetchAndRenderFlags = async function() {
+    const projectId = state.currentProjectId;
+    if (!projectId) return;
+
+    try {
+        const response = await fetch(`api/mobile/v1/books/${encodeURIComponent(projectId)}/flags`);
+        if (!response.ok) return;
+        const data = await response.json();
+        const flags = data.flags || [];
+        state.playbackFlags = flags;
+
+        // Update badge on the Playback Flags tab (count open and pending)
+        const openCount = flags.filter(f => f.status === 'open' || f.status === 'pending').length;
+        const badge = document.getElementById('flag-tab-badge');
+        if (badge) {
+            badge.textContent = String(openCount);
+            badge.style.display = openCount > 0 ? 'inline-block' : 'none';
+        }
+
+        window.renderPlaybackFlags();
+    } catch (err) {
+        console.warn('Failed to fetch playback flags:', err);
+    }
+};
+
+window.renderPlaybackFlags = function() {
+    const container = document.getElementById('playback-flags-list');
+    if (!container) return;
+
+    const filter = document.getElementById('flags-filter-status')?.value || 'all';
+    let flags = state.playbackFlags || [];
+    if (filter === 'open') {
+        flags = flags.filter(f => f.status === 'open' || f.status === 'pending');
+    } else if (filter !== 'all') {
+        flags = flags.filter(f => f.status === filter);
+    }
+
+    if (flags.length === 0) {
+        container.innerHTML = `
+            <div class="empty-state small" style="text-align: center; padding: 40px 20px; background: var(--bg-card); border-radius: var(--radius-md); border: 1px solid var(--glass-border);">
+                <div style="font-size: 2rem; margin-bottom: 8px;">🚩</div>
+                <h3 style="margin-bottom: 6px; font-weight: 600;">No playback flags found</h3>
+                <p style="color: var(--text-secondary); max-width: 480px; margin: 0 auto; font-size: 0.92rem;">
+                    ${filter === 'all' 
+                        ? 'No playback issues have been flagged for this book yet. Tap the 🚩 Flag button during playback in the Android App or Android Auto to report wrong speakers or audio errors.' 
+                        : `No flags match the "${filter}" filter.`}
+                </p>
+            </div>
+        `;
+        return;
+    }
+
+    const esc = (s) => (window.escapeHtml ? window.escapeHtml(s) : String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'));
+
+    const formatTime = (ms) => {
+        if (ms == null) return '00:00';
+        const totalSec = Math.floor(Number(ms) / 1000);
+        const mm = Math.floor(totalSec / 60);
+        const ss = totalSec % 60;
+        return `${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}`;
+    };
+
+    const statusBadge = (status) => {
+        const s = String(status || 'open').toLowerCase();
+        let bg = 'rgba(234, 179, 8, 0.15)', color = 'hsl(45, 95%, 60%)', label = 'Open';
+        if (s === 'vetoed') { bg = 'rgba(168, 85, 247, 0.18)'; color = 'hsl(275, 80%, 75%)'; label = 'Vetoed (Audio Correct)'; }
+        else if (s === 'fixed') { bg = 'rgba(34, 197, 94, 0.18)'; color = 'hsl(145, 75%, 55%)'; label = 'Fixed'; }
+        else if (s === 'investigating') { bg = 'rgba(56, 189, 248, 0.18)'; color = 'hsl(200, 90%, 65%)'; label = 'Investigating'; }
+        else if (s === 'dismissed') { bg = 'rgba(148, 163, 184, 0.18)'; color = 'hsl(215, 20%, 65%)'; label = 'Dismissed'; }
+        return `<span style="background: ${bg}; color: ${color}; font-weight: 600; font-size: 0.75rem; padding: 3px 9px; border-radius: 9999px; text-transform: uppercase; letter-spacing: 0.5px;">${label}</span>`;
+    };
+
+    const sourceLabel = (src) => {
+        if (src === 'android_auto') return '🚗 Android Auto';
+        if (src === 'lyrics_view') return '📜 Lyrics Line Tap';
+        return '📱 Mobile App';
+    };
+
+    container.innerHTML = flags.map(flag => {
+        const activeLine = flag.active_line || {};
+        const speaker = activeLine.speaker || 'Unknown Speaker';
+        const lineText = activeLine.text || '(Active line text unavailable)';
+        const lineId = activeLine.line_id || flag.line_id || '';
+        const enriched = flag.enriched_data || {};
+        const candidateLines = enriched.candidate_lines || [];
+        const contextLines = flag.context_lines || enriched.surrounding_lines || [];
+        const manuscriptExcerpt = flag.manuscript_excerpt || enriched.manuscript_excerpt || '';
+
+        return `
+            <div class="flag-card" data-flag-id="${esc(flag.flag_id)}" style="background: var(--bg-card); border: 1px solid var(--glass-border); border-radius: var(--radius-md); padding: 18px 20px; display: flex; flex-direction: column; gap: 14px; transition: border-color 0.2s;">
+                <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+                    <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+                        ${statusBadge(flag.status)}
+                        <strong style="font-size: 1rem;">Chapter ${flag.chapter_number} @ ${formatTime(flag.position_ms)}</strong>
+                        <span style="color: var(--text-muted); font-size: 0.82rem;">${sourceLabel(flag.source)}</span>
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 12px;">
+                        <div style="display: inline-flex; align-items: center; gap: 6px;">
+                            <label style="font-size: 0.76rem; color: var(--text-muted); font-weight: 600;">Status:</label>
+                            <select class="input-sm select flag-status-select" style="font-size: 0.78rem; padding: 2px 8px; height: 26px; border-radius: 4px; background: var(--bg-surface); color: var(--text-primary);" onchange="window.updateFlagStatus('${esc(flag.flag_id)}', this.value)">
+                                <option value="open" ${flag.status === 'open' || flag.status === 'pending' ? 'selected' : ''}>🟡 Open</option>
+                                <option value="investigating" ${flag.status === 'investigating' ? 'selected' : ''}>🔵 Investigating</option>
+                                <option value="fixed" ${flag.status === 'fixed' ? 'selected' : ''}>🟢 Fixed</option>
+                                <option value="vetoed" ${flag.status === 'vetoed' ? 'selected' : ''}>🟣 Vetoed</option>
+                                <option value="dismissed" ${flag.status === 'dismissed' ? 'selected' : ''}>⚪ Dismissed</option>
+                            </select>
+                        </div>
+                        <span style="font-size: 0.78rem; color: var(--text-muted);">${esc(flag.created_at || '').replace('T', ' ').substring(0, 19)}</span>
+                    </div>
+                </div>
+
+                <div style="background: var(--bg-surface); border-left: 3px solid var(--accent); border-radius: 4px; padding: 12px 14px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                        <span style="font-weight: 700; color: var(--accent-light); font-size: 0.92rem;">🗣️ Attributed Speaker: ${esc(speaker)}</span>
+                        ${lineId ? `<span style="font-size: 0.75rem; color: var(--text-muted); font-family: monospace;">Line ${esc(lineId)}</span>` : ''}
+                    </div>
+                    <p style="margin: 0; font-size: 0.96rem; line-height: 1.5; color: var(--text-primary); font-style: italic;">"${esc(lineText)}"</p>
+                </div>
+
+                ${candidateLines.length > 0 ? `
+                    <div style="background: var(--bg-surface); border-radius: 6px; padding: 12px 14px; border: 1px solid var(--glass-border);">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                            <span style="font-weight: 700; font-size: 0.86rem; color: var(--text-primary); display: flex; align-items: center; gap: 6px;">
+                                ⏱️ Dialogue Leading to Flag Tap (Reaction Delay Window)
+                            </span>
+                            <span style="font-size: 0.74rem; color: var(--text-muted);">Click "Focus Line" to pin the exact line with the issue</span>
+                        </div>
+                        <div style="display: flex; flex-direction: column; gap: 6px;">
+                            ${candidateLines.map(c => {
+                                const isSelected = (c.line_id === lineId);
+                                const isTap = c.is_at_tap;
+                                const relSec = c.relative_sec != null ? (c.relative_sec > 0 ? `+${c.relative_sec}s` : `${c.relative_sec}s`) : '';
+                                return `
+                                    <div class="flag-candidate-chip" style="display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 10px; border-radius: 4px; background: ${isSelected ? 'var(--accent-subtle, rgba(56, 189, 248, 0.15))' : 'var(--bg-deep, rgba(0,0,0,0.2))'}; border: ${isSelected ? '1px solid var(--accent)' : '1px solid transparent'};">
+                                        <div style="display: flex; align-items: baseline; gap: 10px; flex: 1; min-width: 0;">
+                                            <span style="font-family: monospace; font-size: 0.74rem; color: ${isTap ? 'var(--warning, #eab308)' : 'var(--text-muted)'}; min-width: 50px;">
+                                                ${relSec} ${isTap ? '📍' : ''}
+                                            </span>
+                                            <div style="font-size: 0.86rem; line-height: 1.4; min-width: 0;">
+                                                <strong style="color: var(--accent-light); margin-right: 6px;">${esc(c.speaker)}:</strong>
+                                                <span style="color: var(--text-primary); font-style: ${c.is_dialogue ? 'italic' : 'normal'};">"${esc(c.text)}"</span>
+                                                ${isSelected ? `<span class="badge" style="margin-left: 6px; font-size: 0.68rem; background: var(--accent); color: #fff; padding: 1px 6px; border-radius: 4px;">ACTIVE TARGET</span>` : ''}
+                                            </div>
+                                        </div>
+                                        ${!isSelected ? `
+                                            <button class="btn btn-ghost btn-sm" style="font-size: 0.72rem; padding: 2px 6px; white-space: nowrap;" onclick="window.retargetFlagLine('${esc(flag.flag_id)}', '${esc(c.line_id)}')">
+                                                🎯 Focus Line
+                                            </button>
+                                        ` : ''}
+                                    </div>
+                                `;
+                            }).join('')}
+                        </div>
+                    </div>
+                ` : ''}
+
+                ${contextLines.length > 0 ? `
+                    <details style="font-size: 0.85rem; color: var(--text-secondary); background: var(--bg-deep); border-radius: 6px; padding: 8px 12px;">
+                        <summary style="cursor: pointer; font-weight: 500; user-select: none;">Surrounding Chapter Dialogue Context (${contextLines.length} lines)</summary>
+                        <div style="margin-top: 8px; display: flex; flex-direction: column; gap: 6px;">
+                            ${contextLines.map(c => `
+                                <div style="display: flex; gap: 8px; font-size: 0.84rem; ${c.line_id === lineId ? 'font-weight: 700; color: var(--text-primary); background: var(--accent-subtle); padding: 2px 6px; border-radius: 4px;' : ''}">
+                                    <span style="min-width: 90px; color: var(--accent-light); font-family: monospace;">${esc(c.speaker)}:</span>
+                                    <span>${esc(c.text)}</span>
+                                </div>
+                            `).join('')}
+                        </div>
+                    </details>
+                ` : ''}
+
+                ${manuscriptExcerpt ? `
+                    <details style="font-size: 0.85rem; color: var(--text-secondary); background: var(--bg-deep); border-radius: 6px; padding: 8px 12px;">
+                        <summary style="cursor: pointer; font-weight: 500; user-select: none;">📖 Manuscript Excerpt &amp; Dialogue Tags</summary>
+                        <pre style="margin-top: 8px; white-space: pre-wrap; font-size: 0.82rem; font-family: monospace; color: var(--text-muted); background: var(--bg-surface); padding: 10px; border-radius: 4px; max-height: 220px; overflow-y: auto;">${esc(manuscriptExcerpt)}</pre>
+                    </details>
+                ` : ''}
+
+                ${flag.user_note ? `
+                    <div style="font-size: 0.88rem; color: var(--text-secondary);">
+                        <strong>User Note:</strong> ${esc(flag.user_note)}
+                    </div>
+                ` : ''}
+
+                ${flag.agent_veto ? `
+                    <div style="background: rgba(168, 85, 247, 0.1); border: 1px solid rgba(168, 85, 247, 0.3); border-radius: 6px; padding: 10px 14px; font-size: 0.88rem;">
+                        <strong style="color: hsl(275, 80%, 75%); display: block; margin-bottom: 2px;">🛡️ Agent Veto Recorded:</strong>
+                        <p style="margin: 0; color: var(--text-primary);">${esc(flag.agent_veto)}</p>
+                    </div>
+                ` : ''}
+
+                <div style="display: flex; justify-content: space-between; align-items: center; border-top: 1px solid var(--glass-border); padding-top: 10px; margin-top: 4px; flex-wrap: wrap; gap: 8px;">
+                    <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+                        ${(flag.status === 'open' || flag.status === 'pending') ? `
+                            <button class="btn btn-primary btn-sm" onclick="window.updateFlagStatus('${esc(flag.flag_id)}', 'investigating')">🔍 Investigating</button>
+                            <button class="btn btn-success btn-sm" onclick="window.updateFlagStatus('${esc(flag.flag_id)}', 'fixed')">✅ Mark Fixed</button>
+                            <button class="btn btn-ghost btn-sm" style="color: hsl(275, 80%, 75%);" onclick="window.promptVetoFlag('${esc(flag.flag_id)}')">🛡️ Veto Flag</button>
+                            <button class="btn btn-ghost btn-sm" style="color: var(--text-muted);" onclick="window.updateFlagStatus('${esc(flag.flag_id)}', 'dismissed')">❌ Dismiss</button>
+                        ` : flag.status === 'investigating' ? `
+                            <button class="btn btn-success btn-sm" onclick="window.updateFlagStatus('${esc(flag.flag_id)}', 'fixed')">✅ Mark Fixed</button>
+                            <button class="btn btn-ghost btn-sm" style="color: hsl(275, 80%, 75%);" onclick="window.promptVetoFlag('${esc(flag.flag_id)}')">🛡️ Veto Flag</button>
+                            <button class="btn btn-ghost btn-sm" onclick="window.updateFlagStatus('${esc(flag.flag_id)}', 'open')">🟡 Move to Open</button>
+                            <button class="btn btn-ghost btn-sm" style="color: var(--text-muted);" onclick="window.updateFlagStatus('${esc(flag.flag_id)}', 'dismissed')">❌ Dismiss</button>
+                        ` : `
+                            <button class="btn btn-ghost btn-sm" onclick="window.updateFlagStatus('${esc(flag.flag_id)}', 'open')">↩️ Re-open Flag</button>
+                            <button class="btn btn-ghost btn-sm" onclick="window.updateFlagStatus('${esc(flag.flag_id)}', 'investigating')">🔍 Re-investigate</button>
+                        `}
+                    </div>
+                    <button class="btn btn-ghost btn-sm" style="font-family: monospace; font-size: 0.78rem;" onclick="window.copyFlagCliCommand('${esc(flag.flag_id)}')">📋 Copy CLI for Flag</button>
+                </div>
+            </div>
+        `;
+    }).join('');
+};
+
+window.promptVetoFlag = async function(flagId) {
+    const reason = prompt("Enter Agent/Reviewer Veto Reason (explain why the audio/attribution was correct):", "Speech tags and dialogue context in manuscript confirm current speaker is correct.");
+    if (!reason) return;
+    await window.updateFlagStatus(flagId, 'vetoed', reason);
+};
+
+window.retargetFlagLine = async function(flagId, lineId) {
+    const projectId = state.currentProjectId;
+    if (!projectId) return;
+
+    try {
+        const response = await fetch(`api/mobile/v1/books/${encodeURIComponent(projectId)}/flags/${encodeURIComponent(flagId)}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ line_id: lineId })
+        });
+        if (!response.ok) throw new Error("Failed to update target line");
+        showToast(`Target line updated to ${lineId}`, 'success');
+        await window.fetchAndRenderFlags();
+    } catch (err) {
+        showToast(err.message || 'Error updating target line', 'error');
+    }
+};
+
+window.updateFlagStatus = async function(flagId, newStatus, vetoReason = null) {
+    const projectId = state.currentProjectId;
+    if (!projectId) return;
+
+    try {
+        const payload = { status: newStatus };
+        if (vetoReason) {
+            payload.agent_veto = vetoReason;
+            payload.resolution_notes = "Vetoed: " + vetoReason;
+        }
+        const response = await fetch(`api/mobile/v1/books/${encodeURIComponent(projectId)}/flags/${encodeURIComponent(flagId)}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        if (!response.ok) throw new Error("Failed to update flag");
+        showToast(`Flag updated to ${newStatus}`, 'success');
+        await window.fetchAndRenderFlags();
+    } catch (err) {
+        showToast(err.message || 'Error updating flag', 'error');
+    }
+};
+
+window.copyInvestigateCommand = function() {
+    const projectId = state.currentProjectId;
+    if (!projectId) return;
+    const cmd = `python tools/investigate_playback_flags.py "${projectId}" --auto-diagnose`;
+    navigator.clipboard.writeText(cmd).then(() => {
+        showToast('Copied investigation CLI command to clipboard!', 'info');
+    }).catch(() => {
+        prompt('Copy command:', cmd);
+    });
+};
+
+window.copyFlagCliCommand = function(flagId) {
+    const projectId = state.currentProjectId;
+    if (!projectId) return;
+    const cmd = `python tools/investigate_playback_flags.py "${projectId}" --flag-id "${flagId}" --auto-diagnose`;
+    navigator.clipboard.writeText(cmd).then(() => {
+        showToast('Copied CLI command for this flag to clipboard!', 'info');
+    }).catch(() => {
+        prompt('Copy command:', cmd);
+    });
 };

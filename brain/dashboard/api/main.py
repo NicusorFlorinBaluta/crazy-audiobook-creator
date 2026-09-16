@@ -59,6 +59,10 @@ os.environ.setdefault("ROCM_SDK_TARGET_FAMILY", "custom")
 for _alloc_var in TORCH_ALLOC_ENV_VARS:
     os.environ.setdefault(_alloc_var, TORCH_ALLOC_CONF)
 
+from brain.dashboard.api.windows_compat import patch_windows_proactor
+
+patch_windows_proactor()
+
 from brain.dashboard.api import runtime
 from brain.dashboard.api.mobile import _chapter_duration
 from brain.dashboard.api.mobile import router as mobile_router
@@ -3856,6 +3860,7 @@ def main():
         handlers=handlers,
     )
 
+    patch_windows_proactor()
     logger.info("Starting Brain Dashboard on %s:%d", host, port)
     uvicorn.run(
         "brain.dashboard.api.main:app",

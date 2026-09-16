@@ -603,6 +603,124 @@ class MobileApiTests(unittest.TestCase):
             if project_dir.exists():
                 shutil.rmtree(project_dir)
 
+    def test_playback_flags_crud_and_enrichment(self) -> None:
+        """Verify flagging a playback issue auto-enriches context and persists to DB and disk."""
+        import shutil
+
+        project_id = "test_flags_book"
+        project_dir = Path("brain/projects") / project_id
+        project_dir.mkdir(parents=True, exist_ok=True)
+        manifests_dir = project_dir / "manifests"
+        manifests_dir.mkdir(parents=True, exist_ok=True)
+        scripts_dir = project_dir / "script"
+        scripts_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            self.job_queue.create_job(project_id, {"title": "Flag Test Book", "status": "complete"})
+
+            # Write script
+            script_data = {
+                "chapter_number": 1,
+                "lines": [
+                    {"line_id": "line_001", "speaker": "narrator", "text": "Wax stood in the mist.", "source_start": 0, "source_end": 23},
+                    {"line_id": "line_002", "speaker": "wax", "spoken_text": "Did you check the perimeter?", "source_start": 24, "source_end": 52},
+                    {"line_id": "line_003", "speaker": "wayne", "spoken_text": "I sure did, mate.", "source_start": 53, "source_end": 70},
+                ],
+            }
+            (scripts_dir / "chapter_001.json").write_text(json.dumps(script_data), encoding="utf-8")
+
+            # Write timeline
+            timeline_data = [
+                {"line_id": "line_001", "start_ms": 1000, "end_ms": 3000},
+                {"line_id": "line_002", "start_ms": 3500, "end_ms": 6500},
+                {"line_id": "line_003", "start_ms": 7000, "end_ms": 9500},
+            ]
+            (manifests_dir / "chapter_001.timeline.json").write_text(json.dumps(timeline_data), encoding="utf-8")
+
+            # Write book.json
+            book_data = {
+                "chapters": [
+                    {
+                        "number": 1,
+                        "title": "Chapter One",
+                        "text": "Wax stood in the mist. Did you check the perimeter? I sure did, mate.",
+                    }
+                ]
+            }
+            (project_dir / "book.json").write_text(json.dumps(book_data), encoding="utf-8")
+
+            # Flag an issue at 5000ms (inside line_002)
+            post_resp = self.client.post(
+                f"/api/mobile/v1/books/{project_id}/flags",
+                json={
+                    "chapter_number": 1,
+                    "position_ms": 5000,
+                    "issue_type": "wrong_speaker",
+                    "user_note": "Sounds like Wayne instead of Wax",
+                    "source": "android_auto",
+                },
+            )
+            self.assertEqual(post_resp.status_code, 201)
+            flag_res = post_resp.json()["flag"]
+            self.assertEqual(flag_res["chapter_number"], 1)
+            self.assertEqual(flag_res["position_ms"], 5000)
+            self.assertEqual(flag_res["source"], "android_auto")
+            self.assertEqual(flag_res["line_id"], "line_002")
+            self.assertEqual(flag_res["status"], "open")
+
+            # Verify auto-enrichment and reaction delay window
+            enriched = flag_res["enriched_data"]
+            self.assertEqual(enriched["matched_line_id"], "line_002")
+            self.assertEqual(enriched["active_line"]["speaker"], "wax")
+            self.assertIn("Did you check", enriched["active_line"]["text"])
+            self.assertEqual(len(enriched["surrounding_lines"]), 3)
+            self.assertIn("candidate_lines", enriched)
+            self.assertTrue(any(c["line_id"] == "line_002" and c["is_at_tap"] for c in enriched["candidate_lines"]))
+            self.assertIn("reaction_window", enriched)
+
+            # Check GET flags list with open filter
+            get_resp = self.client.get(f"/api/mobile/v1/books/{project_id}/flags?status=open")
+            self.assertEqual(get_resp.status_code, 200)
+            flags_list = get_resp.json()["flags"]
+            self.assertEqual(len(flags_list), 1)
+
+            # Check PATCH retargeting line_id
+            flag_id = flag_res["flag_id"]
+            retarget_resp = self.client.patch(
+                f"/api/mobile/v1/books/{project_id}/flags/{flag_id}",
+                json={"line_id": "line_003"},
+            )
+            self.assertEqual(retarget_resp.status_code, 200)
+            retargeted = retarget_resp.json()["flag"]
+            self.assertEqual(retargeted["line_id"], "line_003")
+            self.assertEqual(retargeted["active_line"]["speaker"], "wayne")
+
+            # Check PATCH update (agent veto)
+            patch_resp = self.client.patch(
+                f"/api/mobile/v1/books/{project_id}/flags/{flag_id}",
+                json={
+                    "status": "vetoed",
+                    "agent_verdict": "AGENT_VETO",
+                    "agent_explanation": "Manuscript text confirms Wax spoke this line.",
+                    "resolution": "Vetoed: speech tag confirms speaker.",
+                    "resolved_by": "agent:test",
+                },
+            )
+            self.assertEqual(patch_resp.status_code, 200)
+            updated = patch_resp.json()["flag"]
+            self.assertEqual(updated["status"], "vetoed")
+            self.assertEqual(updated["agent_verdict"], "AGENT_VETO")
+
+            # Check playback_flags.json was created on disk
+            flags_json_file = project_dir / "playback_flags.json"
+            self.assertTrue(flags_json_file.is_file())
+            saved_flags = json.loads(flags_json_file.read_text(encoding="utf-8"))
+            self.assertEqual(saved_flags["total_flags"], 1)
+            self.assertEqual(saved_flags["flags"][0]["status"], "vetoed")
+        finally:
+            if project_dir.exists():
+                shutil.rmtree(project_dir)
+
 
 class NarratorLookupTests(unittest.TestCase):
     """The Android book-detail call must find the narrator in a real registry.

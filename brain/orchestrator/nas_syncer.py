@@ -328,7 +328,13 @@ class NASSyncer:
             self._atomic_write_json(sftp, book_manifest, posixpath.join(proj_remote_dir, "book.json"))
             self._atomic_write_json(sftp, book_manifest, posixpath.join(nas_root, "api/mobile/v1/books", project_id))
 
-            # 5. Rebuild global catalog.json
+            # 5. Sync reading assets (synchronized lyrics and reader text)
+            try:
+                self.sync_reading_assets(project_id, project_dir, sftp, proj_remote_dir)
+            except Exception as exc:
+                logger.warning("Could not sync reading assets for %s: %s", project_id, exc)
+
+            # 6. Rebuild global catalog.json
             self.rebuild_global_catalog(sftp=sftp, nas_root=nas_root)
 
             return {
@@ -370,13 +376,13 @@ class NASSyncer:
                 parts_remote_dir = posixpath.join(proj_remote_dir, "parts")
                 try:
                     for item in sftp.listdir(parts_remote_dir):
-                        if item.lower().endswith(".m4b") or item.endswith(".json"):
+                        if item.lower().endswith(".m4b"):
                             try:
                                 sftp.remove(posixpath.join(parts_remote_dir, item))
-                                logger.info("Pruned partial delivery file on NAS: %s", item)
+                                logger.info("Pruned delivery part on NAS: %s", item)
                             except Exception as exc:
                                 logger.warning(
-                                    "Could not prune partial delivery file %s: %s",
+                                    "Could not prune delivery part %s: %s",
                                     item,
                                     exc,
                                 )
@@ -393,7 +399,13 @@ class NASSyncer:
             self._atomic_write_json(sftp, book_manifest, posixpath.join(proj_remote_dir, "book.json"))
             self._atomic_write_json(sftp, book_manifest, posixpath.join(nas_root, "api/mobile/v1/books", project_id))
 
-            # 5. Rebuild global catalog.json
+            # 5. Sync reading assets (synchronized lyrics and reader text)
+            try:
+                self.sync_reading_assets(project_id, project_dir, sftp, proj_remote_dir)
+            except Exception as exc:
+                logger.warning("Could not sync reading assets for %s: %s", project_id, exc)
+
+            # 6. Rebuild global catalog.json
             self.rebuild_global_catalog(sftp=sftp, nas_root=nas_root)
 
             return {
@@ -478,6 +490,101 @@ class NASSyncer:
                     return
                 except Exception as e:
                     logger.warning("Failed to upload cover %s to NAS: %s", candidate, e)
+
+    def sync_reading_assets(
+        self,
+        project_id: str,
+        project_dir: Path,
+        sftp: paramiko.SFTPClient,
+        proj_remote_dir: str,
+    ) -> None:
+        """Export and sync synchronized lyrics and reader chapter JSONs to NAS."""
+        lyrics_remote_dir = posixpath.join(proj_remote_dir, "lyrics")
+        reader_remote_dir = posixpath.join(proj_remote_dir, "reader")
+        self._mkdir_p(sftp, lyrics_remote_dir)
+        self._mkdir_p(sftp, reader_remote_dir)
+
+        # Local cache directories
+        local_lyrics_dir = project_dir / "lyrics"
+        local_reader_dir = project_dir / "reader"
+        local_lyrics_dir.mkdir(parents=True, exist_ok=True)
+        local_reader_dir.mkdir(parents=True, exist_ok=True)
+
+        # Discover available chapters from script/ or book.json
+        script_dir = project_dir / "script"
+        available_chapters: set[int] = set()
+        if script_dir.is_dir():
+            for f in script_dir.glob("chapter_*.json"):
+                if not f.name.endswith(".meta.json"):
+                    try:
+                        num = int(f.stem.split("_")[-1])
+                        available_chapters.add(num)
+                    except ValueError:
+                        pass
+        book_json = project_dir / "book.json"
+        if book_json.is_file():
+            try:
+                bdata = json.loads(book_json.read_text(encoding="utf-8"))
+                for idx, ch in enumerate(bdata.get("chapters", []), 1):
+                    ch_num = ch.get("number") or ch.get("chapter_number") or idx
+                    available_chapters.add(int(ch_num))
+            except Exception:
+                pass
+
+        if not available_chapters:
+            return
+
+        try:
+            from brain.dashboard.api.mobile import build_chapter_lyrics, build_chapter_reader
+        except ImportError:
+            logger.warning("Could not import mobile API reading builders; skipping reading assets sync.")
+            return
+
+        synced_count = 0
+        for ch_num in sorted(available_chapters):
+            # 1. Lyrics
+            lyrics_data = None
+            local_lyrics_file = local_lyrics_dir / f"chapter_{ch_num}.json"
+            try:
+                lyrics_data = build_chapter_lyrics(project_id, ch_num)
+                local_lyrics_file.write_text(json.dumps(lyrics_data, indent=2, ensure_ascii=False), encoding="utf-8")
+            except Exception as exc:
+                if local_lyrics_file.is_file():
+                    try:
+                        lyrics_data = json.loads(local_lyrics_file.read_text(encoding="utf-8"))
+                    except Exception:
+                        lyrics_data = None
+                if lyrics_data is None:
+                    logger.debug("Could not build chapter %d lyrics for %s: %s", ch_num, project_id, exc)
+
+            if lyrics_data:
+                # Write both chapter_{ch_num}.json and chapter_{ch_num:03d}.json for seamless lookup
+                self._atomic_write_json(sftp, lyrics_data, posixpath.join(lyrics_remote_dir, f"chapter_{ch_num}.json"))
+                self._atomic_write_json(sftp, lyrics_data, posixpath.join(lyrics_remote_dir, f"chapter_{ch_num:03d}.json"))
+
+            # 2. Reader
+            reader_data = None
+            local_reader_file = local_reader_dir / f"chapter_{ch_num}.json"
+            try:
+                reader_data = build_chapter_reader(project_id, ch_num)
+                local_reader_file.write_text(json.dumps(reader_data, indent=2, ensure_ascii=False), encoding="utf-8")
+            except Exception as exc:
+                if local_reader_file.is_file():
+                    try:
+                        reader_data = json.loads(local_reader_file.read_text(encoding="utf-8"))
+                    except Exception:
+                        reader_data = None
+                if reader_data is None:
+                    logger.debug("Could not build chapter %d reader for %s: %s", ch_num, project_id, exc)
+
+            if reader_data:
+                self._atomic_write_json(sftp, reader_data, posixpath.join(reader_remote_dir, f"chapter_{ch_num}.json"))
+                self._atomic_write_json(sftp, reader_data, posixpath.join(reader_remote_dir, f"chapter_{ch_num:03d}.json"))
+
+            if lyrics_data or reader_data:
+                synced_count += 1
+
+        logger.info("Synchronized %d chapter reading assets (lyrics & reader) to NAS for %s", synced_count, project_id)
 
     def _generate_book_manifest(
         self,

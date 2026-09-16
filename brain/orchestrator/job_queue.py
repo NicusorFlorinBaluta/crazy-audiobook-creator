@@ -15,6 +15,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from shared import paths as shared_paths
 from shared.models import ProgressSnapshot
 
 logger = logging.getLogger(__name__)
@@ -33,8 +34,11 @@ class JobState(StrEnum):
 class JobQueue:
     """SQLite-backed job queue and state store."""
 
-    def __init__(self, db_path: str = "pipeline_state.db"):
-        self.db_path = db_path
+    def __init__(self, db_path: str | Path | None = None):
+        if db_path is None:
+            self.db_path = str(shared_paths.PROJECTS_DIR / "pipeline_state.db")
+        else:
+            self.db_path = str(db_path)
         self._init_db()
 
     def _init_db(self) -> None:
@@ -121,6 +125,32 @@ class JobQueue:
                     FOREIGN KEY (project_id) REFERENCES jobs(project_id)
                 )
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS playback_flags (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    flag_id TEXT UNIQUE NOT NULL,
+                    project_id TEXT NOT NULL,
+                    chapter_number INTEGER NOT NULL,
+                    position_ms INTEGER NOT NULL,
+                    source TEXT NOT NULL DEFAULT 'phone',
+                    issue_type TEXT NOT NULL DEFAULT 'wrong_speaker',
+                    user_note TEXT NOT NULL DEFAULT '',
+                    line_id TEXT,
+                    enriched_data TEXT NOT NULL DEFAULT '{}',
+                    status TEXT NOT NULL DEFAULT 'open',
+                    agent_verdict TEXT,
+                    agent_explanation TEXT,
+                    resolution TEXT,
+                    resolved_by TEXT,
+                    resolved_at TEXT,
+                    created_at TEXT NOT NULL
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_playback_flags_project
+                ON playback_flags(project_id, status)
+            """)
+            conn.execute("UPDATE playback_flags SET status = 'open' WHERE status = 'pending'")
             conn.commit()
 
     @contextmanager
@@ -799,3 +829,247 @@ class JobQueue:
             "is_completed": bool(row[4]),
             "updated_at": row[5],
         }
+
+    # ------------------------------------------------------------------
+    # Playback flags / issue tracker
+    # ------------------------------------------------------------------
+
+    def create_playback_flag(
+        self,
+        project_id: str,
+        flag_id: str,
+        chapter_number: int,
+        position_ms: int,
+        source: str = "phone",
+        issue_type: str = "wrong_speaker",
+        user_note: str = "",
+        line_id: str | None = None,
+        enriched_data: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Record a playback issue flag."""
+        now = datetime.now(UTC).isoformat()
+        enriched_json = json.dumps(enriched_data or {})
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO jobs (project_id, state, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                (project_id, json.dumps({"title": project_id, "status": "complete"}), now, now),
+            )
+            conn.execute(
+                """
+                INSERT INTO playback_flags (
+                    flag_id, project_id, chapter_number, position_ms,
+                    source, issue_type, user_note, line_id,
+                    enriched_data, status, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)
+                """,
+                (
+                    flag_id,
+                    project_id,
+                    int(chapter_number),
+                    int(position_ms),
+                    source,
+                    issue_type,
+                    user_note,
+                    line_id,
+                    enriched_json,
+                    now,
+                ),
+            )
+            conn.commit()
+        enriched = enriched_data or {}
+        active_line = enriched.get("active_line") or {}
+        return {
+            "flag_id": flag_id,
+            "project_id": project_id,
+            "chapter_number": int(chapter_number),
+            "position_ms": int(position_ms),
+            "source": source,
+            "issue_type": issue_type,
+            "user_note": user_note,
+            "line_id": line_id,
+            "enriched_data": enriched,
+            "candidate_lines": enriched.get("candidate_lines") or [],
+            "active_line": active_line,
+            "speaker_attributed": active_line.get("speaker"),
+            "context_lines": enriched.get("surrounding_lines") or [],
+            "manuscript_excerpt": enriched.get("manuscript_excerpt"),
+            "status": "open",
+            "agent_verdict": None,
+            "agent_explanation": None,
+            "agent_veto": None,
+            "resolution": None,
+            "resolution_notes": None,
+            "resolved_by": None,
+            "resolved_at": None,
+            "created_at": now,
+        }
+
+    def get_playback_flags(
+        self,
+        project_id: str,
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """List playback issue flags for a project."""
+        query = """
+            SELECT flag_id, project_id, chapter_number, position_ms,
+                   source, issue_type, user_note, line_id,
+                   enriched_data, status, agent_verdict, agent_explanation,
+                   resolution, resolved_by, resolved_at, created_at
+            FROM playback_flags
+            WHERE project_id = ?
+        """
+        params: list[Any] = [project_id]
+        if status:
+            if status == "open":
+                query += " AND status IN ('open', 'pending')"
+            else:
+                query += " AND status = ?"
+                params.append(status)
+        query += " ORDER BY chapter_number ASC, position_ms ASC, created_at ASC"
+
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+
+        flags = []
+        for r in rows:
+            try:
+                enriched = json.loads(r[8]) if r[8] else {}
+            except (json.JSONDecodeError, TypeError):
+                enriched = {}
+            active_line = enriched.get("active_line") or {}
+            raw_status = r[9]
+            norm_status = "open" if raw_status == "pending" else raw_status
+            flags.append({
+                "flag_id": r[0],
+                "project_id": r[1],
+                "chapter_number": r[2],
+                "position_ms": r[3],
+                "source": r[4],
+                "issue_type": r[5],
+                "user_note": r[6],
+                "line_id": r[7],
+                "enriched_data": enriched,
+                "candidate_lines": enriched.get("candidate_lines") or [],
+                "active_line": active_line,
+                "speaker_attributed": active_line.get("speaker"),
+                "context_lines": enriched.get("surrounding_lines") or [],
+                "manuscript_excerpt": enriched.get("manuscript_excerpt"),
+                "status": norm_status,
+                "agent_verdict": r[10],
+                "agent_explanation": r[11],
+                "agent_veto": r[11] if (norm_status == "vetoed" or r[10] in ("vetoed", "AGENT_VETO")) else None,
+                "resolution": r[12],
+                "resolution_notes": r[12],
+                "resolved_by": r[13],
+                "resolved_at": r[14],
+                "created_at": r[15],
+            })
+        return flags
+
+    def get_playback_flag(self, project_id: str, flag_id: str) -> dict[str, Any] | None:
+        """Get a single playback flag by ID."""
+        with self._connect() as conn:
+            r = conn.execute(
+                """
+                SELECT flag_id, project_id, chapter_number, position_ms,
+                       source, issue_type, user_note, line_id,
+                       enriched_data, status, agent_verdict, agent_explanation,
+                       resolution, resolved_by, resolved_at, created_at
+                FROM playback_flags
+                WHERE project_id = ? AND flag_id = ?
+                """,
+                (project_id, flag_id),
+            ).fetchone()
+        if r is None:
+            return None
+        try:
+            enriched = json.loads(r[8]) if r[8] else {}
+        except (json.JSONDecodeError, TypeError):
+            enriched = {}
+        active_line = enriched.get("active_line") or {}
+        raw_status = r[9]
+        norm_status = "open" if raw_status == "pending" else raw_status
+        return {
+            "flag_id": r[0],
+            "project_id": r[1],
+            "chapter_number": r[2],
+            "position_ms": r[3],
+            "source": r[4],
+            "issue_type": r[5],
+            "user_note": r[6],
+            "line_id": r[7],
+            "enriched_data": enriched,
+            "candidate_lines": enriched.get("candidate_lines") or [],
+            "active_line": active_line,
+            "speaker_attributed": active_line.get("speaker"),
+            "context_lines": enriched.get("surrounding_lines") or [],
+            "manuscript_excerpt": enriched.get("manuscript_excerpt"),
+            "status": norm_status,
+            "agent_verdict": r[10],
+            "agent_explanation": r[11],
+            "agent_veto": r[11] if (norm_status == "vetoed" or r[10] in ("vetoed", "AGENT_VETO")) else None,
+            "resolution": r[12],
+            "resolution_notes": r[12],
+            "resolved_by": r[13],
+            "resolved_at": r[14],
+            "created_at": r[15],
+        }
+
+    def update_playback_flag(
+        self,
+        project_id: str,
+        flag_id: str,
+        status: str | None = None,
+        agent_verdict: str | None = None,
+        agent_explanation: str | None = None,
+        resolution: str | None = None,
+        resolved_by: str | None = None,
+        line_id: str | None = None,
+        enriched_data: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Update a playback flag's investigation status, resolution, or target line."""
+        existing = self.get_playback_flag(project_id, flag_id)
+        if not existing:
+            return None
+
+        updates: list[str] = []
+        params: list[Any] = []
+        now = datetime.now(UTC).isoformat()
+
+        if status is not None:
+            updates.append("status = ?")
+            params.append(status)
+        if agent_verdict is not None:
+            updates.append("agent_verdict = ?")
+            params.append(agent_verdict)
+        if agent_explanation is not None:
+            updates.append("agent_explanation = ?")
+            params.append(agent_explanation)
+        if resolution is not None:
+            updates.append("resolution = ?")
+            params.append(resolution)
+        if resolved_by is not None:
+            updates.append("resolved_by = ?")
+            params.append(resolved_by)
+            updates.append("resolved_at = ?")
+            params.append(now)
+        if line_id is not None:
+            updates.append("line_id = ?")
+            params.append(line_id)
+        if enriched_data is not None:
+            updates.append("enriched_data = ?")
+            params.append(json.dumps(enriched_data))
+
+        if not updates:
+            return existing
+
+        params.extend([project_id, flag_id])
+        with self._connect() as conn:
+            conn.execute(
+                f"UPDATE playback_flags SET {', '.join(updates)} WHERE project_id = ? AND flag_id = ?",
+                params,
+            )
+            conn.commit()
+
+        return self.get_playback_flag(project_id, flag_id)

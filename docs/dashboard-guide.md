@@ -134,6 +134,23 @@ speaker, or severity. Reviewed items remain collapsed under **Show reviewed**.
 Changes enable the row's save button, and visible filtered items can be marked
 acceptable as a confirmed batch action.
 
+## In-Car & Mobile Playback Flags
+
+Auditioning in a vehicle or on mobile often reveals subtle attribution or delivery defects that automated gates cannot detect. The **🚩 Playback Flags** tab provides an interactive triage center for reports submitted from Android Auto and the companion mobile app:
+
+- **Live Flag Counter**: The tab header displays an attention badge indicating the number of unresolved (`Open` or `Investigating`) flags.
+- **Status Filter Toolbar**: Filter flags by `Open Only`, `Investigating`, `Fixed`, `Vetoed`, `Dismissed`, or `All Flags`.
+- **Reaction Delay Window**: Compensates for natural listening and driving delays (5–15 seconds) by presenting an expanded 20-second timeline preceding the tap. Candidate dialogue and narration lines display relative timestamps (e.g. `-9.6s`, `-7.3s`, `[AT TAP]`).
+- **Interactive `🎯 Focus Line` Retargeting**: Click **Focus Line** on any candidate line to instantly retarget the flag's active line ID, recalculating relative offsets and manuscript excerpts in real time.
+- **Collapsible Context Views**: Expand surrounding chapter dialogue or inspect authentic manuscript prose extracts ($\pm 600$ characters) to verify speaker tags.
+- **Inline Status Lifecycle**: Adjust statuses directly using the card dropdown or one-click action buttons:
+  - `🟡 Open`: Default state awaiting triage.
+  - `🔵 Investigating`: Active review in progress.
+  - `🟢 Fixed`: Issue addressed and corrected.
+  - `🟣 Vetoed`: Flag reviewed and confirmed correct (preserves audio with written reason).
+  - `⚪ Dismissed`: Invalid or irrelevant flag.
+- **Agent CLI Integration**: Copy the targeted CLI command (`python tools/investigate_playback_flags.py <project_id> --flag-id <flag_id> --auto-diagnose`) for automated LLM review.
+
 ## Logs and support
 
 Completed projects label their stream as a historical log. Search and level

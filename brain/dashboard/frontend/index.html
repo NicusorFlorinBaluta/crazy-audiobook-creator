@@ -370,6 +370,7 @@
                 <button class="tab active" id="tab-button-characters" role="tab" aria-selected="true" aria-controls="tab-characters" tabindex="0" data-tab="tab-characters">Voice casting</button>
                 <button class="tab" id="tab-button-script" role="tab" aria-selected="false" aria-controls="tab-script" tabindex="-1" data-tab="tab-script">Script</button>
                 <button class="tab" id="tab-button-quality" role="tab" aria-selected="false" aria-controls="tab-quality" tabindex="-1" data-tab="tab-quality">Quality</button>
+                <button class="tab" id="tab-button-flags" role="tab" aria-selected="false" aria-controls="tab-flags" tabindex="-1" data-tab="tab-flags">🚩 Playback Flags <span class="badge" id="flag-tab-badge" style="display:none; margin-left: 6px; background: var(--warning); color: #000; font-size: 0.72rem; padding: 2px 7px; border-radius: 10px; font-weight: 700;">0</span></button>
                 <button class="tab tab-logs" id="tab-button-logs" role="tab" aria-selected="false" aria-controls="tab-logs" tabindex="-1" data-tab="tab-logs">🖥 Logs</button>
             </div>
 
@@ -429,6 +430,33 @@
                 <div class="quality-overview" id="quality-overview">
                     <div class="empty-state small">
                         <p>Quality data will appear after audio generation</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Playback Flags Tab -->
+            <div class="tab-content" id="tab-flags" role="tabpanel" aria-labelledby="tab-button-flags" tabindex="0">
+                <div class="flags-header-toolbar" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; flex-wrap: wrap; gap: 12px; background: var(--bg-card); padding: 14px 18px; border-radius: var(--radius-md); border: 1px solid var(--glass-border);">
+                    <div style="display: flex; gap: 12px; align-items: center;">
+                        <span style="font-weight: 700; font-size: 1.05rem; display: flex; align-items: center; gap: 6px;">🚩 In-Car &amp; Mobile Playback Flags</span>
+                        <select id="flags-filter-status" class="input-sm select" onchange="window.renderPlaybackFlags()">
+                            <option value="all">All Flags</option>
+                            <option value="open" selected>Open Only</option>
+                            <option value="investigating">Investigating</option>
+                            <option value="fixed">Fixed</option>
+                            <option value="vetoed">Vetoed</option>
+                            <option value="dismissed">Dismissed</option>
+                        </select>
+                    </div>
+                    <div style="display: flex; gap: 10px; align-items: center;">
+                        <button class="btn btn-ghost btn-sm" id="btn-refresh-flags" onclick="window.fetchAndRenderFlags()">🔄 Refresh</button>
+                        <button class="btn btn-primary btn-sm" id="btn-copy-cli-investigate" onclick="window.copyInvestigateCommand()">📋 Copy Agent CLI Command</button>
+                    </div>
+                </div>
+
+                <div id="playback-flags-list" class="flags-card-list" style="display: flex; flex-direction: column; gap: 14px;">
+                    <div class="empty-state small">
+                        <p>No playback issues flagged yet. Tap the 🚩 Flag button while listening in Android Auto or the Android app to report wrong speaker attribution or playback errors.</p>
                     </div>
                 </div>
             </div>

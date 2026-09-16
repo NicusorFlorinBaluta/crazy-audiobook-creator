@@ -815,6 +815,18 @@ class ValidationLoopTests(unittest.TestCase):
             measured = sum(value for key, value in first.timings_seconds.items() if key != "total")
             self.assertLessEqual(measured, first.timings_seconds["total"] * 1.1)
 
+            # Unrelated terms must not invalidate cached lines that do not contain them
+            unrelated = loop.process_chapter(
+                project_id="book",
+                chapter_number=1,
+                lines=[line],
+                workspace=root,
+                validation_terms={"unrelated_fantasy_term", "dalereckoning"},
+            )
+            self.assertEqual(unrelated.validation_cache_hits, 1)
+            self.assertEqual(unrelated.validation_cache_misses, 0)
+            self.assertEqual(whisper.transcriptions, 1)
+
             third = loop.process_chapter(
                 project_id="book",
                 chapter_number=1,
@@ -839,6 +851,87 @@ class ValidationLoopTests(unittest.TestCase):
             self.assertEqual(fourth.validation_cache_misses, 1)
             self.assertEqual(engine.calls, synthesis_calls)
             self.assertEqual(whisper.transcriptions, 3)
+
+    def test_selective_revalidation_when_pronunciation_updated(self) -> None:
+        """When a pronunciation changes, only lines containing that term revalidate."""
+        class MatchWhisper(FakeWhisper):
+            def __init__(self) -> None:
+                super().__init__()
+                self.transcriptions = 0
+
+            def transcribe(self, audio_file: str) -> str:
+                self.transcriptions += 1
+                return "text"
+
+            def calculate_wer(self, reference: str, hypothesis: str) -> float:
+                return 0.0
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reference = root / "reference.wav"
+            sf.write(reference, np.ones(2400, dtype=np.float32) * 0.01, 24000)
+            engine = FakeEngine()
+            whisper = MatchWhisper()
+            store = EmbeddingStore(root / "cache.db")
+            loop = ValidationLoop(
+                whisper=whisper,
+                analyzer=FakeAnalyzer(),
+                engine=engine,
+                library=FakeLibrary(reference),
+                embedding_store=store,
+            )
+            line1 = ScriptLine(
+                line_id="ch01_0001",
+                speaker="narrator",
+                text="The morning was quiet and peaceful.",
+            )
+            line2 = ScriptLine(
+                line_id="ch01_0002",
+                speaker="narrator",
+                text="Uncle Jax smiled as he entered the room.",
+            )
+            lines = [line1, line2]
+
+            # Initial generation and validation
+            first = loop.process_chapter(
+                project_id="book",
+                chapter_number=1,
+                lines=lines,
+                workspace=root,
+                validation_terms={"Jax", "Uncle Jax"},
+            )
+            self.assertEqual(first.validation_cache_hits, 0)
+            self.assertEqual(first.validation_cache_misses, 2)
+            self.assertEqual(whisper.transcriptions, 2)
+
+            # Scenario A: User adds an unrelated pronunciation term (e.g. "Dalereckoning")
+            # Neither line contains "Dalereckoning", so BOTH lines must be cache hits!
+            unrelated_run = loop.process_chapter(
+                project_id="book",
+                chapter_number=1,
+                lines=lines,
+                workspace=root,
+                validation_terms={"Jax", "Uncle Jax", "Dalereckoning"},
+            )
+            self.assertEqual(unrelated_run.validation_cache_hits, 2)
+            self.assertEqual(unrelated_run.validation_cache_misses, 0)
+            self.assertEqual(whisper.transcriptions, 2)  # Whisper was NOT called
+
+            # Scenario B: User updates pronunciation for "Jax" -> "Jaks"
+            # line1 is untouched -> cache hit!
+            # line2 has spoken_text changed -> cache miss & revalidates!
+            line2_updated = line2.model_copy(update={"spoken_text": "Uncle Jaks smiled as he entered the room."})
+            updated_lines = [line1, line2_updated]
+            updated_run = loop.process_chapter(
+                project_id="book",
+                chapter_number=1,
+                lines=updated_lines,
+                workspace=root,
+                validation_terms={"Jax", "Uncle Jax", "Jaks", "Dalereckoning"},
+            )
+            self.assertEqual(updated_run.validation_cache_hits, 1)  # line1 cached!
+            self.assertEqual(updated_run.validation_cache_misses, 1)  # line2 re-validated!
+            self.assertEqual(whisper.transcriptions, 3)  # Whisper called only once for line2
 
     def test_resume_reuses_line_checkpointed_before_callback_crash(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

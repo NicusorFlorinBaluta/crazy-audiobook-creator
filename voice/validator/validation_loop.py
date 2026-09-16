@@ -388,12 +388,20 @@ class ValidationLoop:
         quality_by_id: dict[str, QualityResult] = {}
         uncached_lines: list[ScriptLine] = []
         line_positions = {line.line_id: index for index, line in enumerate(lines, 1)}
+        line_validation_terms_by_id: dict[str, set[str]] = {
+            line.line_id: self._filter_relevant_validation_terms(
+                f"{line.text} {expected_text_by_id[line.line_id]}",
+                validation_terms,
+            )
+            for line in lines
+        }
         for line in lines:
             voice_ref, _, _ = reference_context[line.line_id]
+            line_terms = line_validation_terms_by_id[line.line_id]
             validation_context = self._validation_context(
                 voice_ref=voice_ref,
                 speed=line.speed,
-                validation_terms=validation_terms,
+                validation_terms=line_terms,
                 validation_revision=validation_revision,
                 language=language,
             )
@@ -468,7 +476,7 @@ class ValidationLoop:
                     reference_pitch_median=reference_pitch_map[line.line_id],
                     speaker_similarity=speaker_similarity[line.line_id],
                     require_speaker_similarity=True,
-                    validation_terms=validation_terms,
+                    validation_terms=line_validation_terms_by_id[line.line_id],
                     timing_accumulator=timings,
                     emotion_adjusted=self._is_emotion_adjusted(line.emotion),
                     language=language,
@@ -633,7 +641,7 @@ class ValidationLoop:
                         attempt,
                         speaker_similarity=attempt_similarity.get(line.line_id),
                         require_speaker_similarity=True,
-                        validation_terms=validation_terms,
+                        validation_terms=line_validation_terms_by_id[line.line_id],
                         timing_accumulator=timings,
                         voice_ref_path=reference_context[line.line_id][0],
                         reference_pitch_median=reference_pitch_map[line.line_id],
@@ -867,6 +875,37 @@ class ValidationLoop:
                 "short_expressive",
             )
         return synthesis_text, line.emotion, line.speed, line.voice_fx, None
+
+    def _filter_relevant_validation_terms(
+        self,
+        text: str,
+        validation_terms: set[str] | None,
+    ) -> set[str]:
+        """Filter validation terms to only those that can affect this line's validation.
+
+        A term can only affect validation if its normalized form appears in the
+        normalized line text, or if any of its constituent words (>= 3 chars)
+        appear in the words of the line text. All other terms have zero impact on
+        glossary matching or glossary-adjusted WER.
+        """
+        if not validation_terms or not text:
+            return set()
+        normalized_text = self.whisper._normalize_text(text)
+        if not normalized_text:
+            return set()
+        text_words = set(normalized_text.split())
+        relevant: set[str] = set()
+        for term in validation_terms:
+            normalized_term = self.whisper._normalize_text(term)
+            if not normalized_term:
+                continue
+            if normalized_term in normalized_text:
+                relevant.add(term)
+                continue
+            term_words = {word for word in normalized_term.split() if len(word) >= 3}
+            if term_words & text_words:
+                relevant.add(term)
+        return relevant
 
     def _validation_context(
         self,

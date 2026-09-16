@@ -9,10 +9,12 @@ from __future__ import annotations
 import json
 import logging
 import re
+import uuid
 import wave
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
+import urllib.request
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
@@ -21,6 +23,7 @@ from pydantic import BaseModel, Field
 from brain.orchestrator.delivery_manager import DeliveryManager
 from brain.orchestrator.job_queue import JobQueue
 from shared import paths as shared_paths
+from shared.artifacts import atomic_write_json
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +51,26 @@ class ProgressSyncRequest(BaseModel):
     position_ms: int = Field(default=0, ge=0)
     playback_speed: float = Field(default=1.0, ge=0.25, le=4.0)
     is_completed: bool = False
+
+
+class PlaybackFlagRequest(BaseModel):
+    chapter_number: int = Field(default=1, ge=1)
+    position_ms: int = Field(default=0, ge=0)
+    issue_type: str = Field(default="wrong_speaker", max_length=64)
+    user_note: str = Field(default="", max_length=2000)
+    source: str = Field(default="phone", max_length=64)
+    line_id: str | None = Field(default=None, max_length=128)
+
+
+class PlaybackFlagUpdateRequest(BaseModel):
+    status: str | None = Field(default=None, max_length=64)
+    agent_verdict: str | None = Field(default=None, max_length=64)
+    agent_explanation: str | None = Field(default=None, max_length=4000)
+    agent_veto: str | None = Field(default=None, max_length=4000)
+    resolution: str | None = Field(default=None, max_length=4000)
+    resolution_notes: str | None = Field(default=None, max_length=4000)
+    resolved_by: str | None = Field(default=None, max_length=128)
+    line_id: str | None = Field(default=None, max_length=128)
 
 
 def _get_job_queue(request: Request) -> JobQueue:
@@ -532,7 +555,9 @@ async def save_progress(
     )
     return {
         "status": "synced",
+        "success": True,
         "progress": result,
+        "saved_position": result,
     }
 
 
@@ -547,13 +572,23 @@ async def get_progress(project_id: str, req: Request) -> dict[str, Any]:
         return {
             "project_id": project_id,
             "has_progress": False,
+            "saved_position": None,
             "chapter_number": 1,
             "position_ms": 0,
             "playback_speed": 1.0,
             "is_completed": False,
         }
     return {
+        "project_id": project_id,
         "has_progress": True,
+        "saved_position": {
+            "client_id": progress.get("client_id", "voice_android"),
+            "chapter_number": progress.get("chapter_number", 1),
+            "position_ms": progress.get("position_ms", 0),
+            "playback_speed": progress.get("playback_speed", 1.0),
+            "is_completed": progress.get("is_completed", False),
+            "updated_at": progress.get("updated_at"),
+        },
         **progress,
     }
 
@@ -690,9 +725,8 @@ def _resolve_chapter_timeline(project_dir: Path, workspace_dir: Path, chapter_nu
     return timeline_dict
 
 
-@router.get("/books/{project_id}/chapters/{chapter_number}/lyrics")
-async def get_chapter_lyrics(project_id: str, chapter_number: int, request: Request) -> dict[str, Any]:
-    """Return synchronized karaoke/script lines with timestamps for a chapter."""
+def build_chapter_lyrics(project_id: str, chapter_number: int) -> dict[str, Any]:
+    """Build synchronized karaoke/script lines with timestamps for a chapter."""
     project_dir = _project_dir(project_id)
     workspace_dir = _workspace_project_dir(project_id)
 
@@ -738,9 +772,8 @@ async def get_chapter_lyrics(project_id: str, chapter_number: int, request: Requ
     }
 
 
-@router.get("/books/{project_id}/chapters/{chapter_number}/reader")
-async def get_chapter_reader(project_id: str, chapter_number: int, request: Request) -> dict[str, Any]:
-    """Return formatted chapter text partitioned into paragraphs with timing metadata."""
+def build_chapter_reader(project_id: str, chapter_number: int) -> dict[str, Any]:
+    """Build formatted chapter text partitioned into paragraphs with timing metadata."""
     project_dir = _project_dir(project_id)
     workspace_dir = _workspace_project_dir(project_id)
 
@@ -851,6 +884,26 @@ async def get_chapter_reader(project_id: str, chapter_number: int, request: Requ
     }
 
 
+@router.get("/books/{project_id}/chapters/{chapter_number}/lyrics")
+async def get_chapter_lyrics(
+    project_id: str,
+    chapter_number: int,
+    request: Request = None,  # type: ignore[assignment]
+) -> dict[str, Any]:
+    """Return synchronized karaoke/script lines with timestamps for a chapter."""
+    return build_chapter_lyrics(project_id, chapter_number)
+
+
+@router.get("/books/{project_id}/chapters/{chapter_number}/reader")
+async def get_chapter_reader(
+    project_id: str,
+    chapter_number: int,
+    request: Request = None,  # type: ignore[assignment]
+) -> dict[str, Any]:
+    """Return formatted chapter text partitioned into paragraphs with timing metadata."""
+    return build_chapter_reader(project_id, chapter_number)
+
+
 @router.get("/books/{project_id}/epub")
 async def download_book_epub(project_id: str, request: Request):
     """Download the original EPUB source file for offline reading."""
@@ -870,3 +923,393 @@ async def download_book_epub(project_id: str, request: Request):
         media_type="application/epub+zip",
         filename=f"{project_id}.epub",
     )
+
+
+def _enrich_flag_context(
+    project_dir: Path,
+    workspace_dir: Path,
+    chapter_number: int,
+    position_ms: int,
+    target_line_id: str | None = None,
+) -> dict[str, Any]:
+    """Enrich a playback flag with matching, candidate, and surrounding script lines, plus manuscript excerpt."""
+    timeline = _resolve_chapter_timeline(project_dir, workspace_dir, chapter_number)
+
+    # Load script lines if available
+    script_file = project_dir / "script" / f"chapter_{chapter_number:03d}.json"
+    script_lines: list[dict[str, Any]] = []
+    if script_file.is_file():
+        try:
+            sdata = json.loads(script_file.read_text(encoding="utf-8"))
+            script_lines = sdata.get("lines", [])
+        except Exception as exc:
+            logger.warning("Could not read script lines for flag enrichment: %s", exc)
+
+    # Attach timing to script lines
+    line_map: dict[str, dict[str, Any]] = {}
+    for line in script_lines:
+        lid = str(line.get("line_id", ""))
+        timing = timeline.get(lid, (0, 0))
+        line["_start_ms"] = timing[0]
+        line["_end_ms"] = timing[1]
+        line_map[lid] = line
+
+    # 1. Natural Reaction Delay Window:
+    # When listening or driving, users typically react 5-15 seconds after hearing an error.
+    # We inspect a ~22 second window preceding and immediately following the tap.
+    window_start_ms = max(0, position_ms - 20000)
+    window_end_ms = position_ms + 2000
+
+    matched_line: dict[str, Any] | None = None
+    matched_idx: int = -1
+
+    if target_line_id and target_line_id in line_map:
+        matched_line = line_map[target_line_id]
+        for idx, l in enumerate(script_lines):
+            if str(l.get("line_id", "")) == target_line_id:
+                matched_idx = idx
+                break
+    else:
+        # Find line playing at the moment of tap
+        best_candidate = None
+        best_dist = float("inf")
+        for idx, line in enumerate(script_lines):
+            s_ms = line.get("_start_ms", 0)
+            e_ms = line.get("_end_ms", 0)
+            if s_ms <= position_ms <= e_ms:
+                matched_line = line
+                matched_idx = idx
+                break
+            dist = min(abs(position_ms - s_ms), abs(position_ms - e_ms))
+            if dist < best_dist:
+                best_dist = dist
+                best_candidate = (idx, line)
+        if matched_line is None and best_candidate:
+            matched_idx, matched_line = best_candidate
+
+    def _line_summary(l: dict[str, Any]) -> dict[str, Any]:
+        s_ms = l.get("_start_ms", 0)
+        e_ms = l.get("_end_ms", 0)
+        txt = l.get("spoken_text") or l.get("text") or ""
+        is_dialogue = bool(
+            l.get("dialogue_kind") in ("spoken", "dialogue")
+            or (l.get("speaker") and l.get("speaker") not in ("narrator", ""))
+            or ('"' in txt)
+            or ('“' in txt)
+        )
+        rel_sec = round((s_ms - position_ms) / 1000.0, 1)
+        return {
+            "line_id": str(l.get("line_id", "")),
+            "speaker": l.get("speaker") or "narrator",
+            "voice_id": l.get("voice_id") or l.get("speaker") or "narrator",
+            "text": txt,
+            "emotion": l.get("emotion"),
+            "speaker_confidence": l.get("speaker_confidence"),
+            "speaker_evidence": l.get("speaker_evidence"),
+            "dialogue_kind": l.get("dialogue_kind"),
+            "start_ms": s_ms,
+            "end_ms": e_ms,
+            "relative_sec": rel_sec,
+            "is_at_tap": (s_ms <= position_ms <= e_ms),
+            "is_dialogue": is_dialogue,
+            "source_start": l.get("source_start"),
+            "source_end": l.get("source_end"),
+        }
+
+    # Find all candidate lines that played in the 20-second reaction window
+    candidate_lines: list[dict[str, Any]] = []
+    candidate_indices: list[int] = []
+    for idx, l in enumerate(script_lines):
+        s_ms = l.get("_start_ms", 0)
+        e_ms = l.get("_end_ms", 0)
+        if e_ms >= window_start_ms and s_ms <= window_end_ms:
+            candidate_lines.append(_line_summary(l))
+            candidate_indices.append(idx)
+
+    # If no candidate lines captured (e.g. at start of chapter), fallback to matched_idx
+    if not candidate_indices and matched_idx >= 0:
+        candidate_indices = [matched_idx]
+        if matched_line:
+            candidate_lines = [_line_summary(matched_line)]
+
+    # Surrounding lines covering from 2 lines before earliest candidate to 2 lines after latest candidate
+    surrounding: list[dict[str, Any]] = []
+    if candidate_indices:
+        start_idx = max(0, min(candidate_indices) - 2)
+        end_idx = min(len(script_lines), max(candidate_indices) + 3)
+        for i in range(start_idx, end_idx):
+            surrounding.append(_line_summary(script_lines[i]))
+    elif matched_idx >= 0:
+        start_idx = max(0, matched_idx - 2)
+        end_idx = min(len(script_lines), matched_idx + 3)
+        for i in range(start_idx, end_idx):
+            surrounding.append(_line_summary(script_lines[i]))
+
+    # Load book.json excerpt covering the entire candidate range plus generous margin
+    manuscript_excerpt = ""
+    book_file = project_dir / "book.json"
+    if book_file.is_file() and script_lines:
+        try:
+            bdata = json.loads(book_file.read_text(encoding="utf-8"))
+            chapters = bdata.get("chapters", [])
+            if 1 <= chapter_number <= len(chapters):
+                ch_text = chapters[chapter_number - 1].get("text", "")
+                
+                valid_starts = [
+                    l.get("source_start") for l in script_lines
+                    if l.get("source_start") is not None and l.get("source_start") >= 0
+                    and (not candidate_indices or script_lines.index(l) in candidate_indices)
+                ]
+                valid_ends = [
+                    l.get("source_end") for l in script_lines
+                    if l.get("source_end") is not None and l.get("source_end") >= 0
+                    and (not candidate_indices or script_lines.index(l) in candidate_indices)
+                ]
+
+                if valid_starts and valid_ends:
+                    excerpt_start = max(0, min(valid_starts) - 600)
+                    excerpt_end = min(len(ch_text), max(valid_ends) + 600)
+                    manuscript_excerpt = ch_text[excerpt_start:excerpt_end].strip()
+                elif matched_line:
+                    s_start = matched_line.get("source_start")
+                    s_end = matched_line.get("source_end")
+                    if s_start is not None and s_end is not None and 0 <= s_start < len(ch_text):
+                        excerpt_start = max(0, s_start - 400)
+                        excerpt_end = min(len(ch_text), s_end + 400)
+                        manuscript_excerpt = ch_text[excerpt_start:excerpt_end].strip()
+        except Exception as exc:
+            logger.debug("Could not extract manuscript excerpt: %s", exc)
+
+    return {
+        "matched_line_id": str(matched_line.get("line_id", "")) if matched_line else None,
+        "active_line": _line_summary(matched_line) if matched_line else None,
+        "candidate_lines": candidate_lines,
+        "surrounding_lines": surrounding,
+        "reaction_window": {
+            "window_start_ms": window_start_ms,
+            "window_end_ms": window_end_ms,
+            "tap_position_ms": position_ms,
+            "delay_window_seconds": 20,
+        },
+        "manuscript_excerpt": manuscript_excerpt,
+    }
+
+
+def _sync_project_flags_json(project_dir: Path, job_queue: JobQueue, project_id: str) -> None:
+    """Mirror current project flags to playback_flags.json in project directory."""
+    flags = job_queue.get_playback_flags(project_id)
+    flags_path = project_dir / "playback_flags.json"
+    atomic_write_json(flags_path, {"project_id": project_id, "total_flags": len(flags), "flags": flags})
+
+
+def _sync_flags_with_streamer_and_disk(
+    project_id: str,
+    project_dir: Path,
+    workspace_dir: Path,
+    job_queue: JobQueue,
+) -> None:
+    """Import any flags recorded on remote NAS Streamer or local disk JSON into SQLite."""
+    disk_flags = []
+    flags_path = project_dir / "playback_flags.json"
+    if flags_path.is_file():
+        try:
+            with open(flags_path, "r", encoding="utf-8") as f:
+                disk_flags = json.load(f).get("flags", [])
+        except Exception:
+            pass
+
+    remote_flags = []
+    try:
+        remote_url = f"http://192.168.50.180:8005/api/mobile/v1/books/{project_id}/flags"
+        req = urllib.request.Request(remote_url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=1.0) as resp:
+            if resp.status == 200:
+                remote_flags = json.loads(resp.read().decode("utf-8")).get("flags", [])
+    except Exception:
+        pass
+
+    candidates: dict[str, dict[str, Any]] = {f["flag_id"]: f for f in disk_flags if f.get("flag_id")}
+    for rf in remote_flags:
+        if rf.get("flag_id"):
+            candidates[rf["flag_id"]] = rf
+
+    for fid, f in candidates.items():
+        existing = job_queue.get_playback_flag(project_id, fid)
+        if not existing:
+            ch_num = int(f.get("chapter_number", 1))
+            pos_ms = int(f.get("position_ms", 0))
+            line_id = f.get("line_id")
+            enriched = f.get("enriched_data") or f.get("line_metadata")
+            if not enriched:
+                enriched = _enrich_flag_context(project_dir, workspace_dir, ch_num, pos_ms, line_id)
+            job_queue.create_playback_flag(
+                project_id=project_id,
+                flag_id=fid,
+                chapter_number=ch_num,
+                position_ms=pos_ms,
+                source=f.get("source", "nas_streamer"),
+                issue_type=f.get("issue_type", "wrong_speaker"),
+                user_note=f.get("user_note", ""),
+                line_id=line_id or enriched.get("matched_line_id"),
+                enriched_data=enriched,
+            )
+            if f.get("status") and f["status"] != "pending":
+                job_queue.update_playback_flag(
+                    project_id=project_id,
+                    flag_id=fid,
+                    status=f.get("status"),
+                    agent_verdict=f.get("agent_verdict"),
+                    agent_explanation=f.get("agent_explanation"),
+                    resolution=f.get("resolution"),
+                    resolved_by=f.get("resolved_by"),
+                )
+
+    try:
+        _sync_project_flags_json(project_dir, job_queue, project_id)
+    except Exception:
+        pass
+
+
+@router.post("/books/{project_id}/flags", status_code=201)
+async def create_playback_flag(
+    project_id: str,
+    request: PlaybackFlagRequest,
+    req: Request,
+) -> dict[str, Any]:
+    """Flag a playback issue (e.g. wrong speaker/attribution) around the current playback point."""
+    project_dir = _project_dir(project_id)
+    workspace_dir = _workspace_project_dir(project_id)
+    job_queue = _get_job_queue(req)
+
+    flag_id = f"flag_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+
+    # Auto-enrich context with timeline and manuscript data
+    enriched_data = _enrich_flag_context(
+        project_dir=project_dir,
+        workspace_dir=workspace_dir,
+        chapter_number=request.chapter_number,
+        position_ms=request.position_ms,
+        target_line_id=request.line_id,
+    )
+
+    resolved_line_id = request.line_id or enriched_data.get("matched_line_id")
+
+    flag = job_queue.create_playback_flag(
+        project_id=project_id,
+        flag_id=flag_id,
+        chapter_number=request.chapter_number,
+        position_ms=request.position_ms,
+        source=request.source,
+        issue_type=request.issue_type,
+        user_note=request.user_note,
+        line_id=resolved_line_id,
+        enriched_data=enriched_data,
+    )
+
+    # Mirror to local project directory
+    try:
+        _sync_project_flags_json(project_dir, job_queue, project_id)
+    except Exception as exc:
+        logger.warning("Could not sync playback_flags.json: %s", exc)
+
+    return {
+        "status": "flagged",
+        "flag": flag,
+    }
+
+
+@router.get("/books/{project_id}/flags")
+async def get_playback_flags(
+    project_id: str,
+    req: Request,
+    status: str | None = None,
+) -> dict[str, Any]:
+    """List all flagged playback issues for a project."""
+    project_dir = _project_dir(project_id)
+    workspace_dir = _workspace_project_dir(project_id)
+    job_queue = _get_job_queue(req)
+
+    # Sync any flags from remote NAS streamer or disk file
+    _sync_flags_with_streamer_and_disk(project_id, project_dir, workspace_dir, job_queue)
+
+    flags = job_queue.get_playback_flags(project_id, status=status)
+    return {
+        "project_id": project_id,
+        "total_flags": len(flags),
+        "flags": flags,
+    }
+
+
+@router.patch("/books/{project_id}/flags/{flag_id}")
+async def update_playback_flag(
+    project_id: str,
+    flag_id: str,
+    request: PlaybackFlagUpdateRequest,
+    req: Request,
+) -> dict[str, Any]:
+    """Update a flag's investigation status, agent verdict, resolution, or veto."""
+    project_dir = _project_dir(project_id)
+    job_queue = _get_job_queue(req)
+
+    explanation = request.agent_explanation or request.agent_veto
+    resolution = request.resolution or request.resolution_notes
+    verdict = request.agent_verdict or ("AGENT_VETO" if request.status == "vetoed" or request.agent_veto else None)
+
+    enriched_data = None
+    if request.line_id:
+        existing_flag = job_queue.get_playback_flag(project_id, flag_id)
+        if existing_flag:
+            workspace_dir = _workspace_project_dir(project_id)
+            enriched_data = _enrich_flag_context(
+                project_dir=project_dir,
+                workspace_dir=workspace_dir,
+                chapter_number=existing_flag["chapter_number"],
+                position_ms=existing_flag["position_ms"],
+                target_line_id=request.line_id,
+            )
+
+    updated = job_queue.update_playback_flag(
+        project_id=project_id,
+        flag_id=flag_id,
+        status=request.status,
+        agent_verdict=verdict,
+        agent_explanation=explanation,
+        resolution=resolution,
+        resolved_by=request.resolved_by,
+        line_id=request.line_id,
+        enriched_data=enriched_data,
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Playback flag not found")
+
+    try:
+        _sync_project_flags_json(project_dir, job_queue, project_id)
+    except Exception as exc:
+        logger.warning("Could not sync playback_flags.json after update: %s", exc)
+
+    # Mirror update to remote NAS streamer if reachable
+    try:
+        remote_patch_url = f"http://192.168.50.180:8005/api/mobile/v1/books/{project_id}/flags/{flag_id}"
+        patch_payload = json.dumps({
+            "status": request.status,
+            "agent_verdict": verdict,
+            "agent_explanation": explanation,
+            "resolution": resolution,
+            "resolved_by": request.resolved_by,
+        }).encode("utf-8")
+        patch_req = urllib.request.Request(
+            remote_patch_url,
+            data=patch_payload,
+            headers={"Content-Type": "application/json"},
+            method="PATCH",
+        )
+        with urllib.request.urlopen(patch_req, timeout=1.0) as _:
+            pass
+    except Exception:
+        pass
+
+    return {
+        "status": "updated",
+        "flag": updated,
+    }
+
