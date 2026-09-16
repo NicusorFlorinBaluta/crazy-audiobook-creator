@@ -39,8 +39,11 @@ repair is either undone by the next run or invisible to the next measurement:
    line stays on the outlier list forever.
 
 The chapter's **master becomes stale on purpose** -- its
-`segment_manifest_hash` no longer matches -- so the chapter re-masters and the
-repaired take reaches the delivery. Re-mastering is assembly, not synthesis.
+`segment_manifest_hash` no longer matches -- so the chapter must be re-mastered
+(`remaster_chapters.py`) **and its delivery re-exported**
+(`reexport_deliveries.py`). Stopping after the re-master leaves the repair in
+the workspace and absent from the M4B anyone plays, with every intermediate
+check passing. Both steps are assembly, not synthesis.
 
 The take being replaced is copied to `segments/repair-backup/` first.
 
@@ -305,7 +308,10 @@ def main() -> int:
     if not args.apply:
         print("\n(dry run; pass --apply to write the repaired takes)")
     elif touched_chapters:
-        print(f"re-master these chapters so the repair reaches the delivery: {sorted(touched_chapters)}")
+        print(f"re-master these chapters: {sorted(touched_chapters)}")
+        print("  python scripts/remaster_chapters.py <project> " + " ".join(str(c) for c in sorted(touched_chapters)))
+        print("then re-export, or the repair never reaches a listener:")
+        print("  python scripts/reexport_deliveries.py <project> --stale")
     return 0
 
 
