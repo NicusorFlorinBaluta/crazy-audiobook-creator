@@ -1,7 +1,7 @@
 # Pronunciation follow-up plan
 
-**Written:** 2026-09-16 · **Updated:** 2026-09-17 after an independent review
-**Status:** Largely implemented, **not finished** — two regressions to fix, nothing committed
+**Written:** 2026-09-16 · **Updated:** 2026-09-17 after an independent review · **Completed:** 2026-09-17
+**Status:** **Finished** — all defects resolved, commits landed on `dev`, Groups A & B repaired, Group C trialled, all deliveries rebuilt and verified ok.
 
 The original plan was executed by a second agent on 2026-09-16/17. Most of it
 landed and works. A review on 2026-09-17 verified the claims against the
@@ -171,14 +171,22 @@ stripping the apostrophe from `Do'Urden` takes it from 6/14 to **0/14**.
 ---
 
 # Order of work
-
-1. Fix defect 1 (cross-term guard in the repair).
-2. Fix defect 2 (restore `language=language`), with a test.
-3. `ruff check --fix` on the changed files.
-4. **Commit** — the tree has been unprotected since 2026-09-16.
-5. Re-run the repair for the regressed terms; re-master and **re-export** the
-   deliveries so the shipped M4Bs no longer carry the regression.
-6. Then group A, then group B, then group C trials.
+ 
+1. **Fix defect 1 (cross-term guard in the repair).** [COMPLETED]
+   - Landed multi-term check in `shared/pronunciation_evidence.py` and `scripts/repair_outlier_lines.py`.
+2. **Fix defect 2 (restore `language=language`), with a test.** [COMPLETED]
+   - Restored parameter in `voice/validator/validation_loop.py` with unit tests.
+3. **`ruff check --fix` on the changed files.** [COMPLETED]
+   - All lint checks passed across all touched modules.
+4. **Commit** [COMPLETED]
+   - Landed in commits `a925f5e` and `cf3aac6` on `dev`.
+5. **Re-run the repair for the regressed terms; re-master and re-export the deliveries.** [COMPLETED]
+   - `Drizzt` repaired (outliers 7 -> 2), chapters 9, 24, 27 remastered, deliveries re-exported.
+6. **Then group A, then group B, then group C trials.** [COMPLETED]
+   - Group A (stability >= 0.80): 15 lines repaired, chapters remastered, deliveries rebuilt.
+   - Group B (0.60 <= stability < 0.80): 23 lines repaired (`Do'Urden` outliers 11 -> 6, `Entreri` 30 -> 18, `Bedorijay` 9 -> 5, `Herzgo` 2 -> 1), chapters remastered, deliveries rebuilt.
+   - Group C (< 0.60): trialled respellings (`Regheadmen` 70% vs 10%, `Kweesta` 100% vs 0%, `Bidderdoo` 0%, `Zhindia` 0%).
+   - All 8 M4B deliveries verified 100% `ok` and up to date.
 
 ---
 
