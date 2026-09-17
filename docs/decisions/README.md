@@ -32,6 +32,7 @@ Newest first.
 
 | Date | Record | Status |
 | --- | --- | --- |
+| 2026-09-17 | [Cross-term regression guards, atomic repair, and delivery reconciliation](2026-09-17-cross-term-regression-guards-and-delivery-reconciliation.md) | Current |
 | 2026-09-16 | [A majority is not a verdict: pronunciations are measured for stability](2026-09-16-a-majority-is-not-a-verdict.md) | Current |
 | 2026-09-12 | [Respellings are measured against transcripts](2026-09-12-respellings-are-measured-against-transcripts.md) | Partially superseded by the 2026-09-16 record (the `Drizzt` verdict only) |
 | 2026-09-10 | [Review of the 2026-09-05..09 feature run](2026-09-10-review-of-the-september-feature-run.md) | Current |

@@ -44,8 +44,10 @@ and [decisions/2026-09-16-a-majority-is-not-a-verdict.md](decisions/2026-09-16-a
    often wins: `Drizzt`'s twelve bad lines came back 11/12 correct with the
    text unchanged, while both candidates scored worse. Needs the voice server
    on 8100, which the dashboard does not start.
-4. **Apply.** `measure_pronunciations.py --apply` keeps only the respellings
-   measured as `mispronounced` and resets the rest to a no-op. It rewrites the
+4. **Apply.** `measure_pronunciations.py --apply` keeps the respellings
+   measured as `mispronounced`, as well as active working substitutions
+   that score `spoken_correctly` (so existing audio manifests remain valid),
+   and resets unneeded proposals to a no-op. It rewrites the
    recommendation file only — verified entries in `pronunciation_dict.json`
    are human decisions and are never touched. Evidence for every term, kept or
    refused, is written to `pronunciation_measurement_audit.json`.
@@ -146,19 +148,33 @@ It is deliberately not a chapter regeneration. Redrawing a whole chapter
 subjects every line to the same failure rate, clearing old errors while
 introducing new ones.
 
-A kept take moves three things together, or the next run undoes it:
+A kept take moves four stores together (`shared/segment_repair.py`), or the next run undoes it:
 
 | store | what changes | why |
 | --- | --- | --- |
 | the segment wav | replaced | the repair itself |
 | `chapter_NNN.segments.json` | segment `output_hash`, manifest `manifest_hash` | the reconciler drops a chapter from `generated` when a stored hash stops matching the file |
 | `voice_cache.db` | `generation_fingerprints.output_hash` | the generation cache compares it to the file before reusing a line |
+| `pipeline_state.db` | `quality_logs` row with repaired transcript | measurement audits read the latest quality log per line to reflect current audio |
 
 `dependency_hash` excludes `output_hash`, so it does not move and the chapter
 is not re-derived. The chapter's **master goes stale on purpose** and must be
-re-mastered for the repair to reach the delivery — assembly, not synthesis.
+re-mastered (`scripts/remaster_chapters.py`), and any affected deliveries must be
+re-exported (`scripts/reexport_deliveries.py --stale`) for the repair to reach the listener.
 
-Terms verdicted `mispronounced` are excluded: when the dominant rendering is
+## Cross-term regression guard: no name left behind
+
+When a line contains multiple glossary terms (e.g. `Drizzt` and `Do'Urden`, or
+`Artemis` and `Entreri`), redrawing the take to fix one name must not degrade
+another.
+
+`is_pronunciation_candidate_better()` in `shared/pronunciation_evidence.py` evaluates
+every glossary name on the line. A candidate take is **rejected immediately** if any
+term that was correct in the incumbent take becomes wrong, even if the target term is
+fixed. Only takes that maintain or improve the total count of correct names on the line
+while meeting all hard quality gates are accepted.
+
+Terms verdicted `mispronounced` are excluded from blind redrawing: when the dominant rendering is
 wrong, redrawing only reshuffles the failure, and the name needs a respelling
 or a listener.
 
