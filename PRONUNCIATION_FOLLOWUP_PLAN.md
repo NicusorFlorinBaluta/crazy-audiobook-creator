@@ -1,265 +1,214 @@
 # Pronunciation follow-up plan
 
-**Written:** 2026-09-16 · **Status:** Not started · **For:** a later agent/session
+**Written:** 2026-09-16 · **Updated:** 2026-09-17 after an independent review
+**Status:** Largely implemented, **not finished** — two regressions to fix, nothing committed
 
-Everything described here is *pending*. The work already finished is in commits
-`ff8518d`, `e81e887`, `2f29378` on `dev` and in
+The original plan was executed by a second agent on 2026-09-16/17. Most of it
+landed and works. A review on 2026-09-17 verified the claims against the
+artifacts rather than the summary, confirmed the bulk of them, and found two
+real defects plus several smaller gaps. This file now records **what is done**,
+**what broke**, and **what is left**.
+
+Background and evidence for every rule here:
 [docs/decisions/2026-09-16-a-majority-is-not-a-verdict.md](docs/decisions/2026-09-16-a-majority-is-not-a-verdict.md).
-Read that decision record first — it carries the evidence behind every claim
-below.
-
-## State of the tree
-
-- Working tree clean, 1043 tests passing, all three commits pushed to `dev`.
-- `the-finest-edge-of-twilight-book`: `Drizzt` repaired (141/157 → 154/157),
-  chapters 2/4/7/8/9/18/23/27/29 re-mastered, all eight M4B deliveries
-  re-exported and verified current.
-- A batch repair over the remaining terms was started and **stopped before it
-  replaced anything** — it was still on its first term and the backup count
-  never moved past the 13 from the `Drizzt` work. No partial state to clean up.
-- The voice server (port 8100) is stopped. The dashboard does not start it;
-  `python -m voice.tts_server.main` from the repo root does.
-
-## A correction to carry forward
-
-Commit `8e8a45f` says a stale `?v=` on `app.js` meant "a browser would have
-served the old copy alongside new CSS". **That is wrong.** `serve_dashboard()`
-rewrites every `?v=` with `int(time.time())` on every request, so the values
-committed in `index.html` never reach a browser. The real defect is the
-opposite and is item 4 below. The bumped revisions are harmless but cosmetic;
-the test that polices them is checking a source convention with no runtime
-meaning, and its docstring rationale should be corrected when item 4 lands.
 
 ---
 
-# Part 1 — the remaining names in `the-finest-edge-of-twilight-book`
+# Part 0 — current state
 
-Re-run `python scripts/measure_pronunciations.py the-finest-edge-of-twilight-book`
-first; the numbers below are from 2026-09-16 and the repair changes them.
+- **Nothing is committed.** 23 files unstaged on `dev` (16 modified, 7 new).
+  This is the most urgent practical risk: the work is substantial and
+  unprotected. Do not commit until the regressions below are fixed, so history
+  never records a state where `Drizzt` went backwards.
+- 1,056 tests pass; 2 skipped.
+- 18 ruff errors in the changed files (14 unused imports), 16 auto-fixable.
+- All 8 M4B deliveries report `ok` to `reexport_deliveries.py --stale` — but
+  they were rebuilt from audio that contains the regression below, so they will
+  need rebuilding again once it is fixed.
+- Last commit on `dev` is `32629bd`.
 
-Terms split into three groups by `sound_stability`, and each wants a different
-treatment. **The group decides the tool** — using the wrong one wastes hours.
+## Verified as done
 
-### Group A — 27 terms, 80 bad lines of 1587 (stability ≥ 0.80)
+Checked against the audit JSON, the filesystem and the code, not the summary.
 
-`Jarlaxle` (24/399), `Allefaero` (9/176), `Grandda` (5/43), `Savahn` (4/103),
-`Sylfae` (4/51), `Dorcrae` (4/21), `Drizzt` (3/157), `Janquay` (2/13),
-`Brevindon` (2/31), `Sollars` (2/27), `Perrywinkle Shin` (2/22), and others.
+| item | state |
+| --- | --- |
+| Batch repair across `unstable` terms | done — outliers 444 → 314 |
+| Chapters re-mastered, 8 deliveries re-exported | done, all `ok` |
+| `spoken_correctly` 49 → 59, `unstable` 47 → 31 | confirmed |
+| **Item 1** selective best-of-N | done, and the comparator is sound |
+| **Item 3** `shared/segment_repair.py` four-store helper | done **and used** by the repair script |
+| **Item 4** content-hashed asset revisions, `Clear-Site-Data` dropped | done |
+| **Item 6** staleness surfaced (`shared/staleness.py`, dashboard status) | done |
+| **Item 7** entry-point contract audit (`speed`, `language`, `voice_fx`) | done |
+| Emberdark left alone | **confirmed** — zero modified segments, masters or M4Bs, no `repair-backup` |
 
-These behave exactly like `Drizzt` did: the engine says the name correctly most
-of the time and loses a per-draw coin flip on the rest. **Redraw them.**
+The best-of-N comparator in `_is_pronunciation_candidate_better` deserves a
+note: it refuses a candidate that fails hard gates when the incumbent passes,
+refuses one that is unaccepted when the incumbent is accepted, counts **every**
+hard term on the line, and only then falls back to `_is_better`. That is the
+right shape, and it is the model for fixing defect 1.
 
-```
-python scripts/repair_outlier_lines.py the-finest-edge-of-twilight-book --attempts 4 --apply
-```
+---
 
-With no `--term` it picks up every `unstable` term. Expect roughly 80% success
-(the `Drizzt` run fixed 13 of 16). Budget 1–2 hours of GPU. No lexicon change,
-no listening decision.
+# Part 1 — defects found in review (fix these first)
 
-**Then, without fail:**
+## 1. The batch repair damaged terms it was not targeting *(blocking)*
 
-```
-python scripts/remaster_chapters.py the-finest-edge-of-twilight-book <chapters it names>
-python scripts/reexport_deliveries.py the-finest-edge-of-twilight-book --stale
-python scripts/reexport_deliveries.py the-finest-edge-of-twilight-book --batch A-B ... --full
-```
+Outliers fell 444 → 314 overall, but three terms went backwards:
 
-Skipping the re-export leaves the repair in the workspace and absent from every
-M4B, with every intermediate check passing. That happened once already.
+| term | before | after |
+| --- | --- | --- |
+| `Artemis Entreri` | 8 | **18** |
+| **`Drizzt`** | **3** | **7** |
+| `Zaknafein` | 14 | 15 |
 
-### Group B — 14 terms, 62 bad lines of 217 (stability 0.60–0.80)
+Every newly-broken `Drizzt` line — `ch09_0129`, `ch13_0096`, `ch27_0148`,
+`ch27_0154` — also contains `Do'Urden`, `Entreri` or `Artemis Entreri`, all
+repaired in the same run. `Artemis Entreri` regressed because it *contains*
+`Entreri`, so repairing one redraws the other's lines.
 
-`Soliardis` (14/42), `Artemis Entreri` (8/35), `Pwent` (6/18), `Cazzcalci`
-(6/15), `Gromph` (5/18), `Tazmikella` (4/19), `Dininae` (4/18),
-`Ghaliver Longstocking` (3/11), and others.
+**Root cause:** `scripts/repair_outlier_lines.py` computes one `target_key`
+(line ~139) and validates only that term (lines ~164, ~186). A redraw that
+fixes the target while breaking another name on the same line is accepted
+silently.
 
-Repair first (they are included in the command above), re-measure, then trial
-whatever is left as group C.
+**Fix:** before keeping a take, evaluate every glossary term present in the
+line and reject the take if any term that was correct becomes wrong. Reuse the
+term-counting logic from `_is_pronunciation_candidate_better` rather than
+writing a second one — a shared helper for "is this take better for all the
+names on this line" is the right end state, since the generator and the repair
+now need the same judgement.
 
-### Group C — 18 terms, 302 bad lines of 606 (stability < 0.60)
+**Then:** re-run the repair for the regressed terms, re-master the chapters it
+names, and **re-export the affected deliveries** — the regression is currently
+inside the shipped M4Bs. `Drizzt` should return to 3 outliers or fewer.
 
-`Catti-brie` (86/179), `Entreri` (47/107), `Avelyere` (30/48), `Do'Urden`
-(23/45), `Gauntlgrym` (20/46), `Bedorijay` (16/33), `Zaknafein` (14/27),
-`Bregan` (10/19), `D'aerthe` (9/19), `Lolth` (8/19), `Ilnezhara` (8/14),
-`Reghedmen` (7/8), and others.
+## 2. `language=language` dropped from the primary validation call *(blocking)*
 
-**Redrawing will not help these** — around half of every term's lines are
-wrong, so a fresh draw is a coin flip. They need respellings, trialled:
+`voice/validator/validation_loop.py:511` no longer passes `language` to
+`_validate_segment`, while the take-2 call at line ~539 still does. Two
+consequences:
 
-```
-python scripts/trial_respelling.py the-finest-edge-of-twilight-book <Term> <control> <candidate>...
-```
+- every line is now transcribed with Whisper language auto-detection, reversing
+  part of the 2026-09-07 "Whisper STT language normalization" work;
+- the two best-of-N candidates are judged under different settings, so the A/B
+  is not a fair comparison.
 
-**The control comes first and is what currently ships.** On `Drizzt` the control
-beat both candidates and the right answer was to ship nothing; on `Do'Urden`
-both candidates scored 0/14 against the control's 6/14.
+It reads as an accidental deletion when the new block was inserted. No test
+caught it — add one that asserts both candidate paths receive identical
+transcription settings.
 
-#### Choose candidates from the failure mode, not by brainstorming
+## 3. Smaller gaps
 
-This is the part that worked. Three mechanisms explain most of group C, and
-each has a different remedy:
+- **Item 2 is partial.** `generate_phonetic_recommendations` still returns the
+  identity in `default` for every name tried (`Drizzt`, `Catti-brie`,
+  `Guenhwyvar`, `Entreri`, `Gauntlgrym`, `Zaknafein`). That is *safe* and
+  deliberate — an active `default` auto-applies with no human gate, which the
+  09-12 rule forbids — so candidates correctly live in `alternate` only. But
+  the failure modes are only half encoded: `Entreri → Ehntreri` genuinely
+  targets the "and trary" absorption, while `Catti-brie → Cattibrie` ignores
+  the stress/flapping insight that measured **9/14**. Teach it the flapping
+  rule, or document that `alternate` is a hint rather than a derived candidate.
+- **Item 5 (G2P) was benchmarked, not adopted** (`scripts/eval_g2p.py`,
+  `phonetic_key` reported at 94.7%). That is the correct outcome — the plan
+  asked for comparison before replacement. Leave it unless the number moves.
+- **Lint:** `ruff check --fix` on the changed Python files clears 16 of 18.
+- **"142 lines repaired"** in the previous summary is a count of repair
+  *actions*, not net improvement. The net is 130, and that figure already
+  absorbs the regressions above. Report net next time.
+
+---
+
+# Part 2 — the remaining names
+
+Numbers are from the 2026-09-17 audit, **after** the batch repair. Re-run
+`python scripts/measure_pronunciations.py the-finest-edge-of-twilight-book`
+before acting; fixing defect 1 will move them again.
+
+### Group A — 26 terms, 51 bad lines of 1561 (stability ≥ 0.80)
+
+`Drizzt` (7/157 — *regressed, see defect 1*), `Jarlaxle` (4/399), `Savahn`
+(4/103), `Soliardis` (4/42), `Allefaero` (3/176), `D'aerthe` (2/19), `Sylfae`
+(2/51), `Perrywinkle Shin` (2/22), and others.
+
+Redraw them — but only once defect 1 is fixed, or this run will damage other
+terms exactly as the last one did.
+
+### Group B — 10 terms, 70 bad lines of 257 (stability 0.60–0.80)
+
+`Entreri` (30/107), `Do'Urden` (10/45), `Bedorijay` (9/33), `Pwent` (6/18),
+`Gromph` (4/18), `Ghaliver Longstocking` (3/11), and others.
+
+Repair, re-measure, then treat the remainder as group C.
+
+### Group C — 11 terms, 193 bad lines of 382 (stability < 0.60)
+
+`Catti-brie` (86/179), `Avelyere` (26/48), `Gauntlgrym` (19/46),
+`Artemis Entreri` (18/35 — *regressed*), `Zaknafein` (15/27), `Ilnezhara`
+(8/14), `Reghedmen` (7/8), and others.
+
+**Redrawing will not help these.** They need respellings, trialled with
+`scripts/trial_respelling.py`, **control first**.
+
+#### Pick candidates from the failure mode
 
 | mode | evidence | remedy |
 | --- | --- | --- |
-| **Intervocalic flapping** — English flaps /t/ between a stressed and an unstressed vowel | `Catti-brie` → "cadbury" ×48, "cadibri" ×50 | Move the stress off it. `Katteebree` scored **9/14** against the current entry's 1/14. |
-| **Word-splitting** — the engine inserts a boundary that is not there | `Entreri` → "and trary" ×28 (the leading vowel is swallowed into the previous word), `Jarlaxle` → "jar laxal"/"jarl axel", `Tazmikella` → "taz mckellar" | Untested. Try forms that cannot be parsed as an existing word boundary. |
-| **Boundary loss** — removing punctuation lets syllables merge | `Do'Urden` → "dohertyn" ×12 once the apostrophe is stripped | Keep the apostrophe. See the warning below. |
+| **Intervocalic flapping** — English flaps /t/ between a stressed and an unstressed vowel | `Catti-brie` → "cadbury" ×48 | Move the stress off it. `Katteebree` scored **9/14** against the shipped entry's 1/14. |
+| **Word-splitting** — the engine inserts a boundary | `Entreri` → "and trary" ×28, `Jarlaxle` → "jar laxal", `Tazmikella` → "taz mckellar" | Block the merge at the front of the word; `Ehntreri` is the generator's untested attempt at this. |
+| **Boundary loss** — removing punctuation lets syllables merge | `Do'Urden` without its apostrophe → "dohertyn" ×12 | Keep the apostrophe. |
 
 **`Catti-brie` is settled: leave it alone.** `Katteebree` works but buys the
 consonant by shifting stress to "ka-TEE-bree" where the name is "KAT-ee-bree",
-and applying it regenerates 179 lines of a delivered book. The owner declined
-it on 2026-09-16 with that evidence in hand. Do not re-open it without being
-asked.
+and applying it regenerates 179 lines of a delivered book. Declined by the
+owner on 2026-09-16 with that evidence in hand.
 
 **Do not "fix" the apostrophe asymmetry in `normalize_phonetic_text`.** It joins
 hyphens out but leaves apostrophes, which looks like an oversight and is not:
-stripping the apostrophe from `Do'Urden` takes it from 6/14 to **0/14**. The
-apostrophe holds a syllable boundary nothing else supplies.
+stripping the apostrophe from `Do'Urden` takes it from 6/14 to **0/14**.
 
 ---
 
-# Part 2 — improvements
+# Order of work
 
-Ordered by value. Items 1 and 5 are the substantial ones.
-
-## 1. Selective best-of-N at generation *(highest value)*
-
-Failures are per-draw at roughly one line in ten, and **1,366 of this book's
-7,453 lines (18.3%) contain a term currently measured `unstable` or
-`mispronounced`**. Generating *two* takes for only those lines and keeping the
-one whose name lands in the right sound group should roughly square the residual
-error rate, for about +18% generation time.
-
-- Where: `voice/validator/validation_loop.py`, in `process_chapter`'s synthesis
-  path, gated on the line containing a term from `validation_terms`.
-- Reuse `same_spoken_form` (already in `shared/pronunciation_evidence.py`) to
-  pick the better take, and `_is_better` for the tie-break on quality.
-- Gate it behind config (`voice/config.yaml`) and default it off until measured.
-- **Cost control:** only for lines containing a hard name, and only 2 takes.
-  Do not apply it book-wide.
-- Prevents the error rather than detecting and repairing it, which makes the
-  whole repair workflow in Part 1 mostly unnecessary for future books.
-
-## 2. Replace the dead recommendation generator
-
-`generate_phonetic_recommendations` in `shared/pronunciation.py` returns the
-term unchanged for nearly every name — **180 of 184 recommendations in this book
-are no-ops**. It is an identity function wearing a feature's clothes, and it is
-why the lexicon looks populated while doing nothing. The hyphen-joining fix that
-made hyphens correct also removed the only thing the heuristic contributed.
-
-Either delete it and let the LLM path own proposals, or rebuild it around the
-three failure modes in Part 1 so it emits candidates worth feeding to
-`trial_respelling.py`. Deleting is defensible; leaving it is not.
-
-## 3. One `replace_segment()` helper
-
-Replacing a segment means keeping **four** stores in step, and getting it
-partially right is invisible until much later:
-
-1. the segment wav;
-2. `manifests/chapter_NNN.segments.json` — segment `output_hash` **and**
-   manifest `manifest_hash` (the reconciler regenerates the whole chapter if
-   these drift; `dependency_hash` excludes `output_hash` deliberately);
-3. `voice_cache.db` → `generation_fingerprints.output_hash`;
-4. `quality_logs` — a row with the new transcript, or measurement keeps reading
-   the take that was just replaced and the line never leaves the outlier list.
-
-`scripts/repair_outlier_lines.py` implements all four and got it wrong twice
-during development. Extract one helper (suggest `shared/segment_repair.py`) and
-have any future tool use it. Include the `segments/repair-backup/` copy.
-
-## 4. Content-hash the dashboard asset revisions
-
-See the correction at the top. `serve_dashboard()` currently stamps
-`int(time.time())` on every asset at every request, so **the browser re-downloads
-all JavaScript and CSS on every dashboard load** and the cache never holds
-anything. It also sends `Clear-Site-Data: "cache"`, which empties the origin's
-cache on each load — making stale assets impossible by making caching
-impossible.
-
-Replace with a content hash per asset (`sha256(path.read_bytes())[:12]`) and
-drop `Clear-Site-Data`. Keep `no-store` on the HTML itself. This also retires
-the manual `?v=` bump that was missed in `651b854`.
-
-A working patch is committed at [docs/asset-revision.patch](docs/asset-revision.patch)
-— written and tested on 2026-09-16, then reverted out of the tree so the handoff
-would be clean. Apply with `git apply docs/asset-revision.patch`, re-run
-`tests/test_dashboard_base_path.py`, and delete the patch file once it lands.
-Correct the docstring of `test_frontend_assets_share_one_cache_revision` in the
-same change.
-
-## 5. A real G2P instead of `phonetic_key`
-
-`phonetic_key` is a hand-rolled consonant skeleton that needed a syllable-count
-patch on 2026-09-16 because it scored a *wrong* rendering above a *right* one:
-`drizzt`/`drizzit` 0.91 against `guenhwyvar`/`guinevar` 0.89. It works, and it
-is guesswork.
-
-A real grapheme-to-phoneme pass (espeak via `phonemizer`, or similar) would give
-actual phonemes for both the term and the transcript and retire a class of
-heuristics — including the syllable-count special case.
-
-**Handle with care.** Every verdict in this project now depends on
-`phonetic_key`, and the voice venv is ROCm with its own constraints. Add the G2P
-*alongside* first and compare the two over the existing audit data before
-replacing anything. The regression suite in
-`tests/test_pronunciation_evidence.py` has ~30 real pairs and is the right
-oracle.
-
-## 6. Surface staleness in the dashboard
-
-Two kinds of staleness bit during this work and neither is visible in the UI:
-
-- **evidence older than the lexicon** — `measure_pronunciations.py` already
-  reports it (`evidence_current` / `evidence_freshness` in the audit JSON);
-- **deliveries older than their chapters** — `reexport_deliveries.py --stale`
-  already detects it.
-
-Both are one call away from being a dashboard badge. The second is the one that
-silently wasted a full repair cycle.
-
-## 7. Audit other standalone entry points
-
-`validate_single()` never received `validation_terms`, so on the `/validate`
-path the glossary discount was dead code and any short line containing a
-fictional name was judged on raw WER — one name in three words is 0.33, past
-the 0.20 threshold. It had been that way indefinitely and also affected the
-dashboard's preview and review flows.
-
-That is a *shape* of bug: a path that works inside a chapter run and quietly
-misbehaves when called alone. Grep for other helpers with defaulted context
-parameters and check what the standalone callers pass.
+1. Fix defect 1 (cross-term guard in the repair).
+2. Fix defect 2 (restore `language=language`), with a test.
+3. `ruff check --fix` on the changed files.
+4. **Commit** — the tree has been unprotected since 2026-09-16.
+5. Re-run the repair for the regressed terms; re-master and **re-export** the
+   deliveries so the shipped M4Bs no longer carry the regression.
+6. Then group A, then group B, then group C trials.
 
 ---
 
 # Emberdark — metrics only
 
 `isles-of-the-emberdark-a-cosmere-novel-secret-projects-book-5` is **finished
-and delivered**. The owner's instruction (2026-09-16) is that any further work
-on it is for **test and metrics purposes only, never for actual usage**.
+and delivered**. Per the owner (2026-09-16), further work on it is for **test
+and metrics purposes only, never for actual usage**: do not repair its
+segments, re-master it, re-export its deliveries, or apply lexicon changes.
 
-Concretely: do not repair its segments, do not re-master it, do not re-export
-its deliveries, do not apply lexicon changes to it.
+The 2026-09-16/17 run respected this — verified: no modified segments, no
+re-mastered chapters, no rebuilt M4Bs, no `repair-backup` directory.
 
-It remains useful as a measurement corpus, with one caveat already encoded in
-the tooling: its lexicon changed 2026-09-12 while its newest audio is from
-2026-09-03, so **every verdict on an active entry there is meaningless** until
-it is regenerated — which is exactly what must not happen. Treat its
-`unrespelled` verdicts as usable evidence and its `active`-entry verdicts as
-unevaluated. `measure_pronunciations.py` prints this warning on every run.
+It stays useful as a measurement corpus with one caveat already encoded in the
+tooling: its lexicon changed 2026-09-12 while its newest audio is 2026-09-03,
+so **every verdict on an active entry there is unevaluated** until a
+regeneration that must not happen. Treat its `unrespelled` verdicts as evidence
+and its active-entry verdicts as meaningless.
 
 ---
 
 # Ground rules that earned their place
 
-- **`unstable` never ships a respelling.** Only `mispronounced` does. The other
-  verdicts are reports.
-- **Measure before shipping a respelling, with a control arm.** Two of the three
-  respellings trialled on 2026-09-16 would have made things worse.
+- **`unstable` never ships a respelling.** Only `mispronounced` does.
+- **Measure before shipping a respelling, with a control arm.** Two of the
+  three respellings trialled on 2026-09-16 would have made things worse.
+- **A repair must not break a name it was not aiming at.** New, from defect 1.
 - **Never add `initial_prompt` to the Whisper call.** It would improve
-  transcription of rare names, and that is precisely why it is forbidden: this
+  transcription of rare names, which is exactly why it is forbidden: this
   validator is an unbiased phonetic reporter, and priming it erases the signal.
   A test asserts its absence.
 - **A repair is not done until the delivery is rebuilt.**
+- **Report net improvement, not the number of actions taken.**
