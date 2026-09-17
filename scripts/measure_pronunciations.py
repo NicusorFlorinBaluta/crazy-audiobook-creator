@@ -243,7 +243,9 @@ def main() -> int:
     for term, item in evidence.items():
         if term not in recs:
             continue
-        if item.verdict == "mispronounced":
+        if item.verdict == "mispronounced" or (
+            item.verdict == "spoken_correctly" and entries[term].get("applied")
+        ):
             kept += 1
             continue
         # Anything not measured as wrong is reset to itself, which the loader

@@ -423,6 +423,8 @@ _COMPOUND_BASES = {
 }
 
 _KNOWN_TERM_OVERRIDES = {
+    "catti-brie": ("CattiBrie", "Katteebree"),
+    "cattibrie": ("CattiBrie", "Katteebree"),
     "kokerlii": ("Cokerlee", "Koh-ker-lee"),
     "pache": ("Pahchee", "Paych"),
     "szeth": ("Seth", "Zeth"),
@@ -476,6 +478,10 @@ def generate_phonetic_recommendations(term: str, context: str = "") -> dict[str,
     hand-written forms like "Koh-ker-lee", and the `rec_alt = raw` fallbacks
     echo the source term, which for "Catti-brie" or "Aegis-fang" carries a
     hyphen of its own.
+
+    Note: `default` is safe and may be layered as an implicit fallback when
+    enabled, whereas `alternate` is an exploratory candidate hint for human
+    review or `scripts/trial_respelling.py`, and is never auto-applied.
     """
     recommendation = _phonetic_recommendations(term, context)
     return {

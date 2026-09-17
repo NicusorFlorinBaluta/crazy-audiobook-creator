@@ -54,12 +54,14 @@ Without `--apply` nothing is written and the takes are only reported.
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import logging
 import sys
 from pathlib import Path
 from typing import Any
 
+print = functools.partial(print, flush=True)
 logger = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -91,7 +93,12 @@ REPAIRABLE = {"unstable"}
 _chapter_of = parse_chapter_number
 
 
-def _load_audit(project_dir: Path, term: str | None) -> dict[str, list[tuple[str, str]]]:
+def _load_audit(
+    project_dir: Path,
+    terms: list[str] | None = None,
+    min_stability: float | None = None,
+    max_stability: float | None = None,
+) -> dict[str, list[tuple[str, str]]]:
     path = project_dir / "pronunciation_measurement_audit.json"
     if not path.is_file():
         raise SystemExit(f"no measurement audit in {project_dir}; run measure_pronunciations.py first")
@@ -99,10 +106,16 @@ def _load_audit(project_dir: Path, term: str | None) -> dict[str, list[tuple[str
     if not audit.get("evidence_current", True):
         print(f"warning: {audit.get('evidence_freshness')}", file=sys.stderr)
     targets: dict[str, list[tuple[str, str]]] = {}
+    term_set = {t.casefold() for t in terms} if terms else None
     for name, item in audit.get("terms", {}).items():
-        if term and name.casefold() != term.casefold():
+        if term_set and name.casefold() not in term_set:
             continue
-        if not term and item.get("verdict") not in REPAIRABLE:
+        stab = item.get("sound_stability", 0.0)
+        if min_stability is not None and stab < min_stability:
+            continue
+        if max_stability is not None and stab >= max_stability:
+            continue
+        if not terms and min_stability is None and max_stability is None and item.get("verdict") not in REPAIRABLE:
             continue
         lines = [(line_id, heard) for line_id, heard in item.get("outlier_lines", [])]
         if lines:
@@ -118,7 +131,9 @@ def _script_lines(project_dir: Path) -> dict[str, dict[str, Any]]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("project_id")
-    parser.add_argument("--term", help="repair one term instead of every `unstable` one")
+    parser.add_argument("--term", action="append", default=[], help="repair specific term(s)")
+    parser.add_argument("--min-stability", type=float, default=None, help="minimum sound stability (e.g. 0.80 for Group A)")
+    parser.add_argument("--max-stability", type=float, default=None, help="maximum sound stability (e.g. 0.80 for Group B)")
     parser.add_argument("--attempts", type=int, default=4, help="redraws per line before giving up")
     parser.add_argument("--limit", type=int, default=0, help="stop after this many lines")
     parser.add_argument("--apply", action="store_true", help="write the repaired takes")
@@ -126,7 +141,12 @@ def main() -> int:
 
     project_dir = ROOT / "brain" / "projects" / args.project_id
     segments_dir = ROOT / "workspace" / args.project_id / "segments"
-    targets = _load_audit(project_dir, args.term)
+    targets = _load_audit(
+        project_dir,
+        terms=args.term,
+        min_stability=args.min_stability,
+        max_stability=args.max_stability,
+    )
     if not targets:
         print("nothing to repair")
         return 0
