@@ -9,7 +9,7 @@ import numpy as np
 import soundfile as sf
 
 from shared.constants import PAUSE_MARKER_SILENCE_SECONDS, ValidationStatus
-from shared.models import ScriptLine
+from shared.models import QualityResult, ScriptLine
 from voice.tts_server.embedding_store import EmbeddingStore
 from voice.validator.validation_loop import ValidationLoop
 
@@ -1221,6 +1221,136 @@ class SttUnavailableTests(unittest.TestCase):
             )
             self.assertTrue(any("Speech-to-text was unavailable" in w for w in result.warnings))
 
+    def test_is_pronunciation_candidate_better_prefers_faithful_rendering(self) -> None:
+        """Candidate that pronounces hard term faithfully beats one that adds an extra beat."""
+        current = QualityResult(
+            line_id="ch01_0001",
+            status=ValidationStatus.PASS,
+            wer=0.08,
+            quality_score=0.92,
+            transcribed_text="drizzit walked into the cavern",
+        )
+        candidate = QualityResult(
+            line_id="ch01_0001",
+            status=ValidationStatus.PASS,
+            wer=0.10,
+            quality_score=0.90,
+            transcribed_text="drist walked into the cavern",
+        )
+        # For term 'Drizzt', 'drist' passes same_spoken_form while 'drizzit' has an extra syllable
+        self.assertTrue(
+            ValidationLoop._is_pronunciation_candidate_better(candidate, current, {"Drizzt"}),
+            "candidate take saying 'drist' must beat 'drizzit'",
+        )
+        self.assertFalse(
+            ValidationLoop._is_pronunciation_candidate_better(current, candidate, {"Drizzt"}),
+            "'drizzit' must not beat 'drist'",
+        )
+
+    def test_is_pronunciation_candidate_better_refuses_failed_hard_gates(self) -> None:
+        """Candidate failing hard gates cannot replace an acceptable take."""
+        current = QualityResult(
+            line_id="ch01_0001",
+            status=ValidationStatus.PASS,
+            wer=0.15,
+            quality_score=0.85,
+            transcribed_text="drizzit walked into the cavern",
+        )
+        candidate = QualityResult(
+            line_id="ch01_0001",
+            status=ValidationStatus.FAIL,
+            wer=0.05,
+            quality_score=0.40,
+            clipping_detected=True,
+            transcribed_text="drist walked into the cavern",
+        )
+        self.assertFalse(
+            ValidationLoop._is_pronunciation_candidate_better(candidate, current, {"Drizzt"}),
+            "take failing hard acoustic gates must not be promoted",
+        )
+
+    def test_is_pronunciation_candidate_better_tie_breaks_on_quality(self) -> None:
+        """When both takes say the name correctly, tie-break on audio quality/WER."""
+        current = QualityResult(
+            line_id="ch01_0001",
+            status=ValidationStatus.PASS,
+            wer=0.10,
+            quality_score=0.88,
+            transcribed_text="drist walked into the cavern",
+        )
+        candidate = QualityResult(
+            line_id="ch01_0001",
+            status=ValidationStatus.PASS,
+            wer=0.05,
+            quality_score=0.95,
+            transcribed_text="drist walked into the cavern",
+        )
+        self.assertTrue(
+            ValidationLoop._is_pronunciation_candidate_better(candidate, current, {"Drizzt"}),
+            "candidate with higher quality score must win when pronunciation is tied",
+        )
+
+    def test_is_pronunciation_candidate_better_refuses_regressing_other_terms(self) -> None:
+        """Cross-term guard: candidate take fixing one name cannot break another name on the same line."""
+        current = QualityResult(
+            line_id="ch01_0001",
+            status=ValidationStatus.PASS,
+            wer=0.10,
+            quality_score=0.85,
+            transcribed_text="drist and trary walked into the cavern",
+        )
+        candidate = QualityResult(
+            line_id="ch01_0001",
+            status=ValidationStatus.PASS,
+            wer=0.05,
+            quality_score=0.95,
+            transcribed_text="drizzit entrary walked into the cavern",
+        )
+        self.assertFalse(
+            ValidationLoop._is_pronunciation_candidate_better(candidate, current, {"Drizzt", "Entreri"}),
+            "candidate breaking Drizzt to fix Entreri must be refused despite higher quality score",
+        )
+
+    def test_best_of_n_candidates_receive_identical_transcription_settings(self) -> None:
+        """Both candidate takes in best-of-N must receive identical transcription settings including language."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            loop, _ = ValidationLoopTests().make_loop(root)
+
+            class _EchoWhisper(FakeWhisper):
+                def transcribe(self, audio_file: str) -> str:
+                    return "Drizzt was here."
+
+            loop.whisper = _EchoWhisper()
+            loop.pronunciation_best_of_n = 2
+
+            validated_calls = []
+            orig_validate = loop._validate_segment
+
+            def record_validate(*args, **kwargs):
+                validated_calls.append((args, kwargs))
+                return orig_validate(*args, **kwargs)
+
+            loop._validate_segment = record_validate
+
+            loop.process_chapter(
+                project_id="book",
+                chapter_number=1,
+                lines=[ScriptLine(line_id="ch01_0001", speaker="narrator", text="Drizzt was here.")],
+                workspace=root,
+                validate=True,
+                validation_terms={"Drizzt"},
+                language="en",
+            )
+
+            self.assertEqual(len(validated_calls), 2, "best-of-N must validate both takes")
+            take1_kwargs = validated_calls[0][1]
+            take2_kwargs = validated_calls[1][1]
+            self.assertEqual(take1_kwargs.get("language"), "en")
+            self.assertEqual(take2_kwargs.get("language"), "en")
+            self.assertEqual(take1_kwargs.get("speed"), take2_kwargs.get("speed"))
+
 
 if __name__ == "__main__":
     unittest.main()
+

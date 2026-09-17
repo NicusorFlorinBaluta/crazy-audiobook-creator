@@ -3492,7 +3492,13 @@ async function fetchAndRenderDeliveries(projectId) {
             return;
         }
 
-        summary.textContent = `${data.published_count} parts available`;
+        if (data.any_stale) {
+            summary.textContent = `${data.published_count} parts available (${data.stale_deliveries.length} stale — chapters re-mastered)`;
+            summary.style.color = '#f59e0b';
+        } else {
+            summary.textContent = `${data.published_count} parts available`;
+            summary.style.color = '';
+        }
 
         data.deliveries.forEach((d, index) => {
             const row = document.createElement('div');
@@ -3503,8 +3509,11 @@ async function fetchAndRenderDeliveries(projectId) {
             row.style.background = 'var(--bg-surface-secondary)';
             row.style.borderRadius = 'var(--radius-sm)';
 
+            const isStale = d.status === 'stale';
             const info = document.createElement('div');
-            const statusLabel = d.status === 'stale' ? ' — needs republishing' : '';
+            const statusLabel = isStale
+                ? ` <span class="badge" style="background: rgba(245, 158, 11, 0.2); color: #f59e0b; padding: 2px 6px; border-radius: 4px; font-size: 0.85em;" title="${escapeHtml(d.stale_reason || 'Chapters re-mastered')}">⚠️ Stale (needs re-export)</span>`
+                : '';
             info.innerHTML = `<strong>Part ${d.ordinal || index + 1}</strong> <span style="color: var(--text-secondary); font-size: 0.9em; margin-left: 10px;">(Chapters ${d.chapter_numbers.join(', ')})${statusLabel}</span>`;
 
             const actions = document.createElement('div');

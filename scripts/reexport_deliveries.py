@@ -31,6 +31,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from brain.orchestrator.pipeline import Pipeline
+from shared.staleness import check_delivery_staleness
 
 _BATCH = re.compile(r"^(\d+)-(\d+)$")
 
@@ -47,29 +48,24 @@ def _parse_batch(value: str) -> set[int]:
 
 def _report_stale(project_id: str, workspace: Path) -> int:
     """Deliveries older than a chapter wav they contain."""
-    chapters_dir = workspace / "chapters"
     output_dir = workspace / "output"
-    if not chapters_dir.is_dir() or not output_dir.is_dir():
+    if not output_dir.is_dir():
         print("nothing to check", file=sys.stderr)
         return 1
 
-    mtimes = {
-        int(path.stem.split("_")[1]): path.stat().st_mtime
-        for path in chapters_dir.glob("chapter_*.wav")
-        if path.stem.split("_")[-1].isdigit()
-    }
-    stale = False
-    for delivery in sorted(output_dir.glob("*.m4b")):
-        built = delivery.stat().st_mtime
-        match = re.search(r"_chapters_(\d+)-(\d+)\.m4b$", delivery.name)
-        covered = set(range(int(match.group(1)), int(match.group(2)) + 1)) if match else set(mtimes)
-        newer = sorted(number for number in covered if mtimes.get(number, 0) > built)
-        if newer:
-            stale = True
-            print(f"STALE  {delivery.name}  (chapters re-mastered since it was built: {newer})")
+    all_deliveries = sorted(output_dir.glob("*.m4b"))
+    if not all_deliveries:
+        print("nothing to check", file=sys.stderr)
+        return 1
+
+    stale_items = check_delivery_staleness(workspace)
+    stale_names = {item["artifact"]: item["newer_chapters"] for item in stale_items}
+    for delivery in all_deliveries:
+        if delivery.name in stale_names:
+            print(f"STALE  {delivery.name}  (chapters re-mastered since it was built: {stale_names[delivery.name]})")
         else:
             print(f"ok     {delivery.name}")
-    if stale:
+    if stale_items:
         print("\nRe-export the stale ones, or the repaired audio never reaches a listener.")
     return 0
 

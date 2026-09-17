@@ -300,6 +300,7 @@ async def lifespan(app: FastAPI):
         risk_aware_first_attempt=val_cfg.get("risk_aware_first_attempt", False),
         emotion_wer_allowance=val_cfg.get("emotion_wer_allowance", 0.0),
         prosody_config=val_cfg.get("prosody", {}),
+        pronunciation_best_of_n=int(val_cfg.get("pronunciation_best_of_n", 1)),
     )
 
     master_cfg = config.get("mastering", {})
@@ -656,6 +657,7 @@ def generate_line(request: GenerateLineRequest) -> GenerateLineResponse:
             voice_ref.name,
         )
 
+    effective_fx = request.voice_fx if request.voice_fx is not None else request.line.voice_fx
     with gpu_job():
         audio = engine.generate_speech(
             text=request.line.text,
@@ -663,7 +665,7 @@ def generate_line(request: GenerateLineRequest) -> GenerateLineResponse:
             ref_text=ref_text or "",
             emotion_instruction=request.line.emotion,
             speed=request.line.speed,
-            voice_fx=request.line.voice_fx,
+            voice_fx=effective_fx,
             output_path=output_path,
         )
 
@@ -857,6 +859,8 @@ def validate_segment(request: ValidateRequest) -> dict:
             audio_file=str(audio_path),
             expected_text=request.expected_text,
             validation_terms=set(request.validation_terms),
+            speed=request.speed,
+            language=request.language,
         )
     return result.model_dump()
 

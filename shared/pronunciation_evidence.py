@@ -38,6 +38,7 @@ from __future__ import annotations
 import json
 import re
 from collections import Counter
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from typing import Any
@@ -355,3 +356,123 @@ def transcripts_for_project(connection: Any, project_id: str) -> dict[str, str]:
         if text:
             transcripts[line_id] = text
     return transcripts
+
+
+def terms_in_text(text: str, terms: Iterable[str]) -> set[str]:
+    """Return the subset of `terms` present in `text`.
+
+    Matches terms against the word sequence of the text (case-insensitive).
+    Single-word terms match word-level tokens; multi-word terms match
+    exact word sub-sequences.
+    """
+    words = [w.casefold() for w in _words(text)]
+    if not words:
+        return set()
+    word_set = set(words)
+    joined_text = " " + " ".join(words) + " "
+    matched: set[str] = set()
+    for term in terms:
+        t_words = [w.casefold() for w in _words(term)]
+        if not t_words:
+            continue
+        if len(t_words) == 1:
+            if t_words[0] in word_set:
+                matched.add(term)
+        else:
+            phrase = " " + " ".join(t_words) + " "
+            if phrase in joined_text:
+                matched.add(term)
+    return matched
+
+
+def is_pronunciation_candidate_better(
+    candidate: Any,
+    current: Any,
+    terms: Iterable[str],
+) -> bool:
+    """Decide if candidate take is better for a line containing glossary terms.
+
+    Enforces the cross-term regression guard (Defect 1):
+    A candidate that breaks ANY name that was previously pronounced correctly
+    is rejected immediately, even if it fixes another name or scores higher
+    on quality.
+    """
+    cand_hard_ok = bool(
+        getattr(candidate, "passed_hard_gates", True)
+        and not getattr(candidate, "clipping_detected", False)
+    )
+    curr_hard_ok = bool(
+        getattr(current, "passed_hard_gates", True)
+        and not getattr(current, "clipping_detected", False)
+    )
+    if not cand_hard_ok and curr_hard_ok:
+        return False
+
+    def is_accepted(status: Any) -> bool:
+        val = str(getattr(status, "value", status)).lower()
+        return val in {"pass", "accepted_with_warning"}
+
+    cand_status = getattr(candidate, "status", None)
+    curr_status = getattr(current, "status", None)
+    if curr_status and is_accepted(curr_status) and not is_accepted(cand_status):
+        return False
+
+    terms_set = set(terms) if terms else set()
+    if terms_set:
+        cand_words = _words(getattr(candidate, "transcribed_text", "") or "")
+        curr_words = _words(getattr(current, "transcribed_text", "") or "")
+
+        cand_hits = 0
+        curr_hits = 0
+
+        for term in terms_set:
+            cand_span, _ = best_matching_span(term, cand_words)
+            curr_span, _ = best_matching_span(term, curr_words)
+
+            def is_correct(span: str, expected_term: str = term) -> bool:
+                if not span:
+                    return False
+                if phonetic_key(span) == phonetic_key(expected_term):
+                    return True
+                if len(_words(span)) > len(_words(expected_term)):
+                    return False
+                return same_spoken_form(expected_term, span)
+
+            cand_correct = is_correct(cand_span)
+            curr_correct = is_correct(curr_span)
+
+            # Cross-term regression guard:
+            # Reject take if any term that was correct becomes wrong
+            if curr_correct and not cand_correct:
+                return False
+
+            if cand_correct:
+                cand_hits += 1
+            if curr_correct:
+                curr_hits += 1
+
+        if cand_hits != curr_hits:
+            return cand_hits > curr_hits
+
+    # Tie-break on validation status rank, quality score, and WER
+    def rank(status: Any) -> int:
+        val = str(getattr(status, "value", status)).lower()
+        if val == "pass":
+            return 3
+        if val == "accepted_with_warning":
+            return 2
+        if val == "flagged":
+            return 1
+        return 0
+
+    cand_score = float(getattr(candidate, "quality_score", 0.0) or 0.0)
+    curr_score = float(getattr(current, "quality_score", 0.0) or 0.0)
+    cand_wer = float(getattr(candidate, "wer", 1.0) or 1.0)
+    curr_wer = float(getattr(current, "wer", 1.0) or 1.0)
+
+    return (rank(cand_status), cand_score, -cand_wer) > (
+        rank(curr_status),
+        curr_score,
+        -curr_wer,
+    )
+

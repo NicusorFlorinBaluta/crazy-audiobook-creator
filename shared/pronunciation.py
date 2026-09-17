@@ -559,6 +559,14 @@ def _phonetic_recommendations(term: str, context: str = "") -> dict[str, str]:
     elif re.match(r"^J[aeiou]", clean_def, re.I):
         clean_def = "Y" + clean_def[1:]
 
+    # Fantasy pattern heuristics for failure modes
+    if re.search(r"zt$", clean_alt, re.I):
+        clean_alt = re.sub(r"zt$", "st", clean_alt, flags=re.I)
+    elif re.match(r"^En(?=[bcdfghjklmnpqrstvwxz])", clean_alt, re.I):
+        clean_alt = re.sub(r"^En", "Ehn", clean_alt, flags=re.I)
+    elif "ae" in clean_alt.lower() and clean_alt.lower() not in _KNOWN_TERM_OVERRIDES:
+        clean_alt = re.sub(r"ae", "ay", clean_alt, flags=re.I)
+
     sylls_def = _split_into_phonetic_chunks(clean_def)
     sylls_alt = _split_into_phonetic_chunks(clean_alt)
 
@@ -1014,16 +1022,18 @@ def build_pronunciation_inventory(
                 cached_recs[key] = {"default": rec_default, "alternate": rec_alternate}
                 recs_updated = True
 
-        effective = replacement if verified else rec_default
+        rec_def_effective = rec_default if rec_default.casefold() != display_term.casefold() else ""
+        rec_alt_effective = rec_alternate if rec_alternate.casefold() != display_term.casefold() else ""
+        effective = replacement if verified else rec_def_effective
         candidates.append(
             {
                 "term": display_term,
                 "status": "verified" if verified else "review_required",
                 "spoken_text": replacement,
-                "recommendation_default": rec_default,
-                "recommendation_alternate": rec_alternate,
+                "recommendation_default": rec_def_effective,
+                "recommendation_alternate": rec_alt_effective,
                 "effective_spoken": effective or "",
-                "mapping_source": source_by_folded.get(key) or ("default" if rec_default else None),
+                "mapping_source": source_by_folded.get(key) or ("default" if rec_def_effective else None),
                 "occurrences": occurrence_count,
                 "chapters": sorted(chapters.get(key, set())),
                 "contexts": contexts.get(key, []),

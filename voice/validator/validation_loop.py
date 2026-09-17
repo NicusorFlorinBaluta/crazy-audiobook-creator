@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import time
 import unicodedata
 from collections.abc import Callable
@@ -75,6 +76,7 @@ class ValidationLoop:
         risk_aware_first_attempt: bool = False,
         emotion_wer_allowance: float = 0.0,
         prosody_config: dict[str, Any] | None = None,
+        pronunciation_best_of_n: int = 1,
     ):
         self.whisper = whisper
         self.analyzer = analyzer
@@ -94,6 +96,7 @@ class ValidationLoop:
         self.keep_models_resident = keep_models_resident
         self.risk_aware_first_attempt = risk_aware_first_attempt
         self.emotion_wer_allowance = max(0.0, float(emotion_wer_allowance))
+        self.pronunciation_best_of_n = max(1, int(pronunciation_best_of_n))
 
     def process_chapter(
         self,
@@ -137,6 +140,13 @@ class ValidationLoop:
         total_duration = 0.0
         retry_limit = max(1, max_retries or self.max_retries)
         validation_terms = validation_terms or set()
+        line_validation_terms_by_id: dict[str, set[str]] = {
+            line.line_id: self._filter_relevant_validation_terms(
+                f"{line.text} {expected_text_by_id[line.line_id]}",
+                validation_terms,
+            )
+            for line in lines
+        }
         risk_adjusted_line_ids: list[str] = []
         reference_pitch_map: dict[str, float] = {}
 
@@ -261,6 +271,37 @@ class ValidationLoop:
                             if not self._valid_audio(output_path):
                                 raise RuntimeError("TTS returned no valid audio artifact")
                             last_error = None
+
+                            if self.pronunciation_best_of_n >= 2 and line_validation_terms_by_id.get(line.line_id):
+                                candidate_2_path = segments_dir / f".{line.line_id}.take-2.wav"
+                                try:
+                                    take2_start = time.perf_counter()
+                                    self.engine.generate_speech(
+                                        text=synthesis_text,
+                                        voice_reference_path=voice_ref,
+                                        ref_text=ref_text,
+                                        emotion_instruction=synthesis_emotion,
+                                        speed=synthesis_speed,
+                                        voice_fx=synthesis_fx,
+                                        output_path=candidate_2_path,
+                                        seed=self._line_seed(
+                                            project_id,
+                                            line.line_id,
+                                            synthesis_text,
+                                            line.voice_id or line.speaker,
+                                            102,
+                                        ),
+                                    )
+                                    take2_elapsed = time.perf_counter() - take2_start
+                                    timings["tts_synthesis"] = timings.get("tts_synthesis", 0.0) + take2_elapsed
+                                    synthesis_elapsed += take2_elapsed
+                                except Exception as exc:
+                                    logger.debug(
+                                        "Selective best-of-N candidate 2 synthesis failed for %s: %s",
+                                        line.line_id,
+                                        exc,
+                                    )
+                                    candidate_2_path.unlink(missing_ok=True)
                             break
                         except Exception as exc:
                             last_error = exc
@@ -481,6 +522,40 @@ class ValidationLoop:
                     emotion_adjusted=self._is_emotion_adjusted(line.emotion),
                     language=language,
                 )
+                candidate_2_path = segments_dir / f".{line.line_id}.take-2.wav"
+                if candidate_2_path.is_file():
+                    try:
+                        cand2_result = self._validate_segment(
+                            str(candidate_2_path),
+                            expected_text_by_id[line.line_id],
+                            line.line_id,
+                            line.speed,
+                            voice_ref_path=voice_ref,
+                            reference_pitch_median=reference_pitch_map[line.line_id],
+                            speaker_similarity=speaker_similarity[line.line_id],
+                            require_speaker_similarity=True,
+                            validation_terms=line_validation_terms_by_id[line.line_id],
+                            timing_accumulator=timings,
+                            emotion_adjusted=self._is_emotion_adjusted(line.emotion),
+                            language=language,
+                        )
+                        if self._is_pronunciation_candidate_better(
+                            cand2_result,
+                            result,
+                            line_validation_terms_by_id[line.line_id],
+                        ):
+                            logger.info(
+                                "Selective best-of-N: selected candidate 2 for %s (%r beats %r)",
+                                line.line_id,
+                                cand2_result.transcribed_text,
+                                result.transcribed_text,
+                            )
+                            shutil.move(str(candidate_2_path), str(audio_path))
+                            result = cand2_result
+                    except Exception as exc:
+                        logger.debug("Validating take 2 for %s failed: %s", line.line_id, exc)
+                    finally:
+                        candidate_2_path.unlink(missing_ok=True)
                 segment_metrics[line.line_id]["validation_seconds"] = round(time.perf_counter() - validation_started, 6)
                 quality_by_id[line.line_id] = result
                 self._checkpoint_accepted_result(
@@ -758,6 +833,8 @@ class ValidationLoop:
         audio_file: str,
         expected_text: str,
         validation_terms: set[str] | None = None,
+        speed: float = 1.0,
+        language: str | None = None,
     ) -> QualityResult:
         """Validate one segment outside a chapter run.
 
@@ -773,8 +850,9 @@ class ValidationLoop:
             audio_file,
             expected_text,
             "manual",
-            1.0,
+            speed,
             validation_terms=validation_terms or set(),
+            language=language,
         )
 
     def _resolve_reference(self, project_id: str, line: ScriptLine) -> tuple[Path, str]:
@@ -1329,6 +1407,17 @@ class ValidationLoop:
             current.quality_score,
             -current.wer,
         )
+
+    @staticmethod
+    def _is_pronunciation_candidate_better(
+        candidate: QualityResult,
+        current: QualityResult,
+        terms: set[str],
+    ) -> bool:
+        """Decide if candidate take is better for lines with hard terms."""
+        from shared.pronunciation_evidence import is_pronunciation_candidate_better
+
+        return is_pronunciation_candidate_better(candidate, current, terms)
 
     @staticmethod
     def _is_accepted(status: ValidationStatus) -> bool:

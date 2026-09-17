@@ -20,8 +20,6 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from brain.dashboard.api import runtime
-from brain.orchestrator.delivery_manager import DeliveryManager
-from brain.orchestrator.voice_client import VoiceClientError
 from shared.artifacts import atomic_write_json
 from shared.models import GenerateLineRequest, ScriptLine
 from shared.pronunciation import (
@@ -224,7 +222,12 @@ async def get_pronunciations(project_id: str):
     """Return the book pronunciation inventory and custom mappings."""
     runtime.require_job(project_id)
     project_dir = runtime.project_dir(project_id)
-    return build_pronunciation_inventory(project_dir, client=runtime.pronunciation_llm())
+    inventory = build_pronunciation_inventory(project_dir, client=runtime.pronunciation_llm())
+    if isinstance(inventory, dict):
+        from shared.staleness import check_pronunciation_evidence_staleness
+
+        inventory["evidence_staleness"] = check_pronunciation_evidence_staleness(project_dir)
+    return inventory
 
 
 @router.post("/api/projects/{project_id}/pronunciations")

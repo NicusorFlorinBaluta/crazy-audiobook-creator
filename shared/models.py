@@ -498,6 +498,8 @@ class ValidateRequest(BaseModel):
             "passes inside a chapter run."
         ),
     )
+    speed: float = 1.0
+    language: str | None = None
 
 
 class QualityResult(BaseModel):

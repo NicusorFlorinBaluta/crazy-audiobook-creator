@@ -32,7 +32,6 @@ import json
 import re
 import sqlite3
 import sys
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -130,38 +129,11 @@ def _entries_to_measure(
 
 
 def _evidence_is_current(project_dir: Path, connection: Any, project_id: str) -> tuple[bool, str]:
-    """Is the stored audio new enough to say anything about the current lexicon?
+    """Is the stored audio new enough to say anything about the current lexicon?"""
+    from shared.staleness import check_pronunciation_evidence_staleness
 
-    Emberdark is why this exists. Its respellings were written on 2026-09-12
-    -- including `Xisis` -> `Zeeziss`, the fix for a name being read as
-    "Jesus" -- but its newest transcript is from 2026-09-03, because
-    republishing was deliberately deferred. Measured naively, every one of
-    those entries reads as a respelling that was applied and failed. None of
-    them has ever been spoken.
-
-    The check is per project and deliberately blunt: a respelling is only
-    judged when the book has been through the engine since the lexicon last
-    changed. Returning "not current" costs a regeneration; returning a
-    confident verdict on audio that predates the entry costs trust in every
-    other row of the report.
-    """
-    newest_audio = connection.execute(
-        "select max(created_at) from quality_logs where project_id=?",
-        (project_id,),
-    ).fetchone()[0]
-    if not newest_audio:
-        return False, "no transcripts stored"
-
-    lexicon_mtime = 0.0
-    for name in ("pronunciation_dict.json", "pronunciation_recommendations.json"):
-        path = project_dir / name
-        if path.is_file():
-            lexicon_mtime = max(lexicon_mtime, path.stat().st_mtime)
-    lexicon_changed = datetime.fromtimestamp(lexicon_mtime, tz=UTC).isoformat()
-
-    if lexicon_changed <= newest_audio:
-        return True, f"newest audio {newest_audio[:16]}, lexicon last changed {lexicon_changed[:16]}"
-    return False, f"lexicon changed {lexicon_changed[:16]} but newest audio is {newest_audio[:16]}"
+    res = check_pronunciation_evidence_staleness(project_dir)
+    return res["evidence_current"], res["evidence_freshness"]
 
 
 def main() -> int:

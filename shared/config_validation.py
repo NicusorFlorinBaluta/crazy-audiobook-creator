@@ -250,6 +250,7 @@ def validate_voice_config(config: dict[str, Any]) -> dict[str, Any]:
     # VoiceDesign subprocess, so a typo here costs real wall time.
     _number(errors, validation, "voice_distinctness_rounds", minimum=0, maximum=5)
     _number(errors, validation, "max_retries", minimum=0, maximum=20)
+    _number(errors, validation, "pronunciation_best_of_n", minimum=1, maximum=5)
     mastering = config.get("mastering", {})
     _number(errors, mastering, "crossfade_ms", minimum=0, maximum=500)
     _number(errors, mastering, "target_lufs", minimum=-40, maximum=-5)

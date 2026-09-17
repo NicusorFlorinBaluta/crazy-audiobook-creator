@@ -17,10 +17,12 @@ from difflib import SequenceMatcher
 from shared.pronunciation_evidence import (
     TermEvidence,
     best_matching_span,
+    is_pronunciation_candidate_better,
     measure_terms,
     phonetic_key,
     same_spoken_form,
     sound_similarity,
+    terms_in_text,
 )
 
 
@@ -303,3 +305,78 @@ class TestSameSpokenForm:
     def test_a_fragment_too_short_to_judge_is_not_forgiven(self) -> None:
         assert not same_spoken_form("drizzt", "dr")
         assert not same_spoken_form("drizzt", "")
+
+
+class TestTermsInText:
+    def test_single_word_terms(self) -> None:
+        terms = {"Drizzt", "Entreri", "Bruenor"}
+        text = "Drizzt fought with fury."
+        assert terms_in_text(text, terms) == {"Drizzt"}
+
+    def test_multi_word_terms(self) -> None:
+        terms = {"Drizzt", "Artemis Entreri", "Entreri", "Do'Urden"}
+        text = "He spoke with Artemis Entreri and Drizzt Do'Urden yesterday."
+        assert terms_in_text(text, terms) == {"Drizzt", "Artemis Entreri", "Entreri", "Do'Urden"}
+
+    def test_partial_match_ignored(self) -> None:
+        terms = {"Artemis Entreri"}
+        text = "Artemis smiled alone."
+        assert terms_in_text(text, terms) == set()
+
+
+class TestIsPronunciationCandidateBetter:
+    def test_fixes_target_term_without_regression(self) -> None:
+        from shared.models import QualityResult, ValidationStatus
+
+        current = QualityResult(
+            line_id="ch01_0001",
+            status=ValidationStatus.PASS,
+            wer=0.0,
+            transcribed_text="drist and trary went ahead",
+        )
+        candidate = QualityResult(
+            line_id="ch01_0001",
+            status=ValidationStatus.PASS,
+            wer=0.0,
+            transcribed_text="drist entrary went ahead",
+        )
+        assert is_pronunciation_candidate_better(candidate, current, {"Drizzt", "Entreri"})
+
+    def test_cross_term_guard_rejects_breaking_other_name(self) -> None:
+        """Defect 1: Fixing Entreri while breaking Drizzt ('drizzit') must be rejected."""
+        from shared.models import QualityResult, ValidationStatus
+
+        current = QualityResult(
+            line_id="ch01_0001",
+            status=ValidationStatus.PASS,
+            wer=0.0,
+            quality_score=0.85,
+            transcribed_text="drist and trary went ahead",
+        )
+        candidate = QualityResult(
+            line_id="ch01_0001",
+            status=ValidationStatus.PASS,
+            wer=0.0,
+            quality_score=0.95,  # Higher quality score must NOT override broken name
+            transcribed_text="drizzit entrary went ahead",
+        )
+        assert not is_pronunciation_candidate_better(candidate, current, {"Drizzt", "Entreri"})
+
+    def test_refuses_failed_hard_gates(self) -> None:
+        from shared.models import QualityResult, ValidationStatus
+
+        current = QualityResult(
+            line_id="ch01_0001",
+            status=ValidationStatus.PASS,
+            wer=0.0,
+            transcribed_text="drizzit",
+        )
+        candidate = QualityResult(
+            line_id="ch01_0001",
+            status=ValidationStatus.FAIL,
+            wer=0.0,
+            clipping_detected=True,
+            transcribed_text="drist",
+        )
+        assert not is_pronunciation_candidate_better(candidate, current, {"Drizzt"})
+

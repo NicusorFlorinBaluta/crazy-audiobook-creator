@@ -4052,9 +4052,12 @@ class Pipeline:
         config = shared_paths.voice_config()
         if not config:
             return {}
+        validation = dict(config.get("validation", {}))
+        if validation.get("pronunciation_best_of_n", 1) <= 1:
+            validation.pop("pronunciation_best_of_n", None)
         result = {
             "tts": config.get("tts", {}),
-            "validation": config.get("validation", {}),
+            "validation": validation,
         }
         if project_id:
             voice_root = Path(

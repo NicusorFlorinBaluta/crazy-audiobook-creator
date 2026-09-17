@@ -30,7 +30,6 @@ import shutil
 import sqlite3
 import subprocess
 import threading
-import time
 import uuid
 import zipfile
 from contextlib import asynccontextmanager
@@ -978,25 +977,56 @@ if frontend_dir.exists():
     app.mount("/static", StaticFiles(directory=str(frontend_dir)), name="static")
 
 
+def _asset_revision(relative: str) -> str:
+    """Cache buster for one asset: a hash of what the file actually contains.
+
+    This used to be `int(time.time())`, stamped on every asset at every
+    request. That is correct but maximally wasteful -- the URL changed on every
+    page load, so the browser re-fetched all of the JavaScript and CSS every
+    time and the cache never held anything.
+
+    Hashing the content keeps the guarantee and restores the caching: an
+    unchanged file keeps its URL and is reused, a changed file gets a new one
+    and cannot be served stale. It also means nobody has to remember to bump a
+    version by hand, which is a step that was missed in 651b854 -- app.js
+    changed by 293 lines while its `?v=` stayed put.
+    """
+    path = frontend_dir / relative
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()[:12]
+    except OSError:
+        # An asset that cannot be read is about to 404 anyway; a per-process
+        # constant keeps the page renderable and the URL stable.
+        return "missing"
+
+
 @app.get("/")
 async def serve_dashboard():
-    """Serve the dashboard home page with dynamic cache busters."""
+    """Serve the dashboard home page with content-hashed cache busters."""
     index_path = frontend_dir / "index.html"
     if index_path.exists():
         content = index_path.read_text(encoding="utf-8")
-        timestamp = str(int(time.time()))
         content = re.sub(
-            r'((?:src|href)="static/[^"]+?\.(?:js|css))(?:\?v=[^"]*)?(")',
-            rf"\1?v={timestamp}\2",
+            r'((?:src|href)="static/([^"]+?\.(?:js|css)))(?:\?v=[^"]*)?(")',
+            lambda match: f"{match.group(1)}?v={_asset_revision(match.group(2))}{match.group(3)}",
             content,
         )
         return HTMLResponse(
             content=content,
             headers={
+                # The page itself must never be cached, or the browser keeps
+                # serving asset URLs from a previous deploy. The assets it
+                # points at are a different matter: their URLs now carry a
+                # content hash, so they are safe to cache and safe to reuse.
+                #
+                # `Clear-Site-Data: "cache"` used to be sent here as well,
+                # which emptied the browser's cache for this origin on every
+                # single dashboard load. That made stale assets impossible by
+                # making caching impossible. Content hashing gives the same
+                # guarantee and lets an unchanged file actually be reused.
                 "Cache-Control": "no-store, no-cache, max-age=0, must-revalidate",
                 "Pragma": "no-cache",
                 "Expires": "0",
-                "Clear-Site-Data": '"cache"',
             },
         )
     return JSONResponse(
@@ -2193,8 +2223,8 @@ async def get_pipeline_status(project_id: str):
                         project_id,
                         {"voice_revision_pending_chapters": sorted(voice_revision_pending)},
                     )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Failed to update job queue with voice_revision_pending: %s", exc)
 
         mastered_chapters = set(state.get("mastered_chapters", [])) - voice_revision_pending
         # Re-add from disk only for chapters NOT pending voice revision
@@ -2362,8 +2392,19 @@ async def get_pipeline_status(project_id: str):
                     "progress_percent": min(max(pct, 0), 100),
                 }
             )
-
         state["chapter_details"] = chapter_details
+
+        from shared.staleness import check_delivery_staleness, check_pronunciation_evidence_staleness
+
+        stale_delivs = check_delivery_staleness(workspace_dir)
+        ev_staleness = check_pronunciation_evidence_staleness(project_dir)
+        state["staleness"] = {
+            "deliveries_stale": bool(stale_delivs),
+            "stale_deliveries": stale_delivs,
+            "evidence_current": ev_staleness.get("evidence_current", True),
+            "evidence_freshness": ev_staleness.get("evidence_freshness", ""),
+        }
+
         return state
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Project not found") from exc
@@ -3756,13 +3797,27 @@ async def get_deliveries(project_id: str):
     dm = DeliveryManager(project_dir)
     index = dm.load_index()
 
+    workspace_dir = _workspace_project_dir(project_id)
+    raw_deliveries = [p.model_dump() for p in index.deliveries]
+
+    from shared.staleness import check_delivery_staleness
+
+    stale_items = check_delivery_staleness(workspace_dir, raw_deliveries)
+    stale_ids = {item["delivery_id"]: item["newer_chapters"] for item in stale_items if item.get("delivery_id")}
+    for d in raw_deliveries:
+        if d.get("delivery_id") in stale_ids:
+            d["status"] = "stale"
+            d["stale_reason"] = f"Chapters re-mastered since build: {stale_ids[d['delivery_id']]}"
+
     return {
         "settings": state.get("incremental_delivery") or {"enabled": False, "batch_size": 5},
         "active_delivery_id": state.get("active_delivery_id"),
         "active_delivery_chapters": state.get("active_delivery_chapters") or [],
         "pause_after_delivery_requested": bool(state.get("pause_after_delivery_requested")),
-        "published_count": sum(part.status == "published" for part in index.deliveries),
-        "deliveries": [p.model_dump() for p in index.deliveries],
+        "published_count": sum(part.get("status") == "published" for part in raw_deliveries),
+        "deliveries": raw_deliveries,
+        "stale_deliveries": stale_items,
+        "any_stale": bool(stale_items),
     }
 
 

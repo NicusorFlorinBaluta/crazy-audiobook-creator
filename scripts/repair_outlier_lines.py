@@ -55,22 +55,29 @@ from __future__ import annotations
 
 import argparse
 import json
-import shutil
-import sqlite3
+import logging
 import sys
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from brain.orchestrator.voice_client import VoiceClient
-from shared.artifacts import atomic_write_json, fingerprint, hash_file
 from shared.models import GenerateLineRequest, ScriptLine, ValidateRequest
 from shared.pronunciation import apply_pronunciations, load_pronunciation_dictionary
-from shared.pronunciation_evidence import _words, best_matching_span, phonetic_key
+from shared.pronunciation_evidence import (
+    _words,
+    best_matching_span,
+    is_pronunciation_candidate_better,
+    phonetic_key,
+    same_spoken_form,
+    terms_in_text,
+)
+from shared.segment_repair import parse_chapter_number, replace_segment
 
 CACHE_DB = ROOT / "voice_cache.db"
 STATE_DB = ROOT / "brain" / "projects" / "pipeline_state.db"
@@ -81,8 +88,7 @@ STATE_DB = ROOT / "brain" / "projects" / "pipeline_state.db"
 REPAIRABLE = {"unstable"}
 
 
-def _chapter_of(line_id: str) -> int:
-    return int(line_id[2:].split("_")[0])
+_chapter_of = parse_chapter_number
 
 
 def _load_audit(project_dir: Path, term: str | None) -> dict[str, list[tuple[str, str]]]:
@@ -109,85 +115,6 @@ def _script_lines(project_dir: Path) -> dict[str, dict[str, Any]]:
     return {line["line_id"]: line for chapter in script.get("chapters", []) for line in chapter.get("lines", [])}
 
 
-def _manifest_path(project_dir: Path, chapter: int) -> Path:
-    return project_dir / "manifests" / f"chapter_{chapter:03d}.segments.json"
-
-
-def _rewrite_manifest(project_dir: Path, chapter: int, line_id: str, new_hash: str) -> bool:
-    """Point the manifest at the new audio, leaving `dependency_hash` alone."""
-    path = _manifest_path(project_dir, chapter)
-    if not path.is_file():
-        print(f"   !! no manifest for chapter {chapter}; not repairing {line_id}", file=sys.stderr)
-        return False
-    manifest = json.loads(path.read_text(encoding="utf-8"))
-    for segment in manifest.get("segments", []):
-        if segment.get("line_id") == line_id:
-            segment["output_hash"] = new_hash
-            break
-    else:
-        print(f"   !! {line_id} is not in chapter {chapter}'s manifest", file=sys.stderr)
-        return False
-    manifest["manifest_hash"] = fingerprint({k: v for k, v in manifest.items() if k != "manifest_hash"})
-    atomic_write_json(path, manifest)
-    return True
-
-
-def _back_up(segment_path: Path) -> Path:
-    """Keep the take being replaced.
-
-    Replacing a segment is otherwise unrecoverable: the old audio is not in the
-    cache, the manifest only holds its hash, and regenerating cannot reproduce
-    it because the seed that made it is not stored anywhere.
-    """
-    backup_dir = segment_path.parent / "repair-backup"
-    backup_dir.mkdir(exist_ok=True)
-    backup = backup_dir / segment_path.name
-    if not backup.exists():
-        shutil.copy2(segment_path, backup)
-    return backup
-
-
-def _record_validation(project_id: str, line_id: str, chapter: int, validated: Any) -> None:
-    """Append the repaired take's transcript to the validation record.
-
-    Without this the repair is invisible to everything that measures it.
-    `transcripts_for_project` reads the *last* `quality_logs` row per line, so
-    re-running `measure_pronunciations.py` would keep reporting the take that
-    has just been replaced, and the line would stay on the outlier list
-    forever.
-    """
-    payload = validated.model_dump() if hasattr(validated, "model_dump") else dict(validated)
-    payload["repaired_by"] = "scripts/repair_outlier_lines.py"
-    with sqlite3.connect(STATE_DB) as connection:
-        connection.execute(
-            "insert into quality_logs "
-            "(project_id, line_id, chapter_number, attempt, wer, quality_score, status, details, created_at) "
-            "values (?,?,?,?,?,?,?,?,?)",
-            (
-                project_id,
-                line_id,
-                chapter,
-                int(payload.get("attempt") or 1),
-                payload.get("wer"),
-                payload.get("quality_score"),
-                str(payload.get("status") or ""),
-                json.dumps(payload, default=str),
-                datetime.now(UTC).isoformat(),
-            ),
-        )
-
-
-def _rewrite_cache(project_id: str, line_id: str, new_hash: str) -> None:
-    """Keep the generation cache pointing at the take that is now on disk."""
-    if not CACHE_DB.is_file():
-        return
-    with sqlite3.connect(CACHE_DB) as connection:
-        connection.execute(
-            "update generation_fingerprints set output_hash=? where project_id=? and line_id=?",
-            (new_hash, project_id, line_id),
-        )
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("project_id")
@@ -206,7 +133,14 @@ def main() -> int:
 
     script_lines = _script_lines(project_dir)
     mappings, _ = load_pronunciation_dictionary(project_dir)
-    glossary = set(targets) | {str(key) for key in mappings} | {str(value) for value in mappings.values()}
+    audit_path = project_dir / "pronunciation_measurement_audit.json"
+    audit_terms = set()
+    if audit_path.is_file():
+        try:
+            audit_terms = set(json.loads(audit_path.read_text(encoding="utf-8")).get("terms", {}).keys())
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.debug("Failed to read audit terms from %s: %s", audit_path, exc)
+    glossary = audit_terms | set(targets) | {str(key) for key in mappings} | {str(value) for value in mappings.values()}
     client = VoiceClient()
 
     fixed: list[str] = []
@@ -226,7 +160,9 @@ def main() -> int:
             if not line or not segment_path.is_file():
                 print(f"  {line_id}  !! no script line or segment on disk; skipped")
                 continue
-            spoken = apply_pronunciations(line.get("text", ""), mappings)
+            line_text = line.get("text", "")
+            spoken = apply_pronunciations(line_text, mappings)
+            line_terms = terms_in_text(f"{line_text} {spoken}", glossary) | {term}
 
             # The audit is a snapshot, and a line repaired by an earlier run is
             # still listed in it. Without this check a second pass redraws work
@@ -238,7 +174,7 @@ def main() -> int:
                 ValidateRequest(
                     audio_file=str(segment_path),
                     expected_text=spoken,
-                    validation_terms=sorted(glossary),
+                    validation_terms=sorted(line_terms),
                 )
             )
             heard_now, _score = best_matching_span(term, _words((current.transcribed_text or "").strip()))
@@ -261,25 +197,39 @@ def main() -> int:
                     )
                 )
                 candidate = Path(generated.audio_file)
-                validated = client.validate_segment(ValidateRequest(audio_file=str(candidate), expected_text=spoken))
+                validated = client.validate_segment(
+                    ValidateRequest(
+                        audio_file=str(candidate),
+                        expected_text=spoken,
+                        validation_terms=sorted(line_terms),
+                    )
+                )
                 span, _score = best_matching_span(term, _words((validated.transcribed_text or "").strip()))
                 on_target = phonetic_key(span) == target_key
-                gates_ok = bool(getattr(validated, "passed_hard_gates", True))
+                better = is_pronunciation_candidate_better(validated, current, line_terms)
 
-                if on_target and gates_ok:
+                if on_target and better:
                     if args.apply:
-                        new_hash = hash_file(candidate)
                         chapter = _chapter_of(line_id)
-                        if _rewrite_manifest(project_dir, chapter, line_id, new_hash):
-                            _back_up(segment_path)
-                            shutil.move(str(candidate), str(segment_path))
-                            _rewrite_cache(args.project_id, line_id, new_hash)
-                            _record_validation(args.project_id, line_id, chapter, validated)
+                        rep_result = replace_segment(
+                            args.project_id,
+                            line_id,
+                            candidate,
+                            validated,
+                            project_dir=project_dir,
+                            segments_dir=segments_dir,
+                            cache_db=CACHE_DB,
+                            state_db=STATE_DB,
+                            chapter=chapter,
+                            repaired_by="scripts/repair_outlier_lines.py",
+                        )
+                        if rep_result.success:
                             touched_chapters.add(chapter)
+                            current = validated
                             outcome = f"repaired on attempt {attempt}: {was_heard!r} -> {span!r}"
                         else:
                             candidate.unlink(missing_ok=True)
-                            outcome = "manifest refused the repair; audio left alone"
+                            outcome = f"repair refused ({rep_result.error}); audio left alone"
                     else:
                         candidate.unlink(missing_ok=True)
                         outcome = f"would repair on attempt {attempt}: {was_heard!r} -> {span!r}"
@@ -287,19 +237,29 @@ def main() -> int:
                     break
 
                 candidate.unlink(missing_ok=True)
-                # Two different failures, and conflating them hides which lines
-                # are worth more attempts: a take that said the name correctly
-                # but failed the audio gates is a near miss, where a take that
-                # keeps saying the wrong name is not.
                 if on_target:
                     said_it_right = True
-                outcome = (
-                    f"gave up after {args.attempts}: said it right, but no take passed the quality gates"
-                    if said_it_right
-                    else f"gave up after {args.attempts}: still {span!r}"
-                )
+                    # Check if another term regressed
+                    cand_words = _words(validated.transcribed_text or "")
+                    curr_words = _words(current.transcribed_text or "")
+                    regressed = []
+                    for t in line_terms:
+                        c_span, _ = best_matching_span(t, curr_words)
+                        v_span, _ = best_matching_span(t, cand_words)
+                        c_ok = bool(c_span and (same_spoken_form(t, c_span) or phonetic_key(c_span) == phonetic_key(t)))
+                        v_ok = bool(v_span and (same_spoken_form(t, v_span) or phonetic_key(v_span) == phonetic_key(t)))
+                        if c_ok and not v_ok:
+                            regressed.append(t)
+                    if regressed:
+                        outcome = f"attempt {attempt}: said {term!r} right, but broke other names: {regressed}"
+                    else:
+                        outcome = f"attempt {attempt}: said it right, but failed quality gates"
+                else:
+                    outcome = f"attempt {attempt}: still {span!r}"
             else:
                 stubborn.append((line_id, was_heard))
+                if not outcome.startswith("gave up"):
+                    outcome = f"gave up after {args.attempts} ({outcome})"
             print(f"  {line_id}  {outcome}")
 
     print(f"\n{len(fixed)} repaired, {len(stubborn)} left alone")

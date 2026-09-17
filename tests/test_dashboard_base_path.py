@@ -39,12 +39,13 @@ class DashboardBasePathTests(unittest.TestCase):
         self.assertIn("new URL('ws/updates', window.location.href)", app_js)
 
     def test_frontend_assets_share_one_cache_revision(self):
-        """Every referenced asset must carry the same revision.
+        """Every referenced asset in index.html must carry a consistent source revision.
 
-        A stale revision on one asset lets a browser serve old CSS with new JS,
-        which is exactly the mixing the query revisions exist to prevent. The
-        expected count is derived from the files on disk rather than hardcoded,
-        so adding a script cannot leave this assertion silently weaker.
+        At runtime serve_dashboard() replaces each asset's ?v= with a content
+        hash (sha256). In the committed template, keeping a uniform source
+        revision is a clean-code convention rather than a runtime cache-buster.
+        The expected count is derived from the files on disk rather than
+        hardcoded, so adding a script cannot leave this assertion silently weaker.
         """
         index = (FRONTEND / "index.html").read_text(encoding="utf-8")
         referenced = re.findall(r"static/((?:js|css)/[\w.-]+)\?v=([0-9.]+)", index)

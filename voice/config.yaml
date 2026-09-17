@@ -66,6 +66,10 @@ validation:
   wer_threshold: 0.20               # 20%
   emotion_wer_allowance: 0.0        # Keep transcript accuracy strict unless benchmark evidence justifies a relaxation
   max_retries: 3
+  # Selective best-of-N for lines containing hard pronunciation terms.
+  # When set to 2, synthesizes two takes for lines with terms from validation_terms,
+  # keeping the take that pronounces the terms correctly (via same_spoken_form).
+  pronunciation_best_of_n: 1        # 1 = disabled (default); 2 = generate 2 takes on hard names
   speaker_similarity_threshold: 0.55
   # Speaker-embedding cosine similarity at or above which two cast voices are
   # judged too close to tell apart. Lower is stricter.
