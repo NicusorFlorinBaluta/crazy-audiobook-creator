@@ -157,6 +157,63 @@ class TestNASSyncer(unittest.TestCase):
         self.assertEqual(result["status"], "deleted")
         mock_sftp.rmdir.assert_called()
 
+    def test_build_project_manifest_full_m4b_cumulative_offsets(self):
+        mock_sftp = MagicMock()
+        # Mock full/ directory containing an M4B
+        mock_sftp.listdir.side_effect = lambda path: (
+            ["Test Novel.m4b"] if "full" in path else (
+                ["Part 01 - Chapters 1-3-r1.m4b"] if "parts" in path else []
+            )
+        )
+        mock_sftp.stat.return_value = MagicMock(st_size=2048)
+
+        # Update book.json to have 3 chapters
+        (self.project_dir / "book.json").write_text(
+            json.dumps(
+                {
+                    "title": "Test Book",
+                    "author": "Test Author",
+                    "chapters": [
+                        {"chapter_number": 1, "title": "Chapter One"},
+                        {"chapter_number": 2, "title": "Chapter Two"},
+                        {"chapter_number": 3, "title": "Chapter Three"},
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        # Create dummy chapter wav files for chapters 1 and 3, leaving chapter 2 missing
+        ch_dir = self.project_dir / "chapters"
+        ch_dir.mkdir(parents=True, exist_ok=True)
+        import wave
+        for ch_num in (1, 3):
+            with wave.open(str(ch_dir / f"chapter_{ch_num:03d}.wav"), "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(24000)
+                w.writeframes(b"\x00\x00" * 24000 * 10)  # 10s audio each
+
+        manifest = self.syncer._generate_book_manifest(
+            project_id="test_project",
+            project_dir=self.project_dir,
+            sftp=mock_sftp,
+            proj_remote_dir="/crazybooks/test_project",
+        )
+
+        chapters = manifest["chapters"]
+        self.assertEqual(len(chapters), 3)
+        # Verify cumulative offsets across full M4B stream
+        self.assertEqual(chapters[0]["start_ms"], 0)
+        self.assertEqual(chapters[0]["end_ms"], 10000)
+        # Chapter 2 has no WAV, so it falls back to 60s and cumulative_offset advances by 60s
+        self.assertEqual(chapters[1]["start_ms"], 10000)
+        self.assertEqual(chapters[1]["end_ms"], 70000)
+        # Chapter 3 must start at 70000 ms, strictly after chapter 2
+        self.assertEqual(chapters[2]["start_ms"], 70000)
+        self.assertEqual(chapters[2]["end_ms"], 80000)
+        self.assertTrue(chapters[0]["start_ms"] < chapters[1]["start_ms"] < chapters[2]["start_ms"])
+
 
 if __name__ == "__main__":
     unittest.main()

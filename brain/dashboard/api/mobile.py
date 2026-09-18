@@ -152,7 +152,6 @@ def _chapter_duration(project_dir: Path, workspace_dir: Path, chapter_num: int) 
 @router.get("/server-info")
 async def get_server_info(request: Request) -> dict[str, Any]:
     """Return server status and capabilities for mobile client discovery."""
-    pipeline = getattr(request.app.state, "pipeline", None)
     running_tasks = getattr(request.app.state, "running_tasks", {})
     active_project_id = next(
         (pid for pid, task in running_tasks.items() if not task.done()),
@@ -423,7 +422,6 @@ async def get_book_detail(project_id: str, request: Request) -> dict[str, Any]:
 
     # Deliveries
     deliveries = []
-    chapter_delivery_offsets: dict[int, tuple[int, int]] = {}
     try:
         dm = DeliveryManager(project_dir)
         for d in dm.load_index().deliveries:
@@ -438,13 +436,13 @@ async def get_book_detail(project_id: str, request: Request) -> dict[str, Any]:
 
                 part_ch_details: list[dict[str, Any]] = []
                 part_cum_offset = 0.0
+                delivery_dl_url = f"api/projects/{project_id}/deliveries/{d_id}/download"
                 for c_num in d_chaps:
                     c_dur = _chapter_duration(project_dir, workspace_dir, c_num) or 0.0
                     c_title = chapter_titles.get(c_num) or f"Chapter {c_num}"
                     c_start = int(part_cum_offset * 1000)
                     c_end = int((part_cum_offset + c_dur) * 1000)
                     part_cum_offset += c_dur
-                    chapter_delivery_offsets[c_num] = (c_start, c_end)
                     part_ch_details.append(
                         {
                             "number": c_num,
@@ -455,8 +453,8 @@ async def get_book_detail(project_id: str, request: Request) -> dict[str, Any]:
                             "end_ms": c_end,
                             "duration_seconds": c_dur,
                             "status": "mastered" if c_num in mastered_set else "pending",
-                            "stream_url": f"api/projects/{project_id}/stream/chapter/{c_num}?format=aac",
-                            "download_url": f"api/projects/{project_id}/download/chapter/{c_num}",
+                            "stream_url": delivery_dl_url,
+                            "download_url": delivery_dl_url,
                         }
                     )
 
@@ -486,11 +484,8 @@ async def get_book_detail(project_id: str, request: Request) -> dict[str, Any]:
         ch_status = "mastered" if is_mastered else ("generating" if is_generated else "pending")
         dur = _chapter_duration(project_dir, workspace_dir, c_num) if is_mastered else None
 
-        if c_num in chapter_delivery_offsets:
-            start_ms, end_ms = chapter_delivery_offsets[c_num]
-        else:
-            start_ms = 0
-            end_ms = int((dur or 0.0) * 1000)
+        start_ms = 0
+        end_ms = int((dur or 0.0) * 1000)
 
         raw_title = (chapter_titles.get(c_num) or "").strip()
         formatted_title = raw_title if raw_title else f"Chapter {c_num}"

@@ -791,13 +791,23 @@ class NASSyncer:
         # Try to load master durations from local project if present
         for idx, ch in enumerate(book_chapters, 1):
             dur = get_chapter_duration(idx)
-            if idx in chapter_delivery_offsets:
-                start_ms, end_ms = chapter_delivery_offsets[idx]
-            else:
+            if full_m4b_name or idx not in chapter_delivery_offsets:
+                if not dur:
+                    logger.warning(
+                        "Chapter %d in project '%s' has no local WAV duration; falling back to 60.0s placeholder",
+                        idx,
+                        project_id,
+                    )
+                effective = dur or 60.0
                 start_ms = int(cumulative_offset * 1000)
-                end_ms = int((cumulative_offset + (dur or 60.0)) * 1000)
-            if dur:
-                cumulative_offset += dur
+                end_ms = int((cumulative_offset + effective) * 1000)
+                cumulative_offset += effective
+            else:
+                start_ms, end_ms = chapter_delivery_offsets[idx]
+                if dur:
+                    cumulative_offset += dur
+                else:
+                    cumulative_offset += max(0.0, (end_ms - start_ms) / 1000.0) or 60.0
 
             source_heading = ch.get("source_heading") or ch.get("title") or f"Chapter {idx}"
             raw_title = str(source_heading).strip()

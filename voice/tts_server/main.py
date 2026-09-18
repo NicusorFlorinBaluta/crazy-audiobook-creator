@@ -61,6 +61,11 @@ from voice.validator.whisper_validator import WhisperValidator
 
 logger = logging.getLogger(__name__)
 
+#: A chapter announcement is one short line. 512 tokens is far more than any
+#: real heading needs and far less than the 4096 that let chapter 13 babble
+#: for 304 seconds.
+ANNOUNCEMENT_TOKEN_CAP = 512
+
 # ---------------------------------------------------------------------------
 # Global state
 # ---------------------------------------------------------------------------
@@ -920,7 +925,19 @@ def master_chapter(request: MasterChapterRequest) -> MasterChapterResponse:
                     or "",
                     emotion_instruction="clear chapter announcement",
                     speed=1.0,
+                    max_new_tokens=ANNOUNCEMENT_TOKEN_CAP,
                 )
+            if announcement_audio is not None and len(announcement_audio) > 0:
+                ann_sr = getattr(engine, "sample_rate", 24000)
+                ann_dur = len(announcement_audio) / float(ann_sr)
+                if ann_dur > 10.0:
+                    raise HTTPException(
+                        status_code=500,
+                        detail=(
+                            f"Chapter announcement for chapter {request.chapter_number} ran "
+                            f"{ann_dur:.2f}s (cap 10.0s) -- the model is looping. Re-run mastering."
+                        ),
+                    )
 
         with gpu_job():
             assembled = assembler.assemble_chapter(

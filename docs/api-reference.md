@@ -135,6 +135,11 @@ The Mobile Companion API powers the **CrazyVoice** Android app with compatibilit
 
 Project IDs and all resolved files are constrained beneath the project/workspace roots.
 
+In `/api/mobile/v1/books/{project_id}`, chapter stream details reflect precise playback boundaries:
+- **Standalone chapter streams** set `start_ms = 0` and `end_ms = duration_ms` (0-based local coordinates for single-file seek operations).
+- **Full-book M4B manifests** use strictly monotonic cumulative millisecond offsets across all chapters.
+- **Delivery parts** point `stream_url` and `download_url` directly to the active part download route.
+
 Metadata lookup accepts JSON. `{"apply": false}` returns a ranked, validated
 candidate without changing the book; `{"apply": true, "replace_cover": false}`
 merges the reviewed description, ISBN, genre, year, and provider provenance.

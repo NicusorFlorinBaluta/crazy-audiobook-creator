@@ -35,7 +35,11 @@
 
 ### 5. Pure Book Manuscript Chapter Titles & Accurate Timestamps
 - Displays genuine book chapter headings (*"Prologue"*, *"Chapter Thirteen"*, *"Chapter Fourteen"*, *"Chapter Twenty-Three"*) directly matching the author's manuscript without artificial duplicate numbering.
-- **NAS Syncer Batch Timing (`nas_syncer.py`)**: Computes exact chapter audio durations from workspace WAVs and calculates clean 0-based relative millisecond offsets (`start_ms`, `end_ms`) for each chapter in a delivery part.
+- **M4B Chapter Tag Contract (`f"{number}::{clean_title}"`)**: Chapter marks inside exported M4B containers format titles with an explicit sequence prefix (`17::13: Top of the World`). The companion app's `ChapterMark.kt` splits on `::` to isolate `chapterNumber` and `displayTitle`, preventing track desynchronization when books contain unnumbered front matter, preludes, or roman numerals.
+- **Stream Offset Semantics**:
+  - **Standalone Chapter Streams**: Single-chapter AAC streams set `start_ms = 0` (local 0-based coordinates), ensuring seek operations remain within the individual chapter audio boundary.
+  - **Full-Book M4B Streams**: Concatenated multi-chapter M4Bs use strictly monotonic cumulative millisecond offsets (`start_ms`, `end_ms`) calculated by `nas_syncer.py`.
+- **NAS Syncer Batch Timing (`nas_syncer.py`)**: Computes exact chapter audio durations from workspace WAVs and calculates clean relative millisecond offsets for each chapter in a delivery part.
 - **Superseded Part Pruning**: The syncer automatically prunes obsolete revisions (e.g. `Part 01...-r1.m4b` replaced by `-r2.m4b`) from the NAS storage to prevent ghost duplicate entries.
 
 ### 6. Incremental Offline Downloads with Pre-Cached Reading

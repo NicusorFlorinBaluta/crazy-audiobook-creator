@@ -534,6 +534,33 @@ class LineSeedDerivationTests(unittest.TestCase):
         """`generate_speech_batch` looped sequentially; it must stay removed."""
         self.assertFalse(hasattr(Qwen3TTSEngine, "generate_speech_batch"))
 
+    def test_max_new_tokens_is_hard_ceiling_over_adaptive_decoding(self) -> None:
+        """Caller's max_new_tokens must be a hard ceiling even when adaptive decoding is enabled."""
+        engine = Qwen3TTSEngine(
+            device="cpu",
+            generation_config={
+                "max_new_tokens": 4096,
+                "adaptive_max_new_tokens": {
+                    "enabled": True,
+                    "base_tokens": 256,
+                    "tokens_per_character": 10.0,
+                    "minimum_tokens": 512,
+                },
+            },
+        )
+        # Even with adaptive minimum_tokens = 512, a caller cap of 300 must clamp to 300.
+        config = engine._resolve_generation_config(text="Short title", max_new_tokens=300)
+        self.assertEqual(config["max_new_tokens"], 300)
+
+        # A caller cap of 6000 cannot exceed the adaptive cap (512).
+        config_high = engine._resolve_generation_config(text="Short title", max_new_tokens=6000)
+        self.assertEqual(config_high["max_new_tokens"], 512)
+
+        # When adaptive decoding is disabled, caller cap of 6000 clamps to configured 4096.
+        engine_non_adaptive = Qwen3TTSEngine(device="cpu", generation_config={"max_new_tokens": 4096})
+        config_disabled = engine_non_adaptive._resolve_generation_config(text="Short title", max_new_tokens=6000)
+        self.assertEqual(config_disabled["max_new_tokens"], 4096)
+
 
 class PipelineVoiceBootstrapProgressTests(unittest.TestCase):
     def test_run_voice_bootstrap_streams_progress_to_job_queue(self) -> None:
@@ -577,8 +604,8 @@ class PipelineVoiceBootstrapProgressTests(unittest.TestCase):
             (pdir / "script" / "ch01.json").write_text(chap.model_dump_json(), encoding="utf-8")
 
             with (
-                patch("brain.orchestrator.pipeline.JobQueue") as mock_jq_cls,
-                patch("brain.orchestrator.pipeline.VoiceClient") as mock_vc_cls,
+                patch("brain.orchestrator.pipeline.JobQueue"),
+                patch("brain.orchestrator.pipeline.VoiceClient"),
                 patch("brain.orchestrator.pipeline.OllamaClient"),
             ):
                 mock_jq = Mock()

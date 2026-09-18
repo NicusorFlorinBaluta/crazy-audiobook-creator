@@ -432,12 +432,12 @@ class MobileApiTests(unittest.TestCase):
             self.assertEqual(ch_details[1]["start_ms"], 100000)
             self.assertEqual(ch_details[1]["end_ms"], 300000)
 
-            # Verify data["chapters"] also has relative offsets for delivery parts
+            # Verify data["chapters"] (individual chapter streams) always start at 0ms
             all_chaps = data.get("chapters", [])
             self.assertEqual(all_chaps[0]["start_ms"], 0)
             self.assertEqual(all_chaps[0]["end_ms"], 100000)
-            self.assertEqual(all_chaps[1]["start_ms"], 100000)
-            self.assertEqual(all_chaps[1]["end_ms"], 300000)
+            self.assertEqual(all_chaps[1]["start_ms"], 0)
+            self.assertEqual(all_chaps[1]["end_ms"], 200000)
         finally:
             import shutil
 

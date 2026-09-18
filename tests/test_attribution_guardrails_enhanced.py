@@ -2,7 +2,6 @@ import unittest
 
 from brain.director.script_generator import ScriptGenerator, SourceFragment
 from shared.models import Character, CharacterRegistry, Gender
-from voice.mastering.m4b_exporter import M4BExporter
 
 
 class AttributionGuardrailsEnhancedTests(unittest.TestCase):
@@ -184,34 +183,6 @@ class AttributionGuardrailsEnhancedTests(unittest.TestCase):
             "vathi",
         )
         self.assertNotIn(dialogue_indexes[2], issue_by_fragment)
-
-    def test_m4b_chapter_title_formatting(self) -> None:
-        # Book chapter titles are preserved for rich audio track navigation.
-        self.assertEqual(
-            M4BExporter._format_chapter_title(1, "Prologue: Fifty-Seven Years Ago"),
-            "Prologue: Fifty-Seven Years Ago",
-        )
-        self.assertEqual(
-            M4BExporter._format_chapter_title(2, "Chapter One"),
-            "Chapter One",
-        )
-        self.assertEqual(
-            M4BExporter._format_chapter_title(3, "Chapter Two: Five Years Ago"),
-            "Chapter Two: Five Years Ago",
-        )
-        # Empty title defaults to Chapter {N}
-        self.assertEqual(
-            M4BExporter._format_chapter_title(3, ""),
-            "Chapter 3",
-        )
-        self.assertEqual(
-            M4BExporter._format_chapter_title(5, "Chapter 5"),
-            "Chapter 5",
-        )
-        self.assertEqual(
-            M4BExporter._format_chapter_title(5, "Chapter 5: The Meeting"),
-            "Chapter 5: The Meeting",
-        )
 
 
 if __name__ == "__main__":

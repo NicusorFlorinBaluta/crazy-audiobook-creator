@@ -252,11 +252,13 @@ class M4BExporter:
 
     @staticmethod
     def _format_chapter_title(number: int, title: str | None) -> str:
-        """Format chapter title for M4B metadata using the book chapter title."""
+        """Format chapter title for M4B metadata with sequence prefix (e.g. '17::13: Top of the World')."""
         clean_title = (title or "").strip()
-        if clean_title:
+        if not clean_title:
+            return f"{number}::Chapter {number}"
+        if clean_title.startswith(f"{number}::"):
             return clean_title
-        return f"Chapter {number}"
+        return f"{number}::{clean_title}"
 
     @staticmethod
     def _escape_ffmetadata(value: str) -> str:

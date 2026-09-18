@@ -783,6 +783,14 @@ class ExportMetadataTests(unittest.TestCase):
         escaped = M4BExporter._escape_ffmetadata("A=B;C#D\\E\nF\r")
         self.assertEqual(escaped, "A\\=B\\;C\\#D\\\\E\\\nF")
 
+    def test_chapter_title_formatted_with_sequence_prefix(self) -> None:
+        self.assertEqual(M4BExporter._format_chapter_title(17, "13: Top of the World"), "17::13: Top of the World")
+        self.assertEqual(M4BExporter._format_chapter_title(1, "Prologue"), "1::Prologue")
+        self.assertEqual(M4BExporter._format_chapter_title(2, "Chapter One"), "2::Chapter One")
+        self.assertEqual(M4BExporter._format_chapter_title(5, "Chapter 5: The Meeting"), "5::Chapter 5: The Meeting")
+        self.assertEqual(M4BExporter._format_chapter_title(5, None), "5::Chapter 5")
+        self.assertEqual(M4BExporter._format_chapter_title(17, "17::13: Top of the World"), "17::13: Top of the World")
+
     def test_export_embeds_reviewed_isbn(self) -> None:
         exporter = M4BExporter()
         with patch("voice.mastering.m4b_exporter.subprocess.run") as run:

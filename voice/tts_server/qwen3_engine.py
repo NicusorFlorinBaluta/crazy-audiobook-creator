@@ -307,6 +307,7 @@ class Qwen3TTSEngine:
         voice_fx: Any | None = None,
         output_path: str | Path | None = None,
         seed: int | str | None = None,
+        max_new_tokens: int | None = None,
     ) -> np.ndarray:
         """Generate speech audio for a script line.
 
@@ -378,6 +379,7 @@ class Qwen3TTSEngine:
                         text=part,
                         voice_reference=str(voice_reference_path) if voice_reference_path else None,
                         ref_text=ref_text,
+                        max_new_tokens=max_new_tokens,
                     )
                 finally:
                     part_elapsed = time.perf_counter() - part_started
@@ -517,11 +519,42 @@ class Qwen3TTSEngine:
     # Any of these changes sampling order, so promoting one requires a
     # generation-fingerprint bump and full re-synthesis.
 
+    def _resolve_generation_config(
+        self,
+        text: str,
+        max_new_tokens: int | None = None,
+    ) -> dict[str, Any]:
+        """Resolve generation parameters, applying adaptive decoding and caller ceilings."""
+        generation_config = dict(self.generation_config)
+        adaptive = generation_config.pop("adaptive_max_new_tokens", {}) or {}
+        if adaptive.get("enabled", False):
+            configured_cap = int(generation_config.get("max_new_tokens", 4096))
+            adaptive_cap = int(adaptive.get("base_tokens", 256)) + int(
+                len(text) * float(adaptive.get("tokens_per_character", 10.0))
+            )
+            adaptive_cap = max(
+                int(adaptive.get("minimum_tokens", 512)),
+                min(configured_cap, adaptive_cap),
+            )
+            generation_config["max_new_tokens"] = adaptive_cap
+            logger.info(
+                "Experimental adaptive decode cap: %d tokens for %d characters",
+                adaptive_cap,
+                len(text),
+            )
+        if max_new_tokens is not None:
+            generation_config["max_new_tokens"] = min(
+                int(generation_config.get("max_new_tokens", 4096)),
+                int(max_new_tokens),
+            )
+        return generation_config
+
     def _generate(
         self,
         text: str,
         voice_reference: str | None = None,
         ref_text: str = "",
+        max_new_tokens: int | None = None,
     ) -> np.ndarray:
         """Internal generation method using qwen_tts."""
         part_metrics: dict[str, Any] = {}
@@ -554,23 +587,9 @@ class Qwen3TTSEngine:
         finally:
             part_metrics["reference_prompt_seconds"] = time.perf_counter() - prompt_started
             part_metrics["reference_prompt_cache_hit"] = self._last_prompt_cache_hit
-        generation_config = dict(self.generation_config)
-        adaptive = generation_config.pop("adaptive_max_new_tokens", {}) or {}
-        if adaptive.get("enabled", False):
-            configured_cap = int(generation_config.get("max_new_tokens", 4096))
-            adaptive_cap = int(adaptive.get("base_tokens", 256)) + int(
-                len(text) * float(adaptive.get("tokens_per_character", 10.0))
-            )
-            adaptive_cap = max(
-                int(adaptive.get("minimum_tokens", 512)),
-                min(configured_cap, adaptive_cap),
-            )
-            generation_config["max_new_tokens"] = adaptive_cap
-            logger.info(
-                "Experimental adaptive decode cap: %d tokens for %d characters",
-                adaptive_cap,
-                len(text),
-            )
+
+        generation_config = self._resolve_generation_config(text, max_new_tokens=max_new_tokens)
+
         generation_started = time.perf_counter()
         try:
             wavs, _ = self._model.generate_voice_clone(
