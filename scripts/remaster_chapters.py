@@ -43,6 +43,10 @@ def main() -> int:
 
     chapters = sorted(set(args.chapters))
     print(f"re-mastering {args.project_id} chapters {chapters}")
+    for c in chapters:
+        m_path = project_dir / "manifests" / f"chapter_{c:03d}.master.json"
+        if m_path.is_file():
+            m_path.unlink()
     pipeline._run_mastering(args.project_id, project_dir, set(chapters))
     print("done")
     return 0

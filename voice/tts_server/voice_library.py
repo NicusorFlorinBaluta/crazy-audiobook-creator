@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from shared.artifacts import atomic_write_json
+from shared.paths import PROJECTS_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -132,9 +133,11 @@ class VoiceLibraryManager:
     def resolve_voice_reference(self, project_id: str, character_id: str | None = None) -> tuple[Path | None, str, str]:
         """Resolve an existing voice reference clip, character ID, and ref_text.
 
-        If character_id exists, returns its path, id, and ref_text.
-        Otherwise falls back to narrator variants ('narrator', 'narrator_female', 'narrator_male'),
-        or any available voice in the project, or any available voice across any project.
+        If character_id exists, checks for an exact match, then checks project
+        voice_cast.json for approved character assignments (1b), then characters.json (1c).
+        If the narrator character is still unassigned or character_id is omitted, falls back
+        to narrator variants ('narrator', 'narrator_female', 'narrator_male') as a last resort,
+        or any available registered voice in the project, or across projects.
         """
         # 1. Exact match if provided
         if character_id:
@@ -146,6 +149,53 @@ class VoiceLibraryManager:
             except ValueError:
                 pass
 
+            # 1b. Check voice_cast.json for character assignments
+            cast_candidates = [
+                PROJECTS_DIR / project_id / "voice_cast.json",
+                self.library_dir.parent / "brain" / "projects" / project_id / "voice_cast.json",
+                self.library_dir / project_id / "voice_cast.json",
+            ]
+            for cast_path in cast_candidates:
+                if cast_path.is_file():
+                    try:
+                        cast_data = json.loads(cast_path.read_text(encoding="utf-8"))
+                        for vid, profile in cast_data.get("voices", {}).items():
+                            assigned = profile.get("assigned_characters", [])
+                            for a in assigned:
+                                sid = a.get("id") if isinstance(a, dict) else a
+                                if sid == character_id:
+                                    try:
+                                        safe_vid = self._safe_character_id(vid)
+                                        p = self.get_voice_path(project_id, safe_vid)
+                                        if p.is_file():
+                                            return p, safe_vid, self.get_voice_ref_text(project_id, safe_vid)
+                                    except ValueError:
+                                        pass
+                    except (OSError, json.JSONDecodeError):
+                        pass
+
+            # 1c. Check characters.json for voice_id mapping
+            chars_candidates = [
+                PROJECTS_DIR / project_id / "characters.json",
+                self.library_dir.parent / "brain" / "projects" / project_id / "characters.json",
+                self.library_dir / project_id / "characters.json",
+            ]
+            for chars_path in chars_candidates:
+                if chars_path.is_file():
+                    try:
+                        chars_data = json.loads(chars_path.read_text(encoding="utf-8")).get("characters", {})
+                        char_info = chars_data.get(character_id, {})
+                        if isinstance(char_info, dict) and char_info.get("voice_id"):
+                            try:
+                                safe_vid = self._safe_character_id(char_info["voice_id"])
+                                p = self.get_voice_path(project_id, safe_vid)
+                                if p.is_file():
+                                    return p, safe_vid, self.get_voice_ref_text(project_id, safe_vid)
+                            except ValueError:
+                                pass
+                    except (OSError, json.JSONDecodeError):
+                        pass
+
         # 2. Check narrator variants in this project
         registry = self._load_registry(project_id)
         voices = registry.get("voices", {})
@@ -153,6 +203,13 @@ class VoiceLibraryManager:
             if nid in voices:
                 p = self.get_voice_path(project_id, nid)
                 if p.is_file():
+                    if character_id == "narrator":
+                        logger.warning(
+                            "Narrator voice for project '%s' was not assigned in voice_cast.json; "
+                            "falling back to '%s' as a last resort.",
+                            project_id,
+                            nid,
+                        )
                     return p, nid, self.get_voice_ref_text(project_id, nid)
 
         # 3. Check any voice in this project with "narrator" in its name/id

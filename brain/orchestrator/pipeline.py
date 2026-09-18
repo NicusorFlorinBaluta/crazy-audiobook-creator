@@ -96,6 +96,7 @@ from shared.reference_selection import select_reference_text
 from shared.single_instance import SingleInstanceLock
 from shared.voice_casting import (
     build_voice_cast,
+    get_speaker_voice_mapping,
     required_voice_character_ids,
 )
 
@@ -3770,15 +3771,7 @@ class Pipeline:
         if chars_file.exists():
             characters = json.loads(chars_file.read_text(encoding="utf-8")).get("characters", {})
 
-        speaker_to_voice: dict[str, str] = {}
-        cast_file = project_dir / "voice_cast.json"
-        if cast_file.exists():
-            cast_data = json.loads(cast_file.read_text(encoding="utf-8"))
-            for voice_id, profile in cast_data.get("voices", {}).items():
-                for assigned_speaker in profile.get("assigned_characters", []):
-                    speaker_id = assigned_speaker.get("id") if isinstance(assigned_speaker, dict) else assigned_speaker
-                    if speaker_id:
-                        speaker_to_voice[speaker_id] = voice_id
+        speaker_to_voice = get_speaker_voice_mapping(project_dir)
 
         for line in lines:
             spoken_text = apply_pronunciations(line.text, pronunciation_dict)
@@ -4032,19 +4025,7 @@ class Pipeline:
     @staticmethod
     def _selected_narrator_voice_id(project_dir: Path) -> str:
         """Resolve the approved voice assigned to the narrator character."""
-        cast_path = project_dir / "voice_cast.json"
-        if cast_path.is_file():
-            try:
-                voices = json.loads(cast_path.read_text(encoding="utf-8")).get("voices", {})
-                for voice_id, profile in voices.items():
-                    if "narrator" in profile.get("assigned_characters", []):
-                        return str(voice_id)
-            except (OSError, json.JSONDecodeError, AttributeError):
-                logger.warning(
-                    "Could not resolve narrator assignment from %s",
-                    cast_path,
-                )
-        return "narrator"
+        return get_speaker_voice_mapping(project_dir).get("narrator", "narrator")
 
     @staticmethod
     def _voice_generation_config(project_id: str | None = None) -> dict[str, Any]:

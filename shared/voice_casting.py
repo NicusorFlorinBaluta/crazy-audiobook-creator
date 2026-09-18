@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from collections.abc import Iterable
 from pathlib import Path
@@ -449,3 +450,41 @@ def build_voice_cast(
     }
     cast_payload["fingerprint"] = fingerprint(cast_payload)
     return cast_payload
+
+
+def get_speaker_voice_mapping(project_dir: Path | str) -> dict[str, str]:
+    """Resolve speaker_id -> voice_id mapping for a project.
+
+    Reads voice_cast.json first (checking assigned_characters under each voice profile),
+    then falls back to characters.json (voice_id field).
+    """
+    pdir = Path(project_dir)
+    speaker_to_voice: dict[str, str] = {}
+
+    cast_file = pdir / "voice_cast.json"
+    if cast_file.is_file():
+        try:
+            cast_data = json.loads(cast_file.read_text(encoding="utf-8"))
+            for voice_id, profile in cast_data.get("voices", {}).items():
+                for assigned_speaker in profile.get("assigned_characters", []):
+                    speaker_id = (
+                        assigned_speaker.get("id")
+                        if isinstance(assigned_speaker, dict)
+                        else assigned_speaker
+                    )
+                    if speaker_id:
+                        speaker_to_voice[speaker_id] = voice_id
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    chars_file = pdir / "characters.json"
+    if chars_file.is_file():
+        try:
+            chars_data = json.loads(chars_file.read_text(encoding="utf-8")).get("characters", {})
+            for speaker_id, char_info in chars_data.items():
+                if speaker_id not in speaker_to_voice and isinstance(char_info, dict) and char_info.get("voice_id"):
+                    speaker_to_voice[speaker_id] = char_info["voice_id"]
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    return speaker_to_voice

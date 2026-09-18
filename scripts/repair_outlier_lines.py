@@ -80,6 +80,7 @@ from shared.pronunciation_evidence import (
     terms_in_text,
 )
 from shared.segment_repair import parse_chapter_number, replace_segment
+from shared.voice_casting import get_speaker_voice_mapping
 
 CACHE_DB = ROOT / "voice_cache.db"
 STATE_DB = ROOT / "brain" / "projects" / "pipeline_state.db"
@@ -152,6 +153,7 @@ def main() -> int:
         return 0
 
     script_lines = _script_lines(project_dir)
+    speaker_to_voice = get_speaker_voice_mapping(project_dir)
     mappings, _ = load_pronunciation_dictionary(project_dir)
     audit_path = project_dir / "pronunciation_measurement_audit.json"
     audit_terms = set()
@@ -204,13 +206,16 @@ def main() -> int:
 
             outcome = ""
             said_it_right = False
+            speaker = line["speaker"]
+            voice_id = speaker_to_voice.get(speaker) or line.get("voice_id") or speaker
             for attempt in range(1, args.attempts + 1):
                 generated = client.generate_line(
                     GenerateLineRequest(
                         project_id=args.project_id,
                         line=ScriptLine(
                             line_id=f"repair-{line_id}",
-                            speaker=line["speaker"],
+                            speaker=speaker,
+                            voice_id=voice_id,
                             text=spoken,
                             emotion=line.get("emotion") or "normal",
                         ),
@@ -258,7 +263,6 @@ def main() -> int:
 
                 candidate.unlink(missing_ok=True)
                 if on_target:
-                    said_it_right = True
                     # Check if another term regressed
                     cand_words = _words(validated.transcribed_text or "")
                     curr_words = _words(current.transcribed_text or "")

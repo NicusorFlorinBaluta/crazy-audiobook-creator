@@ -305,6 +305,10 @@ changed without repeatable listening evidence.
 
 Loudness normalization is chapter-integrated. The peak ceiling uses an oversampled true-peak estimate. The optional noise gate uses asymmetric attack/release smoothing and is disabled by default for generated audio.
 
+Chapter announcements are synthesized with a dedicated token ceiling (`ANNOUNCEMENT_TOKEN_CAP = 512`). Caller-provided `max_new_tokens` acts as a hard upper bound over adaptive decoding (`min(adaptive_cap, max_new_tokens)`), and mastered announcements must remain under 10.0 seconds to fail closed against autoregressive repetition loops.
+
+During M4B packaging, chapter titles in container metadata are formatted with an explicit sequence prefix (`f"{number}::{clean_title}"`). This decouples container sequence order from author manuscript titles (which may contain unnumbered preludes, prologue sections, or roman numerals), allowing mobile media players to reliably extract the 1-based chapter number alongside the clean display title.
+
 The default `-19 LUFS` target is an internal playback choice, not a claim of ACX compliance.
 
 ## State, pause, and cancellation
@@ -449,6 +453,8 @@ When modifying or introducing new pipeline features, developers and AI agents MU
 6. **Voice Cast vs Character Registry Split**:
    - `voice_cast.json` (in `brain/projects/<id>/`) is the **authoritative speaker → voice mapping** during generation. The narrator's approved candidate (e.g. `narrator_male`) is stored there under `assigned_characters` and is **not** written back to `characters.json`.
    - Any code that resolves which voice to use for a script line MUST read `voice_cast.json` first (via `assigned_characters`), then fall back to `characters.json`'s `voice_id` field, then fall back to the raw speaker ID. See `_prepare_generation_lines` in `pipeline.py`.
+   - `_selected_narrator_voice_id` in `pipeline.py` delegates directly to `get_speaker_voice_mapping`, preventing fallback to default female narrator profiles when a male narrator was cast.
+   - `VoiceLibraryManager.resolve_voice_reference` maintains the canonical fallback tuple `("narrator", "narrator_female", "narrator_male")` and emits a warning on fallback.
    - `VoiceLibraryManager.get_voice_path` consults `voices.json` to find the actual hashed WAV filename. Do not construct voice file paths by hand as `<voice_id>.wav` — they are content-hashed and registered in the voice library registry.
 
 7. **Dual-Endpoint & 24/7 NAS Streaming Architecture**:

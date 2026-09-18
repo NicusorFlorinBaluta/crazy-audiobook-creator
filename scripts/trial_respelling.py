@@ -46,6 +46,7 @@ if str(ROOT) not in sys.path:
 from brain.orchestrator.voice_client import VoiceClient
 from shared.models import GenerateLineRequest, ScriptLine, ValidateRequest
 from shared.pronunciation_evidence import _words, best_matching_span, phonetic_key
+from shared.voice_casting import get_speaker_voice_mapping
 
 #: Long enough to carry natural prosody, short enough that one take is quick.
 MIN_LINE_CHARS = 40
@@ -90,6 +91,7 @@ def _trial(
     sample: list[dict[str, Any]],
     repeats: int,
     segments_dir: Path,
+    speaker_to_voice: dict[str, str] | None = None,
 ) -> tuple[int, int, collections.Counter[str], list[tuple[str, str]]]:
     target = phonetic_key(term)
     heard: collections.Counter[str] = collections.Counter()
@@ -98,6 +100,8 @@ def _trial(
 
     for index, line in enumerate(sample):
         spoken = re.sub(re.escape(term), variant, line["text"], flags=re.IGNORECASE)
+        speaker = line["speaker"]
+        voice_id = (speaker_to_voice or {}).get(speaker) or line.get("voice_id") or speaker
         for repeat in range(repeats):
             try:
                 generated = client.generate_line(
@@ -105,7 +109,8 @@ def _trial(
                         project_id=project_id,
                         line=ScriptLine(
                             line_id=f"trial-{index:02d}-{repeat}",
-                            speaker=line["speaker"],
+                            speaker=speaker,
+                            voice_id=voice_id,
                             text=spoken,
                             emotion=line.get("emotion") or "normal",
                         ),
@@ -159,10 +164,18 @@ def main() -> int:
 
     scores: dict[str, float] = {}
     client = VoiceClient()
+    speaker_to_voice = get_speaker_voice_mapping(project_dir)
     for position, variant in enumerate(args.variants):
         started = time.time()
         on_target, total, heard, misses = _trial(
-            client, args.project_id, args.term, variant, sample, args.repeats, segments_dir
+            client,
+            args.project_id,
+            args.term,
+            variant,
+            sample,
+            args.repeats,
+            segments_dir,
+            speaker_to_voice=speaker_to_voice,
         )
         if not total:
             print(f"{variant:16} {'no results':>12}")

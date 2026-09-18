@@ -578,6 +578,124 @@ class PronunciationAndHotSwapTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(text, "This is the narrator reference text.")
             self.assertTrue(p.is_file())
 
+    def test_voice_library_resolve_voice_reference_respects_voice_cast(self) -> None:
+        """Verify VoiceLibraryManager resolves to narrator_male when assigned in voice_cast.json even if narrator_female exists."""
+        with tempfile.TemporaryDirectory() as directory:
+            lib_dir = Path(directory)
+            from shared.voice_casting import get_speaker_voice_mapping
+            from voice.tts_server.voice_library import VoiceLibraryManager
+
+            mgr = VoiceLibraryManager(library_dir=lib_dir)
+            proj_dir = lib_dir / "test_proj"
+            proj_dir.mkdir(parents=True)
+
+            ref_wav_female = proj_dir / "narrator_female.wav"
+            ref_wav_male = proj_dir / "narrator_male.wav"
+            _make_dummy_wav(ref_wav_female, duration_s=0.5)
+            _make_dummy_wav(ref_wav_male, duration_s=0.5)
+
+            registry = {
+                "project_id": "test_proj",
+                "voices": {
+                    "narrator_female": {
+                        "name": "Narrator Female",
+                        "file": str(ref_wav_female),
+                        "ref_text": "Female narrator reference.",
+                    },
+                    "narrator_male": {
+                        "name": "Narrator Male",
+                        "file": str(ref_wav_male),
+                        "ref_text": "Male narrator reference.",
+                    },
+                },
+            }
+            (proj_dir / "voices.json").write_text(json.dumps(registry), encoding="utf-8")
+
+            # Project voice cast assigns narrator to narrator_male
+            cast_data = {
+                "schema": "1",
+                "project_id": "test_proj",
+                "voices": {
+                    "narrator_male": {
+                        "assigned_characters": ["narrator"],
+                    },
+                    "narrator_female": {
+                        "assigned_characters": [],
+                    },
+                },
+            }
+            (proj_dir / "voice_cast.json").write_text(json.dumps(cast_data), encoding="utf-8")
+
+            # Resolving "narrator" must resolve to narrator_male, not narrator_female
+            p, vid, text = mgr.resolve_voice_reference("test_proj", "narrator")
+            self.assertIsNotNone(p)
+            self.assertEqual(vid, "narrator_male")
+            self.assertEqual(text, "Male narrator reference.")
+            self.assertEqual(p, ref_wav_male)
+
+            # Also verify get_speaker_voice_mapping finds the assignment
+            mapping = get_speaker_voice_mapping(proj_dir)
+            self.assertEqual(mapping.get("narrator"), "narrator_male")
+
+    def test_voice_library_resolve_voice_reference_respects_female_voice_cast(self) -> None:
+        """Verify VoiceLibraryManager resolves to narrator_female when assigned in voice_cast.json even if narrator_male exists."""
+        with tempfile.TemporaryDirectory() as directory:
+            lib_dir = Path(directory)
+            from shared.voice_casting import get_speaker_voice_mapping
+            from voice.tts_server.voice_library import VoiceLibraryManager
+
+            mgr = VoiceLibraryManager(library_dir=lib_dir)
+            proj_dir = lib_dir / "test_proj_female"
+            proj_dir.mkdir(parents=True)
+
+            ref_wav_female = proj_dir / "narrator_female.wav"
+            ref_wav_male = proj_dir / "narrator_male.wav"
+            _make_dummy_wav(ref_wav_female, duration_s=0.5)
+            _make_dummy_wav(ref_wav_male, duration_s=0.5)
+
+            registry = {
+                "project_id": "test_proj_female",
+                "voices": {
+                    "narrator_male": {
+                        "name": "Narrator Male",
+                        "file": str(ref_wav_male),
+                        "ref_text": "Male narrator reference.",
+                    },
+                    "narrator_female": {
+                        "name": "Narrator Female",
+                        "file": str(ref_wav_female),
+                        "ref_text": "Female narrator reference.",
+                    },
+                },
+            }
+            (proj_dir / "voices.json").write_text(json.dumps(registry), encoding="utf-8")
+
+            # Project voice cast assigns narrator to narrator_female
+            cast_data = {
+                "schema": "1",
+                "project_id": "test_proj_female",
+                "voices": {
+                    "narrator_male": {
+                        "assigned_characters": [],
+                    },
+                    "narrator_female": {
+                        "assigned_characters": ["narrator"],
+                    },
+                },
+            }
+            (proj_dir / "voice_cast.json").write_text(json.dumps(cast_data), encoding="utf-8")
+
+            # Resolving "narrator" must resolve to narrator_female, not narrator_male
+            p, vid, text = mgr.resolve_voice_reference("test_proj_female", "narrator")
+            self.assertIsNotNone(p)
+            self.assertEqual(vid, "narrator_female")
+            self.assertEqual(text, "Female narrator reference.")
+            self.assertEqual(p, ref_wav_female)
+
+            # Also verify get_speaker_voice_mapping finds the assignment
+            mapping = get_speaker_voice_mapping(proj_dir)
+            self.assertEqual(mapping.get("narrator"), "narrator_female")
+
     def test_load_pronunciation_dictionary_with_implicit_defaults(self) -> None:
         """Verify load_pronunciation_dictionary layers recommendations under project overrides and honors keep-original."""
         from shared.pronunciation import load_pronunciation_dictionary
@@ -770,9 +888,9 @@ class PronunciationAndHotSwapTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(dashboard_runtime.exit_preview_mode(pid))
 
     def test_health_check_once_raises_voice_client_error_on_httpx_error(self) -> None:
-        """Verify health_check_once wraps httpx errors in VoiceClientError."""
-        from brain.orchestrator.voice_client import VoiceClient, VoiceClientError
         import httpx
+
+        from brain.orchestrator.voice_client import VoiceClient, VoiceClientError
 
         client = VoiceClient(host="http://127.0.0.1:8100")
         with patch.object(client._client, "get", side_effect=httpx.ConnectTimeout("timed out")):
