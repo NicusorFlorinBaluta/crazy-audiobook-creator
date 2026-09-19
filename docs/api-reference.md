@@ -133,7 +133,28 @@ The Mobile Companion API powers the **CrazyVoice** Android app with compatibilit
 | `PATCH` | `/api/mobile/v1/books/{project_id}/flags/{flag_id}` | Update flag status, line retargeting, verdict, resolution, or reviewer veto |
 | `GET` | `/api/mobile/v1/app` | Download compiled companion Android APK (`Voice-CrazyAudiobook-debug.apk`) |
 
-Project IDs and all resolved files are constrained beneath the project/workspace roots.
+#### Playback Flags API (`/api/mobile/v1/books/{project_id}/flags`)
+
+- **Create Flag (`POST /api/mobile/v1/books/{project_id}/flags`)**:
+  - Request body (`PlaybackFlagRequest`):
+    - `chapter_number` (int): Active chapter index.
+    - `position_ms` (int): Audio offset in milliseconds where the issue occurred.
+    - `issue_type` (str): e.g. `"wrong_speaker"`, `"pronunciation"`, `"glitch"`, `"pacing"`, `"other"`.
+    - `user_note` (str, optional): Additional text description.
+    - `source` (str): Client source, e.g. `"android_auto"`, `"lyrics_view"`, `"mobile_app"`.
+    - `line_id` (str, optional): Known active line identifier.
+    - `client_flag_id` (str, optional, max 128 chars): Unique client-generated ID for idempotency and offline deduplication.
+    - `position_origin` (`"chapter" | "book"`, optional): Explicit coordinate frame. If omitted, values exceeding chapter duration fall back to cumulative book timeline derivation.
+  - Deduplication: Submissions with matching `line_id` or within a 2,000 ms window in the same chapter return the existing record (`HTTP 201`) to prevent duplicate flags from repeated taps.
+  - Response envelope: `{"result": "created", "status": "flagged", "flag": {...}}` (status coerced from unknown values to canonical set on import).
+
+- **List Flags (`GET /api/mobile/v1/books/{project_id}/flags`)**:
+  - Filters: `?status=open|investigating|fixed|vetoed|dismissed` or `?status=all`.
+  - Returns `{"project_id": str, "total_flags": int, "flags": list[dict]}`.
+
+- **Update Flag (`PATCH /api/mobile/v1/books/{project_id}/flags/{flag_id}`)**:
+  - Request body: `{"status": str, "resolution_notes": str, "line_id": str, "veto": bool, "reason": str}`.
+  - Canonical statuses: `open`, `investigating`, `fixed`, `vetoed`, `dismissed`.
 
 In `/api/mobile/v1/books/{project_id}`, chapter stream details reflect precise playback boundaries:
 - **Standalone chapter streams** set `start_ms = 0` and `end_ms = duration_ms` (0-based local coordinates for single-file seek operations).

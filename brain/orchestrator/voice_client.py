@@ -427,7 +427,9 @@ class VoiceClient:
             if attempt < effective_retries:
                 time.sleep(self.retry_delay)
 
-        raise VoiceClientError(f"{method} {path} failed after {effective_retries} attempts: {last_error}") from last_error
+        raise VoiceClientError(
+            f"{method} {path} failed after {effective_retries} attempts: {last_error}"
+        ) from last_error
 
     def close(self) -> None:
         """Close the HTTP client."""

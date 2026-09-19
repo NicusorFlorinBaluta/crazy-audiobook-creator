@@ -11,7 +11,10 @@ import re
 import unicodedata
 from difflib import SequenceMatcher
 
+from shared.constants import DIALECT_NORMALISATIONS
+
 logger = logging.getLogger(__name__)
+
 
 #: Transcription options for the OpenAI Whisper backend.
 #:
@@ -414,12 +417,24 @@ class WhisperValidator:
         """Fully generic text normalizer for WER calculation across any book.
 
         Handles:
+          - Suffix rule (-in' -> -ing) and dialect standardisation (e.g. ye -> you, yer -> your)
           - OpenAI EnglishTextNormalizer (spelling variants, contractions, symbols, abbreviations)
           - Dynamic cardinal & ordinal number expansion via num2words (e.g. 1st->first, 12->twelve, 1999->one thousand...)
           - Punctuation stripping & whitespace collapsing
         """
         if not text:
             return ""
+
+        # Normalize curly apostrophes early so contractions and dialect patterns match uniformly
+        text = text.replace("’", "'").replace("‘", "'")
+
+        # Suffix rule: -in' -> -ing (e.g., comin' -> coming, cheatin' -> cheating)
+        text = re.sub(r"\b(\w+)in'(?!\w)", r"\1ing", text, flags=re.IGNORECASE)
+
+        # Dialect normalisations applied per-token on word boundaries (longest first)
+        for k, v in sorted(DIALECT_NORMALISATIONS.items(), key=lambda item: len(item[0]), reverse=True):
+            pattern = rf"\b{re.escape(k)}(?!\w)" if k.endswith("'") else rf"\b{re.escape(k)}\b"
+            text = re.sub(pattern, v, text, flags=re.IGNORECASE)
 
         # This deterministic baseline runs even when the optional Whisper
         # package is absent (as it is in the low-resource CI environment).
@@ -461,6 +476,12 @@ class WhisperValidator:
 
         # Step 3: Remove punctuation and collapse whitespace
         text = re.sub(r"[^\w\s]", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+
+        # Step 4: Final dialect pass for word-only tokens that survived earlier passes
+        for k, v in sorted(DIALECT_NORMALISATIONS.items(), key=lambda item: len(item[0]), reverse=True):
+            if "'" not in k:
+                text = re.sub(rf"\b{re.escape(k)}\b", v, text)
         text = re.sub(r"\s+", " ", text).strip()
 
         return text

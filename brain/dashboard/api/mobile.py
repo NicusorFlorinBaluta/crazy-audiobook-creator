@@ -9,12 +9,12 @@ from __future__ import annotations
 import json
 import logging
 import re
+import urllib.request
 import uuid
 import wave
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
-import urllib.request
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
@@ -60,6 +60,8 @@ class PlaybackFlagRequest(BaseModel):
     user_note: str = Field(default="", max_length=2000)
     source: str = Field(default="phone", max_length=64)
     line_id: str | None = Field(default=None, max_length=128)
+    client_flag_id: str | None = Field(default=None, max_length=128)
+    position_origin: Literal["chapter", "book"] | None = Field(default=None)
 
 
 class PlaybackFlagUpdateRequest(BaseModel):
@@ -146,6 +148,18 @@ def _chapter_duration(project_dir: Path, workspace_dir: Path, chapter_num: int) 
                 size = wav_path.stat().st_size
                 if size > 44:
                     return round((size - 44) / 48000.0, 2)
+
+    timeline_path = project_dir / "manifests" / f"chapter_{chapter_num:03d}.timeline.json"
+    if timeline_path.is_file():
+        try:
+            t_data = json.loads(timeline_path.read_text(encoding="utf-8"))
+            if isinstance(t_data, list) and t_data:
+                max_end = max(int(item.get("end_ms", 0)) for item in t_data)
+                if max_end > 0:
+                    return round(max_end / 1000.0, 2)
+        except (OSError, ValueError, TypeError):
+            pass
+
     return None
 
 
@@ -920,18 +934,128 @@ async def download_book_epub(project_id: str, request: Request):
     )
 
 
+def _cumulative_book_timeline(project_dir: Path, workspace_dir: Path) -> list[tuple[int, int, int]]:
+    """Return list of (chapter_number, cumulative_start_ms, cumulative_end_ms) across all chapters in book."""
+    ch_nums: set[int] = set()
+    book_file = project_dir / "book.json"
+    if book_file.is_file():
+        try:
+            bdata = json.loads(book_file.read_text(encoding="utf-8"))
+            for ch in bdata.get("chapters", []):
+                num = ch.get("number") or ch.get("chapter_number")
+                if num is not None:
+                    ch_nums.add(int(num))
+        except Exception as exc:
+            logger.debug("Could not read book.json chapters: %s", exc)
+
+    script_dir = project_dir / "script"
+    if script_dir.is_dir():
+        for p in script_dir.glob("chapter_*.json"):
+            m = re.match(r"chapter_(\d+)\.json", p.name)
+            if m:
+                ch_nums.add(int(m.group(1)))
+
+    manifests_dir = project_dir / "manifests"
+    if manifests_dir.is_dir():
+        for p in manifests_dir.glob("chapter_*.timeline.json"):
+            m = re.match(r"chapter_(\d+)\.timeline\.json", p.name)
+            if m:
+                ch_nums.add(int(m.group(1)))
+        for p in manifests_dir.glob("chapter_*.master.json"):
+            m = re.match(r"chapter_(\d+)\.master\.json", p.name)
+            if m:
+                ch_nums.add(int(m.group(1)))
+
+    if not ch_nums:
+        return []
+
+    sorted_chs = sorted(ch_nums)
+    timeline: list[tuple[int, int, int]] = []
+    accum_ms = 0
+    for ch in sorted_chs:
+        dur_sec = _chapter_duration(project_dir, workspace_dir, ch)
+        if dur_sec is not None:
+            dur_ms = int(round(dur_sec * 1000.0))
+        else:
+            ch_tl = _resolve_chapter_timeline(project_dir, workspace_dir, ch)
+            dur_ms = max((e for _, e in ch_tl.values()), default=0) if ch_tl else 0
+        c_start = accum_ms
+        c_end = c_start + dur_ms
+        accum_ms = c_end
+        timeline.append((ch, c_start, c_end))
+
+    return timeline
+
+
+def _resolve_flag_position(
+    project_dir: Path,
+    workspace_dir: Path,
+    chapter_number: int,
+    position_ms: int,
+    position_origin: str | None = None,
+) -> tuple[int, int, str]:
+    """Resolve chapter number and position_ms, interpreting book-absolute offsets if needed.
+
+    Returns:
+        (resolved_chapter_number, resolved_position_ms, position_origin_resolved)
+    """
+    if position_origin == "chapter":
+        return chapter_number, position_ms, "chapter"
+
+    timeline = _cumulative_book_timeline(project_dir, workspace_dir)
+
+    if position_origin == "book":
+        if timeline:
+            for ch_num, c_start, c_end in timeline:
+                if c_start <= position_ms < c_end or (ch_num == timeline[-1][0] and position_ms >= c_start):
+                    return ch_num, max(0, position_ms - c_start), "book"
+        return chapter_number, position_ms, "book"
+
+    # position_origin is None -> infer:
+    ch_dur = _chapter_duration(project_dir, workspace_dir, chapter_number)
+    ch_dur_ms: int | None = None
+    if ch_dur is not None:
+        ch_dur_ms = int(round(ch_dur * 1000.0))
+    else:
+        ch_tl = _resolve_chapter_timeline(project_dir, workspace_dir, chapter_number)
+        if ch_tl:
+            ch_dur_ms = max((e for _, e in ch_tl.values()), default=0)
+
+    # Check if position_ms exceeds chapter duration
+    if ch_dur_ms is not None and position_ms > ch_dur_ms and timeline:
+        total_book_ms = timeline[-1][2]
+        # Only re-interpret if position_ms does not far exceed total book duration (+ 30s)
+        if position_ms <= total_book_ms + 30000:
+            for ch_num, c_start, c_end in timeline:
+                if c_start <= position_ms < c_end or (
+                    ch_num == timeline[-1][0] and position_ms <= total_book_ms + 30000
+                ):
+                    return ch_num, max(0, position_ms - c_start), "book"
+
+    return chapter_number, position_ms, "chapter"
+
+
 def _enrich_flag_context(
     project_dir: Path,
     workspace_dir: Path,
     chapter_number: int,
     position_ms: int,
     target_line_id: str | None = None,
+    position_origin: str | None = None,
 ) -> dict[str, Any]:
     """Enrich a playback flag with matching, candidate, and surrounding script lines, plus manuscript excerpt."""
-    timeline = _resolve_chapter_timeline(project_dir, workspace_dir, chapter_number)
+    resolved_ch, resolved_pos_ms, origin_resolved = _resolve_flag_position(
+        project_dir=project_dir,
+        workspace_dir=workspace_dir,
+        chapter_number=chapter_number,
+        position_ms=position_ms,
+        position_origin=position_origin,
+    )
+
+    timeline = _resolve_chapter_timeline(project_dir, workspace_dir, resolved_ch)
 
     # Load script lines if available
-    script_file = project_dir / "script" / f"chapter_{chapter_number:03d}.json"
+    script_file = project_dir / "script" / f"chapter_{resolved_ch:03d}.json"
     script_lines: list[dict[str, Any]] = []
     if script_file.is_file():
         try:
@@ -950,16 +1074,24 @@ def _enrich_flag_context(
         line_map[lid] = line
 
     # 1. Natural Reaction Delay Window:
-    # When listening or driving, users typically react 5-15 seconds after hearing an error.
-    # We inspect a ~22 second window preceding and immediately following the tap.
-    window_start_ms = max(0, position_ms - 20000)
-    window_end_ms = position_ms + 2000
+    window_start_ms = max(0, resolved_pos_ms - 20000)
+    window_end_ms = resolved_pos_ms + 2000
 
     matched_line: dict[str, Any] | None = None
     matched_idx: int = -1
+    match_distance_ms: int = 0
+    match_confidence: str = "exact"
 
     if target_line_id and target_line_id in line_map:
         matched_line = line_map[target_line_id]
+        s_ms = matched_line.get("_start_ms", 0)
+        e_ms = matched_line.get("_end_ms", 0)
+        if s_ms <= resolved_pos_ms <= e_ms:
+            match_distance_ms = 0
+            match_confidence = "exact"
+        else:
+            match_distance_ms = min(abs(resolved_pos_ms - s_ms), abs(resolved_pos_ms - e_ms))
+            match_confidence = "near" if match_distance_ms <= 30000 else "out_of_range"
         for idx, l in enumerate(script_lines):
             if str(l.get("line_id", "")) == target_line_id:
                 matched_idx = idx
@@ -971,16 +1103,23 @@ def _enrich_flag_context(
         for idx, line in enumerate(script_lines):
             s_ms = line.get("_start_ms", 0)
             e_ms = line.get("_end_ms", 0)
-            if s_ms <= position_ms <= e_ms:
+            if s_ms <= resolved_pos_ms <= e_ms:
                 matched_line = line
                 matched_idx = idx
+                match_distance_ms = 0
+                match_confidence = "exact"
                 break
-            dist = min(abs(position_ms - s_ms), abs(position_ms - e_ms))
+            dist = min(abs(resolved_pos_ms - s_ms), abs(resolved_pos_ms - e_ms))
             if dist < best_dist:
                 best_dist = dist
                 best_candidate = (idx, line)
         if matched_line is None and best_candidate:
             matched_idx, matched_line = best_candidate
+            match_distance_ms = int(best_dist)
+            match_confidence = "near" if best_dist <= 30000 else "out_of_range"
+        elif matched_line is None and not script_lines:
+            match_distance_ms = resolved_pos_ms
+            match_confidence = "out_of_range"
 
     def _line_summary(l: dict[str, Any]) -> dict[str, Any]:
         s_ms = l.get("_start_ms", 0)
@@ -990,9 +1129,9 @@ def _enrich_flag_context(
             l.get("dialogue_kind") in ("spoken", "dialogue")
             or (l.get("speaker") and l.get("speaker") not in ("narrator", ""))
             or ('"' in txt)
-            or ('“' in txt)
+            or ("“" in txt)
         )
-        rel_sec = round((s_ms - position_ms) / 1000.0, 1)
+        rel_sec = round((s_ms - resolved_pos_ms) / 1000.0, 1)
         return {
             "line_id": str(l.get("line_id", "")),
             "speaker": l.get("speaker") or "narrator",
@@ -1005,7 +1144,7 @@ def _enrich_flag_context(
             "start_ms": s_ms,
             "end_ms": e_ms,
             "relative_sec": rel_sec,
-            "is_at_tap": (s_ms <= position_ms <= e_ms),
+            "is_at_tap": (s_ms <= resolved_pos_ms <= e_ms),
             "is_dialogue": is_dialogue,
             "source_start": l.get("source_start"),
             "source_end": l.get("source_end"),
@@ -1047,17 +1186,21 @@ def _enrich_flag_context(
         try:
             bdata = json.loads(book_file.read_text(encoding="utf-8"))
             chapters = bdata.get("chapters", [])
-            if 1 <= chapter_number <= len(chapters):
-                ch_text = chapters[chapter_number - 1].get("text", "")
-                
+            if 1 <= resolved_ch <= len(chapters):
+                ch_text = chapters[resolved_ch - 1].get("text", "")
+
                 valid_starts = [
-                    l.get("source_start") for l in script_lines
-                    if l.get("source_start") is not None and l.get("source_start") >= 0
+                    l.get("source_start")
+                    for l in script_lines
+                    if l.get("source_start") is not None
+                    and l.get("source_start") >= 0
                     and (not candidate_indices or script_lines.index(l) in candidate_indices)
                 ]
                 valid_ends = [
-                    l.get("source_end") for l in script_lines
-                    if l.get("source_end") is not None and l.get("source_end") >= 0
+                    l.get("source_end")
+                    for l in script_lines
+                    if l.get("source_end") is not None
+                    and l.get("source_end") >= 0
                     and (not candidate_indices or script_lines.index(l) in candidate_indices)
                 ]
 
@@ -1083,11 +1226,42 @@ def _enrich_flag_context(
         "reaction_window": {
             "window_start_ms": window_start_ms,
             "window_end_ms": window_end_ms,
-            "tap_position_ms": position_ms,
+            "tap_position_ms": resolved_pos_ms,
             "delay_window_seconds": 20,
         },
         "manuscript_excerpt": manuscript_excerpt,
+        "match_distance_ms": match_distance_ms,
+        "match_confidence": match_confidence,
+        "position_origin_resolved": origin_resolved,
+        "original_chapter_number": chapter_number,
+        "original_position_ms": position_ms,
+        "resolved_chapter_number": resolved_ch,
+        "resolved_position_ms": resolved_pos_ms,
     }
+
+
+def _run_flag_diagnosis(
+    project_dir: Path,
+    flag_dict: dict[str, Any],
+) -> tuple[str | None, str | None]:
+    """Run deterministic attribution diagnosis over a flag's reaction window."""
+    try:
+        from tools.investigate_playback_flags import diagnose_flag
+
+        diag = diagnose_flag(flag_dict, project_dir, book_data=None, char_data=None)
+        agent_verdict = diag.get("verdict")
+        findings = diag.get("findings") or []
+        suggested = diag.get("suggested_speaker")
+        explanation_parts = []
+        if suggested and agent_verdict != "INCONCLUSIVE":
+            explanation_parts.append(f"Suggested speaker: {suggested}.")
+        if findings:
+            explanation_parts.extend(findings)
+        agent_explanation = " ".join(explanation_parts) if explanation_parts else None
+        return agent_verdict, agent_explanation
+    except Exception as exc:
+        logger.debug("Auto-diagnosis failed for flag: %s", exc)
+        return None, None
 
 
 def _sync_project_flags_json(project_dir: Path, job_queue: JobQueue, project_id: str) -> None:
@@ -1108,10 +1282,10 @@ def _sync_flags_with_streamer_and_disk(
     flags_path = project_dir / "playback_flags.json"
     if flags_path.is_file():
         try:
-            with open(flags_path, "r", encoding="utf-8") as f:
+            with open(flags_path, encoding="utf-8") as f:
                 disk_flags = json.load(f).get("flags", [])
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Failed reading playback_flags.json: %s", exc)
 
     remote_flags = []
     try:
@@ -1120,8 +1294,10 @@ def _sync_flags_with_streamer_and_disk(
         with urllib.request.urlopen(req, timeout=1.0) as resp:
             if resp.status == 200:
                 remote_flags = json.loads(resp.read().decode("utf-8")).get("flags", [])
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Remote streamer flags unavailable: %s", exc)
+
+    KNOWN_STATUSES = {"open", "investigating", "investigated", "vetoed", "resolved", "fixed", "dismissed"}
 
     candidates: dict[str, dict[str, Any]] = {f["flag_id"]: f for f in disk_flags if f.get("flag_id")}
     for rf in remote_flags:
@@ -1134,25 +1310,79 @@ def _sync_flags_with_streamer_and_disk(
             ch_num = int(f.get("chapter_number", 1))
             pos_ms = int(f.get("position_ms", 0))
             line_id = f.get("line_id")
-            enriched = f.get("enriched_data") or f.get("line_metadata")
-            if not enriched:
-                enriched = _enrich_flag_context(project_dir, workspace_dir, ch_num, pos_ms, line_id)
+            pos_origin = f.get("position_origin")
+
+            # Unconditionally re-enrich so the schema matches the dashboard expectation
+            enriched = _enrich_flag_context(
+                project_dir, workspace_dir, ch_num, pos_ms, line_id, position_origin=pos_origin
+            )
+            effective_chapter = enriched.get("resolved_chapter_number", ch_num)
+            effective_pos = enriched.get("resolved_position_ms", pos_ms)
+            resolved_line_id = line_id or enriched.get("matched_line_id")
+
+            # Content deduplication before creating a new record
+            dup = job_queue.find_duplicate_playback_flag(
+                project_id=project_id,
+                chapter_number=effective_chapter,
+                position_ms=effective_pos,
+                line_id=resolved_line_id,
+                window_ms=2000,
+            )
+            if not dup and effective_chapter != ch_num:
+                dup = job_queue.find_duplicate_playback_flag(
+                    project_id=project_id,
+                    chapter_number=ch_num,
+                    position_ms=pos_ms,
+                    line_id=line_id,
+                    window_ms=2000,
+                )
+            if dup:
+                logger.info("Skipping import of duplicate flag %s (matches %s)", fid, dup["flag_id"])
+                continue
+
+            # Run diagnosis if not already stamped
+            agent_verdict = f.get("agent_verdict")
+            agent_explanation = f.get("agent_explanation")
+            if not agent_verdict:
+                flag_payload = {
+                    "flag_id": fid,
+                    "chapter_number": effective_chapter,
+                    "position_ms": effective_pos,
+                    "line_id": resolved_line_id,
+                    "enriched_data": enriched,
+                    "user_note": f.get("user_note", ""),
+                }
+                diag_verdict, diag_expl = _run_flag_diagnosis(project_dir, flag_payload)
+                agent_verdict = diag_verdict or agent_verdict
+                agent_explanation = diag_expl or agent_explanation
+
+            # Pass remote created_at through if provided
             job_queue.create_playback_flag(
                 project_id=project_id,
                 flag_id=fid,
-                chapter_number=ch_num,
-                position_ms=pos_ms,
+                chapter_number=effective_chapter,
+                position_ms=effective_pos,
                 source=f.get("source", "nas_streamer"),
                 issue_type=f.get("issue_type", "wrong_speaker"),
                 user_note=f.get("user_note", ""),
-                line_id=line_id or enriched.get("matched_line_id"),
+                line_id=resolved_line_id,
                 enriched_data=enriched,
+                created_at=f.get("created_at"),
+                agent_verdict=agent_verdict,
+                agent_explanation=agent_explanation,
             )
-            if f.get("status") and f["status"] != "pending":
+            raw_status = f.get("status")
+            if raw_status and raw_status != "pending":
+                if raw_status in KNOWN_STATUSES:
+                    imported_status = raw_status
+                else:
+                    logger.info("Coercing unrecognised status %r to 'open' for %s", raw_status, fid)
+                    imported_status = "open"
+
                 job_queue.update_playback_flag(
                     project_id=project_id,
                     flag_id=fid,
-                    status=f.get("status"),
+                    status=imported_status,
                     agent_verdict=f.get("agent_verdict"),
                     agent_explanation=f.get("agent_explanation"),
                     resolution=f.get("resolution"),
@@ -1161,8 +1391,8 @@ def _sync_flags_with_streamer_and_disk(
 
     try:
         _sync_project_flags_json(project_dir, job_queue, project_id)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Failed writing playback_flags.json: %s", exc)
 
 
 @router.post("/books/{project_id}/flags", status_code=201)
@@ -1176,8 +1406,6 @@ async def create_playback_flag(
     workspace_dir = _workspace_project_dir(project_id)
     job_queue = _get_job_queue(req)
 
-    flag_id = f"flag_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
-
     # Auto-enrich context with timeline and manuscript data
     enriched_data = _enrich_flag_context(
         project_dir=project_dir,
@@ -1185,20 +1413,77 @@ async def create_playback_flag(
         chapter_number=request.chapter_number,
         position_ms=request.position_ms,
         target_line_id=request.line_id,
+        position_origin=request.position_origin,
     )
 
+    effective_chapter = enriched_data.get("resolved_chapter_number", request.chapter_number)
+    effective_pos = enriched_data.get("resolved_position_ms", request.position_ms)
     resolved_line_id = request.line_id or enriched_data.get("matched_line_id")
+
+    # Content dedupe check: if matching line_id or within 2000ms in same chapter, return existing flag
+    duplicate = job_queue.find_duplicate_playback_flag(
+        project_id=project_id,
+        chapter_number=effective_chapter,
+        position_ms=effective_pos,
+        line_id=resolved_line_id,
+        window_ms=2000,
+    )
+    if not duplicate and effective_chapter != request.chapter_number:
+        duplicate = job_queue.find_duplicate_playback_flag(
+            project_id=project_id,
+            chapter_number=request.chapter_number,
+            position_ms=request.position_ms,
+            line_id=request.line_id,
+            window_ms=2000,
+        )
+    if duplicate:
+        logger.info(
+            "Found duplicate flag for %s ch%d @ %dms: %s",
+            project_id,
+            request.chapter_number,
+            request.position_ms,
+            duplicate["flag_id"],
+        )
+        return {
+            "result": "existing",
+            "status": "flagged",
+            "flag": duplicate,
+        }
+
+    # Accept client-supplied flag_id if valid; reject path separators
+    flag_id = None
+    if request.client_flag_id:
+        raw_cid = request.client_flag_id.strip()
+        if re.match(r"^[A-Za-z0-9_\-]+$", raw_cid) and "/" not in raw_cid and "\\" not in raw_cid:
+            flag_id = raw_cid
+        else:
+            logger.warning("Ignoring invalid client_flag_id: %r", request.client_flag_id)
+
+    if not flag_id:
+        flag_id = f"flag_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+
+    flag_payload = {
+        "flag_id": flag_id,
+        "chapter_number": effective_chapter,
+        "position_ms": effective_pos,
+        "line_id": resolved_line_id,
+        "enriched_data": enriched_data,
+        "user_note": request.user_note,
+    }
+    agent_verdict, agent_explanation = _run_flag_diagnosis(project_dir, flag_payload)
 
     flag = job_queue.create_playback_flag(
         project_id=project_id,
         flag_id=flag_id,
-        chapter_number=request.chapter_number,
-        position_ms=request.position_ms,
+        chapter_number=effective_chapter,
+        position_ms=effective_pos,
         source=request.source,
         issue_type=request.issue_type,
         user_note=request.user_note,
         line_id=resolved_line_id,
         enriched_data=enriched_data,
+        agent_verdict=agent_verdict,
+        agent_explanation=agent_explanation,
     )
 
     # Mirror to local project directory
@@ -1208,6 +1493,7 @@ async def create_playback_flag(
         logger.warning("Could not sync playback_flags.json: %s", exc)
 
     return {
+        "result": "created",
         "status": "flagged",
         "flag": flag,
     }
@@ -1285,13 +1571,15 @@ async def update_playback_flag(
     # Mirror update to remote NAS streamer if reachable
     try:
         remote_patch_url = f"http://192.168.50.180:8005/api/mobile/v1/books/{project_id}/flags/{flag_id}"
-        patch_payload = json.dumps({
-            "status": request.status,
-            "agent_verdict": verdict,
-            "agent_explanation": explanation,
-            "resolution": resolution,
-            "resolved_by": request.resolved_by,
-        }).encode("utf-8")
+        patch_payload = json.dumps(
+            {
+                "status": request.status,
+                "agent_verdict": verdict,
+                "agent_explanation": explanation,
+                "resolution": resolution,
+                "resolved_by": request.resolved_by,
+            }
+        ).encode("utf-8")
         patch_req = urllib.request.Request(
             remote_patch_url,
             data=patch_payload,
@@ -1300,11 +1588,10 @@ async def update_playback_flag(
         )
         with urllib.request.urlopen(patch_req, timeout=1.0) as _:
             pass
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Failed forwarding flag patch to remote streamer: %s", exc)
 
     return {
         "status": "updated",
         "flag": updated,
     }
-

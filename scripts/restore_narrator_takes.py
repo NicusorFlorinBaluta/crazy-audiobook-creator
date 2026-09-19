@@ -47,16 +47,11 @@ def main() -> int:
         return 1
 
     script = json.loads((project_dir / "book_script.json").read_text(encoding="utf-8"))
-    script_lines = {
-        line["line_id"]: line
-        for ch in script.get("chapters", [])
-        for line in ch.get("lines", [])
-    }
+    script_lines = {line["line_id"]: line for ch in script.get("chapters", []) for line in ch.get("lines", [])}
     mappings, _ = load_pronunciation_dictionary(project_dir)
 
     narrator_backups = sorted(
-        p for p in backup_dir.glob("*.wav")
-        if script_lines.get(p.stem, {}).get("speaker") == "narrator"
+        p for p in backup_dir.glob("*.wav") if script_lines.get(p.stem, {}).get("speaker") == "narrator"
     )
 
     print(f"Found {len(narrator_backups)} narrator backup takes in {backup_dir}")
@@ -85,11 +80,15 @@ def main() -> int:
         curr_pitch = curr_analysis.get("pitch_median", 0.0)
 
         if backup_pitch > 130.0:
-            print(f"  [{idx}/{len(narrator_backups)}] {line_id} (ch {chapter}): SKIPPED - backup pitch is high ({backup_pitch:.1f} Hz)")
+            print(
+                f"  [{idx}/{len(narrator_backups)}] {line_id} (ch {chapter}): SKIPPED - backup pitch is high ({backup_pitch:.1f} Hz)"
+            )
             continue
 
         if not args.apply:
-            print(f"  [{idx}/{len(narrator_backups)}] {line_id} (ch {chapter}): would restore male take ({backup_pitch:.1f} Hz) over current take ({curr_pitch:.1f} Hz)")
+            print(
+                f"  [{idx}/{len(narrator_backups)}] {line_id} (ch {chapter}): would restore male take ({backup_pitch:.1f} Hz) over current take ({curr_pitch:.1f} Hz)"
+            )
             restored += 1
             touched_chapters.add(chapter)
             continue
@@ -97,6 +96,7 @@ def main() -> int:
         # Create safe temp candidate to pass to replace_segment
         temp_candidate = segments_dir / f"temp-restore-{line_id}.wav"
         import shutil
+
         shutil.copy2(backup_path, temp_candidate)
 
         # Validate with Whisper & Audio QA
@@ -123,10 +123,15 @@ def main() -> int:
         if rep_result.success:
             restored += 1
             touched_chapters.add(chapter)
-            print(f"  [{idx}/{len(narrator_backups)}] {line_id} (ch {chapter}): RESTORED male take ({backup_pitch:.1f} Hz, wer={validated.wer:.2f})")
+            print(
+                f"  [{idx}/{len(narrator_backups)}] {line_id} (ch {chapter}): RESTORED male take ({backup_pitch:.1f} Hz, wer={validated.wer:.2f})"
+            )
         else:
             temp_candidate.unlink(missing_ok=True)
-            print(f"  [{idx}/{len(narrator_backups)}] {line_id} (ch {chapter}): FAILED ({rep_result.error})", file=sys.stderr)
+            print(
+                f"  [{idx}/{len(narrator_backups)}] {line_id} (ch {chapter}): FAILED ({rep_result.error})",
+                file=sys.stderr,
+            )
 
     print(f"\nCompleted: {restored} narrator take(s) restored across {len(touched_chapters)} chapter(s).")
     if touched_chapters:

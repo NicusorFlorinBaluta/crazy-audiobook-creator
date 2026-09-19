@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import re
+from collections import defaultdict
+from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -37,6 +39,215 @@ class ReviewItem:
         return asdict(self)
 
 
+#: Every within-chapter trend measures *excess* variation, not too little. The
+#: gate used to describe all three as "monotone", which is the opposite of what
+#: the detector found and sent the reader looking for the wrong problem.
+_TREND_TITLES = {
+    "cross_chapter_voice_drift": "Cross-chapter voice consistency",
+    "within_chapter_pitch_variation": "Uneven pitch within a chapter",
+    "within_chapter_rate_variation": "Uneven speaking rate within a chapter",
+    "within_chapter_pitch_jump": "Abrupt pitch change between lines",
+}
+
+
+def _trend_reason(kind: str, warning: dict[str, Any]) -> str:
+    """Say what was actually measured, with the number that tripped it."""
+    if kind == "cross_chapter_voice_drift":
+        return "This voice differs materially from its book-wide identity baseline. Listen before final release."
+    metric = {
+        "within_chapter_pitch_variation": ("pitch_relative_spread", "pitch varies by {:.0%} across this chapter"),
+        "within_chapter_rate_variation": (
+            "speaking_rate_relative_spread",
+            "speaking rate varies by {:.0%} across this chapter",
+        ),
+        "within_chapter_pitch_jump": (
+            "largest_adjacent_pitch_jump_ratio",
+            "pitch jumps {:.0%} between two adjacent lines",
+        ),
+    }.get(kind)
+    if metric is None:
+        return "Chapter prosody looks uneven for this voice. Listen before final release."
+    value = warning.get(metric[0])
+    measured = metric[1].format(value) if isinstance(value, int | float) else metric[1].replace(" {:.0%}", " widely")
+    return f"This voice's {measured}. Listen before final release."
+
+
+def _warning_severity(warning: dict[str, Any] | None) -> float:
+    if not warning or not isinstance(warning, dict):
+        return 0.0
+    kind = warning.get("kind")
+    if kind == "within_chapter_pitch_jump":
+        return float(warning.get("largest_adjacent_pitch_jump_ratio") or 0.0) / 0.45
+    if kind == "within_chapter_pitch_variation":
+        return float(warning.get("pitch_relative_spread") or 0.0) / 0.22
+    if kind == "within_chapter_rate_variation":
+        return float(warning.get("speaking_rate_relative_spread") or 0.0) / 0.30
+    if kind == "cross_chapter_voice_drift":
+        return float(warning.get("similarity_drop") or 0.1) / 0.1
+    return float(
+        warning.get("largest_adjacent_pitch_jump_ratio")
+        or warning.get("pitch_relative_spread")
+        or warning.get("speaking_rate_relative_spread")
+        or 0.0
+    )
+
+
+def collapse_audio_trends(items: Iterable[ReviewItem]) -> list[ReviewItem]:
+    """Collapse voice trend warnings down to one summary row per voice."""
+    other_items: list[ReviewItem] = []
+    trends_by_voice: dict[str, list[ReviewItem]] = defaultdict(list)
+
+    for item in items:
+        if item.category != "audio_trend":
+            other_items.append(item)
+            continue
+        voice_id = None
+        if item.details and isinstance(item.details, dict):
+            voice_id = item.details.get("voice_id")
+        if not voice_id and ":" in item.item_id:
+            parts = item.item_id.split(":")
+            if len(parts) >= 2:
+                voice_id = parts[1]
+        if not voice_id:
+            other_items.append(item)
+            continue
+        trends_by_voice[voice_id].append(item)
+
+    collapsed: list[ReviewItem] = []
+    for voice_id, voice_items in trends_by_voice.items():
+        if len(voice_items) == 1:
+            collapsed.append(voice_items[0])
+            continue
+        worst_item = max(
+            voice_items,
+            key=lambda it: _warning_severity(it.details if it.details else None),
+        )
+        chapters = sorted({it.chapter_number for it in voice_items if it.chapter_number is not None})
+        worst_details = worst_item.details or {}
+        worst_kind = worst_details.get("kind", "audio_consistency")
+        worst_reason = _trend_reason(worst_kind, worst_details)
+        ch_str = f"in ch {worst_item.chapter_number}" if worst_item.chapter_number is not None else ""
+        reason = (
+            f"{len(voice_items)} prosody warning(s) across {len(chapters)} chapter(s). Worst {ch_str}: {worst_reason}"
+        ).strip()
+        collapsed.append(
+            ReviewItem(
+                category="audio_trend",
+                item_id=f"trend:{voice_id}",
+                title=f"Voice prosody: {voice_id}",
+                reason=reason,
+                blocking=False,
+                chapter_number=worst_item.chapter_number,
+                details={
+                    "voice_id": voice_id,
+                    "warning_count": len(voice_items),
+                    "chapters": chapters,
+                    "worst_warning": worst_details,
+                    "warnings": [it.details for it in voice_items if it.details],
+                },
+            )
+        )
+    return other_items + collapsed
+
+
+def group_audio_rejections(
+    items: Iterable[ReviewItem],
+    candidate_terms: Sequence[str] | None = None,
+) -> list[ReviewItem]:
+    """Group audio segment rejections sharing the same glossary term into one fix."""
+    other_items: list[ReviewItem] = []
+    audio_by_term: dict[str, list[ReviewItem]] = defaultdict(list)
+    term_displays: dict[str, str] = {}
+
+    sorted_terms = sorted(candidate_terms or [], key=len, reverse=True)
+
+    for item in items:
+        if item.category != "audio":
+            other_items.append(item)
+            continue
+        matched_term: str | None = None
+        if sorted_terms and item.reason:
+            for term in sorted_terms:
+                pattern = r"(?:\b|['\"])" + re.escape(term) + r"(?:\b|['\"])"
+                if re.search(pattern, item.reason, re.IGNORECASE):
+                    matched_term = term
+                    break
+        if matched_term and item.disposition not in RESOLVED_SEGMENT_DISPOSITIONS:
+            key = matched_term.casefold()
+            audio_by_term[key].append(item)
+            term_displays[key] = matched_term
+        else:
+            other_items.append(item)
+
+    grouped_audio: list[ReviewItem] = []
+    for key, group in audio_by_term.items():
+        if len(group) == 1:
+            grouped_audio.append(group[0])
+            continue
+        display_term = term_displays[key]
+        chapters = sorted({it.chapter_number for it in group if it.chapter_number is not None})
+        ch_text = ", ".join(f"ch {ch}" for ch in chapters)
+        slug = re.sub(r"[^a-zA-Z0-9_-]", "_", display_term.lower())
+        details_0 = group[0].details or {}
+        grouped_audio.append(
+            ReviewItem(
+                category="audio",
+                item_id=f"audio:glossary:{slug}",
+                title=f"Audio rejections: {display_term} ({len(group)} segments)",
+                reason=f"{len(group)} segment(s) rejected due to '{display_term}' ({ch_text}).",
+                confidence=min((it.confidence for it in group if it.confidence is not None), default=None),
+                disposition="unreviewed"
+                if any(it.disposition == "unreviewed" for it in group)
+                else group[0].disposition,
+                blocking=any(it.blocking for it in group),
+                chapter_number=min(chapters, default=None),
+                details={
+                    "glossary_term": display_term,
+                    "segment_count": len(group),
+                    "segment_ids": [it.item_id for it in group],
+                    "chapters": chapters,
+                    "sample_reasons": [it.reason for it in group[:3]],
+                    "audio_url": details_0.get("audio_url", ""),
+                    "speaker": details_0.get("speaker", ""),
+                    "text": details_0.get("text", ""),
+                    "segments": [it.to_dict() for it in group],
+                },
+            )
+        )
+    return other_items + grouped_audio
+
+
+def _review_item_sort_key(item: ReviewItem) -> tuple[Any, ...]:
+    is_not_blocking = not item.blocking
+    cat = item.category
+    details = item.details or {}
+    occ = -int(details.get("occurrences", 0)) if cat == "pronunciation" else 0
+    ch = item.chapter_number if item.chapter_number is not None else 0
+    return (is_not_blocking, cat, occ, ch, item.item_id)
+
+
+def _top_action_rank_key(item: ReviewItem) -> tuple[Any, ...]:
+    blocking_rank = 0 if item.blocking else 1
+    is_actionable = (
+        item.category in _CHANGES_OUTPUT_CATEGORIES
+        and item.disposition not in RESOLVED_ATTRIBUTION_DISPOSITIONS
+        and item.disposition not in RESOLVED_SEGMENT_DISPOSITIONS
+    )
+    actionable_rank = 0 if is_actionable else 1
+    details = item.details or {}
+    impact = 0
+    if item.category == "pronunciation":
+        impact = int(details.get("occurrences", 0))
+    elif item.category == "audio":
+        seg_count = int(details.get("segment_count", 1))
+        impact = seg_count * 50
+    elif item.category == "attribution":
+        impact = 100 if item.blocking else 40
+    elif item.category == "audio_trend":
+        impact = int(details.get("warning_count", 1))
+    return (blocking_rank, actionable_rank, -impact, item.category, item.item_id)
+
+
 @dataclass(frozen=True)
 class ReviewGate:
     items: tuple[ReviewItem, ...]
@@ -60,6 +271,12 @@ class ReviewGate:
             if item.category in _CHANGES_OUTPUT_CATEGORIES and item.disposition not in RESOLVED_ATTRIBUTION_DISPOSITIONS
         )
 
+    def top_actions(self, limit: int = 10) -> list[dict[str, Any]]:
+        ranked = sorted(self.items, key=_top_action_rank_key)
+        return [
+            {**item.to_dict(), "changes_output": item.category in _CHANGES_OUTPUT_CATEGORIES} for item in ranked[:limit]
+        ]
+
     def to_dict(self) -> dict[str, Any]:
         counts: dict[str, int] = {}
         for item in self.items:
@@ -73,7 +290,27 @@ class ReviewGate:
             "actionable_count": len(self.actionable_items),
             "counts": counts,
             "release_ready": not self.blocking_items,
+            "top_actions": self.top_actions(10),
         }
+
+    @classmethod
+    def from_items(
+        cls,
+        items: Iterable[ReviewItem],
+        *,
+        candidate_terms: Sequence[str] | None = None,
+        collapse_trends: bool = True,
+        group_audio: bool = True,
+        sort: bool = True,
+    ) -> ReviewGate:
+        item_list = list(items)
+        if collapse_trends:
+            item_list = collapse_audio_trends(item_list)
+        if group_audio:
+            item_list = group_audio_rejections(item_list, candidate_terms=candidate_terms)
+        if sort:
+            item_list.sort(key=_review_item_sort_key)
+        return cls(tuple(item_list))
 
 
 from datetime import UTC
@@ -152,39 +389,6 @@ def _get_script_review_data(project_dir: Path) -> tuple[dict[str, dict[str, Any]
         ttl_seconds=1800,
     )
     return script_lines_by_id, attribution_lines
-
-
-#: Every within-chapter trend measures *excess* variation, not too little. The
-#: gate used to describe all three as "monotone", which is the opposite of what
-#: the detector found and sent the reader looking for the wrong problem.
-_TREND_TITLES = {
-    "cross_chapter_voice_drift": "Cross-chapter voice consistency",
-    "within_chapter_pitch_variation": "Uneven pitch within a chapter",
-    "within_chapter_rate_variation": "Uneven speaking rate within a chapter",
-    "within_chapter_pitch_jump": "Abrupt pitch change between lines",
-}
-
-
-def _trend_reason(kind: str, warning: dict[str, Any]) -> str:
-    """Say what was actually measured, with the number that tripped it."""
-    if kind == "cross_chapter_voice_drift":
-        return "This voice differs materially from its book-wide identity baseline. Listen before final release."
-    metric = {
-        "within_chapter_pitch_variation": ("pitch_relative_spread", "pitch varies by {:.0%} across this chapter"),
-        "within_chapter_rate_variation": (
-            "speaking_rate_relative_spread",
-            "speaking rate varies by {:.0%} across this chapter",
-        ),
-        "within_chapter_pitch_jump": (
-            "largest_adjacent_pitch_jump_ratio",
-            "pitch jumps {:.0%} between two adjacent lines",
-        ),
-    }.get(kind)
-    if metric is None:
-        return "Chapter prosody looks uneven for this voice. Listen before final release."
-    value = warning.get(metric[0])
-    measured = metric[1].format(value) if isinstance(value, int | float) else metric[1].replace(" {:.0%}", " widely")
-    return f"This voice's {measured}. Listen before final release."
 
 
 def collect_review_gate(project_id: str, project_dir: Path, job_queue: Any) -> ReviewGate:
@@ -428,6 +632,7 @@ def collect_review_gate(project_id: str, project_dir: Path, job_queue: Any) -> R
         except (OSError, ValueError, TypeError):
             pass
 
+    candidate_terms: list[str] = []
     try:
         inv_path = project_dir / "pronunciation_inventory.json"
         if inv_path.is_file():
@@ -435,9 +640,11 @@ def collect_review_gate(project_id: str, project_dir: Path, job_queue: Any) -> R
         else:
             inventory = build_pronunciation_inventory(project_dir)
         for candidate in inventory.get("candidates", []):
+            term = str(candidate.get("term", "")).strip()
+            if term:
+                candidate_terms.append(term)
             if candidate.get("status") != "review_required":
                 continue
-            term = str(candidate.get("term", "unknown"))
             items.append(
                 ReviewItem(
                     category="pronunciation",
@@ -452,11 +659,20 @@ def collect_review_gate(project_id: str, project_dir: Path, job_queue: Any) -> R
                     },
                 )
             )
+        dict_path = project_dir / "pronunciation_dict.json"
+        if dict_path.is_file():
+            try:
+                dict_data = json.loads(dict_path.read_text(encoding="utf-8"))
+                for dict_term in dict_data:
+                    dict_term_str = str(dict_term).strip()
+                    if dict_term_str and dict_term_str not in candidate_terms:
+                        candidate_terms.append(dict_term_str)
+            except (OSError, ValueError):
+                pass
     except (OSError, ValueError, TypeError):
         pass
 
-    items.sort(key=lambda item: (not item.blocking, item.category, item.chapter_number or 0, item.item_id))
-    return ReviewGate(tuple(items))
+    return ReviewGate.from_items(items, candidate_terms=candidate_terms)
 
 
 def write_release_report(project_id: str, project_dir: Path, job_queue: Any) -> dict[str, Any]:

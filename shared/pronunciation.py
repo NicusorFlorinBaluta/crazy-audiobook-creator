@@ -505,9 +505,11 @@ def _phonetic_recommendations(term: str, context: str = "") -> dict[str, str]:
         words = raw.split()
         sub_recs = [_phonetic_recommendations(w, context) for w in words]
         rec_def = " ".join(r["default"] for r in sub_recs)
-        rec_alt = " ".join(r["alternate"] for r in sub_recs)
+        # Use each subword's default as the alternate when it has no better candidate,
+        # so the joined alternate is always complete even if some parts are unchanged.
+        rec_alt = " ".join(r["alternate"] if r["alternate"] else r["default"] for r in sub_recs)
         if rec_def.lower() == rec_alt.lower() or not rec_alt:
-            rec_alt = raw
+            rec_alt = ""  # no secondary candidate differs from the default
         return {"default": rec_def, "alternate": rec_alt}
 
     # Hyphenated terms: the hyphen is a break the engine speaks, so the parts are
@@ -518,9 +520,10 @@ def _phonetic_recommendations(term: str, context: str = "") -> dict[str, str]:
         if len(parts) > 1:
             sub_recs = [_phonetic_recommendations(p, context) for p in parts]
             rec_def = "".join(r["default"] for r in sub_recs)
-            rec_alt = "".join(r["alternate"] for r in sub_recs)
+            # Use each part's default as the alternate when it has no better candidate.
+            rec_alt = "".join(r["alternate"] if r["alternate"] else r["default"] for r in sub_recs)
             if rec_def.lower() == rec_alt.lower() or not rec_alt:
-                rec_alt = raw
+                rec_alt = ""  # no secondary candidate differs from the default
             return {"default": rec_def, "alternate": rec_alt}
 
     comp = _split_compound(raw)
@@ -604,7 +607,7 @@ def _phonetic_recommendations(term: str, context: str = "") -> dict[str, str]:
     rec_alt = format_sylls(sylls_alt, alt=True)
 
     if rec_def.lower() == rec_alt.lower() or not rec_alt:
-        rec_alt = raw
+        rec_alt = ""  # no secondary candidate; signal "no recommendation" to the caller
 
     return {"default": rec_def, "alternate": rec_alt}
 

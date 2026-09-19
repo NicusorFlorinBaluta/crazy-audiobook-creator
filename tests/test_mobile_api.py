@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -622,9 +623,27 @@ class MobileApiTests(unittest.TestCase):
             script_data = {
                 "chapter_number": 1,
                 "lines": [
-                    {"line_id": "line_001", "speaker": "narrator", "text": "Wax stood in the mist.", "source_start": 0, "source_end": 23},
-                    {"line_id": "line_002", "speaker": "wax", "spoken_text": "Did you check the perimeter?", "source_start": 24, "source_end": 52},
-                    {"line_id": "line_003", "speaker": "wayne", "spoken_text": "I sure did, mate.", "source_start": 53, "source_end": 70},
+                    {
+                        "line_id": "line_001",
+                        "speaker": "narrator",
+                        "text": "Wax stood in the mist.",
+                        "source_start": 0,
+                        "source_end": 23,
+                    },
+                    {
+                        "line_id": "line_002",
+                        "speaker": "wax",
+                        "spoken_text": "Did you check the perimeter?",
+                        "source_start": 24,
+                        "source_end": 52,
+                    },
+                    {
+                        "line_id": "line_003",
+                        "speaker": "wayne",
+                        "spoken_text": "I sure did, mate.",
+                        "source_start": 53,
+                        "source_end": 70,
+                    },
                 ],
             }
             (scripts_dir / "chapter_001.json").write_text(json.dumps(script_data), encoding="utf-8")
@@ -721,6 +740,208 @@ class MobileApiTests(unittest.TestCase):
             if project_dir.exists():
                 shutil.rmtree(project_dir)
 
+    def test_playback_flags_duplicate_dedupe(self):
+        project_id = "test_dup_book"
+        project_dir = Path("brain/projects") / project_id
+        project_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self.job_queue.create_job(project_id, {"title": "Dup Test", "status": "complete"})
+
+            # Post first flag
+            resp1 = self.client.post(
+                f"/api/mobile/v1/books/{project_id}/flags",
+                json={
+                    "chapter_number": 1,
+                    "position_ms": 10000,
+                    "source": "android_auto",
+                    "line_id": "line_010",
+                },
+            )
+            self.assertEqual(resp1.status_code, 201)
+            flag1 = resp1.json()["flag"]
+
+            # Exact duplicate POST
+            resp2 = self.client.post(
+                f"/api/mobile/v1/books/{project_id}/flags",
+                json={
+                    "chapter_number": 1,
+                    "position_ms": 10000,
+                    "source": "android_auto",
+                    "line_id": "line_010",
+                },
+            )
+            self.assertEqual(resp2.status_code, 201)
+            self.assertEqual(resp2.json()["result"], "existing")
+            self.assertEqual(resp2.json()["status"], "flagged")
+            self.assertEqual(resp2.json()["flag"]["flag_id"], flag1["flag_id"])
+
+            # Near duplicate within 1500ms
+            resp3 = self.client.post(
+                f"/api/mobile/v1/books/{project_id}/flags",
+                json={
+                    "chapter_number": 1,
+                    "position_ms": 11500,
+                    "source": "android_auto",
+                },
+            )
+            self.assertEqual(resp3.status_code, 201)
+            self.assertEqual(resp3.json()["flag"]["flag_id"], flag1["flag_id"])
+
+            # Farther flag at 2500ms apart -> separate flag
+            resp4 = self.client.post(
+                f"/api/mobile/v1/books/{project_id}/flags",
+                json={
+                    "chapter_number": 1,
+                    "position_ms": 12600,
+                    "source": "android_auto",
+                },
+            )
+            self.assertEqual(resp4.status_code, 201)
+            self.assertNotEqual(resp4.json()["flag"]["flag_id"], flag1["flag_id"])
+
+            # Total flags should be 2
+            flags = self.job_queue.get_playback_flags(project_id)
+            self.assertEqual(len(flags), 2)
+
+            # Mark flag1 as fixed
+            self.job_queue.update_playback_flag(project_id, flag1["flag_id"], status="fixed")
+
+            # Re-flagging the repaired line should NOT be swallowed into the fixed flag
+            resp5 = self.client.post(
+                f"/api/mobile/v1/books/{project_id}/flags",
+                json={
+                    "chapter_number": 1,
+                    "position_ms": 10000,
+                    "source": "android_auto",
+                    "line_id": "line_010",
+                },
+            )
+            self.assertEqual(resp5.status_code, 201)
+            self.assertEqual(resp5.json()["result"], "created")
+            self.assertNotEqual(resp5.json()["flag"]["flag_id"], flag1["flag_id"])
+
+            # Total flags should now be 3
+            flags_after = self.job_queue.get_playback_flags(project_id)
+            self.assertEqual(len(flags_after), 3)
+        finally:
+            if project_dir.exists():
+                shutil.rmtree(project_dir)
+
+    def test_playback_flags_client_flag_id(self):
+        project_id = "test_client_id_book"
+        project_dir = Path("brain/projects") / project_id
+        project_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self.job_queue.create_job(project_id, {"title": "Client ID Test", "status": "complete"})
+
+            # Valid client_flag_id
+            resp = self.client.post(
+                f"/api/mobile/v1/books/{project_id}/flags",
+                json={
+                    "chapter_number": 2,
+                    "position_ms": 5000,
+                    "client_flag_id": "custom-car-tap-987",
+                },
+            )
+            self.assertEqual(resp.status_code, 201)
+            self.assertEqual(resp.json()["flag"]["flag_id"], "custom-car-tap-987")
+
+            # Invalid client_flag_id with path traversal should be ignored and minted safely
+            resp_invalid = self.client.post(
+                f"/api/mobile/v1/books/{project_id}/flags",
+                json={
+                    "chapter_number": 2,
+                    "position_ms": 20000,
+                    "client_flag_id": "../../malicious/flag",
+                },
+            )
+            self.assertEqual(resp_invalid.status_code, 201)
+            self.assertNotEqual(resp_invalid.json()["flag"]["flag_id"], "../../malicious/flag")
+            self.assertTrue(resp_invalid.json()["flag"]["flag_id"].startswith("flag_"))
+        finally:
+            if project_dir.exists():
+                shutil.rmtree(project_dir)
+
+    def test_playback_flags_import_dedupe_coercion_and_timestamp(self):
+        from unittest.mock import MagicMock, patch
+
+        project_id = "test_import_book"
+        project_dir = Path("brain/projects") / project_id
+        project_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self.job_queue.create_job(project_id, {"title": "Import Test", "status": "complete"})
+
+            # Seed an existing flag
+            self.job_queue.create_playback_flag(
+                project_id=project_id,
+                flag_id="existing_flag_001",
+                chapter_number=1,
+                position_ms=5000,
+                line_id="ch01_0005",
+            )
+
+            # Simulated remote flags from streamer:
+            # 1. Duplicate of existing within 1000ms -> should be skipped
+            # 2. Remote ghost with status "flagged" and ISO timestamp -> should coerce to "open" and keep timestamp
+            # 3. Remote flag with streamer schema -> should re-enrich with dashboard schema
+            # 4. Remote flag with invalid timestamp -> should fall back gracefully without error
+            fake_remote_flags = [
+                {
+                    "flag_id": "remote_dup_001",
+                    "chapter_number": 1,
+                    "position_ms": 5500,
+                    "line_id": "ch01_0005",
+                    "status": "flagged",
+                },
+                {
+                    "flag_id": "remote_ghost_002",
+                    "chapter_number": 1,
+                    "position_ms": 25000,
+                    "status": "flagged",
+                    "created_at": "2026-09-17T05:25:20+00:00",
+                    "matched_speaker": "savahn",
+                    "nearby_lines": [{"speaker": "savahn", "text": "hello"}],
+                },
+                {
+                    "flag_id": "remote_bad_ts_003",
+                    "chapter_number": 1,
+                    "position_ms": 50000,
+                    "status": "investigating",
+                    "created_at": "not-a-valid-date",
+                },
+            ]
+
+            mock_response = MagicMock()
+            mock_response.status = 200
+            mock_response.read.return_value = json.dumps({"flags": fake_remote_flags}).encode("utf-8")
+            mock_response.__enter__.return_value = mock_response
+
+            with patch("urllib.request.urlopen", return_value=mock_response):
+                resp = self.client.get(f"/api/mobile/v1/books/{project_id}/flags")
+                self.assertEqual(resp.status_code, 200)
+
+            flags_by_id = {f["flag_id"]: f for f in self.job_queue.get_playback_flags(project_id)}
+
+            # 1. Duplicate should not exist
+            self.assertNotIn("remote_dup_001", flags_by_id)
+
+            # 2. Ghost should be imported with status "open" and preserved created_at
+            ghost = flags_by_id["remote_ghost_002"]
+            self.assertEqual(ghost["status"], "open")
+            self.assertEqual(ghost["created_at"], "2026-09-17T05:25:20+00:00")
+            # Enriched data contains dashboard schema
+            self.assertIn("active_line", ghost)
+            self.assertIn("candidate_lines", ghost)
+
+            # 3. Bad timestamp flag imported with status "investigating" and non-empty created_at
+            bad_ts_flag = flags_by_id["remote_bad_ts_003"]
+            self.assertEqual(bad_ts_flag["status"], "investigating")
+            self.assertTrue(bad_ts_flag["created_at"])
+            self.assertNotEqual(bad_ts_flag["created_at"], "not-a-valid-date")
+        finally:
+            if project_dir.exists():
+                shutil.rmtree(project_dir)
+
 
 class NarratorLookupTests(unittest.TestCase):
     """The Android book-detail call must find the narrator in a real registry.
@@ -789,3 +1010,244 @@ class NarratorLookupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             detail = self._detail(["not", "a", "mapping"], tmp)
         self.assertIn("chapters", detail)
+
+
+class PlaybackFlagPositionSanityTests(unittest.TestCase):
+    """Tests for F7 position sanity: match distance, confidence, and book/chapter origin resolution."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.tmp_path = Path(self.tmp_dir.name)
+        self.projects_dir = self.tmp_path / "projects"
+        self.workspace_dir = self.tmp_path / "workspace"
+        self.projects_dir.mkdir(parents=True)
+        self.workspace_dir.mkdir(parents=True)
+
+        self.project_id = "test_pos_sanity"
+        self.proj_dir = self.projects_dir / self.project_id
+        self.ws_dir = self.workspace_dir / self.project_id
+        self.proj_dir.mkdir(parents=True)
+        self.ws_dir.mkdir(parents=True)
+
+        (self.proj_dir / "script").mkdir(parents=True)
+        (self.proj_dir / "manifests").mkdir(parents=True)
+
+        self.db_path = self.proj_dir / "pipeline_state.db"
+        self.job_queue = JobQueue(db_path=str(self.db_path))
+        app.state.job_queue = self.job_queue
+        app.state.running_tasks = {}
+        self.client = TestClient(app, client=("127.0.0.1", 50000))
+
+        # Setup 14 chapters with real cumulative timing for the benchmark cases
+        # Ch 1-12 cumulative duration: 18,195,930 ms
+        chapters_meta = []
+        for c in range(1, 13):
+            dur_s = 18195.93 / 12.0
+            chapters_meta.append({"number": c, "title": f"Chapter {c}"})
+            (self.proj_dir / "manifests" / f"chapter_{c:03d}.master.json").write_text(
+                json.dumps({"duration_seconds": dur_s}), encoding="utf-8"
+            )
+
+        # Ch 13 duration: 2,257.84 s (2,257,840 ms), cum: [18,195,930, 20,453,770]
+        chapters_meta.append({"number": 13, "title": "Chapter 13"})
+        (self.proj_dir / "manifests" / "chapter_013.master.json").write_text(
+            json.dumps({"duration_seconds": 2257.84}), encoding="utf-8"
+        )
+        ch13_timeline = [
+            {"line_id": "ch13_0001", "start_ms": 0, "end_ms": 10000},
+            {"line_id": "ch13_0350", "start_ms": 1880000, "end_ms": 1885000},
+            {"line_id": "ch13_0424", "start_ms": 2250000, "end_ms": 2257840},
+        ]
+        (self.proj_dir / "manifests" / "chapter_013.timeline.json").write_text(
+            json.dumps(ch13_timeline), encoding="utf-8"
+        )
+        (self.proj_dir / "script" / "chapter_013.json").write_text(
+            json.dumps(
+                {
+                    "chapter_number": 13,
+                    "lines": [
+                        {"line_id": "ch13_0001", "speaker": "narrator", "text": "Start of thirteen."},
+                        {"line_id": "ch13_0350", "speaker": "breezy", "text": "Midpoint of thirteen."},
+                        {"line_id": "ch13_0424", "speaker": "narrator", "text": "End of thirteen."},
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        # Ch 14 duration: 1,996.20 s (1,996,200 ms), cum: [20,453,770, 22,449,970]
+        chapters_meta.append({"number": 14, "title": "Chapter 14"})
+        (self.proj_dir / "manifests" / "chapter_014.master.json").write_text(
+            json.dumps({"duration_seconds": 1996.20}), encoding="utf-8"
+        )
+        ch14_timeline = [
+            {"line_id": "ch14_0001", "start_ms": 0, "end_ms": 10000},
+            {"line_id": "ch14_0064", "start_ms": 319830, "end_ms": 323350},
+            {"line_id": "ch14_0400", "start_ms": 1990000, "end_ms": 1996200},
+        ]
+        (self.proj_dir / "manifests" / "chapter_014.timeline.json").write_text(
+            json.dumps(ch14_timeline), encoding="utf-8"
+        )
+        (self.proj_dir / "script" / "chapter_014.json").write_text(
+            json.dumps(
+                {
+                    "chapter_number": 14,
+                    "lines": [
+                        {"line_id": "ch14_0001", "speaker": "narrator", "text": "Start of fourteen."},
+                        {"line_id": "ch14_0064", "speaker": "jarlaxle", "text": "Target of fourteen."},
+                        {"line_id": "ch14_0400", "speaker": "narrator", "text": "End of fourteen."},
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        (self.proj_dir / "book.json").write_text(
+            json.dumps({"title": "Test Book", "chapters": chapters_meta}), encoding="utf-8"
+        )
+
+        self.projects_dir_patch = patch("brain.dashboard.api.mobile.shared_paths.PROJECTS_DIR", self.projects_dir)
+        self.workspace_dir_patch = patch("brain.dashboard.api.mobile.shared_paths.WORKSPACE_DIR", self.workspace_dir)
+        self.projects_dir_patch.start()
+        self.workspace_dir_patch.start()
+
+    def tearDown(self):
+        self.projects_dir_patch.stop()
+        self.workspace_dir_patch.stop()
+        self.tmp_dir.cleanup()
+
+    def test_chapter_relative_inside_line_is_exact(self):
+        """Chapter-relative position inside a line -> exact, correct line_id."""
+        resp = self.client.post(
+            f"/api/mobile/v1/books/{self.project_id}/flags",
+            json={"chapter_number": 13, "position_ms": 5000},
+        )
+        self.assertEqual(resp.status_code, 201)
+        data = resp.json()["flag"]
+        enriched = data["enriched_data"]
+        self.assertEqual(enriched["match_confidence"], "exact")
+        self.assertEqual(enriched["match_distance_ms"], 0)
+        self.assertEqual(data["line_id"], "ch13_0001")
+        self.assertEqual(data["chapter_number"], 13)
+        self.assertEqual(enriched["position_origin_resolved"], "chapter")
+
+    def test_position_exceeding_chapter_resolves_to_chapter_13_inside_line(self):
+        """Position 5h beyond the chapter matching a book-absolute offset inside chapter 13.
+        Real numbers: chapter 13, position_ms 20,078,546, expected chapter 13.
+        """
+        resp = self.client.post(
+            f"/api/mobile/v1/books/{self.project_id}/flags",
+            json={"chapter_number": 13, "position_ms": 20078546},
+        )
+        self.assertEqual(resp.status_code, 201)
+        data = resp.json()["flag"]
+        enriched = data["enriched_data"]
+        self.assertEqual(enriched["position_origin_resolved"], "book")
+        self.assertEqual(data["chapter_number"], 13)
+        # Position 20,078,546 - 18,195,930 = 1,882,616 ms, which lands on ch13_0350 (1880000-1885000)
+        self.assertEqual(data["line_id"], "ch13_0350")
+        self.assertEqual(enriched["match_confidence"], "exact")
+        # Must NOT have fallen back to last line of chapter 13 (ch13_0424)
+        self.assertNotEqual(data["line_id"], "ch13_0424")
+
+    def test_position_exceeding_chapter_resolves_to_chapter_14(self):
+        """Position 20,774,923 with chapter_number: 13 -> resolves into chapter 14."""
+        resp = self.client.post(
+            f"/api/mobile/v1/books/{self.project_id}/flags",
+            json={"chapter_number": 13, "position_ms": 20774923},
+        )
+        self.assertEqual(resp.status_code, 201)
+        data = resp.json()["flag"]
+        enriched = data["enriched_data"]
+        self.assertEqual(enriched["position_origin_resolved"], "book")
+        self.assertEqual(data["chapter_number"], 14)
+        # Position 20,774,923 - 20,453,770 = 321,153 ms, which lands on ch14_0064 (319830-323350)
+        self.assertEqual(data["line_id"], "ch14_0064")
+        self.assertEqual(enriched["match_confidence"], "exact")
+
+    def test_position_beyond_every_interpretation_is_out_of_range_and_created(self):
+        """Position beyond every interpretation -> out_of_range, and the flag is still created."""
+        resp = self.client.post(
+            f"/api/mobile/v1/books/{self.project_id}/flags",
+            json={"chapter_number": 13, "position_ms": 999999999},
+        )
+        self.assertEqual(resp.status_code, 201)
+        data = resp.json()["flag"]
+        enriched = data["enriched_data"]
+        self.assertEqual(enriched["match_confidence"], "out_of_range")
+        self.assertGreater(enriched["match_distance_ms"], 30000)
+        self.assertEqual(data["chapter_number"], 13)
+
+    def test_explicit_book_position_origin_skips_inference(self):
+        """position_origin: 'book' supplied explicitly -> inference is skipped."""
+        resp = self.client.post(
+            f"/api/mobile/v1/books/{self.project_id}/flags",
+            json={
+                "chapter_number": 13,
+                "position_ms": 20774923,
+                "position_origin": "book",
+            },
+        )
+        self.assertEqual(resp.status_code, 201)
+        data = resp.json()["flag"]
+        enriched = data["enriched_data"]
+        self.assertEqual(enriched["position_origin_resolved"], "book")
+        self.assertEqual(data["chapter_number"], 14)
+        self.assertEqual(data["line_id"], "ch14_0064")
+
+    def test_flag_creation_diagnoses_narration_line_as_inconclusive(self):
+        """POST a flag on a narration line -> verdict is INCONCLUSIVE and no speaker is proposed."""
+        # Setup chapter 15 with purely narration lines
+        ch15_timeline = [
+            {"line_id": "ch15_0001", "start_ms": 0, "end_ms": 10000},
+            {"line_id": "ch15_0002", "start_ms": 10000, "end_ms": 20000},
+        ]
+        (self.proj_dir / "manifests" / "chapter_015.timeline.json").write_text(
+            json.dumps(ch15_timeline), encoding="utf-8"
+        )
+        (self.proj_dir / "manifests" / "chapter_015.master.json").write_text(
+            json.dumps({"duration_seconds": 20.0}), encoding="utf-8"
+        )
+        (self.proj_dir / "script" / "chapter_015.json").write_text(
+            json.dumps(
+                {
+                    "chapter_number": 15,
+                    "lines": [
+                        {
+                            "line_id": "ch15_0001",
+                            "speaker": "narrator",
+                            "text": "The wind howled across the crags without a pause.",
+                        },
+                        {
+                            "line_id": "ch15_0002",
+                            "speaker": "narrator",
+                            "text": "A cold rain began to fall in the early evening.",
+                        },
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        # Flag on chapter 15 line 1 (narration)
+        resp = self.client.post(
+            f"/api/mobile/v1/books/{self.project_id}/flags",
+            json={"chapter_number": 15, "position_ms": 5000},
+        )
+        self.assertEqual(resp.status_code, 201)
+        flag = resp.json()["flag"]
+        self.assertEqual(flag["line_id"], "ch15_0001")
+        self.assertEqual(flag["agent_verdict"], "INCONCLUSIVE")
+        self.assertIsNotNone(flag["agent_explanation"])
+        self.assertNotIn("Suggested speaker:", flag["agent_explanation"])
+
+        # Flag on chapter 14 line 2 (ch14_0064)
+        resp_diag = self.client.post(
+            f"/api/mobile/v1/books/{self.project_id}/flags",
+            json={"chapter_number": 14, "position_ms": 320000},
+        )
+        self.assertEqual(resp_diag.status_code, 201)
+        flag_diag = resp_diag.json()["flag"]
+        self.assertEqual(flag_diag["line_id"], "ch14_0064")
+        self.assertIsNotNone(flag_diag["agent_verdict"])
+        self.assertIsNotNone(flag_diag["agent_explanation"])

@@ -133,8 +133,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("project_id")
     parser.add_argument("--term", action="append", default=[], help="repair specific term(s)")
-    parser.add_argument("--min-stability", type=float, default=None, help="minimum sound stability (e.g. 0.80 for Group A)")
-    parser.add_argument("--max-stability", type=float, default=None, help="maximum sound stability (e.g. 0.80 for Group B)")
+    parser.add_argument(
+        "--min-stability", type=float, default=None, help="minimum sound stability (e.g. 0.80 for Group A)"
+    )
+    parser.add_argument(
+        "--max-stability", type=float, default=None, help="maximum sound stability (e.g. 0.80 for Group B)"
+    )
     parser.add_argument("--attempts", type=int, default=4, help="redraws per line before giving up")
     parser.add_argument("--limit", type=int, default=0, help="stop after this many lines")
     parser.add_argument("--apply", action="store_true", help="write the repaired takes")

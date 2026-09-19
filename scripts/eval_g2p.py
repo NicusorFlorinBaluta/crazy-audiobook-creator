@@ -1,4 +1,4 @@
-﻿"""Grapheme-to-Phoneme (G2P) evaluation benchmark alongside phonetic_key.
+"""Grapheme-to-Phoneme (G2P) evaluation benchmark alongside phonetic_key.
 
 Compares phonetic_key similarity verdicts against phonemic transcriptions
 across the test oracle pairs in tests/test_pronunciation_evidence.py and
@@ -110,9 +110,7 @@ def run_evaluation() -> EvalSummary:
         pk_status = "PASS" if pk_match == expected else "FAIL"
         g2p_status = "PASS" if g2p_match == expected else "FAIL"
 
-        print(
-            f"{term:<18} {heard:<15} {str(expected):<9} {pk_score:4.2f}     {pk_status:<9} {g2p_status:<10} {desc}"
-        )
+        print(f"{term:<18} {heard:<15} {str(expected):<9} {pk_score:4.2f}     {pk_status:<9} {g2p_status:<10} {desc}")
 
     print("-" * 88)
     summary = EvalSummary(

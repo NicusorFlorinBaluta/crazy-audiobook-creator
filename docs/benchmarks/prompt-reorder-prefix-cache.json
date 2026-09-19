@@ -1,0 +1,2053 @@
+{
+  "schema_version": 2,
+  "created_at": "2026-09-19T12:14:55.730013+00:00",
+  "project": "the-finest-edge-of-twilight-book",
+  "chapter": 7,
+  "source_control": {
+    "commit": "dae3ccc533e327fbc2b3bde5ac64eb151b2ed8fa",
+    "branch": "dev",
+    "dirty": true,
+    "status": [
+      "M brain/config.yaml",
+      " M brain/dashboard/api/mobile.py",
+      " M brain/dashboard/frontend/js/app.js",
+      " M brain/director/script_generator.py",
+      " M brain/orchestrator/job_queue.py",
+      " M docs/architecture.md",
+      " M docs/attribution-case-ledger.md",
+      " M docs/configuration.md",
+      " M docs/decisions/README.md",
+      " M docs/quality-assurance.md",
+      " M pyproject.toml",
+      " M scripts/reexport_deliveries.py",
+      " M scripts/remaster_chapters.py",
+      " M shared/config_validation.py",
+      " M shared/constants.py",
+      " M shared/models.py",
+      " M tests/test_artifacts_and_script.py",
+      " M tests/test_mobile_api.py",
+      " M tools/investigate_playback_flags.py",
+      " M voice/validator/validation_loop.py",
+      " M voice/validator/whisper_validator.py",
+      "?? IMPROVEMENT_PLAN_2026-09-19.md",
+      "?? docs/decisions/2026-09-19-dialect-normalisation-and-interjection-homophones.md",
+      "?? scripts/cleanup_duplicate_flags.py",
+      "?? tests/test_dialect_normalisation.py",
+      "?? tests/test_investigate_playback_flags.py"
+    ]
+  },
+  "python_version": "3.13.3",
+  "brain_config_sha256": "668d27b156b389f6d59f37229c45ed303b96044c648522a1b2ae41594d1886b6",
+  "runtime": {
+    "model": "qwen3.8:27b",
+    "context_window": 16384,
+    "think": false,
+    "temperature": 0.2,
+    "speaker_confidence_threshold": 0.55,
+    "dialogue_focused_schema": false
+  },
+  "book_sha256": "4f9ff171a77f5aef3a3372b865cb8609d952fca5c3ffed407a2058a2a3baaad3",
+  "registry_source": "characters.json",
+  "registry_sha256": "f8e84dcfc8098768697acaf69d62654533fb3d0b0fa7ef000bacd98c1ea7297e",
+  "available_fragments": 455,
+  "configs": [
+    {
+      "label": "w350_f40",
+      "chunk_size_words": 350,
+      "max_fragments_per_chunk": 40
+    },
+    {
+      "label": "w550_f60",
+      "chunk_size_words": 550,
+      "max_fragments_per_chunk": 60
+    }
+  ],
+  "protocol": {
+    "order": "AB",
+    "repetitions_per_config_per_excerpt": 2,
+    "window_fragments": 60,
+    "warmup_fragments": 8,
+    "same_source_per_pair": true
+  },
+  "excerpts": [
+    {
+      "offset": 0,
+      "fragment_count": 60,
+      "source_words": 688,
+      "source_sha256": "bc99823ca35f396004c5e05dc106f80d4a7332df9eb998998a030264cf62e66e"
+    },
+    {
+      "offset": 80,
+      "fragment_count": 60,
+      "source_words": 727,
+      "source_sha256": "a009936ec1cc1330f4c57890e45c791b4cab12c9122eb9e074414667667fcea6"
+    },
+    {
+      "offset": 160,
+      "fragment_count": 60,
+      "source_words": 521,
+      "source_sha256": "75540b9bda9ced8da0545612fb7d379535f88d436f57a7fa862b0a3307c4bf83"
+    }
+  ],
+  "runs": [
+    {
+      "config": "w350_f40",
+      "chunk_count": 2,
+      "fragment_count": 60,
+      "source_words": 688,
+      "output_lines": 60,
+      "wall_seconds": 58.57028569999966,
+      "wall_seconds_per_source_word": 0.08513122921511579,
+      "coverage_ok": true,
+      "ids_ok": true,
+      "unknown_speakers": [],
+      "invariant_errors": [],
+      "baseline_attribution_changes": 0,
+      "baseline_attribution_change_ids": [],
+      "target_validation": [],
+      "full_attempts": 2,
+      "structural_retries": 0,
+      "focused_retries": 0,
+      "local_repairs": 1,
+      "fragment_fallbacks": 0,
+      "calls": [
+        {
+          "chapter_number": 7,
+          "chapter_title": "5: Read the Gathering",
+          "fragment_count": 30,
+          "source_words": 349,
+          "prompt_characters": 13665,
+          "wall_seconds": 30.63852,
+          "attempts": 1,
+          "full_attempts": 1,
+          "structural_failures": 0,
+          "structural_retries": 0,
+          "full_semantic_retries": 0,
+          "focused_retries": 0,
+          "strict_attribution_retries": 0,
+          "delivery_focused_retries": 0,
+          "delivery_focused_rounds": 0,
+          "delivery_issue_counts": {},
+          "local_repairs": 1,
+          "fragment_fallbacks": 0,
+          "attribution_issue_counts": {
+            "named_tag": 1
+          },
+          "requests": [
+            {
+              "request_kind": "full_chunk",
+              "attempt": 1,
+              "wall_seconds": 30.623559,
+              "success": true,
+              "ollama": {
+                "attempt": 1,
+                "prompt_characters": 13665,
+                "response_characters": 4873,
+                "stream_chunks": 1185,
+                "elapsed_seconds": 30.623455,
+                "chunks_per_second": 38.69583,
+                "prompt_eval_count": 3901,
+                "eval_count": 1607,
+                "prompt_eval_duration_ns": 4327872000,
+                "eval_duration_ns": 26282898000,
+                "load_duration_ns": 2059400
+              },
+              "compact_metadata": {
+                "received_characters": 3680,
+                "canonical_characters": 8044,
+                "character_savings": 4364,
+                "character_savings_ratio": 0.542516
+              }
+            }
+          ],
+          "used_fallback": false,
+          "ollama": {
+            "attempt": 1,
+            "prompt_characters": 13665,
+            "response_characters": 4873,
+            "stream_chunks": 1185,
+            "elapsed_seconds": 30.623455,
+            "chunks_per_second": 38.69583,
+            "prompt_eval_count": 3901,
+            "eval_count": 1607,
+            "prompt_eval_duration_ns": 4327872000,
+            "eval_duration_ns": 26282898000,
+            "load_duration_ns": 2059400
+          }
+        },
+        {
+          "chapter_number": 7,
+          "chapter_title": "5: Read the Gathering",
+          "fragment_count": 30,
+          "source_words": 339,
+          "prompt_characters": 12519,
+          "wall_seconds": 27.917654,
+          "attempts": 1,
+          "full_attempts": 1,
+          "structural_failures": 0,
+          "structural_retries": 0,
+          "full_semantic_retries": 0,
+          "focused_retries": 0,
+          "strict_attribution_retries": 0,
+          "delivery_focused_retries": 0,
+          "delivery_focused_rounds": 0,
+          "delivery_issue_counts": {},
+          "local_repairs": 0,
+          "fragment_fallbacks": 0,
+          "attribution_issue_counts": {},
+          "requests": [
+            {
+              "request_kind": "full_chunk",
+              "attempt": 1,
+              "wall_seconds": 27.912081,
+              "success": true,
+              "ollama": {
+                "attempt": 1,
+                "prompt_characters": 12519,
+                "response_characters": 4199,
+                "stream_chunks": 1049,
+                "elapsed_seconds": 27.911992,
+                "chunks_per_second": 37.582413,
+                "prompt_eval_count": 3531,
+                "eval_count": 1453,
+                "prompt_eval_duration_ns": 3919603000,
+                "eval_duration_ns": 23832015000,
+                "load_duration_ns": 1024400
+              },
+              "compact_metadata": {
+                "received_characters": 3086,
+                "canonical_characters": 7276,
+                "character_savings": 4190,
+                "character_savings_ratio": 0.575866
+              }
+            }
+          ],
+          "used_fallback": false,
+          "ollama": {
+            "attempt": 1,
+            "prompt_characters": 12519,
+            "response_characters": 4199,
+            "stream_chunks": 1049,
+            "elapsed_seconds": 27.911992,
+            "chunks_per_second": 37.582413,
+            "prompt_eval_count": 3531,
+            "eval_count": 1453,
+            "prompt_eval_duration_ns": 3919603000,
+            "eval_duration_ns": 23832015000,
+            "load_duration_ns": 1024400
+          }
+        }
+      ],
+      "excerpt_offset": 0,
+      "source_sha256": "bc99823ca35f396004c5e05dc106f80d4a7332df9eb998998a030264cf62e66e",
+      "repetition": 1,
+      "slot": 1,
+      "mode_label": "A"
+    },
+    {
+      "config": "w550_f60",
+      "chunk_count": 2,
+      "fragment_count": 60,
+      "source_words": 688,
+      "output_lines": 60,
+      "wall_seconds": 52.74986269999863,
+      "wall_seconds_per_source_word": 0.0766713120639515,
+      "coverage_ok": true,
+      "ids_ok": true,
+      "unknown_speakers": [],
+      "invariant_errors": [],
+      "baseline_attribution_changes": 0,
+      "baseline_attribution_change_ids": [],
+      "target_validation": [],
+      "full_attempts": 2,
+      "structural_retries": 0,
+      "focused_retries": 0,
+      "local_repairs": 1,
+      "fragment_fallbacks": 0,
+      "calls": [
+        {
+          "chapter_number": 7,
+          "chapter_title": "5: Read the Gathering",
+          "fragment_count": 41,
+          "source_words": 532,
+          "prompt_characters": 15362,
+          "wall_seconds": 30.824929,
+          "attempts": 1,
+          "full_attempts": 1,
+          "structural_failures": 0,
+          "structural_retries": 0,
+          "full_semantic_retries": 0,
+          "focused_retries": 0,
+          "strict_attribution_retries": 0,
+          "delivery_focused_retries": 0,
+          "delivery_focused_rounds": 0,
+          "delivery_issue_counts": {},
+          "local_repairs": 1,
+          "fragment_fallbacks": 0,
+          "attribution_issue_counts": {
+            "named_tag": 1
+          },
+          "requests": [
+            {
+              "request_kind": "full_chunk",
+              "attempt": 1,
+              "wall_seconds": 30.808484,
+              "success": true,
+              "ollama": {
+                "attempt": 1,
+                "prompt_characters": 15362,
+                "response_characters": 5302,
+                "stream_chunks": 1332,
+                "elapsed_seconds": 30.808417,
+                "chunks_per_second": 43.234938,
+                "prompt_eval_count": 4463,
+                "eval_count": 1859,
+                "prompt_eval_duration_ns": 1399053000,
+                "eval_duration_ns": 29171309000,
+                "load_duration_ns": 1162200
+              },
+              "compact_metadata": {
+                "received_characters": 3831,
+                "canonical_characters": 10177,
+                "character_savings": 6346,
+                "character_savings_ratio": 0.623563
+              }
+            }
+          ],
+          "used_fallback": false,
+          "ollama": {
+            "attempt": 1,
+            "prompt_characters": 15362,
+            "response_characters": 5302,
+            "stream_chunks": 1332,
+            "elapsed_seconds": 30.808417,
+            "chunks_per_second": 43.234938,
+            "prompt_eval_count": 4463,
+            "eval_count": 1859,
+            "prompt_eval_duration_ns": 1399053000,
+            "eval_duration_ns": 29171309000,
+            "load_duration_ns": 1162200
+          }
+        },
+        {
+          "chapter_number": 7,
+          "chapter_title": "5: Read the Gathering",
+          "fragment_count": 19,
+          "source_words": 156,
+          "prompt_characters": 10557,
+          "wall_seconds": 21.911898,
+          "attempts": 1,
+          "full_attempts": 1,
+          "structural_failures": 0,
+          "structural_retries": 0,
+          "full_semantic_retries": 0,
+          "focused_retries": 0,
+          "strict_attribution_retries": 0,
+          "delivery_focused_retries": 0,
+          "delivery_focused_rounds": 0,
+          "delivery_issue_counts": {},
+          "local_repairs": 0,
+          "fragment_fallbacks": 0,
+          "attribution_issue_counts": {},
+          "requests": [
+            {
+              "request_kind": "full_chunk",
+              "attempt": 1,
+              "wall_seconds": 21.908423,
+              "success": true,
+              "ollama": {
+                "attempt": 1,
+                "prompt_characters": 10557,
+                "response_characters": 3348,
+                "stream_chunks": 835,
+                "elapsed_seconds": 21.908372,
+                "chunks_per_second": 38.113284,
+                "prompt_eval_count": 2895,
+                "eval_count": 1127,
+                "prompt_eval_duration_ns": 3212614000,
+                "eval_duration_ns": 18542526000,
+                "load_duration_ns": 1101200
+              },
+              "compact_metadata": {
+                "received_characters": 2513,
+                "canonical_characters": 5135,
+                "character_savings": 2622,
+                "character_savings_ratio": 0.510613
+              }
+            }
+          ],
+          "used_fallback": false,
+          "ollama": {
+            "attempt": 1,
+            "prompt_characters": 10557,
+            "response_characters": 3348,
+            "stream_chunks": 835,
+            "elapsed_seconds": 21.908372,
+            "chunks_per_second": 38.113284,
+            "prompt_eval_count": 2895,
+            "eval_count": 1127,
+            "prompt_eval_duration_ns": 3212614000,
+            "eval_duration_ns": 18542526000,
+            "load_duration_ns": 1101200
+          }
+        }
+      ],
+      "excerpt_offset": 0,
+      "source_sha256": "bc99823ca35f396004c5e05dc106f80d4a7332df9eb998998a030264cf62e66e",
+      "repetition": 1,
+      "slot": 2,
+      "mode_label": "B"
+    },
+    {
+      "config": "w350_f40",
+      "chunk_count": 2,
+      "fragment_count": 60,
+      "source_words": 688,
+      "output_lines": 60,
+      "wall_seconds": 52.72646600000007,
+      "wall_seconds_per_source_word": 0.07663730523255824,
+      "coverage_ok": true,
+      "ids_ok": true,
+      "unknown_speakers": [],
+      "invariant_errors": [],
+      "baseline_attribution_changes": 0,
+      "baseline_attribution_change_ids": [],
+      "target_validation": [],
+      "full_attempts": 2,
+      "structural_retries": 0,
+      "focused_retries": 0,
+      "local_repairs": 2,
+      "fragment_fallbacks": 0,
+      "calls": [
+        {
+          "chapter_number": 7,
+          "chapter_title": "5: Read the Gathering",
+          "fragment_count": 30,
+          "source_words": 349,
+          "prompt_characters": 13665,
+          "wall_seconds": 25.228806,
+          "attempts": 1,
+          "full_attempts": 1,
+          "structural_failures": 0,
+          "structural_retries": 0,
+          "full_semantic_retries": 0,
+          "focused_retries": 0,
+          "strict_attribution_retries": 0,
+          "delivery_focused_retries": 0,
+          "delivery_focused_rounds": 0,
+          "delivery_issue_counts": {},
+          "local_repairs": 2,
+          "fragment_fallbacks": 0,
+          "attribution_issue_counts": {
+            "named_tag": 2
+          },
+          "requests": [
+            {
+              "request_kind": "full_chunk",
+              "attempt": 1,
+              "wall_seconds": 25.216192,
+              "success": true,
+              "ollama": {
+                "attempt": 1,
+                "prompt_characters": 13665,
+                "response_characters": 4424,
+                "stream_chunks": 1107,
+                "elapsed_seconds": 25.216134,
+                "chunks_per_second": 43.900465,
+                "prompt_eval_count": 3901,
+                "eval_count": 1529,
+                "prompt_eval_duration_ns": 717078000,
+                "eval_duration_ns": 24297048000,
+                "load_duration_ns": 1019700
+              },
+              "compact_metadata": {
+                "received_characters": 3231,
+                "canonical_characters": 7227,
+                "character_savings": 3996,
+                "character_savings_ratio": 0.552927
+              }
+            }
+          ],
+          "used_fallback": false,
+          "ollama": {
+            "attempt": 1,
+            "prompt_characters": 13665,
+            "response_characters": 4424,
+            "stream_chunks": 1107,
+            "elapsed_seconds": 25.216134,
+            "chunks_per_second": 43.900465,
+            "prompt_eval_count": 3901,
+            "eval_count": 1529,
+            "prompt_eval_duration_ns": 717078000,
+            "eval_duration_ns": 24297048000,
+            "load_duration_ns": 1019700
+          }
+        },
+        {
+          "chapter_number": 7,
+          "chapter_title": "5: Read the Gathering",
+          "fragment_count": 30,
+          "source_words": 339,
+          "prompt_characters": 12401,
+          "wall_seconds": 27.484291,
+          "attempts": 1,
+          "full_attempts": 1,
+          "structural_failures": 0,
+          "structural_retries": 0,
+          "full_semantic_retries": 0,
+          "focused_retries": 0,
+          "strict_attribution_retries": 0,
+          "delivery_focused_retries": 0,
+          "delivery_focused_rounds": 0,
+          "delivery_issue_counts": {},
+          "local_repairs": 0,
+          "fragment_fallbacks": 0,
+          "attribution_issue_counts": {},
+          "requests": [
+            {
+              "request_kind": "full_chunk",
+              "attempt": 1,
+              "wall_seconds": 27.478498,
+              "success": true,
+              "ollama": {
+                "attempt": 1,
+                "prompt_characters": 12401,
+                "response_characters": 4160,
+                "stream_chunks": 1032,
+                "elapsed_seconds": 27.478436,
+                "chunks_per_second": 37.556722,
+                "prompt_eval_count": 3510,
+                "eval_count": 1434,
+                "prompt_eval_duration_ns": 3894088000,
+                "eval_duration_ns": 23327125000,
+                "load_duration_ns": 1028200
+              },
+              "compact_metadata": {
+                "received_characters": 3047,
+                "canonical_characters": 7651,
+                "character_savings": 4604,
+                "character_savings_ratio": 0.601751
+              }
+            }
+          ],
+          "used_fallback": false,
+          "ollama": {
+            "attempt": 1,
+            "prompt_characters": 12401,
+            "response_characters": 4160,
+            "stream_chunks": 1032,
+            "elapsed_seconds": 27.478436,
+            "chunks_per_second": 37.556722,
+            "prompt_eval_count": 3510,
+            "eval_count": 1434,
+            "prompt_eval_duration_ns": 3894088000,
+            "eval_duration_ns": 23327125000,
+            "load_duration_ns": 1028200
+          }
+        }
+      ],
+      "excerpt_offset": 0,
+      "source_sha256": "bc99823ca35f396004c5e05dc106f80d4a7332df9eb998998a030264cf62e66e",
+      "repetition": 2,
+      "slot": 1,
+      "mode_label": "A"
+    },
+    {
+      "config": "w550_f60",
+      "chunk_count": 2,
+      "fragment_count": 60,
+      "source_words": 688,
+      "output_lines": 60,
+      "wall_seconds": 54.2039354999979,
+      "wall_seconds_per_source_word": 0.07878478997092718,
+      "coverage_ok": true,
+      "ids_ok": true,
+      "unknown_speakers": [],
+      "invariant_errors": [],
+      "baseline_attribution_changes": 0,
+      "baseline_attribution_change_ids": [],
+      "target_validation": [],
+      "full_attempts": 2,
+      "structural_retries": 0,
+      "focused_retries": 0,
+      "local_repairs": 2,
+      "fragment_fallbacks": 0,
+      "calls": [
+        {
+          "chapter_number": 7,
+          "chapter_title": "5: Read the Gathering",
+          "fragment_count": 41,
+          "source_words": 532,
+          "prompt_characters": 15362,
+          "wall_seconds": 31.219092,
+          "attempts": 1,
+          "full_attempts": 1,
+          "structural_failures": 0,
+          "structural_retries": 0,
+          "full_semantic_retries": 0,
+          "focused_retries": 0,
+          "strict_attribution_retries": 0,
+          "delivery_focused_retries": 0,
+          "delivery_focused_rounds": 0,
+          "delivery_issue_counts": {},
+          "local_repairs": 2,
+          "fragment_fallbacks": 0,
+          "attribution_issue_counts": {
+            "named_tag": 2
+          },
+          "requests": [
+            {
+              "request_kind": "full_chunk",
+              "attempt": 1,
+              "wall_seconds": 31.203264,
+              "success": true,
+              "ollama": {
+                "attempt": 1,
+                "prompt_characters": 15362,
+                "response_characters": 5269,
+                "stream_chunks": 1326,
+                "elapsed_seconds": 31.203201,
+                "chunks_per_second": 42.49564,
+                "prompt_eval_count": 4463,
+                "eval_count": 1853,
+                "prompt_eval_duration_ns": 1412564000,
+                "eval_duration_ns": 29576974000,
+                "load_duration_ns": 1151300
+              },
+              "compact_metadata": {
+                "received_characters": 3798,
+                "canonical_characters": 9819,
+                "character_savings": 6021,
+                "character_savings_ratio": 0.613199
+              }
+            }
+          ],
+          "used_fallback": false,
+          "ollama": {
+            "attempt": 1,
+            "prompt_characters": 15362,
+            "response_characters": 5269,
+            "stream_chunks": 1326,
+            "elapsed_seconds": 31.203201,
+            "chunks_per_second": 42.49564,
+            "prompt_eval_count": 4463,
+            "eval_count": 1853,
+            "prompt_eval_duration_ns": 1412564000,
+            "eval_duration_ns": 29576974000,
+            "load_duration_ns": 1151300
+          }
+        },
+        {
+          "chapter_number": 7,
+          "chapter_title": "5: Read the Gathering",
+          "fragment_count": 19,
+          "source_words": 156,
+          "prompt_characters": 10567,
+          "wall_seconds": 22.971035,
+          "attempts": 1,
+          "full_attempts": 1,
+          "structural_failures": 0,
+          "structural_retries": 0,
+          "full_semantic_retries": 0,
+          "focused_retries": 0,
+          "strict_attribution_retries": 0,
+          "delivery_focused_retries": 0,
+          "delivery_focused_rounds": 0,
+          "delivery_issue_counts": {},
+          "local_repairs": 0,
+          "fragment_fallbacks": 0,
+          "attribution_issue_counts": {},
+          "requests": [
+            {
+              "request_kind": "full_chunk",
+              "attempt": 1,
+              "wall_seconds": 22.967685,
+              "success": true,
+              "ollama": {
+                "attempt": 1,
+                "prompt_characters": 10567,
+                "response_characters": 3377,
+                "stream_chunks": 837,
+                "elapsed_seconds": 22.967634,
+                "chunks_per_second": 36.442586,
+                "prompt_eval_count": 2897,
+                "eval_count": 1135,
+                "prompt_eval_duration_ns": 3244906000,
+                "eval_duration_ns": 19507956000,
+                "load_duration_ns": 1025000
+              },
+              "compact_metadata": {
+                "received_characters": 2542,
+                "canonical_characters": 5074,
+                "character_savings": 2532,
+                "character_savings_ratio": 0.499015
+              }
+            }
+          ],
+          "used_fallback": false,
+          "ollama": {
+            "attempt": 1,
+            "prompt_characters": 10567,
+            "response_characters": 3377,
+            "stream_chunks": 837,
+            "elapsed_seconds": 22.967634,
+            "chunks_per_second": 36.442586,
+            "prompt_eval_count": 2897,
+            "eval_count": 1135,
+            "prompt_eval_duration_ns": 3244906000,
+            "eval_duration_ns": 19507956000,
+            "load_duration_ns": 1025000
+          }
+        }
+      ],
+      "excerpt_offset": 0,
+      "source_sha256": "bc99823ca35f396004c5e05dc106f80d4a7332df9eb998998a030264cf62e66e",
+      "repetition": 2,
+      "slot": 2,
+      "mode_label": "B"
+    },
+    {
+      "config": "w550_f60",
+      "chunk_count": 2,
+      "fragment_count": 60,
+      "source_words": 727,
+      "output_lines": 60,
+      "wall_seconds": 59.949890400002914,
+      "wall_seconds_per_source_word": 0.08246202255846342,
+      "coverage_ok": true,
+      "ids_ok": true,
+      "unknown_speakers": [],
+      "invariant_errors": [],
+      "baseline_attribution_changes": 1,
+      "baseline_attribution_change_ids": [
+        115
+      ],
+      "target_validation": [],
+      "full_attempts": 2,
+      "structural_retries": 0,
+      "focused_retries": 0,
+      "local_repairs": 0,
+      "fragment_fallbacks": 0,
+      "calls": [
+        {
+          "chapter_number": 7,
+          "chapter_title": "5: Read the Gathering",
+          "fragment_count": 36,
+          "source_words": 546,
+          "prompt_characters": 14165,
+          "wall_seconds": 33.252183,
+          "attempts": 1,
+          "full_attempts": 1,
+          "structural_failures": 0,
+          "structural_retries": 0,
+          "full_semantic_retries": 0,
+          "focused_retries": 0,
+          "strict_attribution_retries": 0,
+          "delivery_focused_retries": 0,
+          "delivery_focused_rounds": 0,
+          "delivery_issue_counts": {},
+          "local_repairs": 0,
+          "fragment_fallbacks": 0,
+          "attribution_issue_counts": {},
+          "requests": [
+            {
+              "request_kind": "full_chunk",
+              "attempt": 1,
+              "wall_seconds": 33.234899,
+              "success": true,
+              "ollama": {
+                "attempt": 1,
+                "prompt_characters": 14165,
+                "response_characters": 5088,
+                "stream_chunks": 1296,
+                "elapsed_seconds": 33.234833,
+                "chunks_per_second": 38.995231,
+                "prompt_eval_count": 4053,
+                "eval_count": 1792,
+                "prompt_eval_duration_ns": 4501292000,
+                "eval_duration_ns": 28628006000,
+                "load_duration_ns": 1602800
+              },
+              "compact_metadata": {
+                "received_characters": 3681,
+                "canonical_characters": 8907,
+                "character_savings": 5226,
+                "character_savings_ratio": 0.58673
+              }
+            }
+          ],
+          "used_fallback": false,
+          "ollama": {
+            "attempt": 1,
+            "prompt_characters": 14165,
+            "response_characters": 5088,
+            "stream_chunks": 1296,
+            "elapsed_seconds": 33.234833,
+            "chunks_per_second": 38.995231,
+            "prompt_eval_count": 4053,
+            "eval_count": 1792,
+            "prompt_eval_duration_ns": 4501292000,
+            "eval_duration_ns": 28628006000,
+            "load_duration_ns": 1602800
+          }
+        },
+        {
+          "chapter_number": 7,
+          "chapter_title": "5: Read the Gathering",
+          "fragment_count": 24,
+          "source_words": 181,
+          "prompt_characters": 11580,
+          "wall_seconds": 26.682729,
+          "attempts": 1,
+          "full_attempts": 1,
+          "structural_failures": 0,
+          "structural_retries": 0,
+          "full_semantic_retries": 0,
+          "focused_retries": 0,
+          "strict_attribution_retries": 0,
+          "delivery_focused_retries": 0,
+          "delivery_focused_rounds": 0,
+          "delivery_issue_counts": {},
+          "local_repairs": 0,
+          "fragment_fallbacks": 0,
+          "attribution_issue_counts": {},
+          "requests": [
+            {
+              "request_kind": "full_chunk",
+              "attempt": 1,
+              "wall_seconds": 26.669031,
+              "success": true,
+              "ollama": {
+                "attempt": 1,
+                "prompt_characters": 11580,
+                "response_characters": 4195,
+                "stream_chunks": 1058,
+                "elapsed_seconds": 26.668945,
+                "chunks_per_second": 39.67161,
+                "prompt_eval_count": 3291,
+                "eval_count": 1439,
+                "prompt_eval_duration_ns": 3656966000,
+                "eval_duration_ns": 22851509000,
+                "load_duration_ns": 1009800
+              },
+              "compact_metadata": {
+                "received_characters": 3110,
+                "canonical_characters": 6072,
+                "character_savings": 2962,
+                "character_savings_ratio": 0.487813
+              }
+            }
+          ],
+          "used_fallback": false,
+          "ollama": {
+            "attempt": 1,
+            "prompt_characters": 11580,
+            "response_characters": 4195,
+            "stream_chunks": 1058,
+            "elapsed_seconds": 26.668945,
+            "chunks_per_second": 39.67161,
+            "prompt_eval_count": 3291,
+            "eval_count": 1439,
+            "prompt_eval_duration_ns": 3656966000,
+            "eval_duration_ns": 22851509000,
+            "load_duration_ns": 1009800
+          }
+        }
+      ],
+      "excerpt_offset": 80,
+      "source_sha256": "a009936ec1cc1330f4c57890e45c791b4cab12c9122eb9e074414667667fcea6",
+      "repetition": 1,
+      "slot": 1,
+      "mode_label": "B"
+    },
+    {
+      "config": "w350_f40",
+      "chunk_count": 3,
+      "fragment_count": 60,
+      "source_words": 727,
+      "output_lines": 60,
+      "wall_seconds": 67.52291849999892,
+      "wall_seconds_per_source_word": 0.09287884250343731,
+      "coverage_ok": true,
+      "ids_ok": true,
+      "unknown_speakers": [],
+      "invariant_errors": [],
+      "baseline_attribution_changes": 2,
+      "baseline_attribution_change_ids": [
+        107,
+        139
+      ],
+      "target_validation": [],
+      "full_attempts": 3,
+      "structural_retries": 0,
+      "focused_retries": 0,
+      "local_repairs": 0,
+      "fragment_fallbacks": 0,
+      "calls": [
+        {
+          "chapter_number": 7,
+          "chapter_title": "5: Read the Gathering",
+          "fragment_count": 18,
+          "source_words": 350,
+          "prompt_characters": 11480,
+          "wall_seconds": 20.411638,
+          "attempts": 1,
+          "full_attempts": 1,
+          "structural_failures": 0,
+          "structural_retries": 0,
+          "full_semantic_retries": 0,
+          "focused_retries": 0,
+          "strict_attribution_retries": 0,
+          "delivery_focused_retries": 0,
+          "delivery_focused_rounds": 0,
+          "delivery_issue_counts": {},
+          "local_repairs": 0,
+          "fragment_fallbacks": 0,
+          "attribution_issue_counts": {},
+          "requests": [
+            {
+              "request_kind": "full_chunk",
+              "attempt": 1,
+              "wall_seconds": 20.403471,
+              "success": true,
+              "ollama": {
+                "attempt": 1,
+                "prompt_characters": 11480,
+                "response_characters": 3036,
+                "stream_chunks": 744,
+                "elapsed_seconds": 20.403423,
+                "chunks_per_second": 36.464469,
+                "prompt_eval_count": 3114,
+                "eval_count": 1015,
+                "prompt_eval_duration_ns": 3476862000,
+                "eval_duration_ns": 16770685000,
+                "load_duration_ns": 1202200
+              },
+              "compact_metadata": {
+                "received_characters": 2273,
+                "canonical_characters": 4953,
+                "character_savings": 2680,
+                "character_savings_ratio": 0.541086
+              }
+            }
+          ],
+          "used_fallback": false,
+          "ollama": {
+            "attempt": 1,
+            "prompt_characters": 11480,
+            "response_characters": 3036,
+            "stream_chunks": 744,
+            "elapsed_seconds": 20.403423,
+            "chunks_per_second": 36.464469,
+            "prompt_eval_count": 3114,
+            "eval_count": 1015,
+            "prompt_eval_duration_ns": 3476862000,
+            "eval_duration_ns": 16770685000,
+            "load_duration_ns": 1202200
+          }
+        },
+        {
+          "chapter_number": 7,
+          "chapter_title": "5: Read the Gathering",
+          "fragment_count": 38,
+          "source_words": 346,
+          "prompt_characters": 14036,
+          "wall_seconds": 36.017191,
+          "attempts": 1,
+          "full_attempts": 1,
+          "structural_failures": 0,
+          "structural_retries": 0,
+          "full_semantic_retries": 0,
+          "focused_retries": 0,
+          "strict_attribution_retries": 0,
+          "delivery_focused_retries": 0,
+          "delivery_focused_rounds": 0,
+          "delivery_issue_counts": {},
+          "local_repairs": 0,
+          "fragment_fallbacks": 0,
+          "attribution_issue_counts": {},
+          "requests": [
+            {
+              "request_kind": "full_chunk",
+              "attempt": 1,
+              "wall_seconds": 35.99146,
+              "success": true,
+              "ollama": {
+                "attempt": 1,
+                "prompt_characters": 14036,
+                "response_characters": 5612,
+                "stream_chunks": 1459,
+                "elapsed_seconds": 35.991344,
+                "chunks_per_second": 40.537524,
+                "prompt_eval_count": 4102,
+                "eval_count": 2010,
+                "prompt_eval_duration_ns": 4586046000,
+                "eval_duration_ns": 31257225000,
+                "load_duration_ns": 1021800
+              },
+              "compact_metadata": {
+                "received_characters": 4049,
+                "canonical_characters": 9097,
+                "character_savings": 5048,
+                "character_savings_ratio": 0.554908
+              }
+            }
+          ],
+          "used_fallback": false,
+          "ollama": {
+            "attempt": 1,
+            "prompt_characters": 14036,
+            "response_characters": 5612,
+            "stream_chunks": 1459,
+            "elapsed_seconds": 35.991344,
+            "chunks_per_second": 40.537524,
+            "prompt_eval_count": 4102,
+            "eval_count": 2010,
+            "prompt_eval_duration_ns": 4586046000,
+            "eval_duration_ns": 31257225000,
+            "load_duration_ns": 1021800
+          }
+        },
+        {
+          "chapter_number": 7,
+          "chapter_title": "5: Read the Gathering",
+          "fragment_count": 4,
+          "source_words": 31,
+          "prompt_characters": 8523,
+          "wall_seconds": 11.078807,
+          "attempts": 1,
+          "full_attempts": 1,
+          "structural_failures": 0,
+          "structural_retries": 0,
+          "full_semantic_retries": 0,
+          "focused_retries": 0,
+          "strict_attribution_retries": 0,
+          "delivery_focused_retries": 0,
+          "delivery_focused_rounds": 0,
+          "delivery_issue_counts": {},
+          "local_repairs": 0,
+          "fragment_fallbacks": 0,
+          "attribution_issue_counts": {},
+          "requests": [
+            {
+              "request_kind": "full_chunk",
+              "attempt": 1,
+              "wall_seconds": 11.078274,
+              "success": true,
+              "ollama": {
+                "attempt": 1,
+                "prompt_characters": 8523,
+                "response_characters": 1681,
+                "stream_chunks": 406,
+                "elapsed_seconds": 11.078209,
+                "chunks_per_second": 36.648522,
+                "prompt_eval_count": 2165,
+                "eval_count": 518,
+                "prompt_eval_duration_ns": 2440016000,
+                "eval_duration_ns": 8390977999,
+                "load_duration_ns": 1022400
+              },
+              "compact_metadata": {
+                "received_characters": 1356,
+                "canonical_characters": 1668,
+                "character_savings": 312,
+                "character_savings_ratio": 0.18705
+              }
+            }
+          ],
+          "used_fallback": false,
+          "ollama": {
+            "attempt": 1,
+            "prompt_characters": 8523,
+            "response_characters": 1681,
+            "stream_chunks": 406,
+            "elapsed_seconds": 11.078209,
+            "chunks_per_second": 36.648522,
+            "prompt_eval_count": 2165,
+            "eval_count": 518,
+            "prompt_eval_duration_ns": 2440016000,
+            "eval_duration_ns": 8390977999,
+            "load_duration_ns": 1022400
+          }
+        }
+      ],
+      "excerpt_offset": 80,
+      "source_sha256": "a009936ec1cc1330f4c57890e45c791b4cab12c9122eb9e074414667667fcea6",
+      "repetition": 1,
+      "slot": 2,
+      "mode_label": "A"
+    },
+    {
+      "config": "w550_f60",
+      "chunk_count": 2,
+      "fragment_count": 60,
+      "source_words": 727,
+      "output_lines": 60,
+      "wall_seconds": 55.01885100000072,
+      "wall_seconds_per_source_word": 0.07567929986244941,
+      "coverage_ok": true,
+      "ids_ok": true,
+      "unknown_speakers": [],
+      "invariant_errors": [],
+      "baseline_attribution_changes": 1,
+      "baseline_attribution_change_ids": [
+        115
+      ],
+      "target_validation": [],
+      "full_attempts": 2,
+      "structural_retries": 0,
+      "focused_retries": 0,
+      "local_repairs": 0,
+      "fragment_fallbacks": 0,
+      "calls": [
+        {
+          "chapter_number": 7,
+          "chapter_title": "5: Read the Gathering",
+          "fragment_count": 36,
+          "source_words": 546,
+          "prompt_characters": 14165,
+          "wall_seconds": 31.805717,
+          "attempts": 1,
+          "full_attempts": 1,
+          "structural_failures": 0,
+          "structural_retries": 0,
+          "full_semantic_retries": 0,
+          "focused_retries": 0,
+          "strict_attribution_retries": 0,
+          "delivery_focused_retries": 0,
+          "delivery_focused_rounds": 0,
+          "delivery_issue_counts": {},
+          "local_repairs": 0,
+          "fragment_fallbacks": 0,
+          "attribution_issue_counts": {},
+          "requests": [
+            {
+              "request_kind": "full_chunk",
+              "attempt": 1,
+              "wall_seconds": 31.788425,
+              "success": true,
+              "ollama": {
+                "attempt": 1,
+                "prompt_characters": 14165,
+                "response_characters": 5193,
+                "stream_chunks": 1318,
+                "elapsed_seconds": 31.788338,
+                "chunks_per_second": 41.461747,
+                "prompt_eval_count": 4053,
+                "eval_count": 1816,
+                "prompt_eval_duration_ns": 2798157000,
+                "eval_duration_ns": 28978375000,
+                "load_duration_ns": 1021100
+              },
+              "compact_metadata": {
+                "received_characters": 3786,
+                "canonical_characters": 9012,
+                "character_savings": 5226,
+                "character_savings_ratio": 0.579893
+              }
+            }
+          ],
+          "used_fallback": false,
+          "ollama": {
+            "attempt": 1,
+            "prompt_characters": 14165,
+            "response_characters": 5193,
+            "stream_chunks": 1318,
+            "elapsed_seconds": 31.788338,
+            "chunks_per_second": 41.461747,
+            "prompt_eval_count": 4053,
+            "eval_count": 1816,
+            "prompt_eval_duration_ns": 2798157000,
+            "eval_duration_ns": 28978375000,
+            "load_duration_ns": 1021100
+          }
+        },
+        {
+          "chapter_number": 7,
+          "chapter_title": "5: Read the Gathering",
+          "fragment_count": 24,
+          "source_words": 181,
+          "prompt_characters": 11580,
+          "wall_seconds": 23.198121,
+          "attempts": 1,
+          "full_attempts": 1,
+          "structural_failures": 0,
+          "structural_retries": 0,
+          "full_semantic_retries": 0,
+          "focused_retries": 0,
+          "strict_attribution_retries": 0,
+          "delivery_focused_retries": 0,
+          "delivery_focused_rounds": 0,
+          "delivery_issue_counts": {},
+          "local_repairs": 0,
+          "fragment_fallbacks": 0,
+          "attribution_issue_counts": {},
+          "requests": [
+            {
+              "request_kind": "full_chunk",
+              "attempt": 1,
+              "wall_seconds": 23.1843,
+              "success": true,
+              "ollama": {
+                "attempt": 1,
+                "prompt_characters": 11580,
+                "response_characters": 4233,
+                "stream_chunks": 1059,
+                "elapsed_seconds": 23.184214,
+                "chunks_per_second": 45.677632,
+                "prompt_eval_count": 3291,
+                "eval_count": 1431,
+                "prompt_eval_duration_ns": 118782000,
+                "eval_duration_ns": 22807910000,
+                "load_duration_ns": 1025400
+              },
+              "compact_metadata": {
+                "received_characters": 3148,
+                "canonical_characters": 6210,
+                "character_savings": 3062,
+                "character_savings_ratio": 0.493076
+              }
+            }
+          ],
+          "used_fallback": false,
+          "ollama": {
+            "attempt": 1,
+            "prompt_characters": 11580,
+            "response_characters": 4233,
+            "stream_chunks": 1059,
+            "elapsed_seconds": 23.184214,
+            "chunks_per_second": 45.677632,
+            "prompt_eval_count": 3291,
+            "eval_count": 1431,
+            "prompt_eval_duration_ns": 118782000,
+            "eval_duration_ns": 22807910000,
+            "load_duration_ns": 1025400
+          }
+        }
+      ],
+      "excerpt_offset": 80,
+      "source_sha256": "a009936ec1cc1330f4c57890e45c791b4cab12c9122eb9e074414667667fcea6",
+      "repetition": 2,
+      "slot": 1,
+      "mode_label": "B"
+    },
+    {
+      "config": "w350_f40",
+      "chunk_count": 3,
+      "fragment_count": 60,
+      "source_words": 727,
+      "output_lines": 60,
+      "wall_seconds": 75.54925880000155,
+      "wall_seconds_per_source_word": 0.10391920055020847,
+      "coverage_ok": true,
+      "ids_ok": true,
+      "unknown_speakers": [
+        "character_male"
+      ],
+      "invariant_errors": [
+        "unknown_speakers"
+      ],
+      "baseline_attribution_changes": 1,
+      "baseline_attribution_change_ids": [
+        139
+      ],
+      "target_validation": [],
+      "full_attempts": 3,
+      "structural_retries": 0,
+      "focused_retries": 2,
+      "local_repairs": 0,
+      "fragment_fallbacks": 0,
+      "calls": [
+        {
+          "chapter_number": 7,
+          "chapter_title": "5: Read the Gathering",
+          "fragment_count": 18,
+          "source_words": 350,
+          "prompt_characters": 11480,
+          "wall_seconds": 17.212327,
+          "attempts": 1,
+          "full_attempts": 1,
+          "structural_failures": 0,
+          "structural_retries": 0,
+          "full_semantic_retries": 0,
+          "focused_retries": 0,
+          "strict_attribution_retries": 0,
+          "delivery_focused_retries": 0,
+          "delivery_focused_rounds": 0,
+          "delivery_issue_counts": {},
+          "local_repairs": 0,
+          "fragment_fallbacks": 0,
+          "attribution_issue_counts": {},
+          "requests": [
+            {
+              "request_kind": "full_chunk",
+              "attempt": 1,
+              "wall_seconds": 17.203535,
+              "success": true,
+              "ollama": {
+                "attempt": 1,
+                "prompt_characters": 11480,
+                "response_characters": 3060,
+                "stream_chunks": 753,
+                "elapsed_seconds": 17.203483,
+                "chunks_per_second": 43.770206,
+                "prompt_eval_count": 3114,
+                "eval_count": 1025,
+                "prompt_eval_duration_ns": 132902999,
+                "eval_duration_ns": 16827353000,
+                "load_duration_ns": 1700600
+              },
+              "compact_metadata": {
+                "received_characters": 2297,
+                "canonical_characters": 4977,
+                "character_savings": 2680,
+                "character_savings_ratio": 0.538477
+              }
+            }
+          ],
+          "used_fallback": false,
+          "ollama": {
+            "attempt": 1,
+            "prompt_characters": 11480,
+            "response_characters": 3060,
+            "stream_chunks": 753,
+            "elapsed_seconds": 17.203483,
+            "chunks_per_second": 43.770206,
+            "prompt_eval_count": 3114,
+            "eval_count": 1025,
+            "prompt_eval_duration_ns": 132902999,
+            "eval_duration_ns": 16827353000,
+            "load_duration_ns": 1700600
+          }
+        },
+        {
+          "chapter_number": 7,
+          "chapter_title": "5: Read the Gathering",
+          "fragment_count": 38,
+          "source_words": 346,
+          "prompt_characters": 14007,
+          "wall_seconds": 37.165967,
+          "attempts": 1,
+          "full_attempts": 1,
+          "structural_failures": 0,
+          "structural_retries": 0,
+          "full_semantic_retries": 0,
+          "focused_retries": 0,
+          "strict_attribution_retries": 0,
+          "delivery_focused_retries": 0,
+          "delivery_focused_rounds": 0,
+          "delivery_issue_counts": {},
+          "local_repairs": 0,
+          "fragment_fallbacks": 0,
+          "attribution_issue_counts": {},
+          "requests": [
+            {
+              "request_kind": "full_chunk",
+              "attempt": 1,
+              "wall_seconds": 37.142253,
+              "success": true,
+              "ollama": {
+                "attempt": 1,
+                "prompt_characters": 14007,
+                "response_characters": 5962,
+                "stream_chunks": 1513,
+                "elapsed_seconds": 37.142183,
+                "chunks_per_second": 40.735355,
+                "prompt_eval_count": 4100,
+                "eval_count": 2066,
+                "prompt_eval_duration_ns": 4584656000,
+                "eval_duration_ns": 32442610000,
+                "load_duration_ns": 1561600
+              },
+              "compact_metadata": {
+                "received_characters": 4399,
+                "canonical_characters": 9749,
+                "character_savings": 5350,
+                "character_savings_ratio": 0.548774
+              }
+            }
+          ],
+          "used_fallback": false,
+          "ollama": {
+            "attempt": 1,
+            "prompt_characters": 14007,
+            "response_characters": 5962,
+            "stream_chunks": 1513,
+            "elapsed_seconds": 37.142183,
+            "chunks_per_second": 40.735355,
+            "prompt_eval_count": 4100,
+            "eval_count": 2066,
+            "prompt_eval_duration_ns": 4584656000,
+            "eval_duration_ns": 32442610000,
+            "load_duration_ns": 1561600
+          }
+        },
+        {
+          "chapter_number": 7,
+          "chapter_title": "5: Read the Gathering",
+          "fragment_count": 4,
+          "source_words": 31,
+          "prompt_characters": 8500,
+          "wall_seconds": 21.155538,
+          "attempts": 1,
+          "full_attempts": 1,
+          "structural_failures": 0,
+          "structural_retries": 0,
+          "full_semantic_retries": 0,
+          "focused_retries": 2,
+          "strict_attribution_retries": 2,
+          "delivery_focused_retries": 0,
+          "delivery_focused_rounds": 0,
+          "delivery_issue_counts": {},
+          "local_repairs": 0,
+          "fragment_fallbacks": 0,
+          "attribution_issue_counts": {
+            "unknown_speaker": 2
+          },
+          "requests": [
+            {
+              "request_kind": "full_chunk",
+              "attempt": 1,
+              "wall_seconds": 11.15923,
+              "success": true,
+              "ollama": {
+                "attempt": 1,
+                "prompt_characters": 8500,
+                "response_characters": 1705,
+                "stream_chunks": 405,
+                "elapsed_seconds": 11.159164,
+                "chunks_per_second": 36.293041,
+                "prompt_eval_count": 2163,
+                "eval_count": 517,
+                "prompt_eval_duration_ns": 2449241000,
+                "eval_duration_ns": 8562053000,
+                "load_duration_ns": 503800
+              },
+              "compact_metadata": {
+                "received_characters": 1380,
+                "canonical_characters": 1692,
+                "character_savings": 312,
+                "character_savings_ratio": 0.184397
+              }
+            },
+            {
+              "request_kind": "focused_attribution_batch",
+              "fragment_ids": [
+                57,
+                59
+              ],
+              "wall_seconds": 4.23151,
+              "success": true,
+              "ollama": {
+                "attempt": 1,
+                "prompt_characters": 2835,
+                "response_characters": 675,
+                "stream_chunks": 156,
+                "elapsed_seconds": 4.231465,
+                "chunks_per_second": 36.866661,
+                "prompt_eval_count": 812,
+                "eval_count": 193,
+                "prompt_eval_duration_ns": 1012378000,
+                "eval_duration_ns": 3106847000,
+                "load_duration_ns": 1037400
+              }
+            },
+            {
+              "request_kind": "strict_spoken_attribution",
+              "fragment_ids": [
+                57,
+                59
+              ],
+              "wall_seconds": 5.763756,
+              "success": true,
+              "ollama": {
+                "attempt": 1,
+                "prompt_characters": 3356,
+                "response_characters": 827,
+                "stream_chunks": 192,
+                "elapsed_seconds": 5.763713,
+                "chunks_per_second": 33.311859,
+                "prompt_eval_count": 919,
+                "eval_count": 231,
+                "prompt_eval_duration_ns": 841397000,
+                "eval_duration_ns": 4803136000,
+                "load_duration_ns": 516500
+              }
+            }
+          ],
+          "used_fallback": false,
+          "ollama": {
+            "attempt": 1,
+            "prompt_characters": 3356,
+            "response_characters": 827,
+            "stream_chunks": 192,
+            "elapsed_seconds": 5.763713,
+            "chunks_per_second": 33.311859,
+            "prompt_eval_count": 919,
+            "eval_count": 231,
+            "prompt_eval_duration_ns": 841397000,
+            "eval_duration_ns": 4803136000,
+            "load_duration_ns": 516500
+          }
+        }
+      ],
+      "excerpt_offset": 80,
+      "source_sha256": "a009936ec1cc1330f4c57890e45c791b4cab12c9122eb9e074414667667fcea6",
+      "repetition": 2,
+      "slot": 2,
+      "mode_label": "A"
+    },
+    {
+      "config": "w350_f40",
+      "chunk_count": 2,
+      "fragment_count": 60,
+      "source_words": 521,
+      "output_lines": 60,
+      "wall_seconds": 67.42594989999998,
+      "wall_seconds_per_source_word": 0.12941641055662184,
+      "coverage_ok": true,
+      "ids_ok": true,
+      "unknown_speakers": [],
+      "invariant_errors": [],
+      "baseline_attribution_changes": 6,
+      "baseline_attribution_change_ids": [
+        160,
+        162,
+        165,
+        195,
+        197,
+        219
+      ],
+      "target_validation": [],
+      "full_attempts": 2,
+      "structural_retries": 0,
+      "focused_retries": 0,
+      "local_repairs": 1,
+      "fragment_fallbacks": 0,
+      "calls": [
+        {
+          "chapter_number": 7,
+          "chapter_title": "5: Read the Gathering",
+          "fragment_count": 36,
+          "source_words": 350,
+          "prompt_characters": 13761,
+          "wall_seconds": 43.406499,
+          "attempts": 1,
+          "full_attempts": 1,
+          "structural_failures": 0,
+          "structural_retries": 0,
+          "full_semantic_retries": 0,
+          "focused_retries": 0,
+          "strict_attribution_retries": 0,
+          "delivery_focused_retries": 0,
+          "delivery_focused_rounds": 0,
+          "delivery_issue_counts": {},
+          "local_repairs": 1,
+          "fragment_fallbacks": 0,
+          "attribution_issue_counts": {
+            "named_tag": 1
+          },
+          "requests": [
+            {
+              "request_kind": "full_chunk",
+              "attempt": 1,
+              "wall_seconds": 43.389216,
+              "success": true,
+              "ollama": {
+                "attempt": 1,
+                "prompt_characters": 13761,
+                "response_characters": 6981,
+                "stream_chunks": 1800,
+                "elapsed_seconds": 43.389143,
+                "chunks_per_second": 41.485032,
+                "prompt_eval_count": 4030,
+                "eval_count": 2433,
+                "prompt_eval_duration_ns": 4464036000,
+                "eval_duration_ns": 38713660000,
+                "load_duration_ns": 1253300
+              },
+              "compact_metadata": {
+                "received_characters": 5160,
+                "canonical_characters": 9071,
+                "character_savings": 3911,
+                "character_savings_ratio": 0.431154
+              }
+            }
+          ],
+          "used_fallback": false,
+          "ollama": {
+            "attempt": 1,
+            "prompt_characters": 13761,
+            "response_characters": 6981,
+            "stream_chunks": 1800,
+            "elapsed_seconds": 43.389143,
+            "chunks_per_second": 41.485032,
+            "prompt_eval_count": 4030,
+            "eval_count": 2433,
+            "prompt_eval_duration_ns": 4464036000,
+            "eval_duration_ns": 38713660000,
+            "load_duration_ns": 1253300
+          }
+        },
+        {
+          "chapter_number": 7,
+          "chapter_title": "5: Read the Gathering",
+          "fragment_count": 24,
+          "source_words": 171,
+          "prompt_characters": 11682,
+          "wall_seconds": 24.008904,
+          "attempts": 1,
+          "full_attempts": 1,
+          "structural_failures": 0,
+          "structural_retries": 0,
+          "full_semantic_retries": 0,
+          "focused_retries": 0,
+          "strict_attribution_retries": 0,
+          "delivery_focused_retries": 0,
+          "delivery_focused_rounds": 0,
+          "delivery_issue_counts": {},
+          "local_repairs": 0,
+          "fragment_fallbacks": 0,
+          "attribution_issue_counts": {},
+          "requests": [
+            {
+              "request_kind": "full_chunk",
+              "attempt": 1,
+              "wall_seconds": 23.99608,
+              "success": true,
+              "ollama": {
+                "attempt": 1,
+                "prompt_characters": 11682,
+                "response_characters": 3536,
+                "stream_chunks": 924,
+                "elapsed_seconds": 23.996026,
+                "chunks_per_second": 38.506377,
+                "prompt_eval_count": 3327,
+                "eval_count": 1284,
+                "prompt_eval_duration_ns": 3693624000,
+                "eval_duration_ns": 20056638000,
+                "load_duration_ns": 1018700
+              },
+              "compact_metadata": {
+                "received_characters": 2531,
+                "canonical_characters": 5647,
+                "character_savings": 3116,
+                "character_savings_ratio": 0.551797
+              }
+            }
+          ],
+          "used_fallback": false,
+          "ollama": {
+            "attempt": 1,
+            "prompt_characters": 11682,
+            "response_characters": 3536,
+            "stream_chunks": 924,
+            "elapsed_seconds": 23.996026,
+            "chunks_per_second": 38.506377,
+            "prompt_eval_count": 3327,
+            "eval_count": 1284,
+            "prompt_eval_duration_ns": 3693624000,
+            "eval_duration_ns": 20056638000,
+            "load_duration_ns": 1018700
+          }
+        }
+      ],
+      "excerpt_offset": 160,
+      "source_sha256": "75540b9bda9ced8da0545612fb7d379535f88d436f57a7fa862b0a3307c4bf83",
+      "repetition": 1,
+      "slot": 1,
+      "mode_label": "A"
+    },
+    {
+      "config": "w550_f60",
+      "chunk_count": 1,
+      "fragment_count": 60,
+      "source_words": 521,
+      "output_lines": 60,
+      "wall_seconds": 60.954943799999455,
+      "wall_seconds_per_source_word": 0.1169960533589241,
+      "coverage_ok": true,
+      "ids_ok": true,
+      "unknown_speakers": [],
+      "invariant_errors": [],
+      "baseline_attribution_changes": 5,
+      "baseline_attribution_change_ids": [
+        160,
+        162,
+        165,
+        197,
+        219
+      ],
+      "target_validation": [],
+      "full_attempts": 1,
+      "structural_retries": 0,
+      "focused_retries": 0,
+      "local_repairs": 1,
+      "fragment_fallbacks": 0,
+      "calls": [
+        {
+          "chapter_number": 7,
+          "chapter_title": "5: Read the Gathering",
+          "fragment_count": 60,
+          "source_words": 521,
+          "prompt_characters": 16810,
+          "wall_seconds": 60.945585,
+          "attempts": 1,
+          "full_attempts": 1,
+          "structural_failures": 0,
+          "structural_retries": 0,
+          "full_semantic_retries": 0,
+          "focused_retries": 0,
+          "strict_attribution_retries": 0,
+          "delivery_focused_retries": 0,
+          "delivery_focused_rounds": 0,
+          "delivery_issue_counts": {},
+          "local_repairs": 1,
+          "fragment_fallbacks": 0,
+          "attribution_issue_counts": {
+            "named_tag": 1
+          },
+          "requests": [
+            {
+              "request_kind": "full_chunk",
+              "attempt": 1,
+              "wall_seconds": 60.915332,
+              "success": true,
+              "ollama": {
+                "attempt": 1,
+                "prompt_characters": 16810,
+                "response_characters": 10005,
+                "stream_chunks": 2628,
+                "elapsed_seconds": 60.915236,
+                "chunks_per_second": 43.141916,
+                "prompt_eval_count": 5204,
+                "eval_count": 3615,
+                "prompt_eval_duration_ns": 5832091000,
+                "eval_duration_ns": 54961185000,
+                "load_duration_ns": 1543100
+              },
+              "compact_metadata": {
+                "received_characters": 7080,
+                "canonical_characters": 13739,
+                "character_savings": 6659,
+                "character_savings_ratio": 0.484679
+              }
+            }
+          ],
+          "used_fallback": false,
+          "ollama": {
+            "attempt": 1,
+            "prompt_characters": 16810,
+            "response_characters": 10005,
+            "stream_chunks": 2628,
+            "elapsed_seconds": 60.915236,
+            "chunks_per_second": 43.141916,
+            "prompt_eval_count": 5204,
+            "eval_count": 3615,
+            "prompt_eval_duration_ns": 5832091000,
+            "eval_duration_ns": 54961185000,
+            "load_duration_ns": 1543100
+          }
+        }
+      ],
+      "excerpt_offset": 160,
+      "source_sha256": "75540b9bda9ced8da0545612fb7d379535f88d436f57a7fa862b0a3307c4bf83",
+      "repetition": 1,
+      "slot": 2,
+      "mode_label": "B"
+    },
+    {
+      "config": "w350_f40",
+      "chunk_count": 2,
+      "fragment_count": 60,
+      "source_words": 521,
+      "output_lines": 60,
+      "wall_seconds": 58.43052760000137,
+      "wall_seconds_per_source_word": 0.11215072476007941,
+      "coverage_ok": true,
+      "ids_ok": true,
+      "unknown_speakers": [],
+      "invariant_errors": [],
+      "baseline_attribution_changes": 6,
+      "baseline_attribution_change_ids": [
+        160,
+        162,
+        165,
+        195,
+        197,
+        219
+      ],
+      "target_validation": [],
+      "full_attempts": 2,
+      "structural_retries": 0,
+      "focused_retries": 0,
+      "local_repairs": 1,
+      "fragment_fallbacks": 0,
+      "calls": [
+        {
+          "chapter_number": 7,
+          "chapter_title": "5: Read the Gathering",
+          "fragment_count": 36,
+          "source_words": 350,
+          "prompt_characters": 13761,
+          "wall_seconds": 32.999933,
+          "attempts": 1,
+          "full_attempts": 1,
+          "structural_failures": 0,
+          "structural_retries": 0,
+          "full_semantic_retries": 0,
+          "focused_retries": 0,
+          "strict_attribution_retries": 0,
+          "delivery_focused_retries": 0,
+          "delivery_focused_rounds": 0,
+          "delivery_issue_counts": {},
+          "local_repairs": 1,
+          "fragment_fallbacks": 0,
+          "attribution_issue_counts": {
+            "named_tag": 1
+          },
+          "requests": [
+            {
+              "request_kind": "full_chunk",
+              "attempt": 1,
+              "wall_seconds": 32.984066,
+              "success": true,
+              "ollama": {
+                "attempt": 1,
+                "prompt_characters": 13761,
+                "response_characters": 5864,
+                "stream_chunks": 1510,
+                "elapsed_seconds": 32.983999,
+                "chunks_per_second": 45.779774,
+                "prompt_eval_count": 4030,
+                "eval_count": 2050,
+                "prompt_eval_duration_ns": 121743000,
+                "eval_duration_ns": 32546055000,
+                "load_duration_ns": 1021000
+              },
+              "compact_metadata": {
+                "received_characters": 4283,
+                "canonical_characters": 8674,
+                "character_savings": 4391,
+                "character_savings_ratio": 0.506226
+              }
+            }
+          ],
+          "used_fallback": false,
+          "ollama": {
+            "attempt": 1,
+            "prompt_characters": 13761,
+            "response_characters": 5864,
+            "stream_chunks": 1510,
+            "elapsed_seconds": 32.983999,
+            "chunks_per_second": 45.779774,
+            "prompt_eval_count": 4030,
+            "eval_count": 2050,
+            "prompt_eval_duration_ns": 121743000,
+            "eval_duration_ns": 32546055000,
+            "load_duration_ns": 1021000
+          }
+        },
+        {
+          "chapter_number": 7,
+          "chapter_title": "5: Read the Gathering",
+          "fragment_count": 24,
+          "source_words": 171,
+          "prompt_characters": 11672,
+          "wall_seconds": 25.420109,
+          "attempts": 1,
+          "full_attempts": 1,
+          "structural_failures": 0,
+          "structural_retries": 0,
+          "full_semantic_retries": 0,
+          "focused_retries": 0,
+          "strict_attribution_retries": 0,
+          "delivery_focused_retries": 0,
+          "delivery_focused_rounds": 0,
+          "delivery_issue_counts": {},
+          "local_repairs": 0,
+          "fragment_fallbacks": 0,
+          "attribution_issue_counts": {},
+          "requests": [
+            {
+              "request_kind": "full_chunk",
+              "attempt": 1,
+              "wall_seconds": 25.407631,
+              "success": true,
+              "ollama": {
+                "attempt": 1,
+                "prompt_characters": 11672,
+                "response_characters": 3973,
+                "stream_chunks": 999,
+                "elapsed_seconds": 25.407577,
+                "chunks_per_second": 39.31898,
+                "prompt_eval_count": 3323,
+                "eval_count": 1347,
+                "prompt_eval_duration_ns": 3676655000,
+                "eval_duration_ns": 21523133000,
+                "load_duration_ns": 1542400
+              },
+              "compact_metadata": {
+                "received_characters": 2968,
+                "canonical_characters": 6084,
+                "character_savings": 3116,
+                "character_savings_ratio": 0.512163
+              }
+            }
+          ],
+          "used_fallback": false,
+          "ollama": {
+            "attempt": 1,
+            "prompt_characters": 11672,
+            "response_characters": 3973,
+            "stream_chunks": 999,
+            "elapsed_seconds": 25.407577,
+            "chunks_per_second": 39.31898,
+            "prompt_eval_count": 3323,
+            "eval_count": 1347,
+            "prompt_eval_duration_ns": 3676655000,
+            "eval_duration_ns": 21523133000,
+            "load_duration_ns": 1542400
+          }
+        }
+      ],
+      "excerpt_offset": 160,
+      "source_sha256": "75540b9bda9ced8da0545612fb7d379535f88d436f57a7fa862b0a3307c4bf83",
+      "repetition": 2,
+      "slot": 1,
+      "mode_label": "A"
+    },
+    {
+      "config": "w550_f60",
+      "chunk_count": 1,
+      "fragment_count": 60,
+      "source_words": 521,
+      "output_lines": 60,
+      "wall_seconds": 56.363149499997235,
+      "wall_seconds_per_source_word": 0.10818262859884306,
+      "coverage_ok": true,
+      "ids_ok": true,
+      "unknown_speakers": [],
+      "invariant_errors": [],
+      "baseline_attribution_changes": 5,
+      "baseline_attribution_change_ids": [
+        160,
+        162,
+        165,
+        197,
+        219
+      ],
+      "target_validation": [],
+      "full_attempts": 1,
+      "structural_retries": 0,
+      "focused_retries": 0,
+      "local_repairs": 1,
+      "fragment_fallbacks": 0,
+      "calls": [
+        {
+          "chapter_number": 7,
+          "chapter_title": "5: Read the Gathering",
+          "fragment_count": 60,
+          "source_words": 521,
+          "prompt_characters": 16810,
+          "wall_seconds": 56.353905,
+          "attempts": 1,
+          "full_attempts": 1,
+          "structural_failures": 0,
+          "structural_retries": 0,
+          "full_semantic_retries": 0,
+          "focused_retries": 0,
+          "strict_attribution_retries": 0,
+          "delivery_focused_retries": 0,
+          "delivery_focused_rounds": 0,
+          "delivery_issue_counts": {},
+          "local_repairs": 1,
+          "fragment_fallbacks": 0,
+          "attribution_issue_counts": {
+            "named_tag": 1
+          },
+          "requests": [
+            {
+              "request_kind": "full_chunk",
+              "attempt": 1,
+              "wall_seconds": 56.324592,
+              "success": true,
+              "ollama": {
+                "attempt": 1,
+                "prompt_characters": 16810,
+                "response_characters": 10471,
+                "stream_chunks": 2685,
+                "elapsed_seconds": 56.3245,
+                "chunks_per_second": 47.670197,
+                "prompt_eval_count": 5204,
+                "eval_count": 3672,
+                "prompt_eval_duration_ns": 123265000,
+                "eval_duration_ns": 55977564000,
+                "load_duration_ns": 1034000
+              },
+              "compact_metadata": {
+                "received_characters": 7546,
+                "canonical_characters": 14205,
+                "character_savings": 6659,
+                "character_savings_ratio": 0.468779
+              }
+            }
+          ],
+          "used_fallback": false,
+          "ollama": {
+            "attempt": 1,
+            "prompt_characters": 16810,
+            "response_characters": 10471,
+            "stream_chunks": 2685,
+            "elapsed_seconds": 56.3245,
+            "chunks_per_second": 47.670197,
+            "prompt_eval_count": 5204,
+            "eval_count": 3672,
+            "prompt_eval_duration_ns": 123265000,
+            "eval_duration_ns": 55977564000,
+            "load_duration_ns": 1034000
+          }
+        }
+      ],
+      "excerpt_offset": 160,
+      "source_sha256": "75540b9bda9ced8da0545612fb7d379535f88d436f57a7fa862b0a3307c4bf83",
+      "repetition": 2,
+      "slot": 2,
+      "mode_label": "B"
+    }
+  ],
+  "server_start_seconds": 6.066172899998492,
+  "warmup_seconds": 59.405103599998256,
+  "warmup_fragment_count": 8,
+  "summary": {
+    "w350_f40": {
+      "runs": 6,
+      "wall_seconds_per_source_word_p50": 0.0983990215268229,
+      "wall_seconds_per_source_word_p95": 0.12509998910748624,
+      "full_attempts": 14,
+      "structural_retries": 0,
+      "focused_retries": 2,
+      "local_repairs": 5,
+      "fragment_fallbacks": 0,
+      "all_invariants_passed": false
+    },
+    "w550_f60": {
+      "runs": 6,
+      "wall_seconds_per_source_word_p50": 0.0806234062646953,
+      "wall_seconds_per_source_word_p95": 0.11479269716890383,
+      "full_attempts": 10,
+      "structural_retries": 0,
+      "focused_retries": 0,
+      "local_repairs": 5,
+      "fragment_fallbacks": 0,
+      "all_invariants_passed": true
+    }
+  },
+  "decision": {
+    "normalized_wall_change_fraction": -0.1806482929028118,
+    "speed_gate_pass": false,
+    "automated_quality_gate_pass": true,
+    "requires_manual_attribution_review": true,
+    "promote": false
+  }
+}

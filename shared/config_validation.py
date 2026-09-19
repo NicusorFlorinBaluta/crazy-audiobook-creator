@@ -84,6 +84,7 @@ def validate_brain_config(config: dict[str, Any]) -> dict[str, Any]:
     _number(errors, script, "adaptive_split_max_depth", minimum=0, maximum=6)
     _number(errors, script, "adaptive_split_min_fragments", minimum=2)
     _number(errors, script, "speaker_confidence_threshold", minimum=0, maximum=1)
+    _number(errors, script, "pause_marker_silence_seconds", minimum=0.01, maximum=5.0)
     metadata = config.get("metadata", {})
     if not isinstance(metadata, dict):
         errors.append("metadata must be an object")
@@ -211,6 +212,13 @@ def validate_brain_config(config: dict[str, Any]) -> dict[str, Any]:
         _number(errors, dashboard, "max_upload_size_mb", minimum=1)
         _number(errors, dashboard, "max_epub_expanded_mb", minimum=1)
 
+    prosody = config.get("prosody", {})
+    if not isinstance(prosody, dict):
+        errors.append("prosody must be an object")
+    else:
+        _number(errors, prosody, "pitch_cv_threshold", minimum=0.0, maximum=1.0)
+        _number(errors, prosody, "dynamic_range_threshold", minimum=0.0, maximum=50.0)
+
     if errors:
         raise ValueError("Invalid brain configuration: " + "; ".join(errors))
     return config
@@ -251,6 +259,12 @@ def validate_voice_config(config: dict[str, Any]) -> dict[str, Any]:
     _number(errors, validation, "voice_distinctness_rounds", minimum=0, maximum=5)
     _number(errors, validation, "max_retries", minimum=0, maximum=20)
     _number(errors, validation, "pronunciation_best_of_n", minimum=1, maximum=5)
+    prosody = validation.get("prosody", {})
+    if not isinstance(prosody, dict):
+        errors.append("validation.prosody must be an object")
+    else:
+        _number(errors, prosody, "pitch_cv_threshold", minimum=0.0, maximum=1.0)
+        _number(errors, prosody, "dynamic_range_threshold", minimum=0.0, maximum=50.0)
     mastering = config.get("mastering", {})
     _number(errors, mastering, "crossfade_ms", minimum=0, maximum=500)
     _number(errors, mastering, "target_lufs", minimum=-40, maximum=-5)

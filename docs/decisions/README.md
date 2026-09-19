@@ -32,7 +32,11 @@ Newest first.
 
 | Date | Record | Status |
 | --- | --- | --- |
+| 2026-09-19 | [Recalibration of Monotone Delivery Detection](2026-09-19-monotone-delivery-recalibration.md) | Current |
+| 2026-09-19 | [Prompt reordering for LLM prefix-cache reuse](2026-09-19-prompt-reordering-prefix-caching.md) | Held / Declined |
+| 2026-09-19 | [Dialect Normalisation, Interjection Homophones, and Glossary-Only Misses](2026-09-19-dialect-normalisation-and-interjection-homophones.md) | Current |
 | 2026-09-18 | [Chapter Delineation, Reader Synchronization, and Narrator Voice Resolution](2026-09-18-chapter-delineation-reader-sync-and-voice-resolution.md) | Current |
+
 | 2026-09-17 | [Cross-term regression guards, atomic repair, and delivery reconciliation](2026-09-17-cross-term-regression-guards-and-delivery-reconciliation.md) | Current |
 | 2026-09-16 | [A majority is not a verdict: pronunciations are measured for stability](2026-09-16-a-majority-is-not-a-verdict.md) | Current |
 | 2026-09-12 | [Respellings are measured against transcripts](2026-09-12-respellings-are-measured-against-transcripts.md) | Partially superseded by the 2026-09-16 record (the `Drizzt` verdict only) |

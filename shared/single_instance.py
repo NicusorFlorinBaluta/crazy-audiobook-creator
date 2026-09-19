@@ -10,7 +10,13 @@ logger = logging.getLogger(__name__)
 
 class SingleInstanceLock:
     def __init__(self, lock_name: str = "app.lock"):
-        self.lock_file = Path(os.getenv("TEMP", ".")) / lock_name
+        temp_dir = os.getenv("TEMP") or os.getenv("TMP")
+        if temp_dir:
+            self.lock_file = Path(temp_dir) / lock_name
+        else:
+            from shared.paths import REPO_ROOT
+
+            self.lock_file = REPO_ROOT / lock_name
         self.handle = None
 
     def acquire(self, *, quiet: bool = False) -> bool:
@@ -24,7 +30,7 @@ class SingleInstanceLock:
         try:
             self.lock_file.parent.mkdir(parents=True, exist_ok=True)
             # Do not truncate another process's PID before attempting the lock.
-            self.handle = open(self.lock_file, "a+")
+            self.handle = open(self.lock_file, "a+", encoding="utf-8", errors="replace")
             # Append mode initially positions an existing file at EOF. Every
             # contender must lock the same byte after the owner writes its PID.
             self.handle.seek(0)

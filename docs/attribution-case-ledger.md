@@ -55,6 +55,7 @@ for writing them down.
 | — | three trend kinds all described as "monotone" | a warning states what was measured | 47 items mislabelled | `tests/test_trend_review_wording.py` | — |
 | — | an alias prune queued a re-script of a published book | no auto-re-script once a delivery is published | 8 generated, 5 mastered, Part 01 live | `tests/test_script_refresh_guard.py` | — |
 | — | 291 review items, 0 blocking, 173 that mattered | separate "changes the audio" from advisory | 291→183 and 163→103 | `tests/test_review_inbox_actionability.py` | — |
+| `ch18_0132` | speech tag *"she accused."* invisible as a speech verb | add "accused" and "accuses" to `_SPEECH_VERBS` | 1 flag resolved | `tests/test_investigate_playback_flags.py` | — |
 
 ## Rules measured and rejected
 

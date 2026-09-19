@@ -162,9 +162,9 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-# Tests legitimately use asserts, private access, and hardcoded fixture secrets.
+# Tests legitimately use asserts, private access, dynamic code execution, and hardcoded fixture secrets.
 "tests/**" = [
-    "S105", "S106", "S108", "SIM117", "B017",
+    "S102", "S105", "S106", "S108", "S310", "SIM117", "B017",
     "DTZ001", "DTZ005", "DTZ007",
     "E731",   # inline lambdas are fine for building fixture payloads
 ]
@@ -193,6 +193,8 @@ ignore = [
 # (Ollama, Home Assistant), not arbitrary user input.
 "shared/pronunciation.py" = ["S310"]
 "brain/orchestrator/notifier.py" = ["S310"]
+"brain/dashboard/api/mobile.py" = ["S310"]
+
 
 [tool.ruff.lint.isort]
 known-first-party = ["brain", "voice", "shared"]

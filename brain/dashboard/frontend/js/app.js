@@ -3618,8 +3618,15 @@ window.fetchAndRenderFlags = async function() {
         const flags = data.flags || [];
         state.playbackFlags = flags;
 
-        // Update badge on the Playback Flags tab (count open and pending)
-        const openCount = flags.filter(f => f.status === 'open' || f.status === 'pending').length;
+        // Canonical flag status set; treat unrecognised/ghost statuses as open so they are visible
+        const KNOWN_FLAG_STATUSES = new Set(['open', 'pending', 'investigating', 'fixed', 'vetoed', 'dismissed', 'resolved']);
+        const isFlagOpen = (st) => {
+            const s = String(st || '').toLowerCase();
+            return s === 'open' || s === 'pending' || !KNOWN_FLAG_STATUSES.has(s);
+        };
+
+        // Update badge on the Playback Flags tab (count open and unhandled flags)
+        const openCount = flags.filter(f => isFlagOpen(f.status)).length;
         const badge = document.getElementById('flag-tab-badge');
         if (badge) {
             badge.textContent = String(openCount);
@@ -3636,10 +3643,16 @@ window.renderPlaybackFlags = function() {
     const container = document.getElementById('playback-flags-list');
     if (!container) return;
 
+    const KNOWN_FLAG_STATUSES = new Set(['open', 'pending', 'investigating', 'fixed', 'vetoed', 'dismissed', 'resolved']);
+    const isFlagOpen = (st) => {
+        const s = String(st || '').toLowerCase();
+        return s === 'open' || s === 'pending' || !KNOWN_FLAG_STATUSES.has(s);
+    };
+
     const filter = document.getElementById('flags-filter-status')?.value || 'all';
     let flags = state.playbackFlags || [];
     if (filter === 'open') {
-        flags = flags.filter(f => f.status === 'open' || f.status === 'pending');
+        flags = flags.filter(f => isFlagOpen(f.status));
     } else if (filter !== 'all') {
         flags = flags.filter(f => f.status === filter);
     }
@@ -3694,6 +3707,9 @@ window.renderPlaybackFlags = function() {
         const candidateLines = enriched.candidate_lines || [];
         const contextLines = flag.context_lines || enriched.surrounding_lines || [];
         const manuscriptExcerpt = flag.manuscript_excerpt || enriched.manuscript_excerpt || '';
+        const matchConfidence = enriched.match_confidence || flag.match_confidence;
+        const matchDistanceMs = enriched.match_distance_ms != null ? enriched.match_distance_ms : flag.match_distance_ms;
+        const originResolved = enriched.position_origin_resolved || flag.position_origin_resolved;
 
         return `
             <div class="flag-card" data-flag-id="${esc(flag.flag_id)}" style="background: var(--bg-card); border: 1px solid var(--glass-border); border-radius: var(--radius-md); padding: 18px 20px; display: flex; flex-direction: column; gap: 14px; transition: border-color 0.2s;">
@@ -3702,12 +3718,22 @@ window.renderPlaybackFlags = function() {
                         ${statusBadge(flag.status)}
                         <strong style="font-size: 1rem;">Chapter ${flag.chapter_number} @ ${formatTime(flag.position_ms)}</strong>
                         <span style="color: var(--text-muted); font-size: 0.82rem;">${sourceLabel(flag.source)}</span>
+                        ${matchConfidence === 'out_of_range' ? `
+                            <span class="badge" style="background: rgba(239, 68, 68, 0.2); color: hsl(0, 85%, 65%); font-size: 0.72rem; padding: 2px 7px; border-radius: 4px; font-weight: 600;">
+                                ⚠️ OUT OF RANGE ${matchDistanceMs != null ? `(${Math.round(matchDistanceMs / 1000)}s away)` : ''}
+                            </span>
+                        ` : ''}
+                        ${originResolved === 'book' ? `
+                            <span class="badge" style="background: rgba(168, 85, 247, 0.2); color: hsl(275, 80%, 75%); font-size: 0.72rem; padding: 2px 7px; border-radius: 4px; font-weight: 600;" title="Offset re-derived from book timeline">
+                                📖 Book Offset
+                            </span>
+                        ` : ''}
                     </div>
                     <div style="display: flex; align-items: center; gap: 12px;">
                         <div style="display: inline-flex; align-items: center; gap: 6px;">
                             <label style="font-size: 0.76rem; color: var(--text-muted); font-weight: 600;">Status:</label>
                             <select class="input-sm select flag-status-select" style="font-size: 0.78rem; padding: 2px 8px; height: 26px; border-radius: 4px; background: var(--bg-surface); color: var(--text-primary);" onchange="window.updateFlagStatus('${esc(flag.flag_id)}', this.value)">
-                                <option value="open" ${flag.status === 'open' || flag.status === 'pending' ? 'selected' : ''}>🟡 Open</option>
+                                <option value="open" ${isFlagOpen(flag.status) && flag.status !== 'investigating' ? 'selected' : ''}>🟡 Open${!KNOWN_FLAG_STATUSES.has(flag.status) ? ` (${esc(flag.status)})` : ''}</option>
                                 <option value="investigating" ${flag.status === 'investigating' ? 'selected' : ''}>🔵 Investigating</option>
                                 <option value="fixed" ${flag.status === 'fixed' ? 'selected' : ''}>🟢 Fixed</option>
                                 <option value="vetoed" ${flag.status === 'vetoed' ? 'selected' : ''}>🟣 Vetoed</option>
@@ -3717,6 +3743,12 @@ window.renderPlaybackFlags = function() {
                         <span style="font-size: 0.78rem; color: var(--text-muted);">${esc(flag.created_at || '').replace('T', ' ').substring(0, 19)}</span>
                     </div>
                 </div>
+
+                ${matchConfidence === 'out_of_range' ? `
+                    <div style="background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.25); border-radius: 4px; padding: 8px 12px; font-size: 0.82rem; color: hsl(0, 80%, 70%);">
+                        ⚠️ <strong>Timestamp Out of Range:</strong> Flag timestamp (${formatTime(flag.position_ms)}) is ${Math.round((matchDistanceMs || 0) / 1000)}s away from the nearest line in this chapter.
+                    </div>
+                ` : ''}
 
                 <div style="background: var(--bg-surface); border-left: 3px solid var(--accent); border-radius: 4px; padding: 12px 14px;">
                     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
@@ -3799,7 +3831,7 @@ window.renderPlaybackFlags = function() {
 
                 <div style="display: flex; justify-content: space-between; align-items: center; border-top: 1px solid var(--glass-border); padding-top: 10px; margin-top: 4px; flex-wrap: wrap; gap: 8px;">
                     <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-                        ${(flag.status === 'open' || flag.status === 'pending') ? `
+                        ${(isFlagOpen(flag.status) && flag.status !== 'investigating') ? `
                             <button class="btn btn-primary btn-sm" onclick="window.updateFlagStatus('${esc(flag.flag_id)}', 'investigating')">🔍 Investigating</button>
                             <button class="btn btn-success btn-sm" onclick="window.updateFlagStatus('${esc(flag.flag_id)}', 'fixed')">✅ Mark Fixed</button>
                             <button class="btn btn-ghost btn-sm" style="color: hsl(275, 80%, 75%);" onclick="window.promptVetoFlag('${esc(flag.flag_id)}')">🛡️ Veto Flag</button>

@@ -227,18 +227,18 @@ def mark_chapters_stale(
         return False
 
     stale_audio_chapters = {c for c in affected if _chapter_had_audio(c)}
-    existing_pending = {
-        c for c in state.get("voice_revision_pending_chapters", [])
-        if _chapter_had_audio(c)
-    }
+    existing_pending = {c for c in state.get("voice_revision_pending_chapters", []) if _chapter_had_audio(c)}
     pending = sorted(existing_pending | stale_audio_chapters)
 
     job_queue.update_job(
         project_id,
         {
-            "generated_chapters": [number for number in state.get("generated_chapters", []) if number not in stale_audio_chapters],
-            "mastered_chapters": [number for number in state.get("mastered_chapters", []) if number not in stale_audio_chapters],
+            "generated_chapters": [
+                number for number in state.get("generated_chapters", []) if number not in stale_audio_chapters
+            ],
+            "mastered_chapters": [
+                number for number in state.get("mastered_chapters", []) if number not in stale_audio_chapters
+            ],
             "voice_revision_pending_chapters": pending,
         },
     )
-

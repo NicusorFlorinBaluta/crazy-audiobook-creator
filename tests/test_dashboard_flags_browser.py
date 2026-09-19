@@ -4,7 +4,6 @@
 import json
 import sqlite3
 import sys
-import time
 import urllib.request
 from pathlib import Path
 
@@ -30,13 +29,10 @@ def run_browser_e2e():
         "position_ms": 15000,
         "issue_type": "wrong_speaker",
         "user_note": "Playwright Browser E2E: driving flag test",
-        "source": "android_auto"
+        "source": "android_auto",
     }
     req = urllib.request.Request(
-        post_url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST"
+        post_url, data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST"
     )
     with urllib.request.urlopen(req) as resp:
         assert resp.status in (200, 201), f"Expected 200/201, got {resp.status}"
@@ -46,14 +42,16 @@ def run_browser_e2e():
     flag_id = flag["flag_id"]
     print(f"  -> Flag created: {flag_id}, status = '{flag['status']}'")
     assert flag["status"] == "open", f"Expected default status 'open', got '{flag['status']}'"
-    
+
     # Verify candidate lines in 20s reaction delay window
     candidates = flag.get("candidate_lines") or flag.get("enriched_data", {}).get("candidate_lines", [])
     print(f"  -> Found {len(candidates)} candidate lines in reaction window")
     assert len(candidates) > 0, "Expected candidate lines in the 20s reaction delay window!"
     for c in candidates:
         rel = c.get("relative_sec")
-        print(f"     * [{c['line_id']}] {c['speaker']}: {c['text'][:40]}... (offset: {rel}s, is_at_tap={c.get('is_at_tap')})")
+        print(
+            f"     * [{c['line_id']}] {c['speaker']}: {c['text'][:40]}... (offset: {rel}s, is_at_tap={c.get('is_at_tap')})"
+        )
 
     try:
         print("\n=== [2/7] Launching Headless Browser via Playwright (Edge) ===")
@@ -126,7 +124,9 @@ def run_browser_e2e():
             with urllib.request.urlopen(get_req) as resp:
                 flags_data = json.loads(resp.read().decode("utf-8"))
             live_flag = next(f for f in flags_data["flags"] if f["flag_id"] == flag_id)
-            assert live_flag["status"] == "investigating", f"Expected status 'investigating', got '{live_flag['status']}'"
+            assert live_flag["status"] == "investigating", (
+                f"Expected status 'investigating', got '{live_flag['status']}'"
+            )
             print("  -> Confirmed status updated to 'investigating'!")
 
             # Under 'open' filter, the card is now filtered out
@@ -181,7 +181,7 @@ def run_browser_e2e():
             conn.commit()
 
         if FLAGS_JSON.is_file():
-            with open(FLAGS_JSON, "r", encoding="utf-8") as f:
+            with open(FLAGS_JSON, encoding="utf-8") as f:
                 disk_data = json.load(f)
             if isinstance(disk_data, dict):
                 disk_data["flags"] = [f for f in disk_data.get("flags", []) if f.get("flag_id") != flag_id]

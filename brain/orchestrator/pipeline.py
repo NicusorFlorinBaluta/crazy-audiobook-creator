@@ -16,6 +16,7 @@ import re
 import shutil
 import subprocess
 import time
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -118,7 +119,86 @@ class _WaitingForReview(Exception):
     def __init__(self, item_ids: set[str], reason: str):
         super().__init__(reason)
         self.item_ids = sorted(item_ids)
-        self.reason = reason
+
+
+def collect_accepted_failures(
+    project_id: str,
+    project_dir: Path,
+    chapters: Sequence[int] | set[int] | None = None,
+    job_queue: Any | None = None,
+) -> list[dict[str, Any]]:
+    """Collect selected takes with passed_hard_gates=False and a resolved disposition.
+
+    Surfaces human-accepted audio failures at export in export_quality.json.
+    """
+    if job_queue is None:
+        from brain.orchestrator.job_queue import JobQueue
+
+        db_path = project_dir.parent / "pipeline_state.db"
+        job_queue = JobQueue(db_path=str(db_path))
+
+    chapter_filter = set(chapters) if chapters is not None else None
+
+    # 1. Fetch quality logs and select the winning take per line
+    all_logs = job_queue.get_quality_report(project_id)
+    if chapter_filter is not None:
+        all_logs = [row for row in all_logs if row.get("chapter_number") in chapter_filter]
+
+    selected_logs = job_queue._selected_quality_logs(all_logs)
+
+    # 2. Fetch human review decisions for segments
+    review_rows = job_queue.get_review_items(project_id)
+    reviews_by_line: dict[str, str] = {
+        str(row["item_id"]): str(row.get("disposition", "")) for row in review_rows if row.get("item_type") == "segment"
+    }
+
+    accepted_dispositions = {"acceptable", "approved", "keep_current", "resolved"}
+
+    # 3. Cache chapter scripts for authored text
+    script_cache: dict[int, dict[str, str]] = {}
+
+    def _get_authored_text(ch: int | None, line_id: str, fallback: str) -> str:
+        if ch is None:
+            return fallback
+        if ch not in script_cache:
+            sp = project_dir / "script" / f"chapter_{ch:03d}.json"
+            if sp.is_file():
+                try:
+                    sdata = json.loads(sp.read_text(encoding="utf-8"))
+                    script_cache[ch] = {
+                        str(l.get("line_id", "")): str(l.get("text") or l.get("spoken_text") or "")
+                        for l in sdata.get("lines", [])
+                    }
+                except (OSError, ValueError):
+                    script_cache[ch] = {}
+            else:
+                script_cache[ch] = {}
+        return script_cache[ch].get(line_id, fallback)
+
+    # 4. Build accepted failures array
+    accepted_failures: list[dict[str, Any]] = []
+    for item in selected_logs:
+        line_id = str(item.get("line_id", ""))
+        details = item.get("details", {})
+        passed_hard_gates = bool(details.get("passed_hard_gates", True))
+        disp = reviews_by_line.get(line_id)
+
+        if not passed_hard_gates and disp in accepted_dispositions:
+            ch = item.get("chapter_number")
+            authored = _get_authored_text(ch, line_id, details.get("text", ""))
+            transcript = details.get("transcribed_text") or details.get("transcript") or ""
+            accepted_failures.append(
+                {
+                    "line_id": line_id,
+                    "chapter": ch,
+                    "wer": item.get("wer"),
+                    "authored_text": authored,
+                    "transcript": transcript,
+                }
+            )
+
+    accepted_failures.sort(key=lambda x: (x.get("chapter") or 0, x.get("line_id") or ""))
+    return accepted_failures
 
 
 class Pipeline:
@@ -436,12 +516,15 @@ class Pipeline:
                 self.projects_dir / "ollama-managed.log",
             )
         )
+        if not log_path.is_absolute():
+            log_path = shared_paths.REPO_ROOT / log_path
         log_path.parent.mkdir(parents=True, exist_ok=True)
         rotate_file(log_path)
         self._ollama_server_log_handle = open(
             log_path,
             "a",
             encoding="utf-8",
+            errors="replace",
             buffering=1,
         )
         kwargs["stdout"] = self._ollama_server_log_handle
@@ -611,12 +694,15 @@ class Pipeline:
         apply_torch_alloc_conf(env)
 
         log_path = self.projects_dir / "voice-server-managed.log"
+        if not log_path.is_absolute():
+            log_path = shared_paths.REPO_ROOT / log_path
         log_path.parent.mkdir(parents=True, exist_ok=True)
         rotate_file(log_path)
         self._voice_server_log_handle = open(
             log_path,
             "a",
             encoding="utf-8",
+            errors="replace",
             buffering=1,
         )
 
@@ -3540,6 +3626,12 @@ class Pipeline:
                 "book_loudness": response.book_loudness,
             },
         )
+        accepted_failures = collect_accepted_failures(
+            project_id=project_id,
+            project_dir=project_dir,
+            chapters=included_numbers,
+            job_queue=self.job_queue,
+        )
         atomic_write_json(
             project_dir / (f"export_quality{suffix}.json"),
             {
@@ -3547,6 +3639,7 @@ class Pipeline:
                 "chapters": included_numbers,
                 "book_loudness": response.book_loudness,
                 "output_file": str(local_m4b),
+                "accepted_failures": accepted_failures,
             },
         )
         self.job_queue.update_job(project_id, {"export_stale": False})

@@ -528,8 +528,8 @@ class NASSyncer:
                 for idx, ch in enumerate(bdata.get("chapters", []), 1):
                     ch_num = ch.get("number") or ch.get("chapter_number") or idx
                     available_chapters.add(int(ch_num))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Failed reading book.json chapters in sync_reading_assets: %s", e)
 
         if not available_chapters:
             return
@@ -560,7 +560,9 @@ class NASSyncer:
             if lyrics_data:
                 # Write both chapter_{ch_num}.json and chapter_{ch_num:03d}.json for seamless lookup
                 self._atomic_write_json(sftp, lyrics_data, posixpath.join(lyrics_remote_dir, f"chapter_{ch_num}.json"))
-                self._atomic_write_json(sftp, lyrics_data, posixpath.join(lyrics_remote_dir, f"chapter_{ch_num:03d}.json"))
+                self._atomic_write_json(
+                    sftp, lyrics_data, posixpath.join(lyrics_remote_dir, f"chapter_{ch_num:03d}.json")
+                )
 
             # 2. Reader
             reader_data = None
@@ -579,7 +581,9 @@ class NASSyncer:
 
             if reader_data:
                 self._atomic_write_json(sftp, reader_data, posixpath.join(reader_remote_dir, f"chapter_{ch_num}.json"))
-                self._atomic_write_json(sftp, reader_data, posixpath.join(reader_remote_dir, f"chapter_{ch_num:03d}.json"))
+                self._atomic_write_json(
+                    sftp, reader_data, posixpath.join(reader_remote_dir, f"chapter_{ch_num:03d}.json")
+                )
 
             if lyrics_data or reader_data:
                 synced_count += 1

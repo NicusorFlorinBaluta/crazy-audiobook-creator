@@ -398,12 +398,10 @@ def is_pronunciation_candidate_better(
     on quality.
     """
     cand_hard_ok = bool(
-        getattr(candidate, "passed_hard_gates", True)
-        and not getattr(candidate, "clipping_detected", False)
+        getattr(candidate, "passed_hard_gates", True) and not getattr(candidate, "clipping_detected", False)
     )
     curr_hard_ok = bool(
-        getattr(current, "passed_hard_gates", True)
-        and not getattr(current, "clipping_detected", False)
+        getattr(current, "passed_hard_gates", True) and not getattr(current, "clipping_detected", False)
     )
     if not cand_hard_ok and curr_hard_ok:
         return False
@@ -475,4 +473,3 @@ def is_pronunciation_candidate_better(
         curr_score,
         -curr_wer,
     )
-

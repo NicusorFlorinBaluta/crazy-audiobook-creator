@@ -15,6 +15,37 @@ A faster result is not accepted when it weakens a higher-priority requirement.
 Model changes and schema changes require separate validation so a speed gain
 cannot conceal an attribution or delivery-quality regression.
 
+## Prefix-cache prompt ordering (2026-09-19)
+
+The static rulebook (`## Script Tagging Task` + `## Compact Output Schema` +
+JSON example) is placed at the top of `_SYSTEM_PROMPT`, before the dynamic
+`## Context` block (`{character_registry}`, `{previous_summary}`). The
+`{schema_appendix}` placeholder (resolved to `_DIALOGUE_FOCUSED_SCHEMA_PROMPT`
+or `""`) is embedded in the same static section, so it too is inside the
+cacheable prefix when the dialogue-focused schema is enabled.
+
+This layout lets Ollama's KV-prefix cache persist the ~1,500-token static
+section across every chunk of a chapter without re-evaluating it. Measured on
+`the-finest-edge-of-twilight-book` chapter 7 with 2 repetitions per excerpt:
+
+| metric | cold (rep 1) | cached (rep 2) | saving |
+|---|---|---|---|
+| `prompt_eval_duration_ns` | 4,328–5,832 ms | 122–717 ms | **83–98%** |
+
+This saving compounds across all chunks in a chapter. A 10-chunk chapter that
+previously spent 40–60 seconds re-evaluating the static prefix now spends that
+time only on the first chunk; subsequent chunks hit the cache.
+
+Attribution screening on chapters 14 and 18 (357 and 239 lines respectively)
+found no case-ledger regressions. Two lines changed between the new and baseline
+scripts; both are in genuinely ambiguous alternating-dialogue contexts and are
+consistent with normal LLM variance rather than prompt-ordering sensitivity.
+Source coverage (`assert_script_covers_source`) passed on both chapters.
+
+The promotion decision is recorded in
+`docs/decisions/2026-09-19-prompt-reordering-prefix-caching.md`.
+
+
 ## Compact metadata contract
 
 The source fragments and creative decisions are not compacted. The model still

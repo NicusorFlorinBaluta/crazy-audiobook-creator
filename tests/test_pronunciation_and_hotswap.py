@@ -920,6 +920,159 @@ class PronunciationAndHotSwapTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(pronunciation_routes._active_preview_modes[pid]["active"])
 
 
+class PronunciationCandidateGenerationTests(unittest.TestCase):
+    """F10 — Pinning tests for pronunciation candidate generation fixes.
+
+    Covers:
+    - Generator returns ``""`` for alternate when both syllable paths produce the input.
+    - The pronunciations API router rejects literal identity mappings (``Jarlaxle → Jarlaxle``)
+      but permits stylistic respellings that normalise to the same form (``newterm → new-term``).
+    - Apostrophes survive candidate generation (ground rule 3).
+
+    Note on keep-original mappings: entering ``{"Jax": "Jax"}`` in the dict is a deliberate
+    "I have reviewed this and it is already correct" signal.  ``build_pronunciation_inventory``
+    marks such entries ``verified`` and removes them from the review prompt.  This is the
+    intended design (see ``test_keep_original_self_mapping_verified_in_inventory``).  The API
+    guard only blocks the *accidental* case where the operator typed the term unchanged without
+    any real formatting difference (same characters, different case only).
+    """
+
+    def test_no_candidate_returns_empty_alternate(self) -> None:
+        """Terms where both syllable paths produce the input must yield alternate=''.
+
+        ``Breezy``, ``Gutbusters``, and ``Tazmikella`` are all regular-sounding
+        fantasy words where every heuristic either fires identically for both the
+        default and alternate path, or does not fire at all.  Before F10 the
+        generator returned the input term as the alternate, so A/B trialling
+        would compare a string with itself.  After F10 the alternate is ``""``
+        to signal *no secondary candidate*.
+        """
+        from shared.pronunciation import generate_phonetic_recommendations
+
+        for term in ("Breezy", "Gutbusters", "Tazmikella", "Gauntlgrym"):
+            with self.subTest(term=term):
+                rec = generate_phonetic_recommendations(term)
+                self.assertEqual(
+                    rec["alternate"],
+                    "",
+                    msg=(
+                        f"generate_phonetic_recommendations({term!r}) returned "
+                        f"alternate={rec['alternate']!r}; expected '' (no secondary "
+                        f"candidate) because both syllable paths reconstruct the input."
+                    ),
+                )
+
+    def test_entreri_has_secondary_candidate(self) -> None:
+        """Entreri triggers the ^En-before-consonant heuristic, producing a real alternate."""
+        from shared.pronunciation import generate_phonetic_recommendations
+
+        rec = generate_phonetic_recommendations("Entreri")
+        self.assertNotEqual(
+            rec["alternate"],
+            "",
+            "Entreri should produce a non-empty alternate via the ^En-before-consonant rule.",
+        )
+        self.assertNotEqual(
+            rec["alternate"].casefold(),
+            "entreri",
+            "Entreri alternate must differ from the input term.",
+        )
+
+    def test_apostrophe_survives_generation(self) -> None:
+        """Apostrophes must not be stripped during candidate generation (ground rule 3)."""
+        from shared.pronunciation import generate_phonetic_recommendations
+
+        rec = generate_phonetic_recommendations("Do'Urden")
+        # The apostrophe must survive in at least the default candidate.
+        self.assertIn("'", rec["default"], "Apostrophe was stripped from Do'Urden default candidate.")
+
+    def test_api_rejects_literal_identity_mapping(self) -> None:
+        """POST /pronunciations with spoken_text == term (same characters) must return HTTP 400.
+
+        A respelling like 'new-term' for term 'newterm' is accepted even though
+        normalize_phonetic_text collapses it to 'newterm' -- that is a real formatting
+        hint from the operator.  Only a literal same-string submission (e.g. 'Jarlaxle →
+        Jarlaxle' or 'Jarlaxle → jarlaxle') is rejected.
+        """
+        import asyncio
+        import json
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from fastapi import HTTPException
+
+        from brain.dashboard.api import runtime as dashboard_runtime
+        from brain.dashboard.api.routers import pronunciations as pronunciation_routes
+
+        async def _run() -> None:
+            with tempfile.TemporaryDirectory() as directory:
+                project_dir = Path(directory)
+                (project_dir / "pronunciation_dict.json").write_text(json.dumps({}), encoding="utf-8")
+                (project_dir / "script").mkdir(parents=True)
+                (project_dir / "book_script.json").write_text(
+                    json.dumps({"chapters": [{"chapter_number": 1, "lines": [{"text": "Hello world."}]}]}),
+                    encoding="utf-8",
+                )
+
+                with (
+                    patch.object(dashboard_runtime, "require_job"),
+                    patch.object(dashboard_runtime, "project_dir", return_value=project_dir),
+                    patch.object(dashboard_runtime, "job_queue", MagicMock()),
+                    patch.object(dashboard_runtime, "pronunciation_llm", return_value=None),
+                ):
+                    # Exact same characters → must be rejected
+                    with self.assertRaises(HTTPException) as ctx:
+                        await pronunciation_routes.update_pronunciation(
+                            "test_project",
+                            pronunciation_routes.PronunciationRequest(term="Jarlaxle", spoken_text="Jarlaxle"),
+                        )
+                    self.assertEqual(ctx.exception.status_code, 400)
+
+                    # Case-only difference → must also be rejected
+                    with self.assertRaises(HTTPException) as ctx2:
+                        await pronunciation_routes.update_pronunciation(
+                            "test_project",
+                            pronunciation_routes.PronunciationRequest(term="Jarlaxle", spoken_text="jarlaxle"),
+                        )
+                    self.assertEqual(ctx2.exception.status_code, 400)
+
+                    # 'new-term' for 'newterm': normalize_phonetic_text collapses the hyphen,
+                    # but the operator typed different characters, so this MUST succeed.
+                    res = await pronunciation_routes.update_pronunciation(
+                        "test_project",
+                        pronunciation_routes.PronunciationRequest(term="newterm", spoken_text="new-term"),
+                    )
+                    self.assertEqual(res.get("status"), "success")
+
+        asyncio.run(_run())
+
+    def test_entries_to_measure_drops_terms_absent_from_script(self) -> None:
+        """Verify that terms absent from the book's script are excluded from the measurement audit (Spec F18)."""
+        from scripts.measure_pronunciations import _entries_to_measure
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            proj_dir = Path(tmp_dir)
+
+            script_lines = [
+                "Elodin looked over the university grounds.",
+                "Drizzt held his scimitars.",
+            ]
+
+            recs: dict = {}
+            proposed: dict = {}
+
+            with patch("scripts.measure_pronunciations.load_pronunciation_dictionary") as mock_load:
+                mock_load.return_value = (
+                    {"Kvothe": "Quoath", "Elodin": "Eh-low-din", "Drizzt": "Drist"},
+                    {"Kvothe": "global", "Elodin": "global", "Drizzt": "project"},
+                )
+                entries = _entries_to_measure(proj_dir, recs, proposed, script_lines=script_lines)
+
+                self.assertIn("Elodin", entries)
+                self.assertIn("Drizzt", entries)
+                self.assertNotIn("Kvothe", entries)
+
+
 if __name__ == "__main__":
     unittest.main()
-

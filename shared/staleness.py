@@ -58,12 +58,14 @@ def check_delivery_staleness(
             chapters = [int(c) for c in item.get("chapter_numbers", [])]
             newer = sorted(c for c in chapters if chapter_mtimes.get(c, 0) > built)
             if newer:
-                stale.append({
-                    "delivery_id": item.get("delivery_id"),
-                    "artifact": artifact_name,
-                    "newer_chapters": newer,
-                    "built_at": datetime.fromtimestamp(built, tz=UTC).isoformat(),
-                })
+                stale.append(
+                    {
+                        "delivery_id": item.get("delivery_id"),
+                        "artifact": artifact_name,
+                        "newer_chapters": newer,
+                        "built_at": datetime.fromtimestamp(built, tz=UTC).isoformat(),
+                    }
+                )
         return stale
 
     # Fallback to inspecting output_dir files matching naming convention
@@ -77,12 +79,14 @@ def check_delivery_staleness(
 
         newer = sorted(c for c in covered if chapter_mtimes.get(c, 0) > built)
         if newer:
-            stale.append({
-                "delivery_id": delivery.stem,
-                "artifact": delivery.name,
-                "newer_chapters": newer,
-                "built_at": datetime.fromtimestamp(built, tz=UTC).isoformat(),
-            })
+            stale.append(
+                {
+                    "delivery_id": delivery.stem,
+                    "artifact": delivery.name,
+                    "newer_chapters": newer,
+                    "built_at": datetime.fromtimestamp(built, tz=UTC).isoformat(),
+                }
+            )
 
     return stale
 

@@ -161,9 +161,7 @@ class TestNASSyncer(unittest.TestCase):
         mock_sftp = MagicMock()
         # Mock full/ directory containing an M4B
         mock_sftp.listdir.side_effect = lambda path: (
-            ["Test Novel.m4b"] if "full" in path else (
-                ["Part 01 - Chapters 1-3-r1.m4b"] if "parts" in path else []
-            )
+            ["Test Novel.m4b"] if "full" in path else (["Part 01 - Chapters 1-3-r1.m4b"] if "parts" in path else [])
         )
         mock_sftp.stat.return_value = MagicMock(st_size=2048)
 
@@ -187,6 +185,7 @@ class TestNASSyncer(unittest.TestCase):
         ch_dir = self.project_dir / "chapters"
         ch_dir.mkdir(parents=True, exist_ok=True)
         import wave
+
         for ch_num in (1, 3):
             with wave.open(str(ch_dir / f"chapter_{ch_num:03d}.wav"), "wb") as w:
                 w.setnchannels(1)

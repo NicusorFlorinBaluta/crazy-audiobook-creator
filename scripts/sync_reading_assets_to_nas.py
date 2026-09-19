@@ -3,6 +3,7 @@
 Generates synchronized lyrics and ebook reader JSON files for each chapter of a book
 and uploads them atomically to /mnt/nas/media/crazybooks/{project_id}/lyrics/ and /reader/.
 """
+
 from __future__ import annotations
 
 import argparse

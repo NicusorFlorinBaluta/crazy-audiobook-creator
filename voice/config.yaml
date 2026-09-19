@@ -102,7 +102,7 @@ validation:
     enabled: true
     min_duration_seconds: 1.0
     pitch_cv_threshold: 0.06
-    dynamic_range_threshold: 4.0
+    dynamic_range_threshold: 5.29
 
   # Text normalization for WER
   normalize_text: true

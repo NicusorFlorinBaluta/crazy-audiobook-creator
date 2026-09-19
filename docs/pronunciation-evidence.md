@@ -127,6 +127,8 @@ as their own entry kind, so one masking a failure shows up in the report rather
 than having to be guessed at: `the-finest-edge-of-twilight-book` carries four,
 of which `Janquay`, `Artemis Entreri` and `Jarlaxle` are measured `unstable`.
 
+Identity mappings (`"Term": "Term"`) are rejected at write time by the pronunciation router, and `build_pronunciation_inventory` treats them as unmapped rather than verified so they cannot artificially inflate coverage. Furthermore, candidate generation targets the specific failure modes (`heard_as` transcript patterns, such as word-splitting or intervocalic flapping) rather than echoing the raw term.
+
 ## What this cannot fix
 
 The lexicon substitutes a *spelling*. Nothing constrains which phonemes the

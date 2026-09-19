@@ -467,11 +467,7 @@ def get_speaker_voice_mapping(project_dir: Path | str) -> dict[str, str]:
             cast_data = json.loads(cast_file.read_text(encoding="utf-8"))
             for voice_id, profile in cast_data.get("voices", {}).items():
                 for assigned_speaker in profile.get("assigned_characters", []):
-                    speaker_id = (
-                        assigned_speaker.get("id")
-                        if isinstance(assigned_speaker, dict)
-                        else assigned_speaker
-                    )
+                    speaker_id = assigned_speaker.get("id") if isinstance(assigned_speaker, dict) else assigned_speaker
                     if speaker_id:
                         speaker_to_voice[speaker_id] = voice_id
         except (OSError, json.JSONDecodeError):

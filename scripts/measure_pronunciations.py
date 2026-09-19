@@ -58,6 +58,7 @@ def _entries_to_measure(
     project_dir: Path,
     recs: dict[str, Any],
     proposed: dict[str, Any],
+    script_lines: Any = None,
 ) -> dict[str, dict[str, Any]]:
     """Every term whose pronunciation this book has a stake in.
 
@@ -125,7 +126,31 @@ def _entries_to_measure(
     # report with a term nobody will ever respell. A proposed respelling that
     # is actually being applied arrives above via `active`; one that is not is
     # not a pronunciation this book has a stake in.
-    return {fields.pop("term"): fields for fields in entries.values()}
+    unfiltered = {fields.pop("term"): fields for fields in entries.values()}
+
+    # Drop any term with 0 occurrences in this book's script before reporting
+    # (e.g. global lexicon entries for other books that do not appear here).
+    if script_lines is None:
+        script_file = project_dir / "book_script.json"
+        if script_file.is_file():
+            try:
+                sdata = json.loads(script_file.read_text(encoding="utf-8"))
+                script_lines = [
+                    line.get("text", "") for chapter in sdata.get("chapters", []) for line in chapter.get("lines", [])
+                ]
+            except (OSError, ValueError):
+                pass
+
+    if script_lines:
+        all_text = " ".join(script_lines)
+        filtered: dict[str, dict[str, Any]] = {}
+        for term, fields in unfiltered.items():
+            pat = re.compile(rf"(?<![A-Za-z0-9]){re.escape(term)}(?![A-Za-z0-9])", re.IGNORECASE)
+            if pat.search(all_text):
+                filtered[term] = fields
+        return filtered
+
+    return unfiltered
 
 
 def _evidence_is_current(project_dir: Path, connection: Any, project_id: str) -> tuple[bool, str]:
@@ -155,7 +180,6 @@ def main() -> int:
         for term, value in recs.items()
         if isinstance(value, dict) and str(value.get("default", "")).casefold() != term.casefold()
     }
-    entries = _entries_to_measure(project_dir, recs, proposed)
 
     script = json.loads(script_path.read_text(encoding="utf-8"))
     line_texts = {
@@ -163,6 +187,7 @@ def main() -> int:
         for chapter in script.get("chapters", [])
         for line in chapter.get("lines", [])
     }
+    entries = _entries_to_measure(project_dir, recs, proposed, script_lines=line_texts.values())
     with sqlite3.connect(STATE_DB) as connection:
         transcripts = transcripts_for_project(connection, args.project_id)
         evidence_current, freshness = _evidence_is_current(project_dir, connection, args.project_id)
@@ -243,9 +268,7 @@ def main() -> int:
     for term, item in evidence.items():
         if term not in recs:
             continue
-        if item.verdict == "mispronounced" or (
-            item.verdict == "spoken_correctly" and entries[term].get("applied")
-        ):
+        if item.verdict == "mispronounced" or (item.verdict == "spoken_correctly" and entries[term].get("applied")):
             kept += 1
             continue
         # Anything not measured as wrong is reset to itself, which the loader

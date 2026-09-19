@@ -22,7 +22,7 @@ from shared.artifacts import (
     build_segment_manifest,
     format_chapter_set,
 )
-from shared.constants import Gender
+from shared.constants import Gender, is_non_spoken_separator
 from shared.models import (
     BookMetadata,
     Character,
@@ -2605,3 +2605,78 @@ class VoiceGenerationConfigResolutionTests(unittest.TestCase):
             finally:
                 os.chdir(original)
         self.assertEqual(from_root, from_elsewhere)
+
+
+class SeparatorScriptingTests(unittest.TestCase):
+    def test_separators_produced_as_narrator_non_spoken_quote_empty_emotion(self) -> None:
+        generator = ScriptGenerator(ollama=MagicMock())
+        for text in ("—", "---", "***", "* * *"):
+            with self.subTest(text=text):
+                self.assertTrue(is_non_spoken_separator(text))
+                fragments = [
+                    SourceFragment(text="First sentence.", start=0, end=15),
+                    SourceFragment(text=text, start=16, end=16 + len(text)),
+                    SourceFragment(text="Second sentence.", start=17 + len(text), end=33 + len(text)),
+                ]
+                raw_response = {
+                    "scenes": [],
+                    "lines": [
+                        {"id": 0, "speaker": "narrator", "emotion": "neutral", "speed": 1.0},
+                        {
+                            "id": 1,
+                            "speaker": "bedorijay",
+                            "emotion": "furious roar",
+                            "speed": 1.2,
+                            "dialogue_kind": "spoken",
+                        },
+                        {"id": 2, "speaker": "narrator", "emotion": "neutral", "speed": 1.0},
+                    ],
+                }
+                chapter = generator._parse_script_chapter(
+                    raw=raw_response,
+                    fragments=fragments,
+                    fallback_number=1,
+                    fallback_title="Chapter 1",
+                    allowed_speakers={"narrator", "bedorijay"},
+                )
+                sep_line = chapter.lines[1]
+                self.assertEqual(sep_line.speaker, "narrator")
+                self.assertEqual(sep_line.emotion, "")
+                self.assertEqual(sep_line.dialogue_kind, "non_spoken_quote")
+                self.assertEqual(sep_line.speaker_confidence, 1.0)
+                self.assertFalse(sep_line.attribution_review_required)
+
+    def test_spoken_punctuation_is_not_treated_as_separator(self) -> None:
+        for text in ("?", "...", "!", "?!"):
+            with self.subTest(text=text):
+                self.assertFalse(is_non_spoken_separator(text))
+
+    def test_assert_script_covers_source_with_separators(self) -> None:
+        generator = ScriptGenerator(ollama=MagicMock())
+        source = "Before the break.\n\n* * *\n\nAfter the break."
+        fragments = [
+            SourceFragment(text="Before the break.", start=0, end=17),
+            SourceFragment(text="* * *", start=19, end=24),
+            SourceFragment(text="After the break.", start=26, end=42),
+        ]
+        raw_response = {
+            "scenes": [],
+            "lines": [
+                {"id": 0, "speaker": "narrator", "emotion": "neutral", "speed": 1.0},
+                {"id": 1, "speaker": "narrator", "emotion": "", "speed": 1.0},
+                {"id": 2, "speaker": "narrator", "emotion": "neutral", "speed": 1.0},
+            ],
+        }
+        chapter = generator._parse_script_chapter(
+            raw=raw_response,
+            fragments=fragments,
+            fallback_number=1,
+            fallback_title="Chapter 1",
+            allowed_speakers={"narrator"},
+        )
+        grouped = generator._group_adjacent_utterances(chapter, source)
+        assert_script_covers_source(grouped, source)
+        self.assertEqual(len(grouped.lines), 3)
+        self.assertEqual(grouped.lines[1].dialogue_kind, "non_spoken_quote")
+        self.assertEqual(grouped.lines[1].speaker, "narrator")
+        self.assertEqual(grouped.lines[1].emotion, "")

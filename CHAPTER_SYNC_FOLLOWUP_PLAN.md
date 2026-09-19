@@ -72,7 +72,7 @@ is ever flipped on, the caller's cap becomes the `configured_cap` input and the
 `minimum_tokens` floor raises it back:
 
 ```python
-generation_config["max_new_tokens"] = int(max_new_tokens)          # 300
+generation_config["max_new_tokens"] = int(max_new_tokens)  # 300
 ...
 adaptive_cap = max(512, min(300, base_tokens + len(text) * 10.0))  # -> 512
 ```

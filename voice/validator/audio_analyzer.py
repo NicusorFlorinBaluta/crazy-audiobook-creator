@@ -223,16 +223,41 @@ class AudioAnalyzer:
         return False
 
     @staticmethod
-    def _expected_duration(text: str, speed: float) -> float:
-        """Calculate expected duration based on word count and speed."""
+    def _estimate_syllables_in_word(word: str) -> int:
+        """Estimate syllable count in a single word using vowel-group counting."""
+        w = re.sub(r"[^A-Za-z]", "", word).lower()
+        if not w:
+            return 0
+        # Common silent e and ed endings
+        if w.endswith("e") and not w.endswith("le") and len(w) > 2 and not w.endswith("ee"):
+            w_stem = w[:-1]
+        elif w.endswith("ed") and len(w) > 3 and not (w.endswith("ted") or w.endswith("ded")):
+            w_stem = w[:-2]
+        else:
+            w_stem = w
+        vowel_runs = re.findall(r"[aeiouy]+", w_stem)
+        return max(1, len(vowel_runs))
+
+    @classmethod
+    def _expected_duration(cls, text: str, speed: float) -> float:
+        """Calculate expected duration based on estimated syllables and speed.
+
+        Falls back to word count when syllable estimation returns 0.
+        """
         if not text:
             return 0.0
 
-        # Treat punctuation-separated words as distinct spoken words. A plain
-        # whitespace split undercounts prose such as "white-faintly" and
-        # "Starling-finally-felt", producing false slow-duration failures.
-        word_count = len(re.findall(r"[^\W_]+(?:['’][^\W_]+)*|\d+", text, re.UNICODE))
-        wpm = AVERAGE_WORDS_PER_MINUTE * speed
-        expected_seconds = (word_count / wpm) * 60
+        # Treat punctuation-separated words as distinct spoken words.
+        words = re.findall(r"[^\W_]+(?:['’][^\W_]+)*|\d+", text, re.UNICODE)
+        word_count = len(words)
+        if word_count == 0:
+            return 0.0
 
-        return expected_seconds
+        syllables = sum(cls._estimate_syllables_in_word(w) for w in words)
+        if syllables > 0:
+            # Average English word is ~1.5 syllables; scale average rate accordingly
+            average_spm = (AVERAGE_WORDS_PER_MINUTE * 1.5) * speed
+            return (syllables / average_spm) * 60
+
+        wpm = AVERAGE_WORDS_PER_MINUTE * speed
+        return (word_count / wpm) * 60

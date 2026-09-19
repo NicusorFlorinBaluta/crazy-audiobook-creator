@@ -134,6 +134,14 @@ speaker, or severity. Reviewed items remain collapsed under **Show reviewed**.
 Changes enable the row's save button, and visible filtered items can be marked
 acceptable as a confirmed batch action.
 
+## Review Gate and Attention Required
+
+The Attention Required inbox and pre-master release report aggregate review work across attribution, pronunciation, audio segments, and voice trends:
+- **Ranked worklist**: Items are ordered with blocking items first, followed by actionable changes ordered by impact. Pronunciation candidates are ranked by script occurrences descending, so frequent names (e.g. 1,000+ mentions) sit at the top rather than being buried alphabetically.
+- **Audio trend collapsing**: Voice prosody warnings across chapters are collapsed to one summary row per voice, presenting the total warning count, chapters affected, and the worst measured variation.
+- **Audio rejection grouping**: Audio segment rejections sharing the same glossary term in their rejection reason are grouped into a single fix row detailing all affected segment IDs and chapters.
+- **Top actions**: The pre-master release report surfaces a `top_actions` array capped at the 10 highest-value items across all categories for fast operator triage.
+
 ## In-Car & Mobile Playback Flags
 
 Auditioning in a vehicle or on mobile often reveals subtle attribution or delivery defects that automated gates cannot detect. The **🚩 Playback Flags** tab provides an interactive triage center for reports submitted from Android Auto and the companion mobile app:

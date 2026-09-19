@@ -117,6 +117,7 @@ script:
   # `mastering`. Six *_pause_ms keys used to sit here reading like the timing
   # controls and were read by nothing at all.
   max_unique_voices: 0            # 0 = unlimited; every named character gets their own voice
+  pause_marker_silence_seconds: 0.1 # Silence duration (s) for scene-break separator markers
   chunk_size_words: 1200
   chunk_overlap_words: 0
 # Local dashboard
@@ -301,3 +302,8 @@ schedule:
     - Friday
     start: 09:00
     end: '19:00'
+
+# Prosody and monotone delivery quality trends thresholds
+prosody:
+  pitch_cv_threshold: 0.06
+  dynamic_range_threshold: 5.29

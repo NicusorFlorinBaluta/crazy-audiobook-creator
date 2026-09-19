@@ -20,7 +20,7 @@ class ProsodyScorer:
         enabled: bool = True,
         min_duration_seconds: float = 1.0,
         pitch_cv_threshold: float = 0.06,
-        dynamic_range_threshold: float = 4.0,
+        dynamic_range_threshold: float = 5.29,
     ):
         self.sample_rate = sample_rate
         self.enabled = enabled
@@ -77,10 +77,12 @@ class ProsodyScorer:
             else:
                 dynamic_range = 0.0
 
-            # Heuristics for "monotone" delivery
-            # These thresholds are empirical and should be tuned.
-            # A low pitch coefficient of variation (< 0.05) and low dynamic range (< 5.0) often means flat.
-            is_monotone = pitch_cv < self.pitch_cv_threshold and dynamic_range < self.dynamic_range_threshold
+            # Heuristics for "monotone" delivery.
+            # Low pitch_cv (< 0.06) is the primary signal; dynamic range (< 5.29, p05)
+            # acts as corroboration for borderline pitch variation rather than a veto.
+            is_monotone = (pitch_cv < self.pitch_cv_threshold) or (
+                dynamic_range < self.dynamic_range_threshold and pitch_cv < (self.pitch_cv_threshold * 1.5)
+            )
 
             return {
                 "pitch_std_hz": pitch_std,

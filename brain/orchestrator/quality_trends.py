@@ -7,6 +7,7 @@ safe to update after every completed chapter.
 
 from __future__ import annotations
 
+import contextlib
 from collections import defaultdict
 from collections.abc import Iterable
 from datetime import UTC, datetime
@@ -35,6 +36,72 @@ def _relative_spread(values: list[float]) -> float | None:
     return round(stdev(usable) / centre, 6)
 
 
+def _is_near_silent(row: dict[str, Any], rms_floor_dbfs: float = -45.0) -> bool:
+    """Return True if row has an RMS or peak level indicating near-silence."""
+    metrics = row.get("metrics")
+    rms = None
+    if isinstance(metrics, dict) and "rms_dbfs" in metrics:
+        rms = metrics.get("rms_dbfs")
+    elif "rms_dbfs" in row:
+        rms = row.get("rms_dbfs")
+    if rms is not None:
+        try:
+            return float(rms) < rms_floor_dbfs
+        except (ValueError, TypeError):
+            pass
+    peak = None
+    if isinstance(metrics, dict) and "peak_dbfs" in metrics:
+        peak = metrics.get("peak_dbfs")
+    elif "peak_dbfs" in row:
+        peak = row.get("peak_dbfs")
+    if peak is not None:
+        try:
+            return float(peak) < -50.0
+        except (ValueError, TypeError):
+            pass
+    return False
+
+
+def _load_prosody_thresholds() -> tuple[float, float]:
+    """Load pitch_cv and dynamic_range thresholds from brain config."""
+    pitch_cv = 0.06
+    dr = 5.29
+    with contextlib.suppress(Exception):
+        from shared.paths import brain_config
+
+        cfg = brain_config()
+        prosody = cfg.get("prosody", {})
+        if "pitch_cv_threshold" in prosody:
+            pitch_cv = float(prosody["pitch_cv_threshold"])
+        if "dynamic_range_threshold" in prosody:
+            dr = float(prosody["dynamic_range_threshold"])
+    return pitch_cv, dr
+
+
+def _is_monotone_row(
+    row: dict[str, Any],
+    pitch_cv_thresh: float = 0.06,
+    dr_thresh: float = 5.29,
+) -> bool:
+    """Evaluate if row exhibits monotone delivery using primary pitch and corroborating dynamic range."""
+    if row.get("monotone_warning"):
+        return True
+    pitch_cv = row.get("pitch_cv")
+    if pitch_cv is None or float(row.get("duration_seconds") or 0) < 1.0:
+        return False
+    peak = row.get("peak_dbfs")
+    metrics = row.get("metrics")
+    rms = metrics.get("rms_dbfs") if isinstance(metrics, dict) else row.get("rms_dbfs")
+    if peak is not None and rms is not None:
+        try:
+            dr = 10 ** ((float(peak) - float(rms)) / 20)
+        except (ValueError, TypeError, OverflowError):
+            dr = 999.0
+    else:
+        dr = 999.0
+    return bool(pitch_cv < pitch_cv_thresh or (dr < dr_thresh and pitch_cv < (pitch_cv_thresh * 1.5)))
+
+
 def _within_chapter_consistency(
     details_rows: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -53,21 +120,38 @@ def _within_chapter_consistency(
     seeding change something to be evaluated against.
     """
     ordered = sorted(details_rows, key=lambda row: str(row.get("line_id", "")))
-    pitches = [float(row.get("pitch_median") or 0.0) for row in ordered]
+    pitches: list[float] = []
     rates: list[float] = []
     for row in ordered:
+        if _is_near_silent(row):
+            pitches.append(0.0)
+        else:
+            pitches.append(float(row.get("pitch_median") or 0.0))
         duration = float(row.get("duration_seconds") or 0.0)
         characters = int(row.get("text_characters") or 0)
         if duration > 0 and characters > 0:
             rates.append(characters / duration)
 
-    voiced_pitches = [value for value in pitches if value > 0]
+    voiced: list[tuple[str, float]] = []
+    for row in ordered:
+        if _is_near_silent(row):
+            continue
+        p = float(row.get("pitch_median") or 0.0)
+        if p > 0:
+            voiced.append((str(row.get("line_id", "")), p))
+
+    voiced_line_ids = [lid for lid, _ in voiced]
+    voiced_pitches = [p for _, p in voiced]
+
     largest_jump: float | None = None
+    largest_jump_between: tuple[str, str] | None = None
     if len(voiced_pitches) >= 2:
         centre = median(voiced_pitches)
         if centre > 0:
             jumps = [abs(later - earlier) / centre for earlier, later in zip(voiced_pitches, voiced_pitches[1:])]
-            largest_jump = round(max(jumps), 6)
+            peak = max(range(len(jumps)), key=jumps.__getitem__)
+            largest_jump = round(jumps[peak], 6)
+            largest_jump_between = (voiced_line_ids[peak], voiced_line_ids[peak + 1])
 
     pitch_spread = _relative_spread(pitches)
     rate_spread = _relative_spread(rates)
@@ -87,6 +171,7 @@ def _within_chapter_consistency(
         "pitch_relative_spread": pitch_spread,
         "speaking_rate_relative_spread": rate_spread,
         "largest_adjacent_pitch_jump_ratio": largest_jump,
+        "largest_adjacent_pitch_jump_between": largest_jump_between,
         "warnings": warnings,
     }
 
@@ -124,11 +209,16 @@ def build_long_form_quality_report(
 
     chapter_rows: list[dict[str, Any]] = []
     by_voice: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    pitch_cv_thresh, dr_thresh = _load_prosody_thresholds()
     for (voice_id, chapter_number), details_rows in sorted(buckets.items()):
         similarities = [
             float(row["speaker_similarity"]) for row in details_rows if row.get("speaker_similarity") is not None
         ]
-        pitches = [float(row["pitch_median"]) for row in details_rows if float(row.get("pitch_median") or 0) > 0]
+        pitches = [
+            float(row["pitch_median"])
+            for row in details_rows
+            if float(row.get("pitch_median") or 0) > 0 and not _is_near_silent(row)
+        ]
         eligible_prosody = [row for row in details_rows if float(row.get("duration_seconds") or 0) >= 1.0]
         item = {
             "voice_id": voice_id,
@@ -138,7 +228,8 @@ def build_long_form_quality_report(
             "pitch_median_hz": median(pitches) if pitches else None,
             "prosody_eligible_segments": len(eligible_prosody),
             "monotone_fraction": (
-                sum(bool(row.get("monotone_warning")) for row in eligible_prosody) / len(eligible_prosody)
+                sum(bool(_is_monotone_row(row, pitch_cv_thresh, dr_thresh)) for row in eligible_prosody)
+                / len(eligible_prosody)
                 if eligible_prosody
                 else None
             ),

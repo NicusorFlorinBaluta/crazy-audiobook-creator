@@ -72,7 +72,7 @@ scratch-runner concurrency.
      generation/export remain blocked until every review item is resolved.
 4. **Bootstrapping** (`bootstrapping`): Speaking cast derived, voice design directions compiled, reference audio generated via Qwen VoiceDesign. The long request streams phase/count events for model loading, reference design, transcript validation, acoustic measurement, and cast comparison; the orchestrator maps those events into the canonical progress schema. Qwen speaker-encoder embeddings provide the primary distinctness signal; a 514-value normalized log-spectrogram summary provides a model-independent fallback diagnostic.
 5. **Voice Review** (`voice_review`): Automated pause gate for user approval. Displays voice cards, preview players, and `[Approve voices & continue]` action banner.
-6. **Generating** (`generating`): Qwen3-TTS synthesizes chapter audio line by line with dynamic contextual pauses (250ms same speaker, 380ms narrator, 400ms quote-to-action, 450ms turn change, 900ms paragraph break).
+6. **Generating** (`generating`): Qwen3-TTS synthesizes chapter audio line by line with dynamic contextual pauses (250ms same speaker, 380ms narrator, 400ms quote-to-action, 450ms turn change, 900ms paragraph break). Scene-break separators emit clean silence (`pause_marker_silence_seconds`, default 0.1s) and auto-pass validation without engine synthesis.
 7. **Validating** (`validating`): Whisper Speech-to-Text transcribes audio to verify Word Error Rate (WER), acoustic clipping, and length bounds.
 8. **Mastering** (`mastering`): Chapter audio assembled with chapter announcements, crossfading, and LUFS volume normalization.
 9. **Exporting** (`exporting`): Mastered chapter WAVs packaged as chaptered M4B (AAC) with metadata and embedded cover art.
@@ -441,9 +441,8 @@ When modifying or introducing new pipeline features, developers and AI agents MU
      method definitions in `ScriptGenerator` (one pair with *incompatible*
      contracts), and `F821` caught calls to a `ProgressEvent` class that was
      never written. Manual audits missed both, repeatedly.
-   - Then run unit test discovery (`python -m unittest discover -s tests -p "test_*.py"`) and verify project reset/progress flows after making backend schema or stage changes.
-   - `pre-commit install` runs the same lint gate locally. `ruff format` is
-     intentionally not enforced yet; adopt it in a dedicated commit.
+    - Then run tests using `pytest` (`python -m pytest tests`) or unit test discovery (`python -m unittest discover -s tests -p "test_*.py"`) and verify project reset/progress flows after making backend schema or stage changes.
+    - `pre-commit install` and CI enforce `ruff check .` and `ruff format --check --diff .`.
    - Paths must resolve through `shared/paths.py`, not bare relative literals.
      A working-directory-relative `voice/config.yaml` read previously returned
      `{}` when launched from elsewhere, silently dropping the TTS and

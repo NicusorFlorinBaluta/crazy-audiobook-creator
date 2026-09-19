@@ -158,7 +158,9 @@ class TestGenericTagsAgainstDescriptors:
             ],
         )
         chapter.lines[0].attribution_review_required = True
-        chapter.lines[0].attribution_review_reason = (
+        chapter.lines[
+            0
+        ].attribution_review_reason = (
             "The attached speech tag describes the speaker in terms that fit 'minor_female', not 'woman_of_family'."
         )
 

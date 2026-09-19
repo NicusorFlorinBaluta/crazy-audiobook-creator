@@ -54,9 +54,7 @@ def test_rewrite_manifest_segment(tmp_path: Path):
             {"line_id": "c001_0002", "output_hash": "hash-2"},
         ],
     }
-    initial_manifest["manifest_hash"] = fingerprint(
-        {k: v for k, v in initial_manifest.items() if k != "manifest_hash"}
-    )
+    initial_manifest["manifest_hash"] = fingerprint({k: v for k, v in initial_manifest.items() if k != "manifest_hash"})
     manifest_path.write_text(json.dumps(initial_manifest), encoding="utf-8")
 
     # Update line 1
@@ -80,9 +78,7 @@ def test_rewrite_cache_fingerprint(tmp_path: Path):
             "create table generation_fingerprints ("
             "project_id text, line_id text, output_hash text, primary key (project_id, line_id))"
         )
-        conn.execute(
-            "insert into generation_fingerprints values ('proj1', 'c001_0001', 'old-cache-hash')"
-        )
+        conn.execute("insert into generation_fingerprints values ('proj1', 'c001_0001', 'old-cache-hash')")
 
     assert rewrite_cache_fingerprint(cache_db, "proj1", "c001_0001", "new-cache-hash") is True
     assert rewrite_cache_fingerprint(cache_db, "proj1", "c001_9999", "new-cache-hash") is False
@@ -140,9 +136,7 @@ def test_replace_segment_end_to_end(tmp_path: Path):
 
     # Setup DBs
     with sqlite3.connect(cache_db) as conn:
-        conn.execute(
-            "create table generation_fingerprints (project_id text, line_id text, output_hash text)"
-        )
+        conn.execute("create table generation_fingerprints (project_id text, line_id text, output_hash text)")
         conn.execute("insert into generation_fingerprints values ('test-book', 'c002_0001', 'old-hash')")
     with sqlite3.connect(state_db) as conn:
         conn.execute(
@@ -169,7 +163,9 @@ def test_replace_segment_end_to_end(tmp_path: Path):
     manifest_data["manifest_hash"] = fingerprint({k: v for k, v in manifest_data.items() if k != "manifest_hash"})
     manifest_path.write_text(json.dumps(manifest_data), encoding="utf-8")
 
-    val = QualityResult(line_id="c002_0001", wer=0.02, quality_score=0.98, status="pass", transcribed_text="Drizzt Do'Urden")
+    val = QualityResult(
+        line_id="c002_0001", wer=0.02, quality_score=0.98, status="pass", transcribed_text="Drizzt Do'Urden"
+    )
 
     result = replace_segment(
         "test-book",

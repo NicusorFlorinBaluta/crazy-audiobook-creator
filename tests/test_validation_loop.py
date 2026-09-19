@@ -871,6 +871,7 @@ class ValidationLoopTests(unittest.TestCase):
 
     def test_selective_revalidation_when_pronunciation_updated(self) -> None:
         """When a pronunciation changes, only lines containing that term revalidate."""
+
         class MatchWhisper(FakeWhisper):
             def __init__(self) -> None:
                 super().__init__()
@@ -1353,4 +1354,3 @@ class SttUnavailableTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -480,7 +480,8 @@ def _run_voice_bootstrap(
         except Exception as e:
             import traceback
 
-            with open("voice_crash.log", "a") as f:
+            crash_log_path = shared_paths.repo_path("voice_crash.log")
+            with open(crash_log_path, "a", encoding="utf-8", errors="replace") as f:
                 f.write(f"Crash in bootstrap_voices: {e}\n{traceback.format_exc()}\n")
             raise
         finally:

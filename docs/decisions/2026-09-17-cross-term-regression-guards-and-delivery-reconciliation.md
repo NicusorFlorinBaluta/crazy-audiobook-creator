@@ -60,9 +60,7 @@ A segment repair cannot simply overwrite a WAV file on disk. Four independent st
 ### Decision
 `measure_pronunciations.py --apply` now explicitly preserves active working substitutions:
 ```python
-if item.verdict == "mispronounced" or (
-    item.verdict == "spoken_correctly" and entries[term].get("applied")
-):
+if item.verdict == "mispronounced" or (item.verdict == "spoken_correctly" and entries[term].get("applied")):
     kept += 1
     continue
 ```

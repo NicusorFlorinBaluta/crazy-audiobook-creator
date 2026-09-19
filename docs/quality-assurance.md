@@ -16,7 +16,7 @@ For each attempt the validator records:
 - Qwen speaker-encoder similarity to the selected reference voice
 - final `pass`, `accepted_with_warning`, `flagged`, or `fail` status and notes
 - text similarity, effective text error, attempt number, and the exact acceptance reason
-- nonblocking pitch-variation/dynamic-range metrics and a calibrated monotone warning when prosody diagnostics are enabled
+- nonblocking pitch-variation/dynamic-range metrics and a calibrated monotone warning (low pitch_cv < 0.06 as primary signal; dynamic range < 5.29 corroborating borderline variation) when prosody diagnostics are enabled
 
 WER, clipping, speaker similarity, and prosody checks do not prove perceptual
 cleanliness. The 2026-08-09 run passed those objective gates while many
@@ -37,14 +37,15 @@ rather than crashing the chapter evaluation.
 
 Hard failures include:
 
-- WER above `validation.wer_threshold` (post-FX emotion labels do not relax this unless an explicit nonzero `emotion_wer_allowance` is configured)
+- WER above `validation.wer_threshold` (post-FX emotion labels do not relax this unless an explicit nonzero `emotion_wer_allowance` is configured; dialect standardisations in `DIALECT_NORMALISATIONS` and the `-in' -> -ing` suffix rule are symmetrically applied to both reference and hypothesis in `WhisperValidator._normalize_text` to prevent false rejections of in-character dialogue; single-word interjections in `INTERJECTION_HOMOPHONES` like "Aye" -> "I" are accepted on acoustic pass without blind redraws)
 - clipped samples beyond the configured peak threshold
 - excessive silence
 - severe duration/pacing anomaly
 - speaker similarity below `speaker_similarity_threshold`
 - missing, empty, or unreadable audio
 
-Compact spelling similarity is not a general escape hatch for transcription failures. It is considered only when the expected line contains an explicitly approved character name or pronunciation-dictionary term. This accommodates predictable ASR spellings such as fantasy names without allowing unrelated words to pass.
+Compact spelling similarity is not a general escape hatch for transcription failures. It is considered only when the expected line contains an explicitly approved character name or pronunciation-dictionary term. This accommodates predictable ASR spellings such as fantasy names without allowing unrelated words to pass. Furthermore, when a validation failure's only difference is an unrecognised glossary term (`glossary_only_miss`), the retry loop stops after the initial attempt to preserve retry budget and record the term for lexicon triage instead of burning redraws.
+
 
 Pronunciation substitutions never replace authored script text. They are
 carried as a separate synthesis-only spoken form, included in generation
@@ -135,6 +136,8 @@ chapter:
 | `pitch_relative_spread` | stdev / median of `pitch_median` across the chapter's accepted lines |
 | `speaking_rate_relative_spread` | same, for characters per audio second |
 | `largest_adjacent_pitch_jump_ratio` | biggest line-to-line pitch change, relative to the chapter median |
+| `largest_adjacent_pitch_jump_between` | specific pair of `line_id`s where the maximum adjacent jump occurred |
+| `monotone_fraction` | proportion of prosody-eligible segments flagged for monotone delivery (recalibrated 2026-09-19; note that ~103 segments moved from `PASS` to `ACCEPTED_WITH_WARNING`, so run-to-run 'not clean' warning comparisons across this version boundary are not like-for-like) |
 
 These are **warning-only** and never block a release. They are computed
 entirely from measurements already paid for during validation, so they add no
@@ -324,3 +327,18 @@ the reported winner while all attempts still count toward retry metrics.
 Automated acceptance is not the final listening gate. The Quality tab preserves
 join dispositions and exposes both adjacent segments; accepted warnings and
 every retry attempt remain separately reviewable.
+
+## Export Quality Manifest
+
+The delivery packaging stage writes `export_quality.json` (or `export_quality_part_NNN.json` for partial batch exports).
+Alongside packaging metadata (`partial`, `chapters`, `output_file`) and book-wide loudness statistics
+(`book_loudness`), it records an `accepted_failures` array. This lists every line whose selected take
+failed deterministic validation hard gates (`passed_hard_gates: False`, such as word error rate or acoustic
+thresholds) but was cleared by a human operator under an accepted disposition (`acceptable`, `approved`).
+Each entry contains:
+- `line_id`: Unique script line identifier.
+- `chapter`: Chapter number.
+- `wer`: Word error rate recorded for the take.
+- `authored_text`: Authored line text from the chapter script.
+- `transcript`: ASR transcript produced during validation.
+

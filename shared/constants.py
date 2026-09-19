@@ -1,5 +1,6 @@
 """Shared constants and enums used across Brain and Voice services."""
 
+import contextlib
 from enum import StrEnum
 
 # ---------------------------------------------------------------------------
@@ -242,6 +243,7 @@ def apply_torch_alloc_conf(env: dict[str, str]) -> dict[str, str]:
 # Non-spoken separator markers
 # ---------------------------------------------------------------------------
 
+
 #: Length of the placeholder silence written in place of a scene-break marker.
 #:
 #: Deliberately minimal, and **not** the length of the pause a listener hears.
@@ -257,7 +259,25 @@ def apply_torch_alloc_conf(env: dict[str, str]) -> dict[str, str]:
 #: True of the placeholder in isolation, irrelevant in context, and it added a
 #: third uncombined source of silence that the assembler's one-timing-owner
 #: rule exists to prevent. Reverted the same day; see the review record.
-PAUSE_MARKER_SILENCE_SECONDS = 0.1
+#: Configurable via `script.pause_marker_silence_seconds` in `brain/config.yaml`.
+def _load_pause_marker_silence_seconds() -> float:
+    with contextlib.suppress(Exception):
+        from shared.paths import brain_config
+
+        cfg = brain_config()
+        val = cfg.get("script", {}).get("pause_marker_silence_seconds")
+        if val is not None:
+            return float(val)
+    return 0.1
+
+
+PAUSE_MARKER_SILENCE_SECONDS: float = _load_pause_marker_silence_seconds()
+
+
+def get_pause_marker_silence_seconds() -> float:
+    """Return configured silence duration in seconds for scene-break markers."""
+    return _load_pause_marker_silence_seconds()
+
 
 #: Characters a line may consist of and still be a separator rather than
 #: speech. Deliberately narrow: "no alphanumerics" would also swallow a line of
@@ -280,3 +300,35 @@ def is_non_spoken_separator(text: str | None) -> bool:
     if any(char.isalnum() for char in stripped):
         return False
     return all(char in _SEPARATOR_CHARS for char in stripped)
+
+
+# ---------------------------------------------------------------------------
+# Dialect normalisations & interjections
+# ---------------------------------------------------------------------------
+
+#: Dialect spellings Whisper silently standardises. WER compares the authored
+#: text against a transcript, so a dwarf who says "ye" is scored against a
+#: transcript that writes "you" and fails for being in character. Applied to
+#: BOTH sides in WhisperValidator._normalize_text, so it can only ever make the
+#: two agree -- it never changes what is synthesised.
+DIALECT_NORMALISATIONS: dict[str, str] = {
+    "ye": "you",
+    "yer": "your",
+    "yerself": "yourself",
+    "telled": "told",
+    "em": "them",
+    "d'ye": "do you",
+    "ain't": "is not",
+    "nay": "no",
+    "bah": "bah",
+}
+
+#: Single-word interjections Whisper renders as a different word entirely
+#: ("Aye" -> "I", "Bah" -> "Bye"). WER on a one-word line is 0 or 1, so these
+#: can never pass the text gate however good the audio is.
+INTERJECTION_HOMOPHONES: dict[str, set[str]] = {
+    "aye": {"i", "aye", "eye"},
+    "bah": {"bah", "bye", "ba"},
+    "nay": {"nay", "neigh"},
+    "hmph": {"hmph", "hm", "hmm"},
+}

@@ -27,7 +27,7 @@ from shared.artifacts import (
     atomic_write_text,
     script_fingerprint,
 )
-from shared.constants import CHUNK_OVERLAP_WORDS, CHUNK_SIZE_WORDS, Gender
+from shared.constants import CHUNK_OVERLAP_WORDS, CHUNK_SIZE_WORDS, Gender, is_non_spoken_separator
 from shared.models import (
     Character,
     CharacterRegistry,
@@ -245,6 +245,8 @@ _SPEECH_VERBS = (
     "teases",
     "scoffed",
     "scoffs",
+    "accused",
+    "accuses",
 )
 
 _SPEECH_VERB_PATTERN = "|".join(re.escape(item) for item in _SPEECH_VERBS)
@@ -2236,7 +2238,13 @@ class ScriptGenerator:
                 raise ValueError(f"Fragment {fragment_index} speed is outside 0.5-2.0")
             item["speed"] = speed
 
-            if not is_dialogue:
+            if is_non_spoken_separator(fragments[fragment_index].text):
+                item["speaker"] = "narrator"
+                item["speaker_confidence"] = 1.0
+                item["speaker_evidence"] = "Non-spoken scene separator."
+                item["dialogue_kind"] = "non_spoken_quote"
+                item["emotion"] = ""
+            elif not is_dialogue:
                 # These values are facts of the source-fragment structure, not
                 # creative decisions worth spending model tokens on.
                 item["speaker"] = "narrator"
@@ -3194,6 +3202,8 @@ class ScriptGenerator:
     @staticmethod
     def _is_dialogue_fragment(text: str) -> bool:
         value = text.strip()
+        if is_non_spoken_separator(value):
+            return False
         if value.startswith(("—", "–")):
             return True
         pairs = (('"', '"'), ("“", "”"), ("‘", "’"), ("'", "'"))
@@ -4226,21 +4236,39 @@ class ScriptGenerator:
             except (TypeError, ValueError):
                 speaker_confidence = None
 
+            if is_non_spoken_separator(fragment.text):
+                speaker = "narrator"
+                speaker_confidence = 1.0
+                speaker_evidence = "Non-spoken scene separator."
+                attribution_review_required = False
+                attribution_review_reason = ""
+                dialogue_kind = "non_spoken_quote"
+                emotion = ""
+            else:
+                dialogue_kind = (
+                    str(meta.get("dialogue_kind"))
+                    if meta.get("dialogue_kind") in {"spoken", "non_spoken_quote", "reported_collective_speech"}
+                    else ("spoken" if is_dialogue and speaker != "narrator" else None)
+                )
+                emotion = str(meta.get("emotion", "neutral"))[:200]
+
             lines.append(
                 ScriptLine(
                     line_id=f"ch{fallback_number:02d}_{global_id:04d}",
                     speaker=speaker,
                     speaker_confidence=speaker_confidence,
-                    speaker_evidence=str(meta.get("speaker_evidence", ""))[:500],
-                    attribution_review_required=bool(meta.get("attribution_review_required", False)),
-                    attribution_review_reason=str(meta.get("attribution_review_reason", ""))[:500],
-                    dialogue_kind=(
-                        str(meta.get("dialogue_kind"))
-                        if meta.get("dialogue_kind") in {"spoken", "non_spoken_quote", "reported_collective_speech"}
-                        else ("spoken" if is_dialogue and speaker != "narrator" else None)
-                    ),
+                    speaker_evidence=str(meta.get("speaker_evidence", ""))[:500]
+                    if not is_non_spoken_separator(fragment.text)
+                    else "Non-spoken scene separator.",
+                    attribution_review_required=bool(meta.get("attribution_review_required", False))
+                    if not is_non_spoken_separator(fragment.text)
+                    else False,
+                    attribution_review_reason=str(meta.get("attribution_review_reason", ""))[:500]
+                    if not is_non_spoken_separator(fragment.text)
+                    else "",
+                    dialogue_kind=dialogue_kind,
                     text=fragment.text,
-                    emotion=str(meta.get("emotion", "neutral"))[:200],
+                    emotion=emotion,
                     speed=speed,
                     pause_before_ms=pause_before,
                     pause_after_ms=pause_after,
@@ -4250,6 +4278,16 @@ class ScriptGenerator:
                     source_end=fragment.end,
                 )
             )
+
+        for line in lines:
+            if is_non_spoken_separator(line.text):
+                line.speaker = "narrator"
+                line.emotion = ""
+                line.dialogue_kind = "non_spoken_quote"
+                line.speaker_confidence = 1.0
+                line.speaker_evidence = "Non-spoken scene separator."
+                line.attribution_review_required = False
+                line.attribution_review_reason = ""
 
         return ScriptChapter(
             chapter_number=fallback_number,
@@ -4395,6 +4433,8 @@ class ScriptGenerator:
                 and "\n\n" not in between
                 and candidate_chars <= target_chars
                 and candidate_words <= max_words
+                and not is_non_spoken_separator(line.text)
+                and not is_non_spoken_separator(previous.text)
             )
             if not can_merge:
                 flush()

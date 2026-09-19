@@ -90,6 +90,27 @@ class WithinChapterConsistencyTests(unittest.TestCase):
         result = _within_chapter_consistency(self._rows([90.0, 180.0, 95.0, 200.0, 100.0, 190.0, 88.0]))
         self.assertIn("within_chapter_pitch_variation", result["warnings"])
         self.assertIn("within_chapter_pitch_jump", result["warnings"])
+        self.assertEqual(result["largest_adjacent_pitch_jump_between"], ("ch01_0003", "ch01_0004"))
+
+    def test_pitch_jump_line_ids_skip_unvoiced_and_silent_segments(self) -> None:
+        """Unvoiced or near-silent segments must not shift the reported line IDs."""
+        rows = [
+            {"line_id": "ch01_0001", "pitch_median": 100.0, "duration_seconds": 2.0, "text_characters": 30},
+            {"line_id": "ch01_0002", "pitch_median": 0.0, "duration_seconds": 2.0, "text_characters": 30},  # unvoiced
+            {
+                "line_id": "ch01_0003",
+                "pitch_median": 105.0,
+                "duration_seconds": 2.0,
+                "text_characters": 30,
+                "metrics": {"rms_dbfs": -60.0},  # near-silent
+            },
+            {"line_id": "ch01_0004", "pitch_median": 350.0, "duration_seconds": 2.0, "text_characters": 30},
+            {"line_id": "ch01_0005", "pitch_median": 100.0, "duration_seconds": 2.0, "text_characters": 30},
+            {"line_id": "ch01_0006", "pitch_median": 100.0, "duration_seconds": 2.0, "text_characters": 30},
+        ]
+        result = _within_chapter_consistency(rows)
+        self.assertIn("within_chapter_pitch_jump", result["warnings"])
+        self.assertEqual(result["largest_adjacent_pitch_jump_between"], ("ch01_0001", "ch01_0004"))
 
     def test_inconsistent_speaking_rate_is_flagged(self) -> None:
         rows = []
@@ -126,6 +147,7 @@ class WithinChapterConsistencyTests(unittest.TestCase):
         self.assertIsNone(result["pitch_relative_spread"])
         self.assertIsNone(result["speaking_rate_relative_spread"])
         self.assertIsNone(result["largest_adjacent_pitch_jump_ratio"])
+        self.assertIsNone(result["largest_adjacent_pitch_jump_between"])
         self.assertEqual(result["warnings"], [])
 
     def test_empty_input_is_safe(self) -> None:

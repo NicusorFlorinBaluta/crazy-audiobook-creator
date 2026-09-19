@@ -54,7 +54,7 @@ def parse_chapter_number(line_id: str) -> int:
     """Extract chapter integer from line_id (e.g. 'c002_0001', 'ch01_0000', 'repair-c002_0001')."""
     clean_id = line_id
     if clean_id.startswith("repair-"):
-        clean_id = clean_id[len("repair-"):]
+        clean_id = clean_id[len("repair-") :]
     match = re.search(r"(?:ch|c)?(\d+)_", clean_id, re.IGNORECASE)
     if match:
         return int(match.group(1))

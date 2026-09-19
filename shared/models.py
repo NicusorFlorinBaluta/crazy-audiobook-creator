@@ -538,6 +538,7 @@ class QualityResult(BaseModel):
     )
     attempt: int = 1
     selected: bool = False
+    glossary_only_miss: bool = False
     metrics: dict[str, Any] = Field(default_factory=dict)
     passed_hard_gates: bool = True
     warnings: list[str] = Field(

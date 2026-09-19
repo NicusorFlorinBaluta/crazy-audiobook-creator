@@ -89,6 +89,7 @@ narrative character analysis continues unchanged.
 - Segment bounds: `max_segment_sentences`, `min_segment_words`
 - Default delivery: `default_speed`
 - Pause requests: narrator, dialogue, scene, chapter, and paragraph values in milliseconds
+- Scene separator silence: `pause_marker_silence_seconds` defines the clean silence duration in seconds emitted for non-spoken scene break markers (e.g. "---", "***", em-dash rule). Defaults to 0.1 s; total scene break beat is dominated by adjacent paragraph pauses combined with assembler max() timing. *Warning: Do not raise this value above 0.1 s; raising it was previously trialled and reverted because assembler chapter timing inserts `max(pause_after, pause_before)` (~900 ms) on both adjacent lines, yielding a natural ~1.9 s scene break. Adding extra silence here introduces an uncombined silence gap that breaks assembler timing rules.*
 - Voice assignment: `max_unique_voices`, `minor_character_threshold`, `group_minor_characters`
 - LLM batching: `chunk_size_words` and `max_fragments_per_chunk`; both limits
   are enforced independently, including on short but dialogue-dense chapters.
@@ -287,6 +288,15 @@ side by side. See
 
 State is stored in `pipeline_state.db`. GPU work is chapter-batched and serialized independently of `batch_mode`. Valid line, generated-chapter, and mastered-chapter artifacts are reused through fingerprints and manifests.
 
+### `prosody`
+
+Monotone delivery detection and long-form quality trend thresholds:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `pitch_cv_threshold` | `0.06` | Pitch coefficient of variation (stdev / mean) threshold below which delivery is considered flat |
+| `dynamic_range_threshold` | `5.29` | Maximum crest factor (peak / RMS) corroborating borderline pitch variation (< 1.5× pitch threshold). Measured p05 on audiobook corpus |
+
 ### `schedule`
 
 The dashboard may add a `schedule` section:
@@ -355,7 +365,8 @@ The reference-voice test sentences in this file are informational; the canonical
 | `voice_distinctness_rounds` | Extra design/compare rounds spent separating voices that collide at the threshold above. Default `2`, clamped to `0`–`5`. Each round re-boots the VoiceDesign subprocess and redesigns only the colliding voices with a brief naming who they collided with, then re-measures. `0` restores report-only behaviour. See [decisions/2026-09-04-voice-distinctness-convergence.md](decisions/2026-09-04-voice-distinctness-convergence.md) |
 | `clipping_threshold` | Maximum sample peak in dBFS |
 | `max_silence_seconds` | Longest permitted internal silence |
-| `prosody.*` | Nonblocking monotone-warning enablement and explicit duration/pitch/dynamic-range thresholds; changes invalidate validation cache |
+| `prosody.pitch_cv_threshold` | Pitch coefficient of variation threshold for monotone detection (default `0.06`) |
+| `prosody.dynamic_range_threshold` | Dynamic range (peak/RMS) corroboration threshold (default `5.29`, measured p05) |
 | `duration_tolerance` | Expected-duration tolerance |
 
 Missing audio and missing line IDs always fail regardless of thresholds.

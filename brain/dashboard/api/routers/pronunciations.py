@@ -254,7 +254,21 @@ async def update_pronunciation(project_id: str, request: PronunciationRequest):
         if existing_key.casefold() == term.casefold():
             current_dict.pop(existing_key, None)
     if spoken:
-        current_dict[term] = normalize_phonetic_text(spoken)
+        normalized = normalize_phonetic_text(spoken)
+        # Reject when the user typed the same string as the term (case-insensitive).
+        # Compare *before* normalization: a respelling like "new-term" for "newterm" is
+        # a legitimate stylistic hint even if normalize_phonetic_text collapses the hyphen.
+        # Only the literal "Jarlaxle → Jarlaxle" pattern (same characters, possibly
+        # different case) is meaningless and must be rejected.
+        if spoken.casefold() == term.casefold():
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Identity mapping rejected: spoken text must differ from the term. "
+                    "Delete the mapping instead, or provide a real respelling."
+                ),
+            )
+        current_dict[term] = normalized
     else:
         current_dict.pop(term, None)
 

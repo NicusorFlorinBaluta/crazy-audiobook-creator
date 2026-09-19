@@ -26,10 +26,11 @@ def test_dashboard_status_carries_staleness(client: TestClient, tmp_path: Path):
         "running": False,
     }
 
-    with patch("brain.dashboard.api.main.job_queue") as mock_jq, \
-         patch("brain.dashboard.api.main._project_dir") as mock_pdir, \
-         patch("brain.dashboard.api.main._workspace_project_dir") as mock_wdir:
-
+    with (
+        patch("brain.dashboard.api.main.job_queue") as mock_jq,
+        patch("brain.dashboard.api.main._project_dir") as mock_pdir,
+        patch("brain.dashboard.api.main._workspace_project_dir") as mock_wdir,
+    ):
         proj_dir = tmp_path / "proj"
         proj_dir.mkdir(parents=True)
         ws_dir = tmp_path / "ws"
@@ -57,11 +58,12 @@ def test_dashboard_deliveries_carries_staleness(client: TestClient, tmp_path: Pa
     ws_dir = tmp_path / "ws"
     ws_dir.mkdir(parents=True)
 
-    with patch("brain.dashboard.api.main._require_job") as mock_req, \
-         patch("brain.dashboard.api.main._project_dir", return_value=proj_dir), \
-         patch("brain.dashboard.api.main._workspace_project_dir", return_value=ws_dir), \
-         patch("brain.dashboard.api.main.job_queue") as mock_jq:
-
+    with (
+        patch("brain.dashboard.api.main._require_job") as mock_req,
+        patch("brain.dashboard.api.main._project_dir", return_value=proj_dir),
+        patch("brain.dashboard.api.main._workspace_project_dir", return_value=ws_dir),
+        patch("brain.dashboard.api.main.job_queue") as mock_jq,
+    ):
         mock_req.return_value = {"project_id": project_id}
         mock_jq.get_job.return_value = {"incremental_delivery": {"enabled": True, "batch_size": 5}}
 

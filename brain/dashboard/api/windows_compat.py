@@ -26,9 +26,9 @@ logger = logging.getLogger(__name__)
 
 # Transient client disconnect error codes on Windows during accept/handshake:
 _CLIENT_DISCONNECT_ERRNOS = {
-    64,     # ERROR_NETNAME_DELETED ("The specified network name is no longer available")
-    121,    # ERROR_SEM_TIMEOUT ("The semaphore timeout period has expired")
-    1236,   # ERROR_CONNECTION_ABORTED ("The network connection was aborted by the local system")
+    64,  # ERROR_NETNAME_DELETED ("The specified network name is no longer available")
+    121,  # ERROR_SEM_TIMEOUT ("The semaphore timeout period has expired")
+    1236,  # ERROR_CONNECTION_ABORTED ("The network connection was aborted by the local system")
     10053,  # WSAECONNABORTED ("Software caused connection abort")
     10054,  # WSAECONNRESET ("Connection reset by peer")
     10060,  # WSAETIMEDOUT ("Connection timed out")
@@ -138,11 +138,12 @@ def patch_windows_proactor() -> None:
     # Also patch IocpProactor.accept to avoid unretrieved task exception and clean up conn
     proactor_cls = asyncio.windows_events.IocpProactor
     if not getattr(proactor_cls, "_windows_proactor_accept_patched", False):
+
         def _resilient_accept(self, listener):
+            import _overlapped
             import socket
             import struct
             from asyncio import tasks
-            import _overlapped
 
             self._register_with_iocp(listener)
             conn = self._get_accept_socket(listener.family)
@@ -171,8 +172,8 @@ def patch_windows_proactor() -> None:
                     # Client disconnected before AcceptEx completed; close the ephemeral socket
                     try:
                         conn.close()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("Failed to close socket on aborted AcceptEx: %s", e)
 
             future = self._register(ov, listener, finish_accept)
             coro = accept_coro(future, conn)

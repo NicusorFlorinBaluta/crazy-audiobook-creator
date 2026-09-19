@@ -379,4 +379,3 @@ class TestIsPronunciationCandidateBetter:
             transcribed_text="drist",
         )
         assert not is_pronunciation_candidate_better(candidate, current, {"Drizzt"})
-

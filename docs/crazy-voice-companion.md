@@ -73,7 +73,10 @@
   - Manage status lifecycle (`🟡 Open`, `🔵 Investigating`, `🟢 Fixed`, `🟣 Vetoed`, `⚪ Dismissed`) via inline dropdown or one-click quick action buttons.
 - **Automated AI Diagnosis & CLI Tooling**:
   - CLI script `tools/investigate_playback_flags.py` supports `--auto-diagnose`, `--export-prompt`, and `--veto` commands.
-- **Instant Backend Sync**: Dispatches to `/api/mobile/v1/books/{id}/flags` on the NAS Streamer or Creator workstation for automated AI diagnosis and dashboard review.
+- **Instant Backend Sync & Deduplication**:
+  - Dispatches to `/api/mobile/v1/books/{id}/flags` on the NAS Streamer or Creator workstation.
+  - Supports `client_flag_id` for client-side idempotency across reconnects, and automatic 2,000 ms / same-line content deduplication to eliminate duplicate flags from repeated taps.
+  - Supports `position_origin` (`"chapter"` or `"book"`) so playback positions derived from whole-book M4Bs or single-chapter streams resolve unambiguously without clock drift.
 
 ### 9. 24/7 Two-Way Progress Synchronization
 - Persists chapter number, millisecond offset, playback speed, and completion status to `/api/mobile/v1/books/{id}/progress` in real time.

@@ -24,19 +24,16 @@ def run_test():
         "issue_type": "wrong_speaker",
         "user_note": "E2E Test Flag: speaker mismatch reported from car",
         "source": "android_auto",
-        "line_id": "ch01_0000"
+        "line_id": "ch01_0000",
     }
-    
+
     req = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST"
+        url, data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST"
     )
     with urllib.request.urlopen(req) as resp:
         assert resp.status in (200, 201), f"Expected 200 or 201, got {resp.status}"
         data = json.loads(resp.read().decode("utf-8"))
-    
+
     assert data["status"] == "flagged"
     flag = data["flag"]
     flag_id = flag["flag_id"]
@@ -51,7 +48,7 @@ def run_test():
     print("\n=== [2/6] Verifying SQLite Database & JSON Sync ===")
     # Check JSON file on disk
     assert FLAGS_JSON.is_file(), f"{FLAGS_JSON} was not created!"
-    with open(FLAGS_JSON, "r", encoding="utf-8") as f:
+    with open(FLAGS_JSON, encoding="utf-8") as f:
         disk_data = json.load(f)
     disk_flags = disk_data.get("flags", []) if isinstance(disk_data, dict) else disk_data
     matching = [f for f in disk_flags if f.get("flag_id") == flag_id]
@@ -72,9 +69,10 @@ def run_test():
         sys.executable,
         "tools/investigate_playback_flags.py",
         PROJECT_ID,
-        "--flag-id", flag_id,
+        "--flag-id",
+        flag_id,
         "--auto-diagnose",
-        "--json"
+        "--json",
     ]
     diag_res = subprocess.run(cli_cmd, capture_output=True, text=True, check=True)
     diag_data = json.loads(diag_res.stdout)
@@ -87,8 +85,9 @@ def run_test():
         sys.executable,
         "tools/investigate_playback_flags.py",
         PROJECT_ID,
-        "--flag-id", flag_id,
-        "--export-prompt"
+        "--flag-id",
+        flag_id,
+        "--export-prompt",
     ]
     prompt_res = subprocess.run(prompt_cmd, capture_output=True, text=True, check=True)
     assert "Playback Issue Investigation" in prompt_res.stdout
@@ -101,8 +100,10 @@ def run_test():
         sys.executable,
         "tools/investigate_playback_flags.py",
         PROJECT_ID,
-        "--veto", flag_id,
-        "--reason", veto_reason
+        "--veto",
+        flag_id,
+        "--reason",
+        veto_reason,
     ]
     veto_res = subprocess.run(veto_cmd, capture_output=True, text=True, check=True)
     assert "vetoed flag" in veto_res.stdout.lower()
@@ -118,20 +119,17 @@ def run_test():
 
     print("\n=== [5/6] Testing Dashboard PATCH Endpoint (Reopen / Fix) ===")
     patch_url = f"{BASE_URL}/api/mobile/v1/books/{PROJECT_ID}/flags/{flag_id}"
-    patch_body = {
-        "status": "fixed",
-        "resolution_notes": "Tested and verified resolution."
-    }
+    patch_body = {"status": "fixed", "resolution_notes": "Tested and verified resolution."}
     patch_req = urllib.request.Request(
         patch_url,
         data=json.dumps(patch_body).encode("utf-8"),
         headers={"Content-Type": "application/json"},
-        method="PATCH"
+        method="PATCH",
     )
     with urllib.request.urlopen(patch_req) as resp:
         assert resp.status == 200
         patch_resp = json.loads(resp.read().decode("utf-8"))
-    
+
     assert patch_resp["status"] == "updated"
     assert patch_resp["flag"]["status"] == "fixed"
     assert patch_resp["flag"]["resolution_notes"] == "Tested and verified resolution."
@@ -143,7 +141,7 @@ def run_test():
         conn.execute("DELETE FROM playback_flags WHERE flag_id = ?", (flag_id,))
         conn.commit()
 
-    with open(FLAGS_JSON, "r", encoding="utf-8") as f:
+    with open(FLAGS_JSON, encoding="utf-8") as f:
         disk_data = json.load(f)
     if isinstance(disk_data, dict):
         disk_data["flags"] = [f for f in disk_data.get("flags", []) if f.get("flag_id") != flag_id]

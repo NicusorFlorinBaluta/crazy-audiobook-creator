@@ -18,6 +18,7 @@ import numpy as np
 import soundfile as sf
 
 from shared.constants import (
+    INTERJECTION_HOMOPHONES,
     PAUSE_MARKER_SILENCE_SECONDS,
     QUALITY_SCORE_PASS_THRESHOLD,
     QUALITY_WEIGHT_ARTIFACT,
@@ -85,7 +86,7 @@ class ValidationLoop:
             enabled=bool(prosody_config.get("enabled", True)),
             min_duration_seconds=float(prosody_config.get("min_duration_seconds", 1.0)),
             pitch_cv_threshold=float(prosody_config.get("pitch_cv_threshold", 0.06)),
-            dynamic_range_threshold=float(prosody_config.get("dynamic_range_threshold", 4.0)),
+            dynamic_range_threshold=float(prosody_config.get("dynamic_range_threshold", 5.29)),
         )
         self.engine = engine
         self.library = library
@@ -593,7 +594,13 @@ class ValidationLoop:
 
         # Phase 3: retry both FAIL and FLAGGED results. Each retry is written to
         # a side file and replaces the current artifact only if it is better.
-        candidates = [line for line in lines if not self._is_accepted(quality_by_id[line.line_id].status)]
+        # Glossary-only misses are not blindly redrawn.
+        candidates = [
+            line
+            for line in lines
+            if not self._is_accepted(quality_by_id[line.line_id].status)
+            and not quality_by_id[line.line_id].glossary_only_miss
+        ]
         retried = 0
         if auto_retry:
             for attempt in range(2, retry_limit + 1):
@@ -1170,16 +1177,24 @@ class ValidationLoop:
         semantic_error_rate = 1.0 / max(word_count, 1) if semantic_text_mismatch else 0.0
         reported_wer = max(wer, semantic_error_rate)
         normalized_expected = self.whisper._normalize_text(validation_text)
+        normalized_transcribed = self.whisper._normalize_text(transcribed)
         eligible_glossary_match = any(
             normalized_term and normalized_term in normalized_expected
             for normalized_term in (self.whisper._normalize_text(term) for term in (validation_terms or set()))
         )
         spelling_variant_match = eligible_glossary_match and (
-            (2 <= word_count <= 3 and text_similarity >= 0.75) or (word_count > 3 and text_similarity >= 0.90)
+            (word_count == 1 and text_similarity >= 0.75)
+            or (2 <= word_count <= 3 and text_similarity >= 0.80)
+            or (word_count > 3 and text_similarity >= 0.90)
+        )
+        interjection_match = (
+            word_count == 1
+            and normalized_expected in INTERJECTION_HOMOPHONES
+            and normalized_transcribed in INTERJECTION_HOMOPHONES[normalized_expected]
         )
         glossary_adjusted_wer = self._glossary_adjusted_wer(
             normalized_expected,
-            self.whisper._normalize_text(transcribed),
+            normalized_transcribed,
             validation_terms or set(),
         )
         glossary_phonetic_match = (
@@ -1189,7 +1204,7 @@ class ValidationLoop:
             semantic_error_rate,
             (
                 0.0
-                if orthographic_segmentation_match
+                if (orthographic_segmentation_match or interjection_match)
                 else (
                     min(wer, compact_error_rate, glossary_adjusted_wer)
                     if spelling_variant_match or glossary_phonetic_match
@@ -1211,7 +1226,8 @@ class ValidationLoop:
             and not analysis["has_long_silence"]
             and analysis["duration_ok"]
             and (
-                spelling_variant_match
+                interjection_match
+                or spelling_variant_match
                 or glossary_phonetic_match
                 or orthographic_segmentation_match
                 or (wer <= effective_wer_threshold and text_similarity >= 0.85)
@@ -1223,7 +1239,12 @@ class ValidationLoop:
             and (
                 (word_count <= 2 and estimated_word_errors > 0.05) or (word_count > 2 and wer > effective_wer_threshold)
             )
-            and not (spelling_variant_match or glossary_phonetic_match or orthographic_segmentation_match)
+            and not (
+                interjection_match
+                or spelling_variant_match
+                or glossary_phonetic_match
+                or orthographic_segmentation_match
+            )
         )
 
         hard_audio_failure = (
@@ -1246,18 +1267,31 @@ class ValidationLoop:
             effective_text_error = 0.0
             text_similarity = 0.0
 
+        glossary_only_miss = False
         if stt_unavailable:
             status = ValidationStatus.FAIL
             acceptance_reason = "stt_unavailable"
         elif length_sensitive_wer_failure or hard_audio_failure:
             status = ValidationStatus.FAIL
-            acceptance_reason = (
-                "semantic_transcription_mismatch"
-                if semantic_text_mismatch
-                else "transcription_mismatch"
-                if length_sensitive_wer_failure
-                else "hard_audio_check"
-            )
+            if not hard_audio_failure and self._is_glossary_only_miss(
+                normalized_expected,
+                normalized_transcribed,
+                validation_terms or set(),
+            ):
+                glossary_only_miss = True
+                acceptance_reason = "glossary_only_miss"
+                analysis["glossary_only_miss"] = True
+                analysis["glossary_terms"] = [
+                    t for t in (validation_terms or set()) if self.whisper._normalize_text(t) in normalized_expected
+                ]
+            else:
+                acceptance_reason = (
+                    "semantic_transcription_mismatch"
+                    if semantic_text_mismatch
+                    else "transcription_mismatch"
+                    if length_sensitive_wer_failure
+                    else "hard_audio_check"
+                )
         elif (
             not analysis["duration_ok"]
             or analysis["noise_floor_db"] > self.analyzer.noise_threshold
@@ -1271,15 +1305,19 @@ class ValidationLoop:
         else:
             status = ValidationStatus.PASS
             acceptance_reason = (
-                "orthographic_segmentation_equivalent"
-                if orthographic_segmentation_match and wer > 0
+                "approved_interjection_homophone"
+                if interjection_match
                 else (
-                    "approved_glossary_spelling_variant"
-                    if (spelling_variant_match or glossary_phonetic_match) and wer > effective_wer_threshold
+                    "orthographic_segmentation_equivalent"
+                    if orthographic_segmentation_match and wer > 0
                     else (
-                        "wer_emotion_adjusted"
-                        if emotion_adjusted and wer > self.wer_threshold
-                        else "wer_and_audio_checks"
+                        "approved_glossary_spelling_variant"
+                        if (spelling_variant_match or glossary_phonetic_match) and wer > effective_wer_threshold
+                        else (
+                            "wer_emotion_adjusted"
+                            if emotion_adjusted and wer > self.wer_threshold
+                            else "wer_and_audio_checks"
+                        )
                     )
                 )
             )
@@ -1316,6 +1354,7 @@ class ValidationLoop:
             speaker_similarity=speaker_similarity,
             quality_score=quality_score,
             attempt=attempt,
+            glossary_only_miss=glossary_only_miss,
             metrics=analysis,
             warnings=[],
             passed_hard_gates=not hard_audio_failure and not length_sensitive_wer_failure,
@@ -1389,6 +1428,53 @@ class ValidationLoop:
                     distance[row - 1][column - 1] + substitution_cost,
                 )
         return min(distance[-1][-1] / len(reference_words), 1.0)
+
+    def _is_glossary_only_miss(
+        self,
+        normalized_reference: str,
+        normalized_hypothesis: str,
+        validation_terms: set[str],
+    ) -> bool:
+        """Check if the only mismatch between reference and hypothesis is on glossary terms."""
+        if not validation_terms:
+            return False
+        reference_words = normalized_reference.split()
+        hypothesis_words = normalized_hypothesis.split()
+        if not reference_words or not hypothesis_words:
+            return False
+
+        glossary_words = {
+            word for term in validation_terms for word in self.whisper._normalize_text(term).split() if len(word) >= 3
+        }
+        if not glossary_words:
+            return False
+
+        if not any(word in glossary_words for word in reference_words):
+            return False
+
+        rows = len(reference_words) + 1
+        columns = len(hypothesis_words) + 1
+        distance = [[0.0] * columns for _ in range(rows)]
+        for row in range(rows):
+            distance[row][0] = float(row)
+        for column in range(columns):
+            distance[0][column] = float(column)
+
+        for row in range(1, rows):
+            expected = reference_words[row - 1]
+            is_glossary = expected in glossary_words
+            for column in range(1, columns):
+                observed = hypothesis_words[column - 1]
+                equivalent = (expected == observed) or is_glossary
+                substitution_cost = 0.0 if equivalent else 1.0
+                deletion_cost = 0.0 if is_glossary else 1.0
+                insertion_cost = 0.0 if is_glossary else 1.0
+                distance[row][column] = min(
+                    distance[row - 1][column] + deletion_cost,
+                    distance[row][column - 1] + insertion_cost,
+                    distance[row - 1][column - 1] + substitution_cost,
+                )
+        return distance[-1][-1] == 0.0
 
     @staticmethod
     def _is_better(candidate: QualityResult, current: QualityResult) -> bool:

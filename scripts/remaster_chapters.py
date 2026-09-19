@@ -36,6 +36,8 @@ def main() -> int:
     args = parser.parse_args()
 
     pipeline = Pipeline()
+    if "schedule" in pipeline.config:
+        pipeline.config["schedule"]["enabled"] = False
     project_dir = pipeline.projects_dir / args.project_id
     if not project_dir.is_dir():
         print(f"no such project: {project_dir}", file=sys.stderr)
