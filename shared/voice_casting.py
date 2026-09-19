@@ -1,18 +1,19 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 import numpy as np
 import scipy.signal as signal
 import soundfile as sf
 
 from shared.artifacts import fingerprint
-from shared.constants import Gender, VOICE_CAST_SCHEMA_VERSION
+from shared.constants import VOICE_CAST_SCHEMA_VERSION, Gender
 from shared.models import CharacterRegistry
-
 
 _CONTRAST_CLAUSES = (
     "Dry, lightly textured resonance with crisp consonants and restrained energy.",
@@ -76,12 +77,7 @@ _PROMPT_SIMILARITY_THRESHOLD = 0.68
 
 def speaking_character_ids(script_chapters: Iterable[Any]) -> set[str]:
     """Return only registry IDs that own at least one completed script line."""
-    return {
-        str(line.speaker)
-        for chapter in script_chapters
-        for line in chapter.lines
-        if str(line.speaker).strip()
-    }
+    return {str(line.speaker) for chapter in script_chapters for line in chapter.lines if str(line.speaker).strip()}
 
 
 def required_voice_character_ids(
@@ -155,8 +151,7 @@ def compile_effective_voice_prompt(
             flags=re.IGNORECASE,
         ).strip(" .")
         warnings.append(
-            "A previously compiled prompt was reduced to its source voice "
-            "description before recompilation."
+            "A previously compiled prompt was reduced to its source voice description before recompilation."
         )
 
     register_repairs: dict[str, dict[str, str]] = {
@@ -180,10 +175,7 @@ def compile_effective_voice_prompt(
         )
         if count:
             description = repaired
-            warnings.append(
-                f"Contradictory {contradictory} register wording was repaired "
-                f"to {replacement}."
-            )
+            warnings.append(f"Contradictory {contradictory} register wording was repaired to {replacement}.")
 
     if gender_value == Gender.FEMALE.value:
         identity = f"A clearly female {age} speaker"
@@ -194,10 +186,7 @@ def compile_effective_voice_prompt(
 
     if not description:
         description = "clear mid-range pitch, natural resonance, and measured pacing"
-        warnings.append(
-            "The analyzed voice description was empty; a neutral audible profile "
-            "was supplied."
-        )
+        warnings.append("The analyzed voice description was empty; a neutral audible profile was supplied.")
 
     description_words = set(re.findall(r"[a-z]+", description.lower()))
     if not (description_words & _AUDIBLE_TERMS):
@@ -205,18 +194,13 @@ def compile_effective_voice_prompt(
             "The source description contained few audible properties; explicit "
             "clarity, resonance, and pacing guidance was added."
         )
-        description = (
-            f"{description}; clear articulation, natural resonance, and measured pacing"
-        )
+        description = f"{description}; clear articulation, natural resonance, and measured pacing"
 
     style = re.sub(r"\s+", " ", str(speaking_style or "").strip(" ."))
     prompt = f"{identity}. {description}."
     if style:
         prompt += f" Speaking style: {style}."
-    prompt += (
-        " Maintain this vocal identity consistently and prioritize intelligible "
-        "natural audiobook speech."
-    )
+    prompt += " Maintain this vocal identity consistently and prioritize intelligible natural audiobook speech."
     return prompt, warnings
 
 
@@ -225,10 +209,31 @@ def _normalized_signature(value: str) -> str:
 
 
 _PROMPT_BOILERPLATE = {
-    "a", "an", "clearly", "speaker", "speaking", "style", "maintain", "this",
-    "vocal", "identity", "consistently", "and", "prioritize", "intelligible",
-    "natural", "audiobook", "speech", "distinguishing", "direction", "adult",
-    "speaker", "with", "a", "hint", "of", "emotional", "baseline"
+    "a",
+    "an",
+    "clearly",
+    "speaker",
+    "speaking",
+    "style",
+    "maintain",
+    "this",
+    "vocal",
+    "identity",
+    "consistently",
+    "and",
+    "prioritize",
+    "intelligible",
+    "natural",
+    "audiobook",
+    "speech",
+    "distinguishing",
+    "direction",
+    "adult",
+    "with",
+    "hint",
+    "of",
+    "emotional",
+    "baseline",
 }
 
 
@@ -244,6 +249,7 @@ _AUDIO_SIMILARITY_THRESHOLD = 0.88
 
 
 import functools
+
 
 @functools.lru_cache(maxsize=128)
 def extract_acoustic_embedding(audio_path: str | Path) -> np.ndarray | None:
@@ -302,10 +308,7 @@ def build_voice_cast(
     """Build a speaking-only cast and deterministic effective prompts."""
     missing = speaking_ids - set(registry.characters)
     if missing:
-        raise ValueError(
-            "Scripts reference speakers absent from character registry: "
-            f"{sorted(missing)}"
-        )
+        raise ValueError(f"Scripts reference speakers absent from character registry: {sorted(missing)}")
 
     owner_to_speakers: dict[str, list[str]] = {}
     owner_character_ids: dict[str, str] = {}
@@ -319,16 +322,16 @@ def build_voice_cast(
         if speaker_id == "narrator":
             if owner_id not in {"narrator_male", "narrator_female"}:
                 owner_id = "narrator_male"
-                
+
             owner_character_ids["narrator_male"] = "narrator"
             owner_character_ids["narrator_female"] = "narrator"
-            
+
             owner_to_speakers.setdefault("narrator_male", [])
             owner_to_speakers.setdefault("narrator_female", [])
-            
+
             owner_to_speakers[owner_id].append(speaker_id)
             continue
-        
+
         # Ensure owner_id points to a valid character in the registry
         if owner_id not in registry.characters:
             # Check if speaker_id matches any registered character's explicit aliases
@@ -382,10 +385,7 @@ def build_voice_cast(
         similar_to = [
             previous_id
             for previous_id, previous_prompt, previous_source in previous_prompts
-            if (
-                source_signature
-                and source_signature == _normalized_signature(previous_source)
-            )
+            if (source_signature and source_signature == _normalized_signature(previous_source))
             or (
                 _token_similarity(
                     owner.voice_description,
@@ -393,10 +393,7 @@ def build_voice_cast(
                 )
                 >= _SOURCE_SIMILARITY_THRESHOLD
             )
-            or (
-                _token_similarity(prompt, previous_prompt)
-                >= _PROMPT_SIMILARITY_THRESHOLD
-            )
+            or (_token_similarity(prompt, previous_prompt) >= _PROMPT_SIMILARITY_THRESHOLD)
         ]
         # Every speaking profile receives a stable palette direction. Voice
         # Design otherwise tends to collapse same-gender characters onto the
@@ -448,10 +445,42 @@ def build_voice_cast(
         "schema": VOICE_CAST_SCHEMA_VERSION,
         "project_id": project_id,
         "speaking_characters": sorted(speaking_ids),
-        "non_speaking_characters": sorted(
-            set(registry.characters) - speaking_ids
-        ),
+        "non_speaking_characters": sorted(set(registry.characters) - speaking_ids),
         "voices": voices,
     }
     cast_payload["fingerprint"] = fingerprint(cast_payload)
     return cast_payload
+
+
+def get_speaker_voice_mapping(project_dir: Path | str) -> dict[str, str]:
+    """Resolve speaker_id -> voice_id mapping for a project.
+
+    Reads voice_cast.json first (checking assigned_characters under each voice profile),
+    then falls back to characters.json (voice_id field).
+    """
+    pdir = Path(project_dir)
+    speaker_to_voice: dict[str, str] = {}
+
+    cast_file = pdir / "voice_cast.json"
+    if cast_file.is_file():
+        try:
+            cast_data = json.loads(cast_file.read_text(encoding="utf-8"))
+            for voice_id, profile in cast_data.get("voices", {}).items():
+                for assigned_speaker in profile.get("assigned_characters", []):
+                    speaker_id = assigned_speaker.get("id") if isinstance(assigned_speaker, dict) else assigned_speaker
+                    if speaker_id:
+                        speaker_to_voice[speaker_id] = voice_id
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    chars_file = pdir / "characters.json"
+    if chars_file.is_file():
+        try:
+            chars_data = json.loads(chars_file.read_text(encoding="utf-8")).get("characters", {})
+            for speaker_id, char_info in chars_data.items():
+                if speaker_id not in speaker_to_voice and isinstance(char_info, dict) and char_info.get("voice_id"):
+                    speaker_to_voice[speaker_id] = char_info["voice_id"]
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    return speaker_to_voice

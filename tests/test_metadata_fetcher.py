@@ -63,9 +63,7 @@ class MetadataFetcherTests(unittest.TestCase):
                         "volumeInfo": {
                             "title": "Chosen Edition",
                             "authors": ["Ada Author"],
-                            "imageLinks": {
-                                "thumbnail": "https://books.google.com/cover?zoom=1"
-                            },
+                            "imageLinks": {"thumbnail": "https://books.google.com/cover?zoom=1"},
                         },
                     },
                 )
@@ -135,15 +133,11 @@ class MetadataFetcherTests(unittest.TestCase):
                                     "title": "The Sample Book",
                                     "authors": ["Ada Author"],
                                     "description": "A useful synopsis.",
-                                    "industryIdentifiers": [
-                                        {"type": "ISBN_13", "identifier": "9780000000001"}
-                                    ],
+                                    "industryIdentifiers": [{"type": "ISBN_13", "identifier": "9780000000001"}],
                                     "categories": ["Science Fiction"],
                                     "publishedDate": "2025-04-03",
                                     "language": "en",
-                                    "imageLinks": {
-                                        "thumbnail": "https://books.google.com/cover?zoom=1"
-                                    },
+                                    "imageLinks": {"thumbnail": "https://books.google.com/cover?zoom=1"},
                                 },
                             },
                         ]
@@ -184,10 +178,14 @@ class MetadataFetcherTests(unittest.TestCase):
         transport = httpx.MockTransport(
             lambda request: httpx.Response(
                 200,
-                json={"items": [{
-                    "id": "wrong-author",
-                    "volumeInfo": {"title": "Expected", "authors": ["Entirely Different"]},
-                }]},
+                json={
+                    "items": [
+                        {
+                            "id": "wrong-author",
+                            "volumeInfo": {"title": "Expected", "authors": ["Entirely Different"]},
+                        }
+                    ]
+                },
             )
         )
         result = MetadataFetcher.fetch("Expected", "Ada Author", transport=transport)
@@ -240,14 +238,16 @@ class MetadataFetcherTests(unittest.TestCase):
             lambda request: httpx.Response(
                 200,
                 json={
-                    "items": [{
-                        "id": "exact",
-                        "volumeInfo": {
-                            "title": "Expected",
-                            "authors": ["Author"],
-                            "imageLinks": {"thumbnail": "https://example.com/cover.jpg"},
-                        },
-                    }]
+                    "items": [
+                        {
+                            "id": "exact",
+                            "volumeInfo": {
+                                "title": "Expected",
+                                "authors": ["Author"],
+                                "imageLinks": {"thumbnail": "https://example.com/cover.jpg"},
+                            },
+                        }
+                    ]
                 },
             )
         )

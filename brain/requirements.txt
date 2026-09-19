@@ -23,6 +23,15 @@ aiosqlite>=0.20.0
 # Configuration
 pyyaml>=6.0
 tzdata>=2025.2; platform_system == "Windows"
+# Hard dependency: `from dotenv import load_dotenv` runs at import time in
+# brain/dashboard/api/security.py, brain/dashboard/api/main.py and
+# brain/orchestrator/nas_syncer.py. Without it the dashboard cannot start.
+python-dotenv>=1.0.0
+
+# NAS delivery sync over SFTP. Imported defensively in
+# brain/orchestrator/nas_syncer.py, so the pipeline still runs without it -- the
+# 24/7 NAS streaming feature is simply unavailable.
+paramiko>=3.4.0
 
 # Utilities
 rich>=13.0

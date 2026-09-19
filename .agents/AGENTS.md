@@ -21,3 +21,16 @@
 - **Verification Rule**: Whenever core Python modules (`character_analyzer.py`, `script_generator.py`, `pipeline.py`) are modified:
   1. Either restart the Uvicorn server process so it re-imports the updated files, or
   2. Execute verification tests directly using `python.exe` with `$env:PYTHONPATH="."` to guarantee the test runs against the exact fresh code on disk.
+
+## Android Companion APK Generation & Deployment Rules
+**CRITICAL: Whenever compiling or generating a new Android APK (`app-free-debug.apk`):**
+- **NEVER** leave the build output only inside `app/build/outputs/apk/free/debug/`. The user downloads the app directly from the 24/7 NAS streamer or the project roots.
+- **MANDATORY**: You MUST immediately publish the new APK to all distribution endpoints after building:
+  1. **24/7 Remote NAS Streamer**: `/mnt/nas/media/crazybooks/Voice-CrazyAudiobook-debug.apk` on `192.168.50.180` (served at `https://crazyha.mywire.org/bookplayer/Voice-CrazyAudiobook-debug.apk`)
+  2. **Local Creator Root**: `e:\Projects\crazy-audiobook-creator\Voice-CrazyAudiobook-debug.apk` (served at `http://192.168.50.44:8000/api/mobile/v1/app`)
+  3. **Local Voice Root**: `E:\Projects\Voice\Voice-CrazyAudiobook-debug.apk`
+- **Standard Deployment Command**:
+  - To deploy an already-built APK: `python scripts/deploy_voice_apk.py`
+  - To build and deploy in one step: `python scripts/deploy_voice_apk.py --build`
+- **Verification Rule**: Always verify that the NAS endpoint (`http://192.168.50.180:8005/Voice-CrazyAudiobook-debug.apk`) and dashboard endpoint (`http://127.0.0.1:8000/api/mobile/v1/app`) return HTTP 200/206 with the exact matching file size.
+

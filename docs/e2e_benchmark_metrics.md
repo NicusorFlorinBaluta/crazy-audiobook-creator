@@ -1,4 +1,6 @@
-# Performance and quality improvement plan â€” 2026-08-03
+# Performance and quality improvement plan — 2026-08-03
+
+**Status:** Historical record — A dated record of what was done and why. Evidence, not a specification -- do not implement from it.
 
 ## Objective
 
@@ -68,7 +70,7 @@ artifact checks.
 6. Partial-book generation, later continuation, immediate interruption, and
    one-time voice review must continue to work.
 
-## Phase 1 â€” cache correctness and observability
+## Phase 1 — cache correctness and observability
 
 ### 1.1 Separate generation and validation fingerprints
 
@@ -121,7 +123,7 @@ Validation:
   unavailable.
 - Telemetry overhead below 1% on a 50-line cached test.
 
-## Phase 2 â€” reduce retries without relaxing quality
+## Phase 2 — reduce retries without relaxing quality
 
 ### 2.1 Risk-aware first-attempt policy
 
@@ -156,7 +158,7 @@ Validation:
 - Target: zero pronunciation inconsistencies on the test glossary and fewer
   proper-name retries than baseline.
 
-## Phase 3 â€” casting quality
+## Phase 3 — casting quality
 
 ### 3.1 Acoustic cast-distinctness scoring
 
@@ -198,7 +200,7 @@ Validation:
 - Compare clone similarity and intelligibility against current references.
 - Existing generated-design workflow remains available.
 
-## Phase 4 â€” prosody and chunking
+## Phase 4 — prosody and chunking
 
 ### 4.1 Scene-level prosody plan
 
@@ -227,7 +229,7 @@ Validation:
 - Target: fewer TTS calls and improved blind-rated cadence with no increase in
   hard failures; rollback if retry cost offsets at least half the saved calls.
 
-## Phase 5 â€” generated-audio and book-level QA
+## Phase 5 — generated-audio and book-level QA
 
 ### 5.1 Character continuity/drift checks
 
@@ -268,7 +270,7 @@ Validation:
   tolerance.
 - Blind comparison confirms no pumping or flattened dramatic delivery.
 
-## Phase 6 â€” controlled performance experiments
+## Phase 6 — controlled performance experiments
 
 ### 6.1 Chapter/selection model-residency strategy
 
@@ -351,7 +353,7 @@ For every phase:
 - [ ] Drift, join, and mastering consistency checks (join and book-loudness reporting implemented; drift and listening acceptance pending).
 - [ ] Residency and inference A/B benchmarks (chapter-scoped residency accepted; attention/inference experiments pending).
 
-### Implementation checkpoint â€” cache and timing foundation
+### Implementation checkpoint — cache and timing foundation
 
 - Added a separate SQLite `validation_results` cache keyed by project, line,
   WAV hash, expected text, voice-reference hash, glossary, Whisper model,
@@ -371,7 +373,7 @@ For every phase:
   speaker similarity; changing glossary inputs invokes validation but not TTS.
 - Regression result at this checkpoint: 89 tests passing.
 
-### Phase 1 acceptance benchmark â€” chapter 3
+### Phase 1 acceptance benchmark — chapter 3
 
 The same 50 cached chapter-3 WAVs were run twice through the real managed Voice
 service. The validation-only reset preserved segments and generation
@@ -397,7 +399,7 @@ Voice, VoiceDesign, and managed Ollama ports were closed after both runs.
 Phase 1 is accepted. Quality-affecting Phase 2 work may proceed behind feature
 flags with its documented corpus and A/B gates.
 
-### Phase 2.1 automated acceptance benchmark â€” risk-line corpus
+### Phase 2.1 automated acceptance benchmark — risk-line corpus
 
 The fixed six-line real-model corpus covers a short shout, concatenated
 repetition, dense fictional names, fast delivery, ordinary narration, and
@@ -425,7 +427,7 @@ unloaded and all model service ports closed successfully.
 
 Post-change regression result: 94 tests passing.
 
-### Phase 2.2 implementation checkpoint â€” pronunciation data integrity
+### Phase 2.2 implementation checkpoint — pronunciation data integrity
 
 Pronunciation mappings now produce a separate `spoken_text` used only by TTS.
 Authored `text` remains unchanged and remains the validation target. Mapping is
@@ -443,7 +445,7 @@ suggested it.
 
 Post-foundation regression result: 99 tests passing.
 
-### Phase 2.2 acceptance checkpoint â€” pronunciation review
+### Phase 2.2 acceptance checkpoint — pronunciation review
 
 The pipeline now writes a book-local `pronunciation_candidates.json` after
 scripting. Candidate extraction keeps repeated proper names and world terms,
@@ -471,7 +473,7 @@ This completes the deterministic and reviewable lexicon workflow. Listening
 verification of individual project mappings remains a normal casting/QA action,
 not an automatic inference step.
 
-### Phase 3 implementation checkpoint â€” objective cast/reference evidence
+### Phase 3 implementation checkpoint — objective cast/reference evidence
 
 Every generated reference now records duration, peak/RMS, DC offset, clipped
 sample fraction, silence ratio, F0 median and 10th/90th percentile range,
@@ -486,7 +488,7 @@ suppressed when both measured pitch and spectral centroid are materially
 separated. This fixes the earlier circular logic where an incorrect generated
 gender could hide behind the requested gender label.
 
-Uploaded reference audio already required mono 24 kHz PCM, 3â€“30 seconds,
+Uploaded reference audio already required mono 24 kHz PCM, 3–30 seconds,
 non-silence, and low clipping. It now also starts managed validation for a
 one-time Whisper comparison against the user-supplied exact transcript before
 replacing the current reference. Transcript mismatch fails closed; the managed
@@ -508,7 +510,7 @@ listening pairs are collected. No automatic cast rejection or regeneration has
 been enabled yet. The next acceptance test is one real uploaded-reference E2E,
 followed by a fresh voice bootstrap that persists the new pair diagnostics.
 
-### Phase 4.2 implementation checkpoint â€” prosody-compatible grouping
+### Phase 4.2 implementation checkpoint — prosody-compatible grouping
 
 Adjacent-line grouping now requires a stable measured control envelope in
 addition to the existing speaker, voice, effects, paragraph, character, and
@@ -538,7 +540,7 @@ Acceptance is not yet complete: a calm/action/intimate/dialogue listening A/B
 must show improved cadence with non-inferior validation retries before the
 scene-level prosody phase can be marked accepted.
 
-### Phase 5 implementation checkpoint â€” joins and book loudness
+### Phase 5 implementation checkpoint — joins and book loudness
 
 Mastering now records a report-only diagnostic for every segment boundary:
 actual gap, preceding/following RMS, loudness delta, zero-gap sample jump, and
@@ -567,7 +569,7 @@ ceiling attenuates the entire chapter to protect a very small number of peaks.
 
 A `soft_limiter` mode was implemented and benchmarked on the same audio. It
 produced -19.035 to -19.003 LUFS (**0.032 LU spread**) with
-true peaks between -1.292 and -1.059 dBFS. Only 0.019â€“0.120% of samples entered
+true peaks between -1.292 and -1.059 dBFS. Only 0.019–0.120% of samples entered
 the limiter knee. The matched 30-second listening pair was approved as equally
 natural on 2026-08-03:
 
@@ -580,7 +582,7 @@ mastered chapters are remastered on their next selected run without
 regenerating accepted speech segments. Complete regression suite after
 activation: 114 passing.
 
-### Phase 6.2 implementation checkpoint â€” retry-scoped model residency
+### Phase 6.2 implementation checkpoint — retry-scoped model residency
 
 The corrected long-form benchmark used a 53-word passage for three repetitions
 per mode on the production GPU. With TTS and Whisper loaded together it retained

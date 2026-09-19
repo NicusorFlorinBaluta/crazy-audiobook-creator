@@ -38,9 +38,7 @@ def _select_ids(project_id: str, lines: dict[str, object], limit: int) -> list[s
     ranked: list[tuple[int, float, str]] = []
     max_attempt: dict[str, int] = {}
     for item in logs:
-        max_attempt[item["line_id"]] = max(
-            max_attempt.get(item["line_id"], 1), int(item.get("attempt") or 1)
-        )
+        max_attempt[item["line_id"]] = max(max_attempt.get(item["line_id"], 1), int(item.get("attempt") or 1))
     for item in selected:
         line_id = item["line_id"]
         if line_id not in lines:
@@ -110,10 +108,12 @@ def main() -> int:
                 validator.vad_filter = True
                 started = time.perf_counter()
                 vad_text = validator.transcribe(str(audio))
-                item.update({
-                    "vad_seconds": time.perf_counter() - started,
-                    "vad_wer": validator.calculate_wer(expected, vad_text),
-                })
+                item.update(
+                    {
+                        "vad_seconds": time.perf_counter() - started,
+                        "vad_wer": validator.calculate_wer(expected, vad_text),
+                    }
+                )
                 validator.vad_filter = False
             report["results"].append(item)
             args.output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")

@@ -7,7 +7,6 @@ import json
 import re
 from pathlib import Path
 
-
 PATTERNS = {
     "miopen_fallback": re.compile(r"miopen.*(?:fallback|find|workspace)", re.I),
     "memory_allocation": re.compile(r"(?:out of memory|allocation failed|bad alloc)", re.I),
@@ -17,7 +16,7 @@ PATTERNS = {
 
 
 def summarize(path: Path) -> dict[str, object]:
-    counts = {name: 0 for name in PATTERNS}
+    counts = dict.fromkeys(PATTERNS, 0)
     examples: dict[str, list[str]] = {name: [] for name in PATTERNS}
     if not path.is_file():
         return {"path": str(path), "exists": False, "counts": counts, "examples": examples}

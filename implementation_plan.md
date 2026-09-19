@@ -1,5 +1,7 @@
 # Crazy Audiobook Creator — Pipeline Design (v2)
 
+**Status:** Historical planning record — not a specification. Kept for context; some sections describe modules and deployments that were never built or have since been replaced. Current behavior is defined by [README.md](README.md), [docs/](docs/README.md), the models, and the executable tests.
+
 > **Historical record — superseded.** This plan describes the abandoned
 > Windows/Ubuntu split and pre-manifest pipeline. It is not a setup guide or
 > current specification. See [README.md](README.md) and

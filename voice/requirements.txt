@@ -8,6 +8,23 @@ transformers==4.57.3
 accelerate>=1.0.0
 soundfile>=0.12.0
 librosa>=0.10.0
+# `qwen-tts` produces the actual audio, so an unpinned release can change voice
+# cloning between two runs of the same book without any fingerprint change --
+# invalidating reference-voice reuse and benchmark comparability.
+#
+# It is intentionally left unversioned HERE because the supported version is
+# whatever the tested Windows/ROCm workstation resolved. Pin it in
+# `constraints-windows-rocm-tested.txt` and install with that constraints file:
+#
+#   python -m pip install -r voice/requirements.txt \
+#       -c voice/constraints-windows-rocm-tested.txt
+#
+# To read the currently installed version on the workstation:
+#
+#   python scripts/runtime_preflight.py
+#
+# `shared/runtime_preflight.py` warns when a quality-critical package is not
+# constrained, so the gap is reported rather than silently tolerated.
 qwen-tts
 
 # Quality Validation

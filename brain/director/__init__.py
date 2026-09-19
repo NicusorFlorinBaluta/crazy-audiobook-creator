@@ -5,8 +5,8 @@ audiobook scripts with character detection, voice descriptions,
 and emotion tagging.
 """
 
-from brain.director.ollama_client import OllamaClient
 from brain.director.character_analyzer import CharacterAnalyzer
+from brain.director.ollama_client import OllamaClient
 from brain.director.script_generator import ScriptGenerator
 
 __all__ = ["OllamaClient", "CharacterAnalyzer", "ScriptGenerator"]

@@ -11,8 +11,9 @@ import hashlib
 import json
 import os
 import re
-import shutil
+import subprocess
 import tempfile
+import time
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -48,6 +49,101 @@ def hash_file(path: str | Path) -> str:
     return digest.hexdigest()
 
 
+# On Windows an antivirus scanner or the search indexer can briefly hold an open
+# handle to the destination, making `os.replace` raise PermissionError even
+# though the operation is legitimate. Retrying is the correct response; falling
+# back to a plain copy is not, because `shutil.copyfile` truncates the
+# destination first and a crash mid-copy leaves a partially written state file.
+_REPLACE_ATTEMPTS = 6
+_REPLACE_INITIAL_DELAY_SECONDS = 0.05
+
+
+def _replace_denial_hint(destination: Path) -> str:
+    """Explain a Windows replace denial that no ordinary check predicts.
+
+    `os.replace` over an existing file needs the DELETE right on the *target*.
+    A file owned by `BUILTIN\\Administrators` -- left that way by a run started
+    from an elevated shell -- grants an unelevated token only
+    `BUILTIN\\Users: Write, ReadAndExecute`, which does not include it.
+
+    Every ordinary check says the file is fine: it reports as writable,
+    `os.access(W_OK)` returns True, and it opens exclusively without error.
+    Only the rename fails, and the bare WinError 5 names a temp file, so
+    without this the operator has nothing to act on.
+    """
+    if os.name != "nt":
+        return ""
+    try:
+        result = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                f"(Get-Acl -LiteralPath '{destination}').Owner",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        owner = result.stdout.strip() if result.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if not owner:
+        return ""
+    if "administrator" in owner.casefold() or "system" in owner.casefold():
+        return (
+            f" The destination is owned by '{owner}', so an unelevated process"
+            " cannot replace it: os.replace needs the DELETE right on the"
+            " target, which BUILTIN\\Users does not grant. This is left behind"
+            " by a run started from an elevated shell. See Troubleshooting in"
+            " docs/setup-windows.md for the takeown/icacls fix."
+        )
+    return f" The destination is owned by '{owner}'."
+
+
+def _atomic_replace(temporary: Path, destination: Path) -> None:
+    """Replace `destination` with `temporary`, retrying transient lock errors.
+
+    Raises the final `PermissionError` rather than degrading to a non-atomic
+    copy. A loud failure is preferable to a truncated `pipeline_state`,
+    `voice_cast.json`, or chapter manifest, which the artifact model treats as
+    authoritative evidence of completion.
+    """
+    delay = _REPLACE_INITIAL_DELAY_SECONDS
+    for attempt in range(1, _REPLACE_ATTEMPTS + 1):
+        try:
+            os.replace(temporary, destination)
+            return
+        except PermissionError as exc:
+            if attempt == _REPLACE_ATTEMPTS:
+                hint = _replace_denial_hint(destination)
+                if hint:
+                    raise PermissionError(f"Could not atomically replace {destination}.{hint}") from exc
+                raise
+            time.sleep(delay)
+            delay *= 2
+
+
+def _fsync_directory(directory: Path) -> None:
+    """Flush the directory entry so a completed rename survives power loss.
+
+    Not supported on Windows, where opening a directory handle this way fails;
+    the rename is still atomic there, only its durability window is wider.
+    """
+    try:
+        dir_fd = os.open(str(directory), os.O_RDONLY)
+    except (OSError, AttributeError):
+        return
+    try:
+        os.fsync(dir_fd)
+    except OSError:
+        pass
+    finally:
+        os.close(dir_fd)
+
+
 def atomic_write_text(path: str | Path, text: str) -> None:
     """Replace a UTF-8 text file atomically within its destination directory."""
     destination = Path(path)
@@ -63,10 +159,8 @@ def atomic_write_text(path: str | Path, text: str) -> None:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
-        try:
-            os.replace(temporary, destination)
-        except PermissionError:
-            shutil.copyfile(temporary, destination)
+        _atomic_replace(temporary, destination)
+        _fsync_directory(destination.parent)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -86,15 +180,21 @@ def atomic_write_bytes(path: str | Path, content: bytes) -> None:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
-        try:
-            os.replace(temporary, destination)
-        except PermissionError:
-            shutil.copyfile(temporary, destination)
+        _atomic_replace(temporary, destination)
+        _fsync_directory(destination.parent)
     finally:
         temporary.unlink(missing_ok=True)
 
 
 def atomic_write_json(path: str | Path, value: Any) -> None:
+    """Serialize `value` as JSON and replace `path` atomically.
+
+    `default=str` is deliberate: several callers persist `Path` and `datetime`
+    values directly, and coercing them is preferable to failing a checkpoint
+    write mid-pipeline. It does mean an unexpected object type is silently
+    stringified rather than raising, so prefer passing
+    `model_dump(mode="json")` output for Pydantic models.
+    """
     atomic_write_text(path, json.dumps(value, ensure_ascii=False, indent=2, default=str))
 
 
@@ -108,10 +208,7 @@ def assert_script_covers_source(chapter: ScriptChapter, source_text: str) -> Non
     if not chapter.lines and source_text.strip():
         raise ValueError(f"Chapter {chapter.chapter_number} has source text but no script lines")
 
-    offsets_available = all(
-        line.source_start is not None and line.source_end is not None
-        for line in chapter.lines
-    )
+    offsets_available = all(line.source_start is not None and line.source_end is not None for line in chapter.lines)
     if offsets_available:
         previous_end = 0
         reconstructed: list[str] = []
@@ -119,14 +216,11 @@ def assert_script_covers_source(chapter: ScriptChapter, source_text: str) -> Non
             assert line.source_start is not None and line.source_end is not None
             if line.source_start < previous_end:
                 raise ValueError(
-                    f"Chapter {chapter.chapter_number} has overlapping or out-of-order "
-                    f"source spans at {line.line_id}"
+                    f"Chapter {chapter.chapter_number} has overlapping or out-of-order source spans at {line.line_id}"
                 )
             source_slice = source_text[line.source_start : line.source_end]
             if source_slice != line.text:
-                raise ValueError(
-                    f"Chapter {chapter.chapter_number} source span mismatch at {line.line_id}"
-                )
+                raise ValueError(f"Chapter {chapter.chapter_number} source span mismatch at {line.line_id}")
             reconstructed.append(source_slice)
             previous_end = line.source_end
         spoken = "".join(reconstructed)
@@ -136,8 +230,7 @@ def assert_script_covers_source(chapter: ScriptChapter, source_text: str) -> Non
 
     if normalize_for_coverage(spoken) != normalize_for_coverage(source_text):
         raise ValueError(
-            f"Chapter {chapter.chapter_number} script does not cover the normalized "
-            "source exactly once and in order"
+            f"Chapter {chapter.chapter_number} script does not cover the normalized source exactly once and in order"
         )
 
 
@@ -148,6 +241,10 @@ def script_fingerprint(
     model_name: str,
     prompt_text: str,
     chunk_size_words: int,
+    max_fragments_per_chunk: int = 60,
+    adaptive_split_enabled: bool = True,
+    adaptive_split_max_depth: int = 2,
+    adaptive_split_min_fragments: int = 8,
     group_utterances: bool = False,
     utterance_target_chars: int = 260,
     utterance_max_words: int = 45,
@@ -165,6 +262,10 @@ def script_fingerprint(
             "model": model_name,
             "prompt": sha256_text(prompt_text),
             "chunk_size_words": chunk_size_words,
+            "max_fragments_per_chunk": max_fragments_per_chunk,
+            "adaptive_split_enabled": adaptive_split_enabled,
+            "adaptive_split_max_depth": adaptive_split_max_depth,
+            "adaptive_split_min_fragments": adaptive_split_min_fragments,
             "group_utterances": group_utterances,
             "utterance_target_chars": utterance_target_chars,
             "utterance_max_words": utterance_max_words,
@@ -188,20 +289,20 @@ def build_segment_manifest(
     for order, line in enumerate(chapter.lines):
         voice_id = line.voice_id or line.speaker
         entry = {
-                "order": order,
-                "line_id": line.line_id,
-                "speaker": line.speaker,
-                "voice_id": voice_id,
-                "voice_reference_hash": voice_reference_hashes.get(voice_id, ""),
-                "text_hash": sha256_text(line.text),
-                "source_fragment_id": line.source_fragment_id,
-                "source_fragment_ids": line.source_fragment_ids,
-                "source_start": line.source_start,
-                "source_end": line.source_end,
-                "file": f"{project_id}/segments/{line.line_id}.wav",
-                "pause_before_ms": line.pause_before_ms,
-                "pause_after_ms": line.pause_after_ms,
-            }
+            "order": order,
+            "line_id": line.line_id,
+            "speaker": line.speaker,
+            "voice_id": voice_id,
+            "voice_reference_hash": voice_reference_hashes.get(voice_id, ""),
+            "text_hash": sha256_text(line.text),
+            "source_fragment_id": line.source_fragment_id,
+            "source_fragment_ids": line.source_fragment_ids,
+            "source_start": line.source_start,
+            "source_end": line.source_end,
+            "file": f"{project_id}/segments/{line.line_id}.wav",
+            "pause_before_ms": line.pause_before_ms,
+            "pause_after_ms": line.pause_after_ms,
+        }
         if line.spoken_text:
             entry["spoken_text_hash"] = sha256_text(line.spoken_text)
         entries.append(entry)
@@ -243,11 +344,7 @@ def finalize_segment_manifest(
         if not output_hash:
             raise ValueError(f"Missing generated segment: {output_path}")
         item["output_hash"] = output_hash
-    payload = {
-        key: value
-        for key, value in finalized.items()
-        if key != "manifest_hash"
-    }
+    payload = {key: value for key, value in finalized.items() if key != "manifest_hash"}
     finalized["manifest_hash"] = fingerprint(payload)
     return finalized
 

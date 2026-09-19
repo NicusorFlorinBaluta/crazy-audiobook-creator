@@ -1,45 +1,64 @@
-"""Single Instance Lock — Prevents multiple concurrent instances of the application or voice server.
-"""
+"""Single Instance Lock — Prevents multiple concurrent instances of the application or voice server."""
 
-import sys
-import os
 import logging
+import os
+import sys
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+
 class SingleInstanceLock:
     def __init__(self, lock_name: str = "app.lock"):
-        self.lock_file = Path(os.getenv("TEMP", ".")) / lock_name
+        temp_dir = os.getenv("TEMP") or os.getenv("TMP")
+        if temp_dir:
+            self.lock_file = Path(temp_dir) / lock_name
+        else:
+            from shared.paths import REPO_ROOT
+
+            self.lock_file = REPO_ROOT / lock_name
         self.handle = None
 
-    def acquire(self) -> bool:
-        """Acquire process lock. Returns True if acquired, False if another instance is running."""
+    def acquire(self, *, quiet: bool = False) -> bool:
+        """Acquire process lock. Returns True if acquired, False if another instance is running.
+
+        `quiet` drops the contention message to debug. Use it only when the
+        caller is intentionally polling and will report the wait itself --
+        otherwise a queued caller emits one warning per attempt and drowns the
+        log in a message that is not, for it, a problem.
+        """
         try:
             self.lock_file.parent.mkdir(parents=True, exist_ok=True)
             # Do not truncate another process's PID before attempting the lock.
-            self.handle = open(self.lock_file, "a+")
+            self.handle = open(self.lock_file, "a+", encoding="utf-8", errors="replace")
             # Append mode initially positions an existing file at EOF. Every
             # contender must lock the same byte after the owner writes its PID.
             self.handle.seek(0)
             if sys.platform == "win32":
                 import msvcrt
+
                 msvcrt.locking(self.handle.fileno(), msvcrt.LK_NBLCK, 1)
             else:
                 import fcntl
+
                 fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             self.handle.seek(0)
             self.handle.truncate()
             self.handle.write(str(os.getpid()))
             self.handle.flush()
             return True
-        except (IOError, OSError) as e:
-            logger.warning("Another instance is already running (lock file: %s, error: %s)", self.lock_file, e)
+        except OSError as e:
+            logger.log(
+                logging.DEBUG if quiet else logging.WARNING,
+                "Another instance is already running (lock file: %s, error: %s)",
+                self.lock_file,
+                e,
+            )
             if self.handle:
                 try:
                     self.handle.close()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Could not close the lock file handle after a failed acquire: %s", exc)
                 self.handle = None
             return False
 
@@ -52,9 +71,11 @@ class SingleInstanceLock:
                 self.handle.seek(0)
                 if sys.platform == "win32":
                     import msvcrt
+
                     msvcrt.locking(self.handle.fileno(), msvcrt.LK_UNLCK, 1)
                 else:
                     import fcntl
+
                     fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
                 self.handle.close()
             except Exception as e:
@@ -64,5 +85,7 @@ class SingleInstanceLock:
                 try:
                     if self.lock_file.exists():
                         self.lock_file.unlink()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning(
+                        "Could not remove the lock file %s; the next start may refuse to run: %s", self.lock_file, exc
+                    )

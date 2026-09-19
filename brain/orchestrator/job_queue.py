@@ -10,11 +10,12 @@ import json
 import logging
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from shared import paths as shared_paths
 from shared.models import ProgressSnapshot
 
 logger = logging.getLogger(__name__)
@@ -33,8 +34,11 @@ class JobState(StrEnum):
 class JobQueue:
     """SQLite-backed job queue and state store."""
 
-    def __init__(self, db_path: str = "pipeline_state.db"):
-        self.db_path = db_path
+    def __init__(self, db_path: str | Path | None = None):
+        if db_path is None:
+            self.db_path = str(shared_paths.PROJECTS_DIR / "pipeline_state.db")
+        else:
+            self.db_path = str(db_path)
         self._init_db()
 
     def _init_db(self) -> None:
@@ -109,6 +113,44 @@ class JobQueue:
                 CREATE INDEX IF NOT EXISTS idx_external_validation_project
                 ON external_validation_events(project_id, item_type, item_id)
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS playback_progress (
+                    project_id TEXT PRIMARY KEY,
+                    client_id TEXT NOT NULL DEFAULT '',
+                    chapter_number INTEGER NOT NULL DEFAULT 1,
+                    position_ms INTEGER NOT NULL DEFAULT 0,
+                    playback_speed REAL NOT NULL DEFAULT 1.0,
+                    is_completed INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (project_id) REFERENCES jobs(project_id)
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS playback_flags (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    flag_id TEXT UNIQUE NOT NULL,
+                    project_id TEXT NOT NULL,
+                    chapter_number INTEGER NOT NULL,
+                    position_ms INTEGER NOT NULL,
+                    source TEXT NOT NULL DEFAULT 'phone',
+                    issue_type TEXT NOT NULL DEFAULT 'wrong_speaker',
+                    user_note TEXT NOT NULL DEFAULT '',
+                    line_id TEXT,
+                    enriched_data TEXT NOT NULL DEFAULT '{}',
+                    status TEXT NOT NULL DEFAULT 'open',
+                    agent_verdict TEXT,
+                    agent_explanation TEXT,
+                    resolution TEXT,
+                    resolved_by TEXT,
+                    resolved_at TEXT,
+                    created_at TEXT NOT NULL
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_playback_flags_project
+                ON playback_flags(project_id, status)
+            """)
+            conn.execute("UPDATE playback_flags SET status = 'open' WHERE status = 'pending'")
             conn.commit()
 
     @contextmanager
@@ -137,7 +179,7 @@ class JobQueue:
         state.setdefault("voice_review_approved", False)
         state.setdefault("voice_review_approved_at", None)
         state.setdefault("voice_review_approved_revision", None)
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         with self._connect() as conn:
             conn.execute(
                 """
@@ -176,7 +218,7 @@ class JobQueue:
                 raise KeyError(f"Job not found: {project_id}")
             current = json.loads(row[0])
             current.update(updates)
-            now = datetime.now(timezone.utc).isoformat()
+            now = datetime.now(UTC).isoformat()
             conn.execute(
                 "UPDATE jobs SET state = ?, updated_at = ? WHERE project_id = ?",
                 (json.dumps(current, default=str), now, project_id),
@@ -189,11 +231,7 @@ class JobQueue:
         progress: ProgressSnapshot | dict[str, Any],
     ) -> None:
         """Persist one canonical progress snapshot and compatibility fields."""
-        snapshot = (
-            progress
-            if isinstance(progress, ProgressSnapshot)
-            else ProgressSnapshot.model_validate(progress)
-        )
+        snapshot = progress if isinstance(progress, ProgressSnapshot) else ProgressSnapshot.model_validate(progress)
         payload = snapshot.model_dump(mode="json")
         updates: dict[str, Any] = {
             "progress": payload,
@@ -255,7 +293,7 @@ class JobQueue:
         note: str = "",
     ) -> dict[str, Any]:
         """Create or replace a non-destructive human review disposition."""
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         with self._connect() as conn:
             conn.execute(
                 """
@@ -279,30 +317,72 @@ class JobQueue:
             "updated_at": now,
         }
 
+    #: Longest `reason` an event may store. A provider's explanation is a
+    #: sentence or two; anything past this is a stack trace or a retry log.
+    #: Playwright failures from the web tier reached 109 MB *each* and were
+    #: written once per affected line, which is how pipeline_state.db reached
+    #: 2.4 GB with 7,742 events in it.
+    MAX_EVENT_REASON_CHARS = 4000
+
+    #: Same argument for the serialized `details` blob.
+    MAX_EVENT_DETAILS_CHARS = 16000
+
+    @staticmethod
+    def _bounded(text: str, limit: int) -> str:
+        """Trim to `limit`, saying so, so a truncated value is never mistaken."""
+        if len(text) <= limit:
+            return text
+        return f"{text[:limit]}... [truncated {len(text) - limit:,} chars]"
+
     def log_external_validation(
-        self, project_id: str, item_type: str, item_id: str, provider: str,
-        model: str, decision: str, confidence: float | None, reason: str,
-        latency_ms: int | None = None, details: dict[str, Any] | None = None,
+        self,
+        project_id: str,
+        item_type: str,
+        item_id: str,
+        provider: str,
+        model: str,
+        decision: str,
+        confidence: float | None,
+        reason: str,
+        latency_ms: int | None = None,
+        details: dict[str, Any] | None = None,
     ) -> int:
         """Append one immutable machine-decision event."""
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
+        reason = self._bounded(str(reason), self.MAX_EVENT_REASON_CHARS)
+        details_json = self._bounded(json.dumps(details or {}), self.MAX_EVENT_DETAILS_CHARS)
         with self._connect() as conn:
             cursor = conn.execute(
                 """INSERT INTO external_validation_events
                 (project_id,item_type,item_id,provider,model,decision,confidence,reason,latency_ms,details,created_at)
                 VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-                (project_id, item_type, item_id, provider, model, decision,
-                 confidence, reason, latency_ms, json.dumps(details or {}), now),
+                (
+                    project_id,
+                    item_type,
+                    item_id,
+                    provider,
+                    model,
+                    decision,
+                    confidence,
+                    reason,
+                    latency_ms,
+                    details_json,
+                    now,
+                ),
             )
             conn.commit()
             return int(cursor.lastrowid)
 
     def reconcile_external_validation(
-        self, project_id: str, item_type: str, item_id: str,
-        human_disposition: str, human_value: str = "",
+        self,
+        project_id: str,
+        item_type: str,
+        item_id: str,
+        human_disposition: str,
+        human_value: str = "",
     ) -> None:
         """Attach a human outcome to all prior machine decisions for an item."""
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         with self._connect() as conn:
             conn.execute(
                 """UPDATE external_validation_events
@@ -321,8 +401,22 @@ class JobQueue:
                 FROM external_validation_events WHERE project_id=? ORDER BY id DESC""",
                 (project_id,),
             ).fetchall()
-        keys = ("id","item_type","item_id","provider","model","decision","confidence",
-                "reason","latency_ms","details","human_disposition","human_value","human_at","created_at")
+        keys = (
+            "id",
+            "item_type",
+            "item_id",
+            "provider",
+            "model",
+            "decision",
+            "confidence",
+            "reason",
+            "latency_ms",
+            "details",
+            "human_disposition",
+            "human_value",
+            "human_at",
+            "created_at",
+        )
         result = []
         for row in rows:
             item = dict(zip(keys, row))
@@ -330,33 +424,25 @@ class JobQueue:
             result.append(item)
         return result
 
-    def external_validation_calibration(self, project_id: str, minimum_samples: int = 25) -> dict[str, Any]:
-        """Compute passive agreement metrics; never mutates configured thresholds."""
-        events = [event for event in self.get_external_validation_events(project_id) if event["human_disposition"]]
-        outcomes: list[tuple[float, bool]] = []
-        seen_items: set[tuple[str, str]] = set()
-        for event in events:
-            item_key = (event["item_type"], event["item_id"])
-            if item_key in seen_items:
-                continue
-            confidence = event.get("confidence")
-            if confidence is None:
-                continue
-            decision = str(event.get("decision", "")).lower()
-            human = str(event.get("human_disposition", "")).lower()
-            agrees = (
-                (decision in {"accept", "accepted", "resolved"} and human in {"acceptable", "resolved"})
-                or (decision in {"reject", "regenerate"} and human in {"regenerate", "source_tts_issue"})
-            )
-            outcomes.append((float(confidence), agrees))
-            seen_items.add(item_key)
+    @staticmethod
+    def _calibration_summary(
+        outcomes: list[tuple[float, bool]],
+        minimum_samples: int,
+    ) -> dict[str, Any]:
+        """Summarize confidence-versus-human agreement without tuning policy."""
         sample_count = len(outcomes)
         bins = []
         for low in (0.0, 0.5, 0.7, 0.85):
             high = {0.0: 0.5, 0.5: 0.7, 0.7: 0.85, 0.85: 1.01}[low]
             rows = [agree for confidence, agree in outcomes if low <= confidence < high]
-            bins.append({"low": low, "high": min(high, 1.0), "samples": len(rows),
-                         "agreement": sum(rows) / len(rows) if rows else None})
+            bins.append(
+                {
+                    "low": low,
+                    "high": min(high, 1.0),
+                    "samples": len(rows),
+                    "agreement": sum(rows) / len(rows) if rows else None,
+                }
+            )
         recommended = None
         if sample_count >= minimum_samples:
             lowest_observed = min(confidence for confidence, _ in outcomes)
@@ -367,11 +453,115 @@ class JobQueue:
                 if len(rows) >= 10 and sum(rows) / len(rows) >= 0.95:
                     recommended = threshold
                     break
-        return {"sample_count": sample_count, "minimum_samples": minimum_samples,
-                "samples_needed": max(0, minimum_samples - sample_count),
-                "ready": sample_count >= minimum_samples, "bins": bins,
-                "recommended_auto_accept_threshold": recommended,
-                "applied_automatically": False}
+        brier_score = (
+            sum((confidence - float(agrees)) ** 2 for confidence, agrees in outcomes) / sample_count
+            if sample_count
+            else None
+        )
+        populated_bins = [row for row in bins if row["samples"]]
+        expected_calibration_error = (
+            sum(
+                row["samples"]
+                / sample_count
+                * abs(
+                    sum(
+                        confidence
+                        for confidence, _ in outcomes
+                        if row["low"] <= confidence < (row["high"] if row["high"] < 1 else 1.01)
+                    )
+                    / row["samples"]
+                    - float(row["agreement"])
+                )
+                for row in populated_bins
+            )
+            if sample_count
+            else None
+        )
+        return {
+            "sample_count": sample_count,
+            "minimum_samples": minimum_samples,
+            "samples_needed": max(0, minimum_samples - sample_count),
+            "ready": sample_count >= minimum_samples,
+            "bins": bins,
+            "brier_score": brier_score,
+            "expected_calibration_error": expected_calibration_error,
+            "recommended_auto_accept_threshold": recommended,
+            "applied_automatically": False,
+        }
+
+    def external_validation_calibration(self, project_id: str, minimum_samples: int = 25) -> dict[str, Any]:
+        """Compute project and purpose-matched pooled calibration metrics.
+
+        Pooling is deliberately segmented by provider, model, item purpose, and
+        schema/prompt revision so an accurate audio validator cannot lend false
+        confidence to a different attribution workflow. Recommendations remain
+        advisory and never alter configured thresholds.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT project_id,item_type,item_id,provider,model,decision,
+                confidence,details,human_disposition,id
+                FROM external_validation_events
+                WHERE human_disposition IS NOT NULL
+                ORDER BY id DESC"""
+            ).fetchall()
+
+        groups: dict[tuple[str, str, str, str], list[tuple[float, bool]]] = {}
+        project_outcomes: list[tuple[float, bool]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for row in rows:
+            (
+                event_project,
+                item_type,
+                item_id,
+                provider,
+                model,
+                decision,
+                confidence,
+                details_json,
+                human,
+                _event_id,
+            ) = row
+            item_key = (str(event_project), str(item_type), str(item_id))
+            if item_key in seen or confidence is None:
+                continue
+            seen.add(item_key)
+            decision_norm = str(decision or "").lower()
+            human_norm = str(human or "").lower()
+            agrees = (
+                decision_norm in {"accept", "accepted", "resolved"} and human_norm in {"acceptable", "resolved"}
+            ) or (decision_norm in {"reject", "regenerate"} and human_norm in {"regenerate", "source_tts_issue"})
+            outcome = (max(0.0, min(1.0, float(confidence))), agrees)
+            if event_project == project_id:
+                project_outcomes.append(outcome)
+            try:
+                details = json.loads(details_json or "{}")
+            except (TypeError, json.JSONDecodeError):
+                details = {}
+            revision = str(
+                details.get("purpose_version") or details.get("schema_revision") or details.get("schema") or "legacy"
+            )
+            key = (
+                str(provider or "unknown"),
+                str(model or "unknown"),
+                str(item_type or "unknown"),
+                revision,
+            )
+            groups.setdefault(key, []).append(outcome)
+
+        result = self._calibration_summary(project_outcomes, minimum_samples)
+        result["pooled_groups"] = [
+            {
+                "provider": key[0],
+                "model": key[1],
+                "purpose": key[2],
+                "revision": key[3],
+                **self._calibration_summary(outcomes, minimum_samples),
+            }
+            for key, outcomes in sorted(groups.items())
+        ]
+        result["pooling_policy"] = "provider_model_purpose_revision"
+        return result
 
     def get_review_items(
         self,
@@ -379,10 +569,7 @@ class JobQueue:
         item_type: str | None = None,
     ) -> list[dict[str, Any]]:
         """Return persisted human review dispositions for a project."""
-        query = (
-            "SELECT item_type, item_id, disposition, note, updated_at "
-            "FROM review_items WHERE project_id = ?"
-        )
+        query = "SELECT item_type, item_id, disposition, note, updated_at FROM review_items WHERE project_id = ?"
         params: list[Any] = [project_id]
         if item_type:
             query += " AND item_type = ?"
@@ -410,6 +597,25 @@ class JobQueue:
             )
             conn.commit()
 
+    def clear_review_items(
+        self,
+        project_id: str,
+        item_type: str | None = None,
+    ) -> None:
+        """Clear review decisions whose underlying artifacts were invalidated."""
+        with self._connect() as conn:
+            if item_type is None:
+                conn.execute(
+                    "DELETE FROM review_items WHERE project_id = ?",
+                    (project_id,),
+                )
+            else:
+                conn.execute(
+                    "DELETE FROM review_items WHERE project_id = ? AND item_type = ?",
+                    (project_id, item_type),
+                )
+            conn.commit()
+
     # ------------------------------------------------------------------
     # Quality logging
     # ------------------------------------------------------------------
@@ -426,7 +632,7 @@ class JobQueue:
         details: dict[str, Any] | None = None,
     ) -> None:
         """Log a quality validation result."""
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         with self._connect() as conn:
             conn.execute(
                 """
@@ -462,8 +668,7 @@ class JobQueue:
                 )
             else:
                 conn.execute(
-                    "DELETE FROM quality_logs "
-                    "WHERE project_id = ? AND chapter_number = ?",
+                    "DELETE FROM quality_logs WHERE project_id = ? AND chapter_number = ?",
                     (project_id, chapter_number),
                 )
             conn.commit()
@@ -504,12 +709,8 @@ class JobQueue:
             grouped.setdefault(item["line_id"], []).append(item)
         selected: list[dict[str, Any]] = []
         for attempts in grouped.values():
-            explicit = [
-                item for item in attempts if item.get("details", {}).get("selected")
-            ]
-            selected.append(
-                max(explicit or attempts, key=lambda item: int(item.get("attempt") or 1))
-            )
+            explicit = [item for item in attempts if item.get("details", {}).get("selected")]
+            selected.append(max(explicit or attempts, key=lambda item: int(item.get("attempt") or 1)))
         return selected
 
     @staticmethod
@@ -526,10 +727,7 @@ class JobQueue:
 
     def get_chapter_quality_summary(self, project_id: str, chapter_number: int) -> dict[str, Any]:
         """Get aggregated quality metrics for a chapter."""
-        logs = [
-            item for item in self.get_quality_report(project_id)
-            if item.get("chapter_number") == chapter_number
-        ]
+        logs = [item for item in self.get_quality_report(project_id) if item.get("chapter_number") == chapter_number]
         final = self._selected_quality_logs(logs)
         if not final:
             return {}
@@ -564,3 +762,336 @@ class JobQueue:
             "worst_wer": max(wers, default=0.0),
             "total_retries": self._quality_retry_count(logs),
         }
+
+    def set_playback_progress(
+        self,
+        project_id: str,
+        client_id: str = "",
+        chapter_number: int = 1,
+        position_ms: int = 0,
+        playback_speed: float = 1.0,
+        is_completed: bool = False,
+    ) -> dict[str, Any]:
+        """Save playback progress for a project."""
+        now = datetime.now(UTC).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO playback_progress (project_id, client_id, chapter_number, position_ms, playback_speed, is_completed, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(project_id) DO UPDATE SET
+                    client_id = excluded.client_id,
+                    chapter_number = excluded.chapter_number,
+                    position_ms = excluded.position_ms,
+                    playback_speed = excluded.playback_speed,
+                    is_completed = excluded.is_completed,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    project_id,
+                    client_id,
+                    int(chapter_number),
+                    int(position_ms),
+                    float(playback_speed),
+                    1 if is_completed else 0,
+                    now,
+                ),
+            )
+            conn.commit()
+        return {
+            "project_id": project_id,
+            "client_id": client_id,
+            "chapter_number": int(chapter_number),
+            "position_ms": int(position_ms),
+            "playback_speed": float(playback_speed),
+            "is_completed": bool(is_completed),
+            "updated_at": now,
+        }
+
+    def get_playback_progress(self, project_id: str) -> dict[str, Any] | None:
+        """Get the latest saved playback progress for a project."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT client_id, chapter_number, position_ms, playback_speed, is_completed, updated_at
+                FROM playback_progress WHERE project_id = ?
+                """,
+                (project_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "project_id": project_id,
+            "client_id": row[0],
+            "chapter_number": int(row[1]),
+            "position_ms": int(row[2]),
+            "playback_speed": float(row[3]),
+            "is_completed": bool(row[4]),
+            "updated_at": row[5],
+        }
+
+    # ------------------------------------------------------------------
+    # Playback flags / issue tracker
+    # ------------------------------------------------------------------
+
+    def _format_playback_flag_row(self, r: tuple[Any, ...]) -> dict[str, Any]:
+        try:
+            enriched = json.loads(r[8]) if r[8] else {}
+        except (json.JSONDecodeError, TypeError):
+            enriched = {}
+        active_line = enriched.get("active_line") or {}
+        raw_status = r[9]
+        norm_status = "open" if raw_status == "pending" else raw_status
+        return {
+            "flag_id": r[0],
+            "project_id": r[1],
+            "chapter_number": r[2],
+            "position_ms": r[3],
+            "source": r[4],
+            "issue_type": r[5],
+            "user_note": r[6],
+            "line_id": r[7],
+            "enriched_data": enriched,
+            "candidate_lines": enriched.get("candidate_lines") or [],
+            "active_line": active_line,
+            "speaker_attributed": active_line.get("speaker"),
+            "context_lines": enriched.get("surrounding_lines") or [],
+            "manuscript_excerpt": enriched.get("manuscript_excerpt"),
+            "status": norm_status,
+            "agent_verdict": r[10],
+            "agent_explanation": r[11],
+            "agent_veto": r[11] if (norm_status == "vetoed" or r[10] in ("vetoed", "AGENT_VETO")) else None,
+            "resolution": r[12],
+            "resolution_notes": r[12],
+            "resolved_by": r[13],
+            "resolved_at": r[14],
+            "created_at": r[15],
+        }
+
+    def create_playback_flag(
+        self,
+        project_id: str,
+        flag_id: str,
+        chapter_number: int,
+        position_ms: int,
+        source: str = "phone",
+        issue_type: str = "wrong_speaker",
+        user_note: str = "",
+        line_id: str | None = None,
+        enriched_data: dict[str, Any] | None = None,
+        created_at: str | None = None,
+        agent_verdict: str | None = None,
+        agent_explanation: str | None = None,
+    ) -> dict[str, Any]:
+        """Record a playback issue flag."""
+        now = datetime.now(UTC).isoformat()
+        if created_at:
+            try:
+                datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                record_created_at = created_at
+            except (ValueError, TypeError):
+                record_created_at = now
+        else:
+            record_created_at = now
+
+        enriched_json = json.dumps(enriched_data or {})
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO jobs (project_id, state, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                (project_id, json.dumps({"title": project_id, "status": "complete"}), now, now),
+            )
+            conn.execute(
+                """
+                INSERT INTO playback_flags (
+                    flag_id, project_id, chapter_number, position_ms,
+                    source, issue_type, user_note, line_id,
+                    enriched_data, status, agent_verdict, agent_explanation, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)
+                """,
+                (
+                    flag_id,
+                    project_id,
+                    int(chapter_number),
+                    int(position_ms),
+                    source,
+                    issue_type,
+                    user_note,
+                    line_id,
+                    enriched_json,
+                    agent_verdict,
+                    agent_explanation,
+                    record_created_at,
+                ),
+            )
+            conn.commit()
+        enriched = enriched_data or {}
+        active_line = enriched.get("active_line") or {}
+        norm_status = "open"
+        return {
+            "flag_id": flag_id,
+            "project_id": project_id,
+            "chapter_number": int(chapter_number),
+            "position_ms": int(position_ms),
+            "source": source,
+            "issue_type": issue_type,
+            "user_note": user_note,
+            "line_id": line_id,
+            "enriched_data": enriched,
+            "candidate_lines": enriched.get("candidate_lines") or [],
+            "active_line": active_line,
+            "speaker_attributed": active_line.get("speaker"),
+            "context_lines": enriched.get("surrounding_lines") or [],
+            "manuscript_excerpt": enriched.get("manuscript_excerpt"),
+            "status": norm_status,
+            "agent_verdict": agent_verdict,
+            "agent_explanation": agent_explanation,
+            "agent_veto": agent_explanation if agent_verdict in ("vetoed", "AGENT_VETO") else None,
+            "resolution": None,
+            "resolution_notes": None,
+            "resolved_by": None,
+            "resolved_at": None,
+            "created_at": record_created_at,
+        }
+
+    def find_duplicate_playback_flag(
+        self,
+        project_id: str,
+        chapter_number: int,
+        position_ms: int,
+        line_id: str | None = None,
+        *,
+        window_ms: int = 2000,
+        unresolved_only: bool = True,
+    ) -> dict[str, Any] | None:
+        """Find an existing flag matching on line_id or within window_ms in the same chapter.
+
+        If unresolved_only is True (default), closed flags ('fixed', 'resolved', 'vetoed', 'dismissed')
+        are ignored so that a line repaired earlier can be legitimately re-flagged on later listening.
+        """
+        query = """
+            SELECT flag_id, project_id, chapter_number, position_ms,
+                   source, issue_type, user_note, line_id,
+                   enriched_data, status, agent_verdict, agent_explanation,
+                   resolution, resolved_by, resolved_at, created_at
+            FROM playback_flags
+            WHERE project_id = ? AND chapter_number = ?
+        """
+        params: list[Any] = [project_id, int(chapter_number)]
+        if unresolved_only:
+            query += " AND status NOT IN ('fixed', 'resolved', 'vetoed', 'dismissed')"
+        query += " ORDER BY created_at ASC"
+
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+
+        for r in rows:
+            r_pos = r[3]
+            r_line = r[7]
+            if (line_id and r_line and line_id == r_line) or abs(int(position_ms) - int(r_pos)) <= window_ms:
+                return self._format_playback_flag_row(r)
+        return None
+
+    def get_playback_flags(
+        self,
+        project_id: str,
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """List playback issue flags for a project."""
+        query = """
+            SELECT flag_id, project_id, chapter_number, position_ms,
+                   source, issue_type, user_note, line_id,
+                   enriched_data, status, agent_verdict, agent_explanation,
+                   resolution, resolved_by, resolved_at, created_at
+            FROM playback_flags
+            WHERE project_id = ?
+        """
+        params: list[Any] = [project_id]
+        if status:
+            if status == "open":
+                query += " AND status IN ('open', 'pending')"
+            else:
+                query += " AND status = ?"
+                params.append(status)
+        query += " ORDER BY chapter_number ASC, position_ms ASC, created_at ASC"
+
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+
+        return [self._format_playback_flag_row(r) for r in rows]
+
+    def get_playback_flag(self, project_id: str, flag_id: str) -> dict[str, Any] | None:
+        """Get a single playback flag by ID."""
+        with self._connect() as conn:
+            r = conn.execute(
+                """
+                SELECT flag_id, project_id, chapter_number, position_ms,
+                       source, issue_type, user_note, line_id,
+                       enriched_data, status, agent_verdict, agent_explanation,
+                       resolution, resolved_by, resolved_at, created_at
+                FROM playback_flags
+                WHERE project_id = ? AND flag_id = ?
+                """,
+                (project_id, flag_id),
+            ).fetchone()
+        if r is None:
+            return None
+        return self._format_playback_flag_row(r)
+
+    def update_playback_flag(
+        self,
+        project_id: str,
+        flag_id: str,
+        status: str | None = None,
+        agent_verdict: str | None = None,
+        agent_explanation: str | None = None,
+        resolution: str | None = None,
+        resolved_by: str | None = None,
+        line_id: str | None = None,
+        enriched_data: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Update a playback flag's investigation status, resolution, or target line."""
+        existing = self.get_playback_flag(project_id, flag_id)
+        if not existing:
+            return None
+
+        updates: list[str] = []
+        params: list[Any] = []
+        now = datetime.now(UTC).isoformat()
+
+        if status is not None:
+            updates.append("status = ?")
+            params.append(status)
+        if agent_verdict is not None:
+            updates.append("agent_verdict = ?")
+            params.append(agent_verdict)
+        if agent_explanation is not None:
+            updates.append("agent_explanation = ?")
+            params.append(agent_explanation)
+        if resolution is not None:
+            updates.append("resolution = ?")
+            params.append(resolution)
+        if resolved_by is not None:
+            updates.append("resolved_by = ?")
+            params.append(resolved_by)
+            updates.append("resolved_at = ?")
+            params.append(now)
+        if line_id is not None:
+            updates.append("line_id = ?")
+            params.append(line_id)
+        if enriched_data is not None:
+            updates.append("enriched_data = ?")
+            params.append(json.dumps(enriched_data))
+
+        if not updates:
+            return existing
+
+        params.extend([project_id, flag_id])
+        with self._connect() as conn:
+            conn.execute(
+                f"UPDATE playback_flags SET {', '.join(updates)} WHERE project_id = ? AND flag_id = ?",
+                params,
+            )
+            conn.commit()
+
+        return self.get_playback_flag(project_id, flag_id)

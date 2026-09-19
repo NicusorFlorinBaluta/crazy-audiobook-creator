@@ -8,10 +8,10 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
-from shared.constants import ValidationStatus
-from shared.models import ScriptLine
-from voice.validator.validation_loop import ValidationLoop
+from shared.constants import PAUSE_MARKER_SILENCE_SECONDS, ValidationStatus
+from shared.models import QualityResult, ScriptLine
 from voice.tts_server.embedding_store import EmbeddingStore
+from voice.validator.validation_loop import ValidationLoop
 
 
 class FakeEngine:
@@ -83,6 +83,15 @@ class FakeWhisper:
     def transcribe(self, audio_file: str) -> str:
         return "hello"
 
+    def transcribe_strict(self, audio_file: str, language: str | None = None) -> str:
+        """Mirror the real contract: subclasses override `transcribe` only.
+
+        `ValidationLoop` calls the strict form so that an engine failure raises
+        instead of being scored as an empty transcript; the fakes never fail, so
+        delegating keeps every existing override working.
+        """
+        return self.transcribe(audio_file)
+
     def calculate_wer(self, reference: str, hypothesis: str) -> float:
         return 0.0 if reference.lower() == hypothesis.lower() else 1.0
 
@@ -98,16 +107,9 @@ class FakeWhisper:
         reference: str,
         hypothesis: str,
     ) -> bool:
-        compact_reference = "".join(
-            char for char in reference.casefold() if char.isalnum()
-        )
-        compact_hypothesis = "".join(
-            char for char in hypothesis.casefold() if char.isalnum()
-        )
-        return bool(
-            compact_reference
-            and compact_reference == compact_hypothesis
-        )
+        compact_reference = "".join(char for char in reference.casefold() if char.isalnum())
+        compact_hypothesis = "".join(char for char in hypothesis.casefold() if char.isalnum())
+        return bool(compact_reference and compact_reference == compact_hypothesis)
 
     @staticmethod
     def _normalize_text(text: str) -> str:
@@ -322,7 +324,7 @@ class ValidationLoopTests(unittest.TestCase):
         line = ScriptLine(
             line_id="ch01_0046",
             speaker="narrator",
-            text="\"UNCLE!\" she shouted.",
+            text='"UNCLE!" she shouted.',
             emotion="panicked shout",
             speed=1.15,
         )
@@ -417,9 +419,7 @@ class ValidationLoopTests(unittest.TestCase):
 
     def test_concatenated_repetitions_are_separated_for_synthesis(self) -> None:
         self.assertEqual(
-            ValidationLoop._prepare_synthesis_text(
-                "\"Letsgoletsgoletsgo!\""
-            ),
+            ValidationLoop._prepare_synthesis_text('"Letsgoletsgoletsgo!"'),
             "\"Let's go, let's go, let's go!\"",
         )
 
@@ -608,6 +608,21 @@ class ValidationLoopTests(unittest.TestCase):
         self.assertEqual(result.status, ValidationStatus.FAIL)
 
     def test_multiple_phonetic_glossary_spellings_preserve_sentence(self) -> None:
+        """Whisper's spelling is forgiven; a changed pronunciation is not.
+
+        Both names here are real, and they are not the same case. `Eelakin`
+        transcribed "Ilekin" is one sound spelled two ways, so it costs
+        nothing. `Patji` transcribed "Pachi" is the engine saying a different
+        word -- measured `mispronounced` over 133 Emberdark lines, heard as
+        "patchy" x73 and "pachi" x19 -- and it keeps its WER cost so the retry
+        that redraws it can fire.
+
+        Until 2026-09-16 both were forgiven, because the test was a 0.45
+        character ratio. The sentence is still preserved, which is what this
+        case is for: one questionable name out of nine words does not condemn
+        the line.
+        """
+
         class FictionalNamesWhisper(FakeWhisper):
             def transcribe(self, audio_file: str) -> str:
                 return "Pachi King of the Pantheon, God of the Ilekin."
@@ -641,7 +656,9 @@ class ValidationLoopTests(unittest.TestCase):
             )
 
         self.assertEqual(result.status, ValidationStatus.PASS)
-        self.assertEqual(result.effective_text_error, 0.0)
+        # "Ilekin" is discounted, "Pachi" is not: one of the two words costs.
+        self.assertAlmostEqual(result.effective_text_error, 1 / 9)
+        self.assertLess(result.effective_text_error, result.wer, "the same-sound name was still discounted")
         self.assertEqual(
             result.acceptance_reason,
             "approved_glossary_spelling_variant",
@@ -747,11 +764,7 @@ class ValidationLoopTests(unittest.TestCase):
                 ["ch01_0000", "ch01_0001"],
             )
             self.assertEqual(
-                [
-                    message["line_id"]
-                    for message in progress
-                    if message.get("phase") == "synthesis"
-                ],
+                [message["line_id"] for message in progress if message.get("phase") == "synthesis"],
                 ["ch01_0000", "ch01_0001"],
             )
             self.assertEqual(
@@ -816,12 +829,20 @@ class ValidationLoopTests(unittest.TestCase):
             self.assertIn("whisper_transcription", first.timings_seconds)
             self.assertIn("validation_cache_lookup", second.timings_seconds)
             self.assertNotIn("whisper_transcription", second.timings_seconds)
-            measured = sum(
-                value
-                for key, value in first.timings_seconds.items()
-                if key != "total"
-            )
+            measured = sum(value for key, value in first.timings_seconds.items() if key != "total")
             self.assertLessEqual(measured, first.timings_seconds["total"] * 1.1)
+
+            # Unrelated terms must not invalidate cached lines that do not contain them
+            unrelated = loop.process_chapter(
+                project_id="book",
+                chapter_number=1,
+                lines=[line],
+                workspace=root,
+                validation_terms={"unrelated_fantasy_term", "dalereckoning"},
+            )
+            self.assertEqual(unrelated.validation_cache_hits, 1)
+            self.assertEqual(unrelated.validation_cache_misses, 0)
+            self.assertEqual(whisper.transcriptions, 1)
 
             third = loop.process_chapter(
                 project_id="book",
@@ -848,6 +869,88 @@ class ValidationLoopTests(unittest.TestCase):
             self.assertEqual(engine.calls, synthesis_calls)
             self.assertEqual(whisper.transcriptions, 3)
 
+    def test_selective_revalidation_when_pronunciation_updated(self) -> None:
+        """When a pronunciation changes, only lines containing that term revalidate."""
+
+        class MatchWhisper(FakeWhisper):
+            def __init__(self) -> None:
+                super().__init__()
+                self.transcriptions = 0
+
+            def transcribe(self, audio_file: str) -> str:
+                self.transcriptions += 1
+                return "text"
+
+            def calculate_wer(self, reference: str, hypothesis: str) -> float:
+                return 0.0
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reference = root / "reference.wav"
+            sf.write(reference, np.ones(2400, dtype=np.float32) * 0.01, 24000)
+            engine = FakeEngine()
+            whisper = MatchWhisper()
+            store = EmbeddingStore(root / "cache.db")
+            loop = ValidationLoop(
+                whisper=whisper,
+                analyzer=FakeAnalyzer(),
+                engine=engine,
+                library=FakeLibrary(reference),
+                embedding_store=store,
+            )
+            line1 = ScriptLine(
+                line_id="ch01_0001",
+                speaker="narrator",
+                text="The morning was quiet and peaceful.",
+            )
+            line2 = ScriptLine(
+                line_id="ch01_0002",
+                speaker="narrator",
+                text="Uncle Jax smiled as he entered the room.",
+            )
+            lines = [line1, line2]
+
+            # Initial generation and validation
+            first = loop.process_chapter(
+                project_id="book",
+                chapter_number=1,
+                lines=lines,
+                workspace=root,
+                validation_terms={"Jax", "Uncle Jax"},
+            )
+            self.assertEqual(first.validation_cache_hits, 0)
+            self.assertEqual(first.validation_cache_misses, 2)
+            self.assertEqual(whisper.transcriptions, 2)
+
+            # Scenario A: User adds an unrelated pronunciation term (e.g. "Dalereckoning")
+            # Neither line contains "Dalereckoning", so BOTH lines must be cache hits!
+            unrelated_run = loop.process_chapter(
+                project_id="book",
+                chapter_number=1,
+                lines=lines,
+                workspace=root,
+                validation_terms={"Jax", "Uncle Jax", "Dalereckoning"},
+            )
+            self.assertEqual(unrelated_run.validation_cache_hits, 2)
+            self.assertEqual(unrelated_run.validation_cache_misses, 0)
+            self.assertEqual(whisper.transcriptions, 2)  # Whisper was NOT called
+
+            # Scenario B: User updates pronunciation for "Jax" -> "Jaks"
+            # line1 is untouched -> cache hit!
+            # line2 has spoken_text changed -> cache miss & revalidates!
+            line2_updated = line2.model_copy(update={"spoken_text": "Uncle Jaks smiled as he entered the room."})
+            updated_lines = [line1, line2_updated]
+            updated_run = loop.process_chapter(
+                project_id="book",
+                chapter_number=1,
+                lines=updated_lines,
+                workspace=root,
+                validation_terms={"Jax", "Uncle Jax", "Jaks", "Dalereckoning"},
+            )
+            self.assertEqual(updated_run.validation_cache_hits, 1)  # line1 cached!
+            self.assertEqual(updated_run.validation_cache_misses, 1)  # line2 re-validated!
+            self.assertEqual(whisper.transcriptions, 3)  # Whisper called only once for line2
+
     def test_resume_reuses_line_checkpointed_before_callback_crash(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -856,8 +959,11 @@ class ValidationLoopTests(unittest.TestCase):
             engine = FakeEngine()
             store = EmbeddingStore(root / "cache.db")
             loop = ValidationLoop(
-                whisper=FakeWhisper(), analyzer=FakeAnalyzer(), engine=engine,
-                library=FakeLibrary(reference), embedding_store=store,
+                whisper=FakeWhisper(),
+                analyzer=FakeAnalyzer(),
+                engine=engine,
+                library=FakeLibrary(reference),
+                embedding_store=store,
             )
             lines = [
                 ScriptLine(line_id="ch01_0000", speaker="narrator", text="hello"),
@@ -870,12 +976,18 @@ class ValidationLoopTests(unittest.TestCase):
 
             with self.assertRaisesRegex(RuntimeError, "injected callback crash"):
                 loop.process_chapter(
-                    project_id="book", chapter_number=1, lines=lines,
-                    workspace=root, progress_callback=crash_after_first_checkpoint,
+                    project_id="book",
+                    chapter_number=1,
+                    lines=lines,
+                    workspace=root,
+                    progress_callback=crash_after_first_checkpoint,
                 )
 
             response = loop.process_chapter(
-                project_id="book", chapter_number=1, lines=lines, workspace=root,
+                project_id="book",
+                chapter_number=1,
+                lines=lines,
+                workspace=root,
             )
 
             self.assertEqual(response.status, "success")
@@ -975,6 +1087,269 @@ class ValidationLoopTests(unittest.TestCase):
         self.assertEqual(whisper.unload_calls, 1)
         self.assertFalse(whisper.is_loaded)
         self.assertTrue(engine.is_loaded)
+
+    def test_non_spoken_pause_marker_skips_tts_and_auto_passes(self) -> None:
+        """Non-spoken separator/em-dash lines must emit silence and auto-pass without neural TTS or Whisper."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            loop, engine = self.make_loop(root)
+
+            # Process a chapter with an em-dash pause line
+            response = loop.process_chapter(
+                project_id="book",
+                chapter_number=1,
+                lines=[
+                    ScriptLine(
+                        line_id="ch01_0001",
+                        speaker="narrator",
+                        text="—",
+                        pause_after_ms=900,
+                    )
+                ],
+                workspace=root,
+                validate=True,
+            )
+
+            # Neural TTS must not have been called
+            self.assertEqual(len(engine.calls), 0)
+
+            # A valid, silent placeholder -- not the pause itself. The audible
+            # break is inserted by `voice.mastering.assembler` from
+            # `pause_after_ms`, which is 900 on these lines and on the line
+            # before, and adjacent directives are combined with max(). Making
+            # the placeholder long would add a third, uncombined silence.
+            segment_path = root / "book" / "segments" / "ch01_0001.wav"
+            self.assertTrue(segment_path.exists())
+            info = sf.info(str(segment_path))
+            self.assertAlmostEqual(info.duration, PAUSE_MARKER_SILENCE_SECONDS, places=2)
+            self.assertLess(
+                info.duration,
+                0.5,
+                "the placeholder must not compete with the assembler's pause_after_ms",
+            )
+
+            # Validation must have passed cleanly
+            self.assertEqual(response.status, "success")
+            self.assertEqual(response.generated, 1)
+            self.assertEqual(response.failed_validation, 0)
+
+    def test_punctuation_only_dialogue_is_still_spoken(self) -> None:
+        """A line of "?" is speech, not a separator, and must reach the engine.
+
+        The separator test is `no alphanumerics` plus `only separator glyphs`.
+        The first half alone would silently replace a spoken "?" or "..." with
+        silence, dropping authored dialogue from the book.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            loop, engine = self.make_loop(root)
+
+            loop.process_chapter(
+                project_id="book",
+                chapter_number=1,
+                lines=[
+                    ScriptLine(line_id="ch01_0001", speaker="narrator", text="?"),
+                    ScriptLine(line_id="ch01_0002", speaker="narrator", text="..."),
+                    ScriptLine(line_id="ch01_0003", speaker="narrator", text="***"),
+                ],
+                workspace=root,
+                validate=False,
+            )
+
+            synthesised = {call.get("text") if isinstance(call, dict) else call for call in engine.calls}
+            self.assertEqual(len(engine.calls), 2, f"expected only '?' and '...' to be synthesised, got {engine.calls}")
+            self.assertNotIn("***", str(synthesised))
+
+
+class SttUnavailableTests(unittest.TestCase):
+    """An STT outage must not be scored as a 100% transcription mismatch.
+
+    On 2026-09-07 Whisper was handed the BCP-47 tag "en-US", which it rejects.
+    `transcribe` caught the ValueError and returned "", WER scored that empty
+    string as 1.0, and 275 of 277 pristine segments were blocked with
+    "Deterministic audio hard gate failed; external models cannot override
+    it". Normalising the language code fixed that trigger; this pins the
+    failure mode itself, which any future engine fault would reproduce.
+    """
+
+    def test_engine_failure_raises_instead_of_returning_an_empty_transcript(self) -> None:
+        from voice.validator.whisper_validator import TranscriptionUnavailableError, WhisperValidator
+
+        validator = WhisperValidator.__new__(WhisperValidator)
+        validator._is_loaded = True
+        validator._backend = "faster_whisper"
+        validator.vad_filter = True
+
+        class _Boom:
+            def transcribe(self, *_args, **_kwargs):
+                raise ValueError("Unsupported language: en-us")
+
+        validator._model = _Boom()
+
+        # The lenient form stays lenient for benchmarks and ad-hoc scripts.
+        self.assertEqual(validator.transcribe("x.wav", language="en-US"), "")
+        # The scoring form refuses to hand back a transcript it never got.
+        with self.assertRaises(TranscriptionUnavailableError):
+            validator.transcribe_strict("x.wav", language="en-US")
+
+    def test_stt_outage_is_reported_as_not_run_not_as_a_mismatch(self) -> None:
+        from voice.validator.whisper_validator import TranscriptionUnavailableError
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            loop, _engine = ValidationLoopTests().make_loop(root)
+
+            class _BrokenWhisper(FakeWhisper):
+                def transcribe_strict(self, audio_file, language=None):
+                    raise TranscriptionUnavailableError("engine fell over")
+
+            loop.whisper = _BrokenWhisper()
+            response = loop.process_chapter(
+                project_id="book",
+                chapter_number=1,
+                lines=[ScriptLine(line_id="ch01_0001", speaker="narrator", text="Hello there.")],
+                workspace=root,
+                validate=True,
+            )
+
+            result = response.quality_results[0]
+            self.assertEqual(result.acceptance_reason, "stt_unavailable")
+            self.assertNotEqual(result.acceptance_reason, "transcription_mismatch")
+            self.assertEqual(result.wer, 0.0, "an outage is not a 100% word error rate")
+            self.assertTrue(
+                result.passed_hard_gates,
+                "the text gate never ran, so it must not report a deterministic failure",
+            )
+            self.assertTrue(any("Speech-to-text was unavailable" in w for w in result.warnings))
+
+    def test_is_pronunciation_candidate_better_prefers_faithful_rendering(self) -> None:
+        """Candidate that pronounces hard term faithfully beats one that adds an extra beat."""
+        current = QualityResult(
+            line_id="ch01_0001",
+            status=ValidationStatus.PASS,
+            wer=0.08,
+            quality_score=0.92,
+            transcribed_text="drizzit walked into the cavern",
+        )
+        candidate = QualityResult(
+            line_id="ch01_0001",
+            status=ValidationStatus.PASS,
+            wer=0.10,
+            quality_score=0.90,
+            transcribed_text="drist walked into the cavern",
+        )
+        # For term 'Drizzt', 'drist' passes same_spoken_form while 'drizzit' has an extra syllable
+        self.assertTrue(
+            ValidationLoop._is_pronunciation_candidate_better(candidate, current, {"Drizzt"}),
+            "candidate take saying 'drist' must beat 'drizzit'",
+        )
+        self.assertFalse(
+            ValidationLoop._is_pronunciation_candidate_better(current, candidate, {"Drizzt"}),
+            "'drizzit' must not beat 'drist'",
+        )
+
+    def test_is_pronunciation_candidate_better_refuses_failed_hard_gates(self) -> None:
+        """Candidate failing hard gates cannot replace an acceptable take."""
+        current = QualityResult(
+            line_id="ch01_0001",
+            status=ValidationStatus.PASS,
+            wer=0.15,
+            quality_score=0.85,
+            transcribed_text="drizzit walked into the cavern",
+        )
+        candidate = QualityResult(
+            line_id="ch01_0001",
+            status=ValidationStatus.FAIL,
+            wer=0.05,
+            quality_score=0.40,
+            clipping_detected=True,
+            transcribed_text="drist walked into the cavern",
+        )
+        self.assertFalse(
+            ValidationLoop._is_pronunciation_candidate_better(candidate, current, {"Drizzt"}),
+            "take failing hard acoustic gates must not be promoted",
+        )
+
+    def test_is_pronunciation_candidate_better_tie_breaks_on_quality(self) -> None:
+        """When both takes say the name correctly, tie-break on audio quality/WER."""
+        current = QualityResult(
+            line_id="ch01_0001",
+            status=ValidationStatus.PASS,
+            wer=0.10,
+            quality_score=0.88,
+            transcribed_text="drist walked into the cavern",
+        )
+        candidate = QualityResult(
+            line_id="ch01_0001",
+            status=ValidationStatus.PASS,
+            wer=0.05,
+            quality_score=0.95,
+            transcribed_text="drist walked into the cavern",
+        )
+        self.assertTrue(
+            ValidationLoop._is_pronunciation_candidate_better(candidate, current, {"Drizzt"}),
+            "candidate with higher quality score must win when pronunciation is tied",
+        )
+
+    def test_is_pronunciation_candidate_better_refuses_regressing_other_terms(self) -> None:
+        """Cross-term guard: candidate take fixing one name cannot break another name on the same line."""
+        current = QualityResult(
+            line_id="ch01_0001",
+            status=ValidationStatus.PASS,
+            wer=0.10,
+            quality_score=0.85,
+            transcribed_text="drist and trary walked into the cavern",
+        )
+        candidate = QualityResult(
+            line_id="ch01_0001",
+            status=ValidationStatus.PASS,
+            wer=0.05,
+            quality_score=0.95,
+            transcribed_text="drizzit entrary walked into the cavern",
+        )
+        self.assertFalse(
+            ValidationLoop._is_pronunciation_candidate_better(candidate, current, {"Drizzt", "Entreri"}),
+            "candidate breaking Drizzt to fix Entreri must be refused despite higher quality score",
+        )
+
+    def test_best_of_n_candidates_receive_identical_transcription_settings(self) -> None:
+        """Both candidate takes in best-of-N must receive identical transcription settings including language."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            loop, _ = ValidationLoopTests().make_loop(root)
+
+            class _EchoWhisper(FakeWhisper):
+                def transcribe(self, audio_file: str) -> str:
+                    return "Drizzt was here."
+
+            loop.whisper = _EchoWhisper()
+            loop.pronunciation_best_of_n = 2
+
+            validated_calls = []
+            orig_validate = loop._validate_segment
+
+            def record_validate(*args, **kwargs):
+                validated_calls.append((args, kwargs))
+                return orig_validate(*args, **kwargs)
+
+            loop._validate_segment = record_validate
+
+            loop.process_chapter(
+                project_id="book",
+                chapter_number=1,
+                lines=[ScriptLine(line_id="ch01_0001", speaker="narrator", text="Drizzt was here.")],
+                workspace=root,
+                validate=True,
+                validation_terms={"Drizzt"},
+                language="en",
+            )
+
+            self.assertEqual(len(validated_calls), 2, "best-of-N must validate both takes")
+            take1_kwargs = validated_calls[0][1]
+            take2_kwargs = validated_calls[1][1]
+            self.assertEqual(take1_kwargs.get("language"), "en")
+            self.assertEqual(take2_kwargs.get("language"), "en")
+            self.assertEqual(take1_kwargs.get("speed"), take2_kwargs.get("speed"))
 
 
 if __name__ == "__main__":

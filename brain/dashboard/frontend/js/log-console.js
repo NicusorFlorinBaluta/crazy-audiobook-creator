@@ -32,11 +32,10 @@ window.LogConsole = (() => {
 
     // ─── Highlight known prefixes with extra span ────────────────────────────
     function highlightLine(text) {
-        // Escape HTML first
-        const safe = text
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;');
+        // Escape first. `escapeHtmlText` (js/dom-utils.js) preserves quotes,
+        // which keeps log prose readable; the result is only ever placed in
+        // text position, never inside an attribute.
+        const safe = escapeHtmlText(text);
 
         // Colour the prefix badge (e.g. "[Ollama]", "[CharacterAnalyzer]", etc.)
         return safe.replace(

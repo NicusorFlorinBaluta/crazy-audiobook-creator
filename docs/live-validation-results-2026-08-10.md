@@ -1,5 +1,7 @@
 # Live validation results — 2026-08-10
 
+**Status:** Historical record — A dated record of what was done and why. Evidence, not a specification -- do not implement from it.
+
 This report records the deferred model/GPU gates from
 [live-validation-plan-2026-08-10.md](live-validation-plan-2026-08-10.md). The
 tests were deliberately tiered: fixed fixtures first, then a checkpointed tiny
